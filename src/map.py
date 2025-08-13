@@ -98,7 +98,10 @@ OTHER_PLAYER_ICON_LOWER1 = np.array([0, 120, 120])
 OTHER_PLAYER_ICON_UPPER1 = np.array([10, 255, 255])
 OTHER_PLAYER_ICON_LOWER2 = np.array([170, 120, 120])
 OTHER_PLAYER_ICON_UPPER2 = np.array([180, 255, 255])
-PLAYER_Y_OFFSET = 1 # Y축 좌표 보정을 위한 오프셋. 양수 값은 기준점을 아래로 이동시킵니다.
+PLAYER_Y_OFFSET = 1 # 플레이어 Y축 좌표 보정을 위한 오프셋. 양수 값은 기준점을 아래로 이동시킵니다.
+
+MIN_ICON_WIDTH = 5  # 아이콘으로 인정할 최소 너비 (픽셀)
+MIN_ICON_HEIGHT = 5 # 아이콘으로 인정할 최소 높이 (픽셀)
 
 # --- v10.0.0: 네비게이터 위젯 클래스 ---
 class NavigatorDisplay(QWidget):
@@ -1469,10 +1472,6 @@ class FullMinimapEditorDialog(QDialog):
         self.chk_show_waypoints.setChecked(self.render_options.get('waypoints', True))
         self.chk_show_waypoints.stateChanged.connect(self._update_visibility)
         
-        self.chk_show_links = QCheckBox("관계선")
-        self.chk_show_links.setChecked(self.render_options.get('links', True))
-        self.chk_show_links.stateChanged.connect(self._update_visibility)
-        
         self.chk_show_terrain = QCheckBox("지형선")
         self.chk_show_terrain.setChecked(self.render_options.get('terrain', True))
         self.chk_show_terrain.stateChanged.connect(self._update_visibility)
@@ -1497,7 +1496,6 @@ class FullMinimapEditorDialog(QDialog):
         view_opts_layout.addWidget(self.chk_show_background)
         view_opts_layout.addWidget(self.chk_show_features)
         view_opts_layout.addWidget(self.chk_show_waypoints)
-        view_opts_layout.addWidget(self.chk_show_links)
         view_opts_layout.addWidget(self.chk_show_terrain)
         view_opts_layout.addWidget(self.chk_show_objects)
         view_opts_layout.addWidget(self.chk_show_jump_links)
@@ -1537,7 +1535,6 @@ class FullMinimapEditorDialog(QDialog):
             'background': self.chk_show_background.isChecked(),
             'features': self.chk_show_features.isChecked(),
             'waypoints': self.chk_show_waypoints.isChecked(),
-            'links': self.chk_show_links.isChecked(),
             'terrain': self.chk_show_terrain.isChecked(),
             'objects': self.chk_show_objects.isChecked(),
             'jump_links': self.chk_show_jump_links.isChecked()
@@ -1676,7 +1673,6 @@ class FullMinimapEditorDialog(QDialog):
         show_bg = self.chk_show_background.isChecked()
         show_features = self.chk_show_features.isChecked()
         show_waypoints = self.chk_show_waypoints.isChecked()
-        show_links = self.chk_show_links.isChecked()
         show_terrain = self.chk_show_terrain.isChecked()
         show_objects = self.chk_show_objects.isChecked()
         show_jump_links = self.chk_show_jump_links.isChecked()
@@ -1689,8 +1685,6 @@ class FullMinimapEditorDialog(QDialog):
                 item.setVisible(show_features)
             elif item_type == "waypoint_v10":
                 item.setVisible(show_waypoints)
-            elif item_type == "link":
-                item.setVisible(show_links)
             elif item_type in ["terrain_line", "vertex"]:
                 item.setVisible(show_terrain)
             elif item_type == "floor_text": 
@@ -2632,7 +2626,12 @@ class AnchorDetectionThread(QThread):
         hsv = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2HSV)
         mask = cv2.inRange(hsv, PLAYER_ICON_LOWER, PLAYER_ICON_UPPER)
         contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        return [QRect(*cv2.boundingRect(c)) for c in contours if cv2.contourArea(c) > 5]
+        valid_rects = []
+        for c in contours:
+            x, y, w, h = cv2.boundingRect(c)
+            if w >= MIN_ICON_WIDTH and h >= MIN_ICON_HEIGHT:
+                valid_rects.append(QRect(x, y, w, h))
+        return valid_rects
 
     def find_other_player_icons(self, frame_bgr):
         hsv = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2HSV)
@@ -2640,7 +2639,12 @@ class AnchorDetectionThread(QThread):
         mask2 = cv2.inRange(hsv, OTHER_PLAYER_ICON_LOWER2, OTHER_PLAYER_ICON_UPPER2)
         mask = cv2.bitwise_or(mask1, mask2)
         contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        return [QRect(*cv2.boundingRect(c)) for c in contours if cv2.contourArea(c) > 5]
+        valid_rects = []
+        for c in contours:
+            x, y, w, h = cv2.boundingRect(c)
+            if w >= MIN_ICON_WIDTH and h >= MIN_ICON_HEIGHT:
+                valid_rects.append(QRect(x, y, w, h))
+        return valid_rects
 
     def stop(self):
         self.is_running = False
@@ -2673,7 +2677,7 @@ class MapTab(QWidget):
         
         self.render_options = {
             'background': True, 'features': True, 'waypoints': True,
-            'links': True, 'terrain': True, 'objects': True, 'jump_links': True
+            'terrain': True, 'objects': True, 'jump_links': True
         }
         self.initUI()
         self.perform_initial_setup()
@@ -2944,7 +2948,7 @@ class MapTab(QWidget):
             saved_options = config.get('render_options', {})
             self.render_options = {
                 'background': True, 'features': True, 'waypoints': True,
-                'links': True, 'terrain': True, 'objects': True, 'jump_links': True
+                'terrain': True, 'objects': True, 'jump_links': True
             }
             self.render_options.update(saved_options)
 
