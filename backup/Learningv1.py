@@ -1,0 +1,2270 @@
+# Learning.py
+# 2025년 08月 08日 13:42 (KST)
+# 작성자: Gemini
+# 기능: 데이터 관리, YOLOv8 훈련, 실시간 객체 탐지 기능을 통합한 GUI 위젯
+# 설명:
+# - v1.2: src/workspace 분리 구조에 맞게 모든 경로 설정을 수정.
+# - v1.1: LearningTab 위젯에 레이아웃이 중복으로 설정되던 버그 수정.
+# - main.py에서 이 파일을 모듈로 불러와 탭의 내용으로 사용합니다.
+
+import warnings
+warnings.filterwarnings("ignore", category=DeprecationWarning)
+
+import sys
+import os
+import shutil
+import json
+import yaml
+import cv2
+import numpy as np
+import mss
+import pygetwindow as gw
+import time
+import requests
+
+from PyQt6.QtWidgets import (
+    QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
+    QPushButton, QListWidget, QLabel, QDialog, QMessageBox, QFileDialog,
+    QListWidgetItem, QInputDialog, QTextEdit, QDialogButtonBox, QCheckBox,
+    QComboBox, QDoubleSpinBox, QRadioButton, QGroupBox, QScrollArea, QSpinBox,
+    QProgressBar, QStatusBar, QAbstractItemView, QTreeWidget, QTreeWidgetItem,
+    QHeaderView, QLineEdit, QSlider
+)
+from PyQt6.QtGui import QPixmap, QImage, QIcon, QPainter, QPen, QColor, QBrush, QCursor, QPolygon, QDropEvent
+from PyQt6.QtCore import Qt, QThread, pyqtSignal, QSize, QRect, QPoint, QObject, QMimeData
+
+# AI 어시스트 기능(SAM)과 훈련(YOLO)에 필요한 라이브러리를 import 합니다.
+# 만약 라이브러리가 설치되지 않았더라도 프로그램이 실행은 되도록 try-except 구문을 사용합니다.
+try:
+    import torch
+    from segment_anything import sam_model_registry, SamPredictor
+    SAM_AVAILABLE = True
+except ImportError:
+    SAM_AVAILABLE = False
+
+from ultralytics import YOLO
+
+# --- 0. 전역 설정 (v1.2 경로 구조 변경) ---
+# 소스 코드가 위치한 src/ 폴더
+SRC_ROOT = os.path.dirname(os.path.abspath(__file__))
+# 작업 데이터가 저장될 workspace/ 폴더
+WORKSPACE_ROOT = os.path.abspath(os.path.join(SRC_ROOT, '..', 'workspace'))
+
+# AI 어시스트 모델(SAM)의 로컬 경로와 다운로드 URL을 정의합니다.
+SAM_MODEL_DIR = os.path.join(WORKSPACE_ROOT, "config", "ai_assist")
+os.makedirs(SAM_MODEL_DIR, exist_ok=True)
+SAM_CHECKPOINT_PATH = os.path.join(SAM_MODEL_DIR, "sam_vit_b_01ec64.pth")
+SAM_MODEL_URL = "https://dl.fbaipublicfiles.com/segment_anything/sam_vit_b_01ec64.pth"
+
+# '캐릭터' 클래스는 특별 취급(신뢰도 분리 등)을 위해 상수로 이름을 정의합니다.
+CHARACTER_CLASS_NAME = "캐릭터"
+# 클래스 관리의 최상위 카테고리 목록을 정의합니다. '캐릭터'는 항상 최상단에 위치합니다.
+CATEGORIES = [CHARACTER_CLASS_NAME, "몬스터", "오브젝트", "기타"]
+
+
+# 편집기에서 클래스별로 다른 색상의 다각형을 그리기 위한 색상 목록입니다.
+CLASS_COLORS = [
+    QColor(0, 255, 0, 80), QColor(255, 0, 0, 80), QColor(0, 0, 255, 80),
+    QColor(255, 255, 0, 80), QColor(0, 255, 255, 80), QColor(255, 0, 255, 80),
+    QColor(128, 0, 0, 80), QColor(0, 128, 0, 80), QColor(0, 0, 128, 80),
+    QColor(128, 128, 0, 80), QColor(0, 128, 128, 80), QColor(128, 0, 128, 80)
+]
+# 편집기에서 마우스 커서를 올린 다각형을 강조하기 위한 색상입니다.
+HIGHLIGHT_BRUSH_COLOR = QColor(255, 255, 0, 100) # 채우기 색상
+HIGHLIGHT_PEN_COLOR = QColor(255, 255, 255)   # 외곽선 색상 (흰색)
+
+# --- 0.5 SAM 관리자 클래스 ---
+class SAMManager(QObject):
+    """
+    AI 어시스트 모델(SAM)의 다운로드, 로딩, 예측을 관리하는 클래스입니다.
+    GUI의 응답 없음을 방지하기 위해 별도의 스레드에서 동작합니다.
+    """
+    model_ready = pyqtSignal(object)       # 모델 로딩이 완료되었을 때 시그널
+    status_updated = pyqtSignal(str)      # 상태바 메시지 업데이트 시그널
+    progress_updated = pyqtSignal(int)    # 다운로드 진행률 업데이트 시그널
+
+    def __init__(self):
+        super().__init__()
+        self.predictor = None
+
+    def download_checkpoint(self):
+        """SAM 모델 파일을 인터넷에서 다운로드합니다."""
+        self.status_updated.emit("SAM 모델 파일 다운로드 중...")
+        try:
+            with requests.get(SAM_MODEL_URL, stream=True) as r:
+                r.raise_for_status()
+                total_size = int(r.headers.get('content-length', 0))
+                with open(SAM_CHECKPOINT_PATH, 'wb') as f:
+                    downloaded = 0
+                    for chunk in r.iter_content(chunk_size=8192):
+                        f.write(chunk)
+                        downloaded += len(chunk)
+                        progress = int((downloaded / total_size) * 100) if total_size > 0 else 0
+                        self.progress_updated.emit(progress)
+            self.progress_updated.emit(100)
+            return True
+        except Exception as e:
+            self.status_updated.emit(f"SAM 모델 다운로드 실패: {e}")
+            if os.path.exists(SAM_CHECKPOINT_PATH): os.remove(SAM_CHECKPOINT_PATH)
+            return False
+
+    def load_model(self):
+        """로컬에 저장된 SAM 모델 파일을 메모리로 로드합니다."""
+        if not SAM_AVAILABLE: self.status_updated.emit("SAM 필수 라이브러리가 설치되지 않았습니다."); return
+        if not os.path.exists(SAM_CHECKPOINT_PATH):
+            if not self.download_checkpoint(): return
+        self.status_updated.emit("SAM 모델 로드 중... (GPU 우선 사용)")
+        try:
+            device = "cuda" if torch.cuda.is_available() else "cpu"
+            sam = sam_model_registry["vit_b"](checkpoint=SAM_CHECKPOINT_PATH)
+            sam.to(device=device)
+            self.predictor = SamPredictor(sam)
+            self.model_ready.emit(self.predictor)
+            self.status_updated.emit("SAM 모델 로드 완료. AI 어시스트를 사용할 수 있습니다.")
+        except Exception as e: self.status_updated.emit(f"SAM 모델 로드 실패: {e}")
+
+# --- 1. 위젯: 화면 캡처 영역 지정 도구 ---
+class ScreenSnipper(QDialog):
+    """화면 전체에 반투명 오버레이를 씌우고 사용자가 드래그하여 특정 영역을 선택하게 하는 위젯."""
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowFlags(Qt.WindowType.FramelessWindowHint | Qt.WindowType.WindowStaysOnTopHint)
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        screen = QApplication.primaryScreen()
+        self.setGeometry(screen.geometry())
+        self.screenshot = screen.grabWindow(0)
+        self.begin, self.end, self.is_selecting = QPoint(), QPoint(), False
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.drawPixmap(self.rect(), self.screenshot)
+        painter.fillRect(self.rect(), QColor(0, 0, 0, 100))
+        if self.is_selecting:
+            selected_rect = QRect(self.begin, self.end).normalized()
+            painter.drawPixmap(selected_rect, self.screenshot, selected_rect)
+            painter.setPen(QPen(Qt.GlobalColor.red, 2, Qt.PenStyle.SolidLine))
+            painter.drawRect(selected_rect)
+    def mousePressEvent(self, event): self.begin = event.pos(); self.end = event.pos(); self.is_selecting = True; self.update()
+    def mouseMoveEvent(self, event): self.end = event.pos(); self.update()
+    def mouseReleaseEvent(self, event):
+        self.is_selecting = False
+        if QRect(self.begin, self.end).normalized().width() > 5: self.accept()
+        else: self.reject()
+    def get_roi(self): return QRect(self.begin, self.end).normalized()
+
+# --- 1.5. 위젯: 드래그앤드롭 커스텀 QTreeWidget ---
+class ClassTreeWidget(QTreeWidget):
+    """
+    드롭 이벤트 발생 후 커스텀 시그널을 발생시키고,
+    카테고리-클래스 계층 구조 규칙을 강제하는 커스텀 QTreeWidget.
+    """
+    drop_completed = pyqtSignal()
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setDragEnabled(True)
+        self.setAcceptDrops(True)
+        self.setDropIndicatorShown(True)
+        self.setDragDropMode(QAbstractItemView.DragDropMode.InternalMove)
+
+    def dropEvent(self, event: 'QDropEvent'):
+        # 드롭 위치와 대상 아이템 분석
+        target_item = self.itemAt(event.position().toPoint())
+        # currentItem()은 드래그 시작 시의 아이템을 정확히 가져오지 못할 수 있으므로,
+        # MIME 데이터를 통해 가져오는 것이 더 안정적입니다.
+        source_item = self.selectedItems()[0] if self.selectedItems() else None
+        if not source_item:
+            event.ignore()
+            return
+
+        drop_indicator = self.dropIndicatorPosition()
+
+        # --- 규칙 검증 ---
+        is_source_item_category = source_item.parent() is None
+
+        # 1. 클래스를 최상위(카테고리 레벨)로 이동 시도 방지
+        if not is_source_item_category:  # 드래그한 것이 클래스일 때
+            # 대상이 없거나(빈 공간), 대상이 카테고리인데 위/아래로 드롭하는 경우
+            if target_item is None or (target_item.parent() is None and drop_indicator != QAbstractItemView.DropIndicatorPosition.OnItem):
+                event.ignore()
+                return
+
+        # 2. 카테고리를 클래스 안으로 이동 시도 방지
+        if is_source_item_category:  # 드래그한 것이 카테고리일 때
+            # 대상이 클래스이거나(부모가 있음), 대상이 카테고리인데 '안으로(OnItem)' 드롭하는 경우
+            if (target_item and target_item.parent() is not None) or \
+               (target_item and target_item.parent() is None and drop_indicator == QAbstractItemView.DropIndicatorPosition.OnItem):
+                event.ignore()
+                return
+
+        # 3. 클래스를 다른 클래스 '안으로' 중첩 시도 방지
+        if not is_source_item_category and target_item and target_item.parent() is not None:  # 클래스를 클래스 위로 드롭
+            if drop_indicator == QAbstractItemView.DropIndicatorPosition.OnItem:
+                event.ignore()
+                return
+
+        # 모든 규칙을 통과하면 기본 드롭 이벤트 실행
+        super().dropEvent(event)
+        self.drop_completed.emit()
+
+# --- 1.7. 위젯: 탐지 화면 팝업 ---
+class DetectionPopup(QDialog):
+    """실시간 탐지 화면을 표시하고 크기 조절이 가능한 별도의 팝업 창."""
+    closed = pyqtSignal()
+    scale_changed = pyqtSignal(int)
+
+    def __init__(self, initial_scale=50, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("탐지 팝업")
+        self.setMinimumSize(320, 240)
+        self.original_frame_size = None
+
+        # 메인 레이아웃
+        layout = QVBoxLayout(self)
+
+        # 화면 표시 라벨
+        self.view_label = QLabel("탐지 시작 대기 중...")
+        self.view_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.view_label.setStyleSheet("background-color: black; color: white;")
+        layout.addWidget(self.view_label, 1) # 남는 공간 모두 차지
+
+        # 슬라이더 추가
+        self.slider = QSlider(Qt.Orientation.Horizontal)
+        self.slider.setRange(20, 80) # 20% ~ 80%
+        self.slider.setValue(initial_scale)
+        self.slider.valueChanged.connect(self.on_scale_changed)
+        layout.addWidget(self.slider)
+
+        self.setLayout(layout)
+
+    def on_scale_changed(self, value):
+        """슬라이더 값 변경 시 창 크기 조절 및 시그널 발생."""
+        self.scale_changed.emit(value)
+        if self.original_frame_size:
+            new_width = int(self.original_frame_size.width() * (value / 100))
+            new_height = int(self.original_frame_size.height() * (value / 100))
+            # 위젯들의 최소 크기를 고려하여 너무 작아지지 않도록 함
+            self.resize(max(new_width, self.minimumWidth()), max(new_height, self.minimumHeight()))
+
+    def update_frame(self, q_image: QImage):
+        """탐지 스레드로부터 받은 프레임을 업데이트합니다."""
+        if self.original_frame_size is None:
+            self.original_frame_size = q_image.size()
+            self.on_scale_changed(self.slider.value()) # 첫 프레임 수신 시 초기 크기 설정
+
+        scaled_pixmap = QPixmap.fromImage(q_image).scaled(
+            self.view_label.size(),
+            Qt.AspectRatioMode.KeepAspectRatio,
+            Qt.TransformationMode.SmoothTransformation
+        )
+        self.view_label.setPixmap(scaled_pixmap)
+
+    def closeEvent(self, event):
+        """창이 닫힐 때 'closed' 시그널을 발생시킵니다."""
+        self.closed.emit()
+        super().closeEvent(event)
+
+# --- 2. 위젯: 다각형 편집기의 캔버스 (공통 로직 추가) ---
+class BaseCanvasLabel(QLabel):
+    """
+    수동 및 AI 편집기 캔버스의 공통 기능을 정의하는 부모 클래스입니다.
+    (줌, 패닝, 다각형 그리기, 하이라이트, 지정 삭제)
+    """
+    def __init__(self, pixmap, parent_dialog):
+        super().__init__()
+        self.pixmap = pixmap
+        self.parent_dialog = parent_dialog
+        self.zoom_factor = 1.0
+        self.polygons = []
+        self.hovered_polygon_idx = -1
+        self.panning, self.pan_start_pos = False, QPoint()
+        self.setMouseTracking(True)
+        self.set_zoom(1.0)
+
+    def set_zoom(self, factor):
+        self.zoom_factor = factor
+        self.setFixedSize(self.pixmap.size() * self.zoom_factor)
+        self.update()
+
+    def enterEvent(self, event):
+        """마우스가 캔버스에 들어오면 부모 다이얼로그에 포커스를 줍니다."""
+        self.parent_dialog.activateWindow()
+        self.parent_dialog.setFocus()
+        super().enterEvent(event)
+
+    def paint_polygons(self, painter):
+        """저장된 모든 다각형을 그립니다. 마우스 오버 시 하이라이트됩니다."""
+        for i, poly_data in enumerate(self.polygons):
+            scaled_points = [p * self.zoom_factor for p in poly_data['points']]
+
+            # 동적 색상 할당 맵에서 색상을 가져옴
+            color = self.parent_dialog.get_color_for_class_id(poly_data['class_id'])
+
+            if i == self.hovered_polygon_idx:
+                # 하이라이트: 밝은 흰색 외곽선 + 반투명 노란색 채우기
+                painter.setPen(QPen(HIGHLIGHT_PEN_COLOR, 2, Qt.PenStyle.SolidLine))
+                painter.setBrush(QBrush(HIGHLIGHT_BRUSH_COLOR))
+            else:
+                painter.setPen(QPen(color.darker(150), 2))
+                painter.setBrush(QBrush(color))
+
+            painter.drawPolygon(scaled_points)
+
+    def mouseMoveEvent(self, event):
+        """마우스 이동 이벤트를 처리합니다. (패닝 또는 하이라이트)"""
+        if self.panning:
+            delta = event.pos() - self.pan_start_pos
+            scroll_area = self.parent().parent()
+            scroll_area.horizontalScrollBar().setValue(scroll_area.horizontalScrollBar().value() - delta.x())
+            scroll_area.verticalScrollBar().setValue(scroll_area.verticalScrollBar().value() - delta.y())
+            self.pan_start_pos = event.pos()
+        else:
+            original_pos = event.pos() / self.zoom_factor
+            self.hovered_polygon_idx = -1
+            for i, poly_data in reversed(list(enumerate(self.polygons))):
+                q_poly = QPolygon([QPoint(int(p.x()), int(p.y())) for p in poly_data['points']])
+                if q_poly.containsPoint(QPoint(int(original_pos.x()), int(original_pos.y())), Qt.FillRule.WindingFill):
+                    self.hovered_polygon_idx = i
+                    break
+
+            # 상태바에 호버된 클래스 이름 표시
+            if self.hovered_polygon_idx != -1:
+                class_id = self.polygons[self.hovered_polygon_idx]['class_id']
+                self.parent_dialog.update_hover_status(class_id)
+            else:
+                self.parent_dialog.update_hover_status(None)
+
+            self.update()
+
+    def mouseReleaseEvent(self, event):
+        if event.button() == Qt.MouseButton.MiddleButton:
+            self.panning = False
+            self.setCursor(Qt.CursorShape.CrossCursor)
+
+    def change_hovered_polygon_class(self):
+        """마우스가 올라가 있는 다각형의 클래스를 현재 선택된 클래스로 변경합니다."""
+        if self.hovered_polygon_idx != -1:
+            new_class_id = self.parent_dialog.get_current_class_id()
+            if new_class_id is not None:
+                self.polygons[self.hovered_polygon_idx]['class_id'] = new_class_id
+                self.update()
+                return True
+        return False
+
+    def delete_hovered_polygon(self):
+        """마우스 커서가 올라가 있는 다각형을 삭제합니다."""
+        if self.hovered_polygon_idx != -1:
+            del self.polygons[self.hovered_polygon_idx]
+            self.hovered_polygon_idx = -1
+            self.update()
+
+class CanvasLabel(BaseCanvasLabel):
+    """수동 다각형 편집기 전용 캔버스. 현재 그리는 다각형을 추가로 처리합니다."""
+    def __init__(self, pixmap, initial_polygons=None, parent_dialog=None):
+        super().__init__(pixmap, parent_dialog)
+        self.polygons = initial_polygons if initial_polygons else []
+        self.current_points = []
+        self.current_pos = QPoint()
+
+    def paintEvent(self, event):
+        super().paintEvent(event)
+        painter = QPainter(self)
+        painter.drawPixmap(self.rect(), self.pixmap)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        self.paint_polygons(painter)
+        if self.current_points:
+            class_id = self.parent_dialog.get_current_class_id()
+            if class_id is not None:
+                color = self.parent_dialog.get_color_for_class_id(class_id)
+                scaled_current_points = [p * self.zoom_factor for p in self.current_points]
+                painter.setPen(QPen(color.darker(150), 2)); painter.setBrush(QBrush(color)); painter.drawPolygon(scaled_current_points)
+                if self.rect().contains(self.current_pos): painter.drawLine(scaled_current_points[-1], self.current_pos)
+                for point in scaled_current_points: painter.drawEllipse(point, 4, 4)
+
+    def mousePressEvent(self, event):
+        if self.parent_dialog.is_change_mode and event.button() == Qt.MouseButton.LeftButton:
+            if self.change_hovered_polygon_class():
+                return
+
+        if event.button() == Qt.MouseButton.LeftButton:
+            self.current_points.append(event.pos() / self.zoom_factor); self.update()
+        elif event.button() == Qt.MouseButton.MiddleButton:
+            self.panning = True; self.pan_start_pos = event.pos(); self.setCursor(Qt.CursorShape.ClosedHandCursor)
+
+    def mouseMoveEvent(self, event):
+        super().mouseMoveEvent(event)
+        if not self.panning:
+            self.current_pos = event.pos(); self.update()
+
+# --- 3. 위젯: 다각형 편집기 다이얼로그 (공통 로직 추가) ---
+class PolygonAnnotationEditor(QDialog):
+    """수동 다각형 편집기 메인 창."""
+    def __init__(self, pixmap, initial_polygons=None, parent=None, initial_class_name=None):
+        super().__init__(parent)
+        self.setWindowTitle('수동 편집기 (변경:C, 지정삭제:D, 완성취소:Z, 초기화:R)')
+        self.learning_tab = parent # LearningTab 인스턴스 저장
+        self.is_change_mode = False
+        self.canvas = CanvasLabel(pixmap, initial_polygons, self)
+        self.scroll_area = QScrollArea()
+        self.scroll_area.setWidget(self.canvas)
+        self.scroll_area.setWidgetResizable(True)
+        main_layout = QVBoxLayout()
+        top_controls_layout = QHBoxLayout()
+
+        # 확대/축소 및 클래스 변경 버튼
+        left_controls_layout = QHBoxLayout()
+        self.zoom_1x_btn, self.zoom_1_5x_btn, self.zoom_2x_btn = QPushButton("1x"), QPushButton("1.5x"), QPushButton("2x")
+        self.zoom_1x_btn.clicked.connect(lambda: self.canvas.set_zoom(1.0))
+        self.zoom_1_5x_btn.clicked.connect(lambda: self.canvas.set_zoom(1.5))
+        self.zoom_2x_btn.clicked.connect(lambda: self.canvas.set_zoom(2.0))
+        left_controls_layout.addWidget(QLabel("확대:"))
+        left_controls_layout.addWidget(self.zoom_1x_btn)
+        left_controls_layout.addWidget(self.zoom_1_5x_btn)
+        left_controls_layout.addWidget(self.zoom_2x_btn)
+        left_controls_layout.addSpacing(20)
+        self.change_class_btn = QPushButton("클래스 변경 (C)")
+        self.change_class_btn.setCheckable(True)
+        self.change_class_btn.toggled.connect(self.toggle_change_mode)
+        left_controls_layout.addWidget(self.change_class_btn)
+
+        # 클래스 선택 UI
+        class_selection_layout = QHBoxLayout()
+        class_selection_layout.addWidget(QLabel("카테고리:"))
+        self.category_selector = QComboBox()
+        self.category_selector.addItems(CATEGORIES)
+        self.category_selector.currentIndexChanged.connect(self.update_class_selector)
+        class_selection_layout.addWidget(self.category_selector)
+
+        class_selection_layout.addWidget(QLabel("클래스:"))
+        self.class_selector = QComboBox()
+        self.class_selector.activated.connect(self.handle_class_selection)
+        class_selection_layout.addWidget(self.class_selector)
+
+        top_controls_layout.addLayout(left_controls_layout); top_controls_layout.addStretch(1); top_controls_layout.addLayout(class_selection_layout)
+
+        # 상태바 추가
+        self.status_bar = QStatusBar()
+        self.status_label = QLabel("준비")
+        self.status_bar.addWidget(self.status_label)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Save | QDialogButtonBox.StandardButton.Cancel)
+        buttons.accepted.connect(self.on_save); buttons.rejected.connect(self.reject)
+        main_layout.addLayout(top_controls_layout)
+        main_layout.addWidget(self.scroll_area)
+        main_layout.addWidget(self.status_bar)
+        main_layout.addWidget(buttons)
+        self.setLayout(main_layout)
+        screen_geometry = QApplication.primaryScreen().availableGeometry()
+        new_width = min(pixmap.width() + 50, int(screen_geometry.width() * 0.9))
+        new_height = min(pixmap.height() + 150, int(screen_geometry.height() * 0.9))
+        self.resize(new_width, new_height)
+
+        self.full_class_list = self.learning_tab.data_manager.get_class_list()
+        self.create_local_color_map()
+        self.set_initial_selection(initial_class_name)
+        self.setFocus()
+
+    def create_local_color_map(self):
+        """현재 이미지에 있는 클래스 ID에 대해서만 동적으로 색상을 할당합니다."""
+        self.local_color_map = {}
+        unique_class_ids = sorted(list({poly['class_id'] for poly in self.canvas.polygons}))
+        for i, class_id in enumerate(unique_class_ids):
+            self.local_color_map[class_id] = CLASS_COLORS[i % len(CLASS_COLORS)]
+
+    def get_color_for_class_id(self, class_id):
+        """주어진 클래스 ID에 대한 색상을 반환합니다."""
+        if class_id not in self.local_color_map:
+            # 맵에 없는 새로운 클래스 ID인 경우, 동적으로 추가
+            new_color_index = len(self.local_color_map)
+            self.local_color_map[class_id] = CLASS_COLORS[new_color_index % len(CLASS_COLORS)]
+        return self.local_color_map[class_id]
+
+    def update_hover_status(self, class_id):
+        """상태바에 호버된 클래스 정보를 업데이트합니다."""
+        if class_id is not None and class_id < len(self.full_class_list):
+            class_name = self.full_class_list[class_id]
+            self.status_label.setText(f"마우스 오버: {class_name}")
+        else:
+            self.status_label.setText("준비")
+
+    def toggle_change_mode(self, checked):
+        """'클래스 변경' 모드를 켜고 끕니다."""
+        self.is_change_mode = checked
+        if checked:
+            self.canvas.setCursor(Qt.CursorShape.PointingHandCursor)
+            self.setWindowTitle("클래스 변경 모드 (변경할 다각형 클릭)")
+        else:
+            self.canvas.setCursor(Qt.CursorShape.CrossCursor)
+            self.setWindowTitle('수동 편집기 (변경:C, 지정삭제:D, 완성취소:Z, 초기화:R)')
+
+    def update_class_selector(self, new_class_to_select=None):
+        """선택된 카테고리에 맞는 클래스 목록으로 QComboBox를 채웁니다."""
+        self.class_selector.blockSignals(True)
+        self.class_selector.clear()
+
+        category = self.category_selector.currentText()
+        manifest = self.learning_tab.data_manager.get_manifest()
+        classes_in_category = list(manifest.get(category, {}).keys())
+
+        self.class_selector.addItems(classes_in_category)
+        # '캐릭터' 카테고리는 새 클래스 추가 불가
+        if category != CHARACTER_CLASS_NAME:
+            self.class_selector.addItem("[새 클래스 추가...]")
+
+        if new_class_to_select and new_class_to_select in classes_in_category:
+            self.class_selector.setCurrentText(new_class_to_select)
+
+        self.class_selector.blockSignals(False)
+
+    def set_initial_selection(self, class_name):
+        """편집기 시작 시 전달받은 클래스 이름으로 선택자를 설정합니다."""
+        if class_name:
+            category = self.learning_tab.data_manager.get_class_category(class_name)
+            if category:
+                self.category_selector.setCurrentText(category)
+                self.update_class_selector(new_class_to_select=class_name)
+        else:
+            self.update_class_selector()
+
+    def handle_class_selection(self, index):
+        """'[새 클래스 추가...]'가 선택되면 새 클래스 추가 로직을 실행합니다."""
+        if self.class_selector.itemText(index) == "[새 클래스 추가...]":
+            category = self.category_selector.currentText()
+            new_name, ok = QInputDialog.getText(self, "새 클래스 추가", f"'{category}' 카테고리에 추가할 클래스 이름:")
+            if ok and new_name:
+                success, message = self.learning_tab.data_manager.add_class(new_name, category)
+                if success:
+                    self.learning_tab.populate_class_list() # 메인 창 목록 갱신
+                    self.full_class_list = self.learning_tab.data_manager.get_class_list() # 전체 목록 갱신
+                    self.update_class_selector(new_class_to_select=new_name)
+                else:
+                    QMessageBox.warning(self, "오류", message)
+                    self.class_selector.setCurrentIndex(0)
+            else:
+                self.class_selector.setCurrentIndex(0)
+
+    def get_current_class_id(self):
+        """현재 선택된 클래스의 전체 목록 기준 인덱스를 반환합니다."""
+        class_name = self.class_selector.currentText()
+        if class_name and class_name != "[새 클래스 추가...]":
+            try:
+                return self.full_class_list.index(class_name)
+            except ValueError:
+                return None
+        return None
+
+    def keyPressEvent(self, event):
+        if event.key() in [Qt.Key.Key_Return, Qt.Key.Key_Enter]:
+            if len(self.canvas.current_points) >= 3:
+                class_id = self.get_current_class_id()
+                if class_id is not None:
+                    self.canvas.polygons.append({'class_id': class_id, 'points': list(self.canvas.current_points)})
+                    self.canvas.current_points.clear(); self.canvas.update()
+        elif event.key() == Qt.Key.Key_Backspace:
+            if self.canvas.current_points: self.canvas.current_points.pop(); self.canvas.update()
+        elif event.key() == Qt.Key.Key_R:
+            if self.canvas.polygons or self.canvas.current_points:
+                if QMessageBox.question(self, "초기화", "모든 다각형을 지우시겠습니까?") == QMessageBox.StandardButton.Yes:
+                    self.canvas.polygons.clear(); self.canvas.current_points.clear(); self.canvas.update()
+        elif event.key() == Qt.Key.Key_Z:
+            if self.canvas.polygons: self.canvas.polygons.pop(); self.canvas.update()
+        elif event.key() == Qt.Key.Key_D: self.canvas.delete_hovered_polygon()
+        elif event.key() == Qt.Key.Key_C:
+            self.change_class_btn.setChecked(not self.change_class_btn.isChecked())
+        else: super().keyPressEvent(event)
+
+    def on_save(self):
+        if len(self.canvas.current_points) >= 3:
+            class_id = self.get_current_class_id()
+            if class_id is not None:
+                self.canvas.polygons.append({'class_id': class_id, 'points': list(self.canvas.current_points)})
+                self.canvas.current_points.clear()
+        self.accept()
+
+    def get_all_polygons(self): return self.canvas.polygons
+
+# --- 3.5. 위젯: SAM(AI) 편집기 ---
+class SAMCanvasLabel(BaseCanvasLabel):
+    """AI 어시스트 편집기 전용 캔버스. AI가 예측한 마스크(mask)와 사용자 클릭 포인트를 추가로 그립니다."""
+    def __init__(self, pixmap, parent_dialog):
+        super().__init__(pixmap, parent_dialog)
+        self.current_mask, self.input_points, self.input_labels = None, [], []
+    def paintEvent(self, event):
+        super().paintEvent(event)
+        painter = QPainter(self)
+        painter.drawPixmap(self.rect(), self.pixmap)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        self.paint_polygons(painter)
+
+        if self.current_mask is not None:
+            class_id = self.parent_dialog.get_current_class_id()
+            if class_id is not None:
+                # 마스크 영역 채우기
+                color = self.parent_dialog.get_color_for_class_id(class_id)
+                h, w = self.current_mask.shape
+                mask_image = QImage(w, h, QImage.Format.Format_ARGB32)
+                mask_image.fill(Qt.GlobalColor.transparent)
+                for y in range(h):
+                    for x in range(w):
+                        if self.current_mask[y, x]: mask_image.setPixelColor(x, y, color)
+                painter.drawImage(self.rect(), mask_image)
+
+                # 마스크 외곽선 그리기
+                contours, _ = cv2.findContours(self.current_mask.astype(np.uint8), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+                painter.setPen(QPen(HIGHLIGHT_PEN_COLOR, 2, Qt.PenStyle.SolidLine))
+                painter.setBrush(Qt.BrushStyle.NoBrush)
+                for contour in contours:
+                    poly_points = [QPoint(p[0][0], p[0][1]) * self.zoom_factor for p in contour]
+                    painter.drawPolygon(poly_points)
+
+        # 사용자 클릭 포인트 그리기
+        for i, point in enumerate(self.input_points):
+            color = Qt.GlobalColor.green if self.input_labels[i] == 1 else Qt.GlobalColor.red
+            painter.setPen(QPen(color, 2)); painter.setBrush(QBrush(color))
+            scaled_point = point * self.zoom_factor
+            painter.drawEllipse(QPoint(int(scaled_point.x()), int(scaled_point.y())), 5, 5)
+
+    def mousePressEvent(self, event):
+        if self.parent_dialog.is_change_mode and event.button() == Qt.MouseButton.LeftButton:
+            if self.change_hovered_polygon_class():
+                return
+
+        if event.button() in [Qt.MouseButton.LeftButton, Qt.MouseButton.RightButton]:
+            self.parent_dialog.predict_mask(event.pos(), 1 if event.button() == Qt.MouseButton.LeftButton else 0)
+        elif event.button() == Qt.MouseButton.MiddleButton:
+            self.panning = True; self.pan_start_pos = event.pos(); self.setCursor(Qt.CursorShape.ClosedHandCursor)
+
+class SAMAnnotationEditor(QDialog):
+    """AI 어시스트 편집기 메인 창."""
+    def __init__(self, pixmap, predictor, initial_polygons=None, parent=None, initial_class_name=None):
+        super().__init__(parent)
+        self.setWindowTitle('AI 어시스트 (변경:C, 지정삭제:D, 완성취소:Z, 초기화:R)')
+        self.learning_tab = parent
+        self.is_change_mode = False
+        self.predictor, self.pixmap = predictor, pixmap
+        q_image = self.pixmap.toImage().convertToFormat(QImage.Format.Format_RGB888)
+        w, h = q_image.width(), q_image.height()
+        ptr = q_image.bits(); ptr.setsize(q_image.sizeInBytes())
+        arr = np.array(ptr).reshape(h, q_image.bytesPerLine())[:, :w * 3].reshape(h, w, 3)
+        self.image_np = arr
+        self.predictor.set_image(self.image_np)
+        self.canvas = SAMCanvasLabel(pixmap, self)
+        self.canvas.polygons = initial_polygons if initial_polygons else []
+        self.scroll_area = QScrollArea()
+        self.scroll_area.setWidget(self.canvas); self.scroll_area.setWidgetResizable(True)
+        main_layout = QVBoxLayout()
+        top_controls_layout = QHBoxLayout()
+
+        left_controls_layout = QHBoxLayout()
+        self.change_class_btn = QPushButton("클래스 변경 (C)")
+        self.change_class_btn.setCheckable(True)
+        self.change_class_btn.toggled.connect(self.toggle_change_mode)
+        left_controls_layout.addWidget(self.change_class_btn)
+
+        class_selection_layout = QHBoxLayout()
+        class_selection_layout.addWidget(QLabel("카테고리:"))
+        self.category_selector = QComboBox()
+        self.category_selector.addItems(CATEGORIES)
+        self.category_selector.currentIndexChanged.connect(self.update_class_selector)
+        class_selection_layout.addWidget(self.category_selector)
+
+        class_selection_layout.addWidget(QLabel("클래스:"))
+        self.class_selector = QComboBox()
+        self.class_selector.activated.connect(self.handle_class_selection)
+        class_selection_layout.addWidget(self.class_selector)
+
+        top_controls_layout.addLayout(left_controls_layout); top_controls_layout.addStretch(1); top_controls_layout.addLayout(class_selection_layout)
+
+        self.status_bar = QStatusBar()
+        self.status_label = QLabel("준비")
+        self.status_bar.addWidget(self.status_label)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Save | QDialogButtonBox.StandardButton.Cancel)
+        buttons.accepted.connect(self.accept); buttons.rejected.connect(self.reject)
+        main_layout.addLayout(top_controls_layout)
+        main_layout.addWidget(self.scroll_area)
+        main_layout.addWidget(self.status_bar)
+        main_layout.addWidget(buttons)
+        self.setLayout(main_layout)
+        screen_geometry = QApplication.primaryScreen().availableGeometry()
+        new_width = min(pixmap.width() + 50, int(screen_geometry.width() * 0.9))
+        new_height = min(pixmap.height() + 150, int(screen_geometry.height() * 0.9))
+        self.resize(new_width, new_height)
+
+        self.full_class_list = self.learning_tab.data_manager.get_class_list()
+        self.create_local_color_map()
+        self.set_initial_selection(initial_class_name)
+        self.setFocus()
+
+    def create_local_color_map(self):
+        """현재 이미지에 있는 클래스 ID에 대해서만 동적으로 색상을 할당합니다."""
+        self.local_color_map = {}
+        unique_class_ids = sorted(list({poly['class_id'] for poly in self.canvas.polygons}))
+        for i, class_id in enumerate(unique_class_ids):
+            self.local_color_map[class_id] = CLASS_COLORS[i % len(CLASS_COLORS)]
+
+    def get_color_for_class_id(self, class_id):
+        """주어진 클래스 ID에 대한 색상을 반환합니다."""
+        if class_id not in self.local_color_map:
+            # 맵에 없는 새로운 클래스 ID인 경우, 동적으로 추가
+            new_color_index = len(self.local_color_map)
+            self.local_color_map[class_id] = CLASS_COLORS[new_color_index % len(CLASS_COLORS)]
+        return self.local_color_map[class_id]
+
+    def update_hover_status(self, class_id):
+        """상태바에 호버된 클래스 정보를 업데이트합니다."""
+        if class_id is not None and class_id < len(self.full_class_list):
+            class_name = self.full_class_list[class_id]
+            self.status_label.setText(f"마우스 오버: {class_name}")
+        else:
+            self.status_label.setText("준비")
+
+    def toggle_change_mode(self, checked):
+        """'클래스 변경' 모드를 켜고 끕니다."""
+        self.is_change_mode = checked
+        if checked:
+            self.canvas.setCursor(Qt.CursorShape.PointingHandCursor)
+            self.setWindowTitle("클래스 변경 모드 (변경할 다각형 클릭)")
+        else:
+            self.canvas.setCursor(Qt.CursorShape.CrossCursor)
+            self.setWindowTitle('AI 어시스트 (변경:C, 지정삭제:D, 완성취소:Z, 초기화:R)')
+
+    def update_class_selector(self, new_class_to_select=None):
+        """선택된 카테고리에 맞는 클래스 목록으로 QComboBox를 채웁니다."""
+        self.class_selector.blockSignals(True)
+        self.class_selector.clear()
+
+        category = self.category_selector.currentText()
+        manifest = self.learning_tab.data_manager.get_manifest()
+        classes_in_category = list(manifest.get(category, {}).keys())
+
+        self.class_selector.addItems(classes_in_category)
+        if category != CHARACTER_CLASS_NAME:
+            self.class_selector.addItem("[새 클래스 추가...]")
+
+        if new_class_to_select and new_class_to_select in classes_in_category:
+            self.class_selector.setCurrentText(new_class_to_select)
+
+        self.class_selector.blockSignals(False)
+
+    def set_initial_selection(self, class_name):
+        """편집기 시작 시 전달받은 클래스 이름으로 선택자를 설정합니다."""
+        if class_name:
+            category = self.learning_tab.data_manager.get_class_category(class_name)
+            if category:
+                self.category_selector.setCurrentText(category)
+                self.update_class_selector(new_class_to_select=class_name)
+        else:
+            self.update_class_selector()
+
+    def handle_class_selection(self, index):
+        """'[새 클래스 추가...]'가 선택되면 새 클래스 추가 로직을 실행합니다."""
+        if self.class_selector.itemText(index) == "[새 클래스 추가...]":
+            category = self.category_selector.currentText()
+            new_name, ok = QInputDialog.getText(self, "새 클래스 추가", f"'{category}' 카테고리에 추가할 클래스 이름:")
+            if ok and new_name:
+                success, message = self.learning_tab.data_manager.add_class(new_name, category)
+                if success:
+                    self.learning_tab.populate_class_list()
+                    self.full_class_list = self.learning_tab.data_manager.get_class_list()
+                    self.update_class_selector(new_class_to_select=new_name)
+                else:
+                    QMessageBox.warning(self, "오류", message)
+                    self.class_selector.setCurrentIndex(0)
+            else:
+                self.class_selector.setCurrentIndex(0)
+
+    def get_current_class_id(self):
+        """현재 선택된 클래스의 전체 목록 기준 인덱스를 반환합니다."""
+        class_name = self.class_selector.currentText()
+        if class_name and class_name != "[새 클래스 추가...]":
+            try:
+                return self.full_class_list.index(class_name)
+            except ValueError:
+                return None
+        return None
+
+    def predict_mask(self, pos, label):
+        self.canvas.input_points.append(pos / self.canvas.zoom_factor)
+        self.canvas.input_labels.append(label)
+        input_points_np = np.array([[p.x(), p.y()] for p in self.canvas.input_points])
+        input_labels_np = np.array(self.canvas.input_labels)
+        masks, _, _ = self.predictor.predict(point_coords=input_points_np, point_labels=input_labels_np, multimask_output=False)
+        self.canvas.current_mask = masks[0]
+        self.canvas.update()
+
+    def keyPressEvent(self, event):
+        if event.key() in [Qt.Key.Key_Return, Qt.Key.Key_Enter]:
+            if self.canvas.current_mask is not None:
+                class_id = self.get_current_class_id()
+                if class_id is not None:
+                    contours, _ = cv2.findContours(self.canvas.current_mask.astype(np.uint8), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+                    if contours:
+                        largest_contour = max(contours, key=cv2.contourArea)
+                        if cv2.contourArea(largest_contour) > 10:
+                            poly_points = [QPoint(p[0][0], p[0][1]) for p in largest_contour]
+                            self.canvas.polygons.append({'class_id': class_id, 'points': poly_points})
+                            self.reset_current_mask()
+        elif event.key() == Qt.Key.Key_R: self.reset_current_mask()
+        elif event.key() == Qt.Key.Key_Z:
+            if self.canvas.polygons: self.canvas.polygons.pop(); self.canvas.update()
+        elif event.key() == Qt.Key.Key_D: self.canvas.delete_hovered_polygon()
+        elif event.key() == Qt.Key.Key_C:
+            self.change_class_btn.setChecked(not self.change_class_btn.isChecked())
+        else: super().keyPressEvent(event)
+
+    def reset_current_mask(self):
+        self.canvas.current_mask = None; self.canvas.input_points.clear(); self.canvas.input_labels.clear(); self.canvas.update()
+
+    def get_all_polygons(self): return self.canvas.polygons
+
+# --- 4. 위젯: 편집 모드 및 다중 캡처 선택 ---
+class EditModeDialog(QDialog):
+    AI_ASSIST, MANUAL, CANCEL = 1, 2, 0
+    def __init__(self, pixmap, sam_ready, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("편집 모드 선택")
+        self.image_label = QLabel()
+        self.image_label.setPixmap(pixmap)
+        self.ai_button = QPushButton("AI 어시스트 편집")
+        self.ai_button.clicked.connect(self.on_ai_assist)
+        if not sam_ready:
+            self.ai_button.setEnabled(False)
+            self.ai_button.setToolTip("SAM 모델이 로드 중이거나 설치되지 않았습니다.")
+        self.manual_button = QPushButton("수동 다각형 편집")
+        self.manual_button.clicked.connect(self.on_manual)
+        self.cancel_button = QPushButton("취소")
+        self.cancel_button.clicked.connect(self.on_cancel)
+        button_layout = QHBoxLayout()
+        button_layout.addWidget(self.ai_button)
+        button_layout.addWidget(self.manual_button)
+        button_layout.addWidget(self.cancel_button)
+        main_layout = QVBoxLayout()
+        main_layout.addWidget(self.image_label)
+        main_layout.addLayout(button_layout)
+        self.setLayout(main_layout)
+    def on_ai_assist(self): self.done(self.AI_ASSIST)
+    def on_manual(self): self.done(self.MANUAL)
+    def on_cancel(self): self.done(self.CANCEL)
+
+class MultiCaptureDialog(QDialog):
+    def __init__(self, pixmaps, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("편집할 이미지 선택")
+        self.pixmaps = pixmaps
+        self.image_list_widget = QListWidget()
+        self.image_list_widget.setViewMode(QListWidget.ViewMode.IconMode)
+        self.image_list_widget.setIconSize(QSize(160, 120))
+        self.image_list_widget.setResizeMode(QListWidget.ResizeMode.Adjust)
+        self.image_list_widget.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
+        for i, pixmap in enumerate(pixmaps):
+            item = QListWidgetItem(QIcon(pixmap), f"캡처 {i+1}")
+            self.image_list_widget.addItem(item)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+
+        main_layout = QVBoxLayout()
+        main_layout.addWidget(self.image_list_widget)
+        main_layout.addWidget(buttons)
+        self.setLayout(main_layout)
+        self.resize(800, 600)
+
+    def get_selected_pixmaps(self):
+        selected_pixmaps = []
+        for item in self.image_list_widget.selectedItems():
+            row = self.image_list_widget.row(item)
+            selected_pixmaps.append(self.pixmaps[row])
+        return selected_pixmaps
+
+# --- 5. 핵심 로직 클래스 (백엔드) ---
+class DataManager:
+    def __init__(self, workspace_root):
+        # (v1.2) 모든 경로는 workspace_root를 기준으로 설정됩니다.
+        self.workspace_root = workspace_root
+        self.dataset_path = os.path.join(self.workspace_root, 'datasets', 'maple_dataset')
+        self.images_path = os.path.join(self.dataset_path, 'images')
+        self.labels_path = os.path.join(self.dataset_path, 'labels')
+        self.manifest_path = os.path.join(self.dataset_path, 'manifest.json')
+        self.yaml_path = os.path.join(self.dataset_path, 'data.yaml')
+        self.models_path = os.path.join(self.workspace_root, 'models')
+        self.config_path = os.path.join(self.workspace_root, 'config')
+        self.presets_path = os.path.join(self.config_path, 'presets.json')
+        self.ensure_dirs_and_files()
+        self.migrate_manifest_if_needed()
+
+    def ensure_dirs_and_files(self):
+        os.makedirs(self.images_path, exist_ok=True)
+        os.makedirs(self.labels_path, exist_ok=True)
+        os.makedirs(self.models_path, exist_ok=True)
+        os.makedirs(self.config_path, exist_ok=True)
+        if not os.path.exists(self.manifest_path):
+            # 새 manifest 파일은 계층 구조로 생성
+            with open(self.manifest_path, 'w', encoding='utf-8') as f:
+                json.dump({category: {} for category in CATEGORIES}, f, indent=4, ensure_ascii=False)
+        if not os.path.exists(self.presets_path):
+            with open(self.presets_path, 'w', encoding='utf-8') as f: json.dump({}, f)
+
+    def migrate_manifest_if_needed(self):
+        """이전 버전의 manifest.json(플랫 구조)을 새 계층 구조로 자동 변환합니다."""
+        try:
+            with open(self.manifest_path, 'r', encoding='utf-8') as f:
+                manifest = json.load(f)
+        except (json.JSONDecodeError, FileNotFoundError):
+            return # 파일이 비어있거나 없으면 마이그레이션 불필요
+
+        # manifest의 첫 번째 값 유형을 확인하여 이전 버전인지 판단
+        # 이전 버전: {"클래스이름": ["이미지1.png", ...]} -> 값이 list
+        # 새 버전:   {"카테고리": {"클래스이름": ["이미지1.png", ...], ...}} -> 값이 dict
+        first_value = next(iter(manifest.values()), None)
+        if first_value is None or isinstance(first_value, list):
+            print("이전 버전 manifest.json 감지. 새 구조로 마이그레이션을 시작합니다.")
+            new_manifest = {category: {} for category in CATEGORIES}
+            for class_name, image_list in manifest.items():
+                # '캐릭터'는 '캐릭터' 카테고리로, 나머지는 '기타' 카테고리로 이동
+                target_category = CHARACTER_CLASS_NAME if class_name == CHARACTER_CLASS_NAME else "기타"
+                new_manifest[target_category][class_name] = image_list
+            self.save_manifest(new_manifest)
+            print("마이그레이션 완료.")
+
+    def get_manifest(self):
+        with open(self.manifest_path, 'r', encoding='utf-8') as f: return json.load(f)
+
+    def save_manifest(self, manifest):
+        with open(self.manifest_path, 'w', encoding='utf-8') as f: json.dump(manifest, f, indent=4, ensure_ascii=False)
+
+    def get_presets(self):
+        with open(self.presets_path, 'r', encoding='utf-8') as f: return json.load(f)
+
+    def save_presets(self, presets):
+        with open(self.presets_path, 'w', encoding='utf-8') as f: json.dump(presets, f, indent=4, ensure_ascii=False)
+
+    def get_class_list(self):
+        """사용자가 UI에서 정한 순서 그대로 모든 클래스를 리스트로 반환합니다."""
+        manifest = self.get_manifest()
+        all_classes = []
+        for category in CATEGORIES:
+            # manifest.json에 저장된 순서(dict key 순서)를 그대로 사용
+            class_names_in_category = list(manifest.get(category, {}).keys())
+            all_classes.extend(class_names_in_category)
+        return all_classes
+
+    def get_class_category(self, class_name):
+        """주어진 클래스 이름이 속한 카테고리를 찾습니다."""
+        manifest = self.get_manifest()
+        for category, classes in manifest.items():
+            if class_name in classes:
+                return category
+        return None
+
+    def rename_class(self, old_name, new_name):
+        manifest = self.get_manifest()
+
+        # 새 이름이 이미 다른 클래스에 의해 사용되고 있는지 확인
+        if any(new_name in classes for classes in manifest.values()):
+             return False, "이름 변경 불가: 새 이름이 이미 존재합니다."
+
+        category = self.get_class_category(old_name)
+        if not category:
+            return False, "이름 변경 불가: 이전 이름을 찾을 수 없습니다."
+
+        old_class_list = self.get_class_list()
+
+        # manifest에서 이름 변경 (순서 유지를 위해 새 dict 생성)
+        new_ordered_classes = {}
+        for name, data in manifest[category].items():
+            if name == old_name:
+                new_ordered_classes[new_name] = data
+            else:
+                new_ordered_classes[name] = data
+        manifest[category] = new_ordered_classes
+
+        self.save_manifest(manifest)
+
+        new_class_list = self.get_class_list()
+
+        # 프리셋 업데이트
+        presets = self.get_presets()
+        for preset_name, class_list in presets.items():
+            if old_name in class_list:
+                presets[preset_name] = [new_name if name == old_name else name for name in class_list]
+        self.save_presets(presets)
+
+        # 라벨 파일의 클래스 인덱스 업데이트
+        try:
+            old_idx = old_class_list.index(old_name)
+        except ValueError:
+            # 이름이 바뀌기 전 리스트에 old_name이 없는 경우는 거의 없지만, 안전장치
+            return True, "이름 변경 완료. (라벨 파일 업데이트 불필요)"
+
+        try:
+            new_idx = new_class_list.index(new_name)
+        except ValueError:
+             return False, "클래스 리스트에서 새 인덱스를 찾지 못했습니다."
+
+        if old_idx != new_idx:
+            # 모든 클래스의 인덱스가 변경될 수 있으므로 전체 맵을 생성
+            old_map = {name: i for i, name in enumerate(old_class_list)}
+            new_map = {name: i for i, name in enumerate(new_class_list)}
+
+            # 이전 인덱스를 새 인덱스로 매핑
+            idx_remap = {old_map[name]: new_map.get(name) for name in old_map if new_map.get(name) is not None}
+
+            for label_file in os.listdir(self.labels_path):
+                if label_file.endswith('.txt'):
+                    filepath = os.path.join(self.labels_path, label_file)
+                    new_lines = []
+                    try:
+                        with open(filepath, 'r') as f:
+                            lines = f.readlines()
+                        for line in lines:
+                            parts = line.strip().split()
+                            if not parts: continue
+                            class_idx = int(parts[0])
+                            if class_idx in idx_remap:
+                                parts[0] = str(idx_remap[class_idx])
+                                new_lines.append(" ".join(parts) + "\n")
+                            else:
+                                new_lines.append(line) # 매핑에 없는 경우 원본 유지
+                        with open(filepath, 'w') as f:
+                            f.writelines(new_lines)
+                    except Exception as e:
+                        print(f"라벨 파일 업데이트 중 오류 ({filepath}): {e}")
+                        continue
+
+        return True, "이름 변경 및 모든 관련 파일 업데이트 완료."
+
+
+    def add_class(self, class_name, category_name):
+        manifest = self.get_manifest()
+        if category_name not in manifest:
+            return False, f"'{category_name}' 카테고리를 찾을 수 없습니다."
+        # 모든 카테고리에서 중복 이름 확인
+        if any(class_name in classes for classes in manifest.values()):
+            return False, "이미 존재하는 클래스 이름입니다."
+
+        manifest[category_name][class_name] = []
+        self.save_manifest(manifest)
+        return True, f"'{category_name}' 카테고리에 '{class_name}' 클래스를 추가했습니다."
+
+    def delete_class(self, class_name):
+        manifest = self.get_manifest()
+        category = self.get_class_category(class_name)
+        if not category:
+            return False, "삭제할 클래스를 찾을 수 없습니다."
+
+        image_files_to_check = manifest[category].pop(class_name)
+        self.save_manifest(manifest)
+
+        # 다른 클래스에서 사용되지 않는 이미지와 라벨 파일 삭제
+        all_remaining_images = {
+            img_file for cat_classes in manifest.values()
+            for img_list in cat_classes.values()
+            for img_file in img_list
+        }
+
+        for filename in image_files_to_check:
+            if filename not in all_remaining_images:
+                for path in [os.path.join(self.images_path, filename), os.path.join(self.labels_path, f"{os.path.splitext(filename)[0]}.txt")]:
+                    if os.path.exists(path): os.remove(path)
+
+        return True, f"'{class_name}' 클래스 및 관련 파일 삭제 완료."
+
+    def get_images_for_class(self, class_name):
+        category = self.get_class_category(class_name)
+        if category:
+            return self.get_manifest()[category].get(class_name, [])
+        return []
+
+    def add_image_and_label_multi_class(self, image_data, label_content, involved_classes):
+        timestamp = time.strftime('%Y%m%d_%H%M%S')
+        base_filename = f"multi_{timestamp}_{int(time.time() * 1000) % 1000:03d}"
+        image_path = os.path.join(self.images_path, f"{base_filename}.png")
+        label_path = os.path.join(self.labels_path, f"{base_filename}.txt")
+        cv2.imwrite(image_path, image_data)
+        with open(label_path, 'w') as f: f.write(label_content)
+
+        manifest = self.get_manifest()
+        for class_name in involved_classes:
+            category = self.get_class_category(class_name)
+            if category and class_name in manifest[category]:
+                manifest[category][class_name].append(f"{base_filename}.png")
+        self.save_manifest(manifest)
+        return f"{base_filename}.png"
+
+    def update_label(self, image_path, label_content, involved_classes):
+        base_name = os.path.splitext(os.path.basename(image_path))[0]
+        label_path = os.path.join(self.labels_path, f"{base_name}.txt")
+        with open(label_path, 'w') as f: f.write(label_content)
+
+        manifest = self.get_manifest()
+        filename = f"{base_name}.png"
+
+        # 모든 클래스에서 해당 이미지 파일 제거
+        for category in manifest:
+            for class_name in manifest[category]:
+                if filename in manifest[category][class_name]:
+                    manifest[category][class_name].remove(filename)
+
+        # 관련된 클래스에 다시 추가
+        for class_name in involved_classes:
+            category = self.get_class_category(class_name)
+            if category and class_name in manifest[category]:
+                 if filename not in manifest[category][class_name]:
+                    manifest[category][class_name].append(filename)
+        self.save_manifest(manifest)
+
+    def delete_image(self, image_path):
+        filename = os.path.basename(image_path)
+        for path in [image_path, os.path.join(self.labels_path, f"{os.path.splitext(filename)[0]}.txt")]:
+            if os.path.exists(path): os.remove(path)
+
+        manifest = self.get_manifest()
+        for category in manifest:
+            for class_name in manifest[category]:
+                if filename in manifest[category][class_name]:
+                    manifest[category][class_name].remove(filename)
+        self.save_manifest(manifest)
+
+    def create_yaml_file(self):
+        # get_class_list()가 이미 정렬된 전체 클래스 목록을 반환하므로 그대로 사용
+        class_list = self.get_class_list()
+        data = {
+            'path': self.dataset_path, # (v1.2) 경로 수정
+            'train': 'images',
+            'val': 'images',
+            'names': {i: name for i, name in enumerate(class_list)}
+        }
+        with open(self.yaml_path, 'w', encoding='utf-8') as f:
+            yaml.dump(data, f, allow_unicode=True, default_flow_style=False)
+        return self.yaml_path
+
+    def get_saved_models(self):
+        if not os.path.exists(self.models_path): return []
+        return sorted([d for d in os.listdir(self.models_path) if os.path.isdir(os.path.join(self.models_path, d))])
+
+    def save_model_version(self, source_run_dir, model_name):
+        dest_dir = os.path.join(self.models_path, model_name)
+        if os.path.exists(dest_dir): shutil.rmtree(dest_dir)
+        source_weights_dir = os.path.join(source_run_dir, 'weights')
+        if os.path.exists(source_weights_dir):
+            shutil.copytree(source_weights_dir, os.path.join(dest_dir, 'weights'))
+            return True
+        return False
+
+    def delete_model_version(self, model_name):
+        model_dir = os.path.join(self.models_path, model_name)
+        if os.path.exists(model_dir) and os.path.isdir(model_dir):
+            try:
+                shutil.rmtree(model_dir)
+                return True, f"'{model_name}' 모델이 삭제되었습니다."
+            except Exception as e:
+                return False, f"모델 삭제 중 오류 발생: {e}"
+        return False, "삭제할 모델을 찾을 수 없습니다."
+
+    def rebuild_manifest_from_labels(self):
+        """
+        모든 라벨(.txt) 파일을 스캔하여 manifest.json의 이미지 목록을 재구성합니다.
+        라벨 파일에 기록된 class_id를 기반으로 어떤 이미지에 어떤 클래스가 포함되어 있는지
+        역추적하여 manifest를 복원합니다.
+        """
+        try:
+            # 1. 현재 클래스 목록과 이름->인덱스 맵 생성
+            all_classes = self.get_class_list()
+            if not all_classes:
+                return False, "복구를 위해 manifest에 클래스가 하나 이상 정의되어 있어야 합니다."
+
+            # 2. 현재 manifest 구조를 가져와 이미지 목록만 비웁니다.
+            manifest = self.get_manifest()
+            for category in manifest:
+                for class_name in manifest[category]:
+                    manifest[category][class_name] = [] # 이미지 목록 초기화
+
+            # 3. 모든 라벨 파일을 순회합니다.
+            label_files = [f for f in os.listdir(self.labels_path) if f.endswith('.txt')]
+            if not label_files:
+                return True, "스캔할 라벨 파일이 없습니다. 복구가 필요하지 않습니다."
+
+            for label_file in label_files:
+                image_filename = os.path.splitext(label_file)[0] + ".png"
+                filepath = os.path.join(self.labels_path, label_file)
+
+                involved_class_ids = set()
+                with open(filepath, 'r') as f:
+                    for line in f:
+                        parts = line.strip().split()
+                        if parts:
+                            try:
+                                class_id = int(parts[0])
+                                involved_class_ids.add(class_id)
+                            except (ValueError, IndexError):
+                                continue # 잘못된 형식의 라인 건너뛰기
+
+                # 4. 이 이미지에 포함된 클래스들을 manifest에 기록합니다.
+                for class_id in involved_class_ids:
+                    if class_id < len(all_classes):
+                        class_name = all_classes[class_id]
+                        category = self.get_class_category(class_name)
+                        if category:
+                            # 중복 추가 방지
+                            if image_filename not in manifest[category][class_name]:
+                                manifest[category][class_name].append(image_filename)
+
+            # 5. 재구성된 manifest를 저장합니다.
+            self.save_manifest(manifest)
+            return True, f"데이터 복구 완료. 총 {len(label_files)}개의 라벨 파일을 스캔했습니다."
+        except Exception as e:
+            return False, f"데이터 복구 중 오류 발생: {e}"
+
+# --- 6. 스레드 클래스 (백그라운드 작업) ---
+class TrainingThread(QThread):
+    progress = pyqtSignal(str)
+    results_path_ready = pyqtSignal(str)
+    finished = pyqtSignal(bool, str)
+    def __init__(self, yaml_path, epochs, base_model_name, training_runs_path):
+        super().__init__()
+        self.yaml_path = yaml_path
+        self.epochs = epochs
+        self.base_model_name = base_model_name
+        self.training_runs_path = training_runs_path # (v1.2) 훈련 결과 저장 경로 추가
+
+    def run(self):
+        try:
+            self.progress.emit(f"모델 훈련을 시작합니다... (기본 모델: {self.base_model_name}, Epochs: {self.epochs})")
+            model = YOLO(f"{self.base_model_name}-seg.pt")
+            # (v1.2) project 경로를 workspace/training_runs로 지정
+            results = model.train(data=self.yaml_path, epochs=self.epochs, imgsz=640, device=0, project=self.training_runs_path)
+            self.results_path_ready.emit(str(results.save_dir))
+            self.finished.emit(True, "훈련 성공! '최신 훈련 저장'으로 모델을 저장하세요.")
+        except Exception as e: self.finished.emit(False, f"훈련 오류: {e}")
+
+class ExportThread(QThread):
+    progress = pyqtSignal(str)
+    finished = pyqtSignal(bool, str)
+    def __init__(self, model_path): super().__init__(); self.model_path = model_path
+    def run(self):
+        try:
+            self.progress.emit(f"'{os.path.basename(self.model_path)}' 모델을 TensorRT로 변환 중...")
+            model = YOLO(self.model_path)
+            model.export(format='engine', half=True, device=0)
+            self.finished.emit(True, "모델 최적화 성공!")
+        except Exception as e: self.finished.emit(False, f"모델 최적화 오류: {e}")
+
+class DetectionThread(QThread):
+    frame_ready = pyqtSignal(QImage)
+    detection_logged = pyqtSignal(list)
+    def __init__(self, model_path, capture_region, target_class_indices, conf_char, conf_monster, char_class_index, is_debug_mode=False):
+        super().__init__()
+        self.model_path, self.capture_region, self.target_class_indices = model_path, capture_region, target_class_indices
+        self.conf_char, self.conf_monster, self.char_class_index, self.is_debug_mode = conf_char, conf_monster, char_class_index, is_debug_mode
+        self.is_running = True
+    def run(self):
+        try:
+            model = YOLO(self.model_path)
+            sct = mss.mss()
+            low_conf = min(self.conf_char, self.conf_monster)
+            while self.is_running:
+                frame = cv2.cvtColor(np.array(sct.grab(self.capture_region)), cv2.COLOR_BGRA2BGR)
+                results = model(frame, conf=low_conf, classes=self.target_class_indices, verbose=False)
+
+                result = results[0]
+
+                # --- [v4.5.18] 캐릭터 단일 탐지 및 텐서 오류 수정 로직 ---
+                if len(result.boxes) > 0:
+                    char_indices_with_conf = []
+                    other_indices = []
+
+                    # 1. 모든 탐지 결과를 순회하며 캐릭터와 기타 객체로 분리하고 신뢰도 필터링
+                    for i, box in enumerate(result.boxes):
+                        cls_id = int(box.cls)
+                        conf = box.conf.item()
+
+                        if cls_id == self.char_class_index:
+                            if conf >= self.conf_char:
+                                # (원본 인덱스, 신뢰도) 쌍으로 저장
+                                char_indices_with_conf.append((i, conf))
+                        else:
+                            if conf >= self.conf_monster:
+                                other_indices.append(i)
+
+                    final_indices = []
+                    # 2. 캐릭터가 하나 이상 탐지되었다면, 그 중 신뢰도가 가장 높은 것 하나만 선택
+                    if char_indices_with_conf:
+                        # 신뢰도(conf)를 기준으로 가장 높은 값의 원본 인덱스(i)를 찾음
+                        best_char_index = max(char_indices_with_conf, key=lambda item: item[1])[0]
+                        final_indices.append(best_char_index)
+
+                    # 3. 신뢰도를 통과한 다른 모든 객체들의 인덱스를 추가
+                    final_indices.extend(other_indices)
+
+                    # 4. 최종 선택된 인덱스들을 사용하여 result 객체 전체를 필터링 (오류 해결 지점)
+                    #    이렇게 하면 boxes, masks 등 모든 관련 데이터가 함께 필터링됩니다.
+                    if final_indices:
+                        result = result[final_indices]
+                    else:
+                        # 표시할 객체가 하나도 없으면 빈 결과 객체로 만듦
+                        result = result[:0]
+                # --- 로직 수정 끝 ---
+
+                if self.is_debug_mode:
+                    log_messages = []
+                    boxes = result.boxes
+                    timestamp = time.strftime('%H:%M:%S')
+                    if boxes is not None and len(boxes) > 0:
+                        log_messages.append(f"[{timestamp}] 탐지된 객체: {len(boxes)}개")
+                        for box in boxes: log_messages.append(f"  - {model.names[int(box.cls)]} (신뢰도: {box.conf.item():.2f})")
+                    else: log_messages.append(f"[{timestamp}] 탐색 완료. 객체 없음.")
+                    self.detection_logged.emit(log_messages)
+
+                annotated_frame = result.plot()
+                rgb_image = cv2.cvtColor(annotated_frame, cv2.COLOR_BGR2RGB)
+                h, w, ch = rgb_image.shape
+                qt_image = QImage(rgb_image.data, w, h, ch * w, QImage.Format.Format_RGB888)
+                self.frame_ready.emit(qt_image.copy())
+                self.msleep(10)
+        except Exception as e: print(f"탐지 스레드 오류: {e}")
+    def stop(self): self.is_running = False
+
+# --- 7. GUI 클래스 (프론트엔드) ---
+class LearningTab(QWidget):
+    def __init__(self):
+        super().__init__()
+        # (v1.2) DataManager를 새로운 workspace 경로 기준으로 초기화
+        self.data_manager = DataManager(workspace_root=WORKSPACE_ROOT)
+        self.training_thread, self.export_thread, self.detection_thread = None, None, None
+        self.latest_run_dir, self.manual_capture_region = None, None
+        self.sam_predictor = None
+        self.current_image_sort_mode = 'date'
+        self.detection_popup = None
+        self.is_popup_active = False
+        self.last_popup_scale = 50 # 팝업창 크기 기억을 위한 변수
+        self.initUI()
+        self.init_sam()
+
+    def initUI(self):
+        # [BUG FIX] 레이아웃을 위젯에 할당하지 않고 생성한 뒤, 마지막에 한 번만 설정합니다.
+        main_layout = QHBoxLayout()
+        
+        # 왼쪽: 클래스 목록 및 프리셋
+        left_layout = QVBoxLayout()
+        left_layout.addWidget(QLabel('클래스 목록 (체크하여 탐지 대상 설정)'))
+
+        self.class_tree_widget = ClassTreeWidget()
+        self.class_tree_widget.setHeaderLabel('클래스')
+        self.class_tree_widget.itemSelectionChanged.connect(self.populate_image_list)
+        self.class_tree_widget.itemChanged.connect(self.handle_item_check)
+        self.class_tree_widget.drop_completed.connect(self.save_tree_state_to_manifest)
+
+        left_layout.addWidget(self.class_tree_widget)
+
+        class_buttons_layout = QHBoxLayout()
+        self.add_class_btn = QPushButton('클래스 추가')
+        self.rename_class_btn = QPushButton('이름 변경')
+        self.delete_class_btn = QPushButton('선택 항목 삭제')
+        self.recover_data_btn = QPushButton('데이터 복구')
+        self.recover_data_btn.setToolTip("라벨(.txt) 파일을 기반으로 이미지 목록을 재구성합니다.")
+
+        self.add_class_btn.clicked.connect(self.add_class)
+        self.rename_class_btn.clicked.connect(self.rename_class)
+        self.delete_class_btn.clicked.connect(self.delete_class)
+        self.recover_data_btn.clicked.connect(self.recover_data)
+
+        class_buttons_layout.addWidget(self.add_class_btn)
+        class_buttons_layout.addWidget(self.rename_class_btn)
+        class_buttons_layout.addWidget(self.delete_class_btn)
+        class_buttons_layout.addWidget(self.recover_data_btn)
+        left_layout.addLayout(class_buttons_layout)
+
+        preset_group = QGroupBox("탐지 프리셋")
+        preset_layout = QVBoxLayout()
+        self.preset_selector = QComboBox()
+        self.preset_selector.currentIndexChanged.connect(self.load_preset)
+        preset_buttons_layout = QHBoxLayout()
+        self.add_preset_btn = QPushButton("추가")
+        self.update_preset_btn = QPushButton("수정")
+        self.delete_preset_btn = QPushButton("삭제")
+        self.add_preset_btn.clicked.connect(self.add_preset)
+        self.update_preset_btn.clicked.connect(self.update_preset)
+        self.delete_preset_btn.clicked.connect(self.delete_preset)
+        preset_buttons_layout.addWidget(self.add_preset_btn)
+        preset_buttons_layout.addWidget(self.update_preset_btn)
+        preset_buttons_layout.addWidget(self.delete_preset_btn)
+        preset_layout.addWidget(self.preset_selector)
+        preset_layout.addLayout(preset_buttons_layout)
+        preset_group.setLayout(preset_layout)
+        left_layout.addWidget(preset_group)
+
+        # 중앙: 이미지 목록
+        center_layout = QVBoxLayout()
+
+        image_list_header_layout = QHBoxLayout()
+        image_list_header_layout.addWidget(QLabel('이미지 목록'))
+        image_list_header_layout.addStretch(1)
+        image_list_header_layout.addWidget(QLabel("정렬:"))
+        self.sort_by_name_btn = QPushButton("이름순")
+        self.sort_by_date_btn = QPushButton("추가순")
+        self.sort_by_name_btn.setCheckable(True)
+        self.sort_by_date_btn.setCheckable(True)
+        self.sort_by_date_btn.setChecked(True)
+        self.sort_by_name_btn.clicked.connect(lambda: self.set_image_sort_mode('name'))
+        self.sort_by_date_btn.clicked.connect(lambda: self.set_image_sort_mode('date'))
+        image_list_header_layout.addWidget(self.sort_by_name_btn)
+        image_list_header_layout.addWidget(self.sort_by_date_btn)
+
+        self.image_list_widget = QListWidget()
+        self.image_list_widget.setViewMode(QListWidget.ViewMode.IconMode)
+        self.image_list_widget.setIconSize(QSize(128, 128))
+        self.image_list_widget.setResizeMode(QListWidget.ResizeMode.Adjust)
+        self.image_list_widget.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
+        self.image_list_widget.setDragDropMode(QAbstractItemView.DragDropMode.NoDragDrop)
+        self.image_list_widget.itemDoubleClicked.connect(self.edit_selected_image)
+
+        capture_options_layout = QHBoxLayout()
+        capture_options_layout.addWidget(QLabel("횟수:"))
+        self.capture_count_spinbox = QSpinBox()
+        self.capture_count_spinbox.setRange(1, 50)
+        self.capture_count_spinbox.setValue(1)
+        capture_options_layout.addWidget(self.capture_count_spinbox)
+        capture_options_layout.addWidget(QLabel("간격(초):"))
+        self.capture_interval_spinbox = QDoubleSpinBox()
+        self.capture_interval_spinbox.setRange(0.2, 5.0)
+        self.capture_interval_spinbox.setValue(1.0)
+        self.capture_interval_spinbox.setSingleStep(0.1)
+        capture_options_layout.addWidget(self.capture_interval_spinbox)
+        self.capture_btn = QPushButton('메이플 창 캡처')
+        self.capture_btn.clicked.connect(self.capture_screen)
+        capture_options_layout.addWidget(self.capture_btn)
+
+        center_buttons_layout = QHBoxLayout()
+        self.add_image_btn = QPushButton('이미지 파일 추가')
+        self.add_image_btn.clicked.connect(self.add_images_from_files)
+        self.edit_image_btn = QPushButton('선택 이미지 편집')
+        self.edit_image_btn.clicked.connect(self.edit_selected_image)
+        self.delete_image_btn = QPushButton('선택 이미지 삭제')
+        self.delete_image_btn.clicked.connect(self.delete_image)
+        center_buttons_layout.addWidget(self.add_image_btn)
+        center_buttons_layout.addWidget(self.edit_image_btn)
+        center_buttons_layout.addWidget(self.delete_image_btn)
+
+        center_layout.addLayout(image_list_header_layout)
+        center_layout.addWidget(self.image_list_widget)
+        center_layout.addLayout(capture_options_layout)
+        center_layout.addLayout(center_buttons_layout)
+        
+        main_layout.addLayout(left_layout, 1)
+        main_layout.addLayout(center_layout, 2)
+
+        # 오른쪽: 훈련 및 탐지
+        right_layout = QVBoxLayout()
+
+        train_group = QGroupBox("모델 훈련")
+        train_layout = QVBoxLayout()
+        train_options_layout = QHBoxLayout()
+        train_options_layout.addWidget(QLabel("기본 모델:"))
+        self.base_model_selector = QComboBox()
+        self.base_model_selector.addItems(['yolov8n', 'yolov8s', 'yolov8m'])
+        train_options_layout.addWidget(self.base_model_selector)
+        train_options_layout.addWidget(QLabel("Epochs:"))
+        self.epoch_spinbox = QSpinBox()
+        self.epoch_spinbox.setRange(10, 500)
+        self.epoch_spinbox.setValue(100)
+        self.epoch_spinbox.setSingleStep(10)
+        train_options_layout.addWidget(self.epoch_spinbox)
+        train_options_layout.addStretch(1)
+        self.train_btn = QPushButton('훈련 시작'); self.train_btn.clicked.connect(self.start_training)
+        train_options_layout.addWidget(self.train_btn)
+        train_layout.addLayout(train_options_layout)
+        train_group.setLayout(train_layout)
+        right_layout.addWidget(train_group)
+
+        model_manage_group = QGroupBox("저장된 모델 관리")
+        model_manage_layout = QVBoxLayout()
+        self.save_model_btn = QPushButton('최신 훈련 결과 저장'); self.save_model_btn.clicked.connect(self.save_latest_training_result); self.save_model_btn.setEnabled(False)
+        model_selection_layout = QHBoxLayout()
+        model_selection_layout.addWidget(QLabel('사용 모델:'))
+        self.model_selector = QComboBox()
+        model_selection_layout.addWidget(self.model_selector)
+        model_buttons_layout = QHBoxLayout()
+        self.export_btn = QPushButton('선택 모델 최적화'); self.export_btn.clicked.connect(self.start_exporting)
+        self.delete_saved_model_btn = QPushButton('선택 모델 삭제'); self.delete_saved_model_btn.clicked.connect(self.delete_saved_model)
+        model_buttons_layout.addWidget(self.export_btn)
+        model_buttons_layout.addWidget(self.delete_saved_model_btn)
+        model_manage_layout.addWidget(self.save_model_btn)
+        model_manage_layout.addLayout(model_selection_layout)
+        model_manage_layout.addLayout(model_buttons_layout)
+        model_manage_group.setLayout(model_manage_layout)
+        right_layout.addWidget(model_manage_group)
+
+        self.log_viewer = QTextEdit(); self.log_viewer.setReadOnly(True)
+        detection_options_group = QGroupBox("탐지 옵션")
+        detection_options_layout = QVBoxLayout()
+        target_layout = QHBoxLayout()
+        self.auto_target_radio = QRadioButton("자동 (Maple 창)"); self.auto_target_radio.setChecked(True)
+        self.manual_target_radio = QRadioButton("수동 (영역 지정)")
+        self.set_area_btn = QPushButton("영역 지정"); self.set_area_btn.clicked.connect(self.set_manual_area); self.set_area_btn.setEnabled(False)
+        self.manual_target_radio.toggled.connect(self.set_area_btn.setEnabled)
+        target_layout.addWidget(self.auto_target_radio); target_layout.addWidget(self.manual_target_radio); target_layout.addWidget(self.set_area_btn)
+
+        conf_layout = QHBoxLayout()
+        conf_layout.addWidget(QLabel(f"{CHARACTER_CLASS_NAME} 신뢰도:"))
+        self.conf_char_spinbox = QDoubleSpinBox(); self.conf_char_spinbox.setRange(0.05, 0.95); self.conf_char_spinbox.setSingleStep(0.05); self.conf_char_spinbox.setValue(0.5)
+        conf_layout.addWidget(self.conf_char_spinbox)
+        conf_layout.addWidget(QLabel("몬스터 신뢰도:"))
+        self.conf_monster_spinbox = QDoubleSpinBox(); self.conf_monster_spinbox.setRange(0.05, 0.95); self.conf_monster_spinbox.setSingleStep(0.05); self.conf_monster_spinbox.setValue(0.5)
+        conf_layout.addWidget(self.conf_monster_spinbox)
+        self.debug_checkbox = QCheckBox('디버그 로그')
+        conf_layout.addWidget(self.debug_checkbox)
+
+        detection_options_layout.addLayout(target_layout); detection_options_layout.addLayout(conf_layout)
+        detection_options_group.setLayout(detection_options_layout)
+        self.detect_btn = QPushButton('실시간 탐지 시작'); self.detect_btn.setCheckable(True); self.detect_btn.clicked.connect(self.toggle_detection)
+
+        detection_container = QWidget()
+        detection_container.setStyleSheet("background-color: black;")
+        detection_layout = QVBoxLayout(detection_container)
+        detection_layout.setContentsMargins(0, 0, 0, 0)
+        detection_layout.setSpacing(0)
+
+        header_widget = QWidget()
+        header_layout = QHBoxLayout(header_widget)
+        header_layout.setContentsMargins(2, 2, 2, 2)
+        header_layout.addStretch(1)
+        self.popup_btn = QPushButton("↗")
+        self.popup_btn.setToolTip("탐지 화면을 팝업으로 열기")
+        self.popup_btn.setFixedSize(24, 24)
+        self.popup_btn.clicked.connect(self.toggle_detection_popup)
+        header_layout.addWidget(self.popup_btn)
+
+        self.detection_view = QLabel('탐지 화면')
+        self.detection_view.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.detection_view.setStyleSheet("color: white;")
+
+        detection_layout.addWidget(header_widget)
+        detection_layout.addWidget(self.detection_view, 1)
+
+        right_layout.addWidget(QLabel('로그'))
+        right_layout.addWidget(self.log_viewer)
+        right_layout.addWidget(detection_options_group)
+        right_layout.addWidget(self.detect_btn)
+        right_layout.addWidget(detection_container, 1)
+        
+        main_layout.addLayout(right_layout, 2)
+
+        # 상태바 대신 사용할 라벨과 프로그레스바
+        status_layout = QHBoxLayout()
+        self.status_label = QLabel("준비")
+        self.progress_bar = QProgressBar()
+        self.progress_bar.hide()
+        status_layout.addWidget(self.status_label)
+        status_layout.addStretch(1)
+        status_layout.addWidget(self.progress_bar)
+        
+        # 전체 레이아웃 구성
+        overall_layout = QVBoxLayout()
+        overall_layout.addLayout(main_layout)
+        overall_layout.addLayout(status_layout)
+        
+        # 최종적으로 위젯에 레이아웃 설정
+        self.setLayout(overall_layout)
+
+
+        self.populate_class_list()
+        self.populate_model_list()
+        self.populate_preset_list()
+
+    def update_status_message(self, message):
+        """상태바 메시지 업데이트를 위한 슬롯."""
+        self.status_label.setText(message)
+
+    def init_sam(self):
+        if not SAM_AVAILABLE:
+            self.update_status_message("SAM 사용 불가: 'segment_anything' 또는 'torch' 라이브러리를 설치하세요.")
+            return
+
+        self.sam_manager = SAMManager()
+        self.sam_thread = QThread()
+        self.sam_manager.moveToThread(self.sam_thread)
+
+        self.sam_manager.model_ready.connect(self.on_sam_model_ready)
+        self.sam_manager.status_updated.connect(self.update_status_message)
+        self.sam_manager.progress_updated.connect(self.update_progress_bar)
+
+        self.sam_thread.started.connect(self.sam_manager.load_model)
+        self.sam_thread.start()
+
+    def on_sam_model_ready(self, predictor):
+        self.sam_predictor = predictor
+        self.progress_bar.hide()
+
+    def update_progress_bar(self, value):
+        if value > 0 and value < 100:
+            self.progress_bar.show()
+            self.progress_bar.setValue(value)
+        else:
+            self.progress_bar.hide()
+
+    def populate_model_list(self):
+        self.model_selector.clear()
+        self.model_selector.addItems(self.data_manager.get_saved_models())
+
+    def populate_class_list(self):
+        """manifest.json 데이터를 기반으로 QTreeWidget을 채웁니다."""
+        self.class_tree_widget.blockSignals(True)
+        self.class_tree_widget.clear()
+        manifest = self.data_manager.get_manifest()
+
+        temp_manifest = self.data_manager.get_manifest()
+        all_categories_in_manifest = list(temp_manifest.keys())
+
+        ordered_categories = CATEGORIES + [cat for cat in all_categories_in_manifest if cat not in CATEGORIES]
+
+        for category_name in ordered_categories:
+            if category_name not in temp_manifest: continue
+
+            category_item = QTreeWidgetItem(self.class_tree_widget, [category_name])
+            category_item.setFlags(category_item.flags() & ~Qt.ItemFlag.ItemIsSelectable | Qt.ItemFlag.ItemIsDragEnabled)
+
+            classes_in_category = manifest.get(category_name, {})
+            for class_name in classes_in_category:
+                class_item = QTreeWidgetItem(category_item, [class_name])
+                class_item.setFlags(class_item.flags() | Qt.ItemFlag.ItemIsUserCheckable | Qt.ItemFlag.ItemIsDragEnabled)
+                class_item.setCheckState(0, Qt.CheckState.Checked)
+
+            category_item.setExpanded(True)
+
+        self.class_tree_widget.blockSignals(False)
+
+    def set_image_sort_mode(self, mode):
+        self.current_image_sort_mode = mode
+        self.sort_by_name_btn.setChecked(mode == 'name')
+        self.sort_by_date_btn.setChecked(mode == 'date')
+        self.populate_image_list()
+
+    def populate_image_list(self):
+        self.image_list_widget.clear()
+        selected_items = self.class_tree_widget.selectedItems()
+        if not selected_items: return
+
+        selected_item = selected_items[0]
+        if not selected_item.parent():
+            return
+
+        class_name = selected_item.text(0)
+        image_filenames = self.data_manager.get_images_for_class(class_name)
+
+        image_paths = [os.path.join(self.data_manager.images_path, fname) for fname in image_filenames]
+
+        if self.current_image_sort_mode == 'name':
+            image_paths.sort(key=lambda p: os.path.basename(p))
+        else: # 'date'
+            valid_paths = [p for p in image_paths if os.path.exists(p)]
+            valid_paths.sort(key=os.path.getctime, reverse=True)
+            image_paths = valid_paths
+
+        for path in image_paths:
+            item = QListWidgetItem(QIcon(path), os.path.basename(path))
+            item.setData(Qt.ItemDataRole.UserRole, path)
+            self.image_list_widget.addItem(item)
+
+    def add_class(self):
+        selected_item = self.class_tree_widget.currentItem()
+        target_category = "기타"
+        if selected_item:
+            target_category = selected_item.text(0) if not selected_item.parent() else selected_item.parent().text(0)
+
+        text, ok = QInputDialog.getText(self, '클래스 추가', f"'{target_category}' 카테고리에 추가할 클래스 이름:")
+        if ok and text:
+            success, message = self.data_manager.add_class(text, target_category)
+            if success:
+                self.populate_class_list()
+                self.log_viewer.append(message)
+                for i in range(self.class_tree_widget.topLevelItemCount()):
+                    cat_item = self.class_tree_widget.topLevelItem(i)
+                    if cat_item.text(0) == target_category:
+                        for j in range(cat_item.childCount()):
+                            child_item = cat_item.child(j)
+                            if child_item.text(0) == text:
+                                self.class_tree_widget.setCurrentItem(child_item)
+                                break
+                        break
+            else:
+                QMessageBox.warning(self, "오류", message)
+
+    def rename_class(self):
+        selected = self.class_tree_widget.currentItem()
+        if not selected or not selected.parent():
+            QMessageBox.warning(self, "오류", "이름을 변경할 클래스를 선택하세요.")
+            return
+
+        old_name = selected.text(0)
+        new_name, ok = QInputDialog.getText(self, "클래스 이름 변경", f"'{old_name}'의 새 이름 입력:", text=old_name)
+
+        if ok and new_name and new_name != old_name:
+            checked_states = self.get_checked_states()
+
+            success, message = self.data_manager.rename_class(old_name, new_name)
+            if success:
+                self.log_viewer.append(message)
+                self.populate_class_list()
+                self.populate_preset_list()
+                self.set_checked_states(checked_states)
+            else:
+                QMessageBox.critical(self, "이름 변경 오류", message)
+
+    def delete_class(self):
+        selected = self.class_tree_widget.currentItem()
+        if not selected or not selected.parent():
+            QMessageBox.warning(self, "오류", "삭제할 클래스를 선택하세요.")
+            return
+
+        class_name = selected.text(0)
+        reply = QMessageBox.question(self, '삭제 확인', f"'{class_name}' 클래스를 삭제하시겠습니까?\n이 클래스가 포함된 모든 이미지와 라벨이 삭제될 수 있습니다.",
+                                     QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No, QMessageBox.StandardButton.No)
+        if reply == QMessageBox.StandardButton.Yes:
+            success, message = self.data_manager.delete_class(class_name)
+            if success:
+                self.populate_class_list()
+                self.image_list_widget.clear()
+                self.log_viewer.append(message)
+            else:
+                QMessageBox.critical(self, "삭제 오류", message)
+
+    def recover_data(self):
+        reply = QMessageBox.question(self, '데이터 복구 확인',
+                                     "모든 라벨 파일을 스캔하여 이미지 목록을 재구성합니다.\n"
+                                     "manifest.json 파일이 덮어씌워집니다. 계속하시겠습니까?",
+                                     QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                                     QMessageBox.StandardButton.No)
+        if reply == QMessageBox.StandardButton.Yes:
+            self.update_status_message("데이터 복구 중...")
+            QApplication.processEvents()
+
+            success, message = self.data_manager.rebuild_manifest_from_labels()
+
+            if success:
+                self.update_status_message(message)
+                self.log_viewer.append(message)
+                self.populate_class_list()
+                self.populate_image_list()
+            else:
+                QMessageBox.critical(self, "복구 오류", message)
+                self.update_status_message("복구 실패.")
+
+    def add_images_from_files(self):
+        # 1. 현재 선택된 클래스가 있는지 확인
+        selected_items = self.class_tree_widget.selectedItems()
+        if not selected_items or not selected_items[0].parent():
+            QMessageBox.warning(self, "오류", "이미지를 추가할 클래스를 먼저 선택해주세요.")
+            return
+
+        selected_class_name = selected_items[0].text(0)
+
+        # 2. 파일 대화 상자 열기
+        file_paths, _ = QFileDialog.getOpenFileNames(
+            self,
+            "데이터셋에 추가할 이미지 선택",
+            "", # 기본 경로
+            "Image Files (*.png *.jpg *.jpeg *.bmp)"
+        )
+
+        if not file_paths:
+            return # 사용자가 취소한 경우
+
+        # 3. 선택된 각 파일을 처리
+        added_count = 0
+        for file_path in file_paths:
+            try:
+                # 3-1. 새 파일명 생성 (타임스탬프 기반)
+                timestamp = time.strftime('%Y%m%d_%H%M%S')
+                original_filename = os.path.basename(file_path)
+                new_filename = f"file_{timestamp}_{added_count}_{original_filename}"
+                
+                # 3-2. 이미지/라벨 경로 설정
+                new_image_path = os.path.join(self.data_manager.images_path, new_filename)
+                new_label_path = os.path.join(self.data_manager.labels_path, f"{os.path.splitext(new_filename)[0]}.txt")
+
+                # 3-3. 파일 복사 및 빈 라벨 생성
+                shutil.copy(file_path, new_image_path)
+                with open(new_label_path, 'w') as f:
+                    pass # 빈 파일 생성
+
+                # 3-4. manifest.json 업데이트
+                manifest = self.data_manager.get_manifest()
+                category = self.data_manager.get_class_category(selected_class_name)
+                if category and selected_class_name in manifest[category]:
+                    manifest[category][selected_class_name].append(new_filename)
+                
+                added_count += 1
+            except Exception as e:
+                self.log_viewer.append(f"'{file_path}' 파일 추가 중 오류 발생: {e}")
+                continue
+        
+        # 4. 최종 저장 및 UI 갱신
+        if added_count > 0:
+            self.data_manager.save_manifest(manifest)
+            self.log_viewer.append(f"'{selected_class_name}' 클래스에 {added_count}개의 이미지를 추가했습니다.")
+            self.populate_image_list()
+
+    def delete_image(self):
+        selected_items = self.image_list_widget.selectedItems()
+        if not selected_items: return
+        if QMessageBox.question(self, '삭제', f"이미지 {len(selected_items)}개를 삭제하시겠습니까?") == QMessageBox.StandardButton.Yes:
+            for item in selected_items:
+                self.data_manager.delete_image(item.data(Qt.ItemDataRole.UserRole))
+            self.populate_image_list()
+
+    def capture_screen(self):
+        count = self.capture_count_spinbox.value()
+        interval = self.capture_interval_spinbox.value()
+
+        # 캡처 시에는 메인 윈도우를 숨길 필요가 없으므로 hide/show 로직 제거
+        try:
+            QApplication.processEvents() # UI 업데이트
+            QThread.msleep(250)
+
+            target_windows = gw.getWindowsWithTitle('Maple') or gw.getWindowsWithTitle('메이플')
+            if not target_windows:
+                QMessageBox.warning(self, '오류', '메이플랜드 게임 창을 찾을 수 없습니다.')
+                return
+
+            target_window = target_windows[0]
+            if target_window.isMinimized: target_window.restore(); QThread.msleep(500)
+
+            capture_region = {'top': target_window.top, 'left': target_window.left, 'width': target_window.width, 'height': target_window.height}
+
+            if capture_region['width'] <= 0 or capture_region['height'] <= 0:
+                QMessageBox.warning(self, '오류', '게임 창의 크기가 유효하지 않습니다.')
+                return
+
+            captured_pixmaps = []
+            with mss.mss() as sct:
+                for i in range(count):
+                    self.update_status_message(f"{i+1}/{count}번째 캡처 중...")
+                    sct_img = sct.grab(capture_region)
+                    frame_rgb = cv2.cvtColor(np.array(sct_img), cv2.COLOR_BGRA2RGB)
+                    h, w, ch = frame_rgb.shape
+                    q_image = QImage(frame_rgb.data, w, h, ch * w, QImage.Format.Format_RGB888)
+                    captured_pixmaps.append(QPixmap.fromImage(q_image))
+                    if count > 1: QThread.msleep(int(interval * 1000))
+
+            self.update_status_message("캡처 완료")
+
+            if count == 1:
+                self.open_editor_mode_dialog(captured_pixmaps[0])
+            else:
+                multi_dialog = MultiCaptureDialog(captured_pixmaps, self)
+                if multi_dialog.exec():
+                    selected_pixmaps = multi_dialog.get_selected_pixmaps()
+                    for pixmap in selected_pixmaps:
+                        self.open_editor_mode_dialog(pixmap)
+        except Exception as e:
+            QMessageBox.critical(self, "캡처 오류", str(e))
+        finally:
+            self.update_status_message("준비")
+
+
+    def open_editor_mode_dialog(self, pixmap, image_path=None, initial_polygons=None, initial_class_name=None):
+        dialog = EditModeDialog(pixmap, self.sam_predictor is not None, self)
+        result = dialog.exec()
+        editor = None
+        if result == EditModeDialog.AI_ASSIST:
+            editor = SAMAnnotationEditor(pixmap, self.sam_predictor, initial_polygons, self, initial_class_name)
+        elif result == EditModeDialog.MANUAL:
+            editor = PolygonAnnotationEditor(pixmap, initial_polygons, self, initial_class_name)
+
+        if editor and editor.exec():
+            previously_selected_class = initial_class_name
+
+            self.populate_class_list()
+
+            if previously_selected_class:
+                self.select_class_item_by_name(previously_selected_class)
+
+            polygons_data = editor.get_all_polygons()
+            final_class_list = self.data_manager.get_class_list()
+
+            label_lines, involved_class_ids = [], set()
+            if polygons_data:
+                q_img = pixmap.toImage()
+                w, h = q_img.width(), q_img.height()
+                for poly_data in polygons_data:
+                    class_id, points = poly_data['class_id'], poly_data['points']
+                    normalized_points = [f"{p.x()/w:.6f} {p.y()/h:.6f}" for p in points]
+                    label_lines.append(f"{class_id} {' '.join(normalized_points)}")
+                    involved_class_ids.add(class_id)
+
+            involved_classes = [final_class_list[i] for i in involved_class_ids if i < len(final_class_list)]
+            label_content = "\n".join(label_lines)
+
+            if image_path:
+                self.data_manager.update_label(image_path, label_content, involved_classes)
+                if label_content:
+                    self.log_viewer.append(f"'{os.path.basename(image_path)}' 라벨 업데이트 완료.")
+                else:
+                    self.log_viewer.append(f"'{os.path.basename(image_path)}'의 모든 라벨이 제거되었습니다.")
+            elif label_content:
+                q_img = pixmap.toImage().convertToFormat(QImage.Format.Format_RGB888)
+                w, h = q_img.width(), q_img.height()
+                ptr = q_img.bits(); ptr.setsize(q_img.sizeInBytes())
+                arr = np.array(ptr).reshape(h, q_img.bytesPerLine())[:, :w * 3].reshape(h, w, 3)
+                cropped_bgr = cv2.cvtColor(arr, cv2.COLOR_RGB2BGR)
+                filename = self.data_manager.add_image_and_label_multi_class(cropped_bgr, label_content, involved_classes)
+                self.log_viewer.append(f"새로운 다중 클래스 이미지 '{filename}' 추가 완료.")
+
+            self.populate_image_list()
+
+    def select_class_item_by_name(self, class_name):
+        """이름으로 클래스 트리 아이템을 찾아 선택합니다."""
+        for i in range(self.class_tree_widget.topLevelItemCount()):
+            category_item = self.class_tree_widget.topLevelItem(i)
+            for j in range(category_item.childCount()):
+                class_item = category_item.child(j)
+                if class_item.text(0) == class_name:
+                    self.class_tree_widget.setCurrentItem(class_item)
+                    return
+
+    def edit_selected_image(self):
+        image_paths_to_edit = [item.data(Qt.ItemDataRole.UserRole) for item in self.image_list_widget.selectedItems()]
+
+        if not image_paths_to_edit:
+            QMessageBox.warning(self, '오류', '편집할 이미지를 선택하세요.'); return
+
+        selected_class_item = self.class_tree_widget.currentItem()
+        if not selected_class_item or not selected_class_item.parent():
+            QMessageBox.warning(self, '오류', '이미지가 속한 클래스를 먼저 선택하세요.'); return
+
+        initial_class_name = selected_class_item.text(0)
+
+        for image_path in image_paths_to_edit:
+            img_bgr = cv2.imread(image_path)
+            if img_bgr is None:
+                self.log_viewer.append(f"오류: '{os.path.basename(image_path)}' 파일을 열 수 없습니다.")
+                continue
+
+            h, w, _ = img_bgr.shape
+            label_path = os.path.join(self.data_manager.labels_path, f"{os.path.splitext(os.path.basename(image_path))[0]}.txt")
+            initial_polygons = []
+            if os.path.exists(label_path):
+                with open(label_path, 'r') as f:
+                    for line in f:
+                        parts = line.strip().split()
+                        if len(parts) > 1:
+                            class_id = int(parts[0])
+                            coords = [float(c) for c in parts[1:]]
+                            poly_points = [QPoint(int(coords[i] * w), int(coords[i+1] * h)) for i in range(0, len(coords), 2)]
+                            initial_polygons.append({'class_id': class_id, 'points': poly_points})
+
+            img_rgb = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
+            q_image = QImage(img_rgb.data, w, h, w * 3, QImage.Format.Format_RGB888)
+            self.open_editor_mode_dialog(QPixmap.fromImage(q_image), image_path=image_path, initial_polygons=initial_polygons, initial_class_name=initial_class_name)
+
+    def set_manual_area(self):
+        # 메인 윈도우를 숨기지 않고 스니퍼를 실행합니다.
+        snipper = ScreenSnipper(self) # 부모를 self로 지정
+        if snipper.exec():
+            roi = snipper.get_roi()
+            self.manual_capture_region = {'top': roi.top(), 'left': roi.left(), 'width': roi.width(), 'height': roi.height()}
+            self.log_viewer.append(f"수동 탐지 영역 설정 완료: {self.manual_capture_region}")
+
+    def start_training(self):
+        if len(self.data_manager.get_class_list()) == 0:
+            QMessageBox.warning(self, "오류", "훈련할 클래스가 하나 이상 있어야 합니다.")
+            return
+
+        self.log_viewer.clear()
+        yaml_path = self.data_manager.create_yaml_file()
+        self.log_viewer.append(f"데이터셋 설정 파일 생성 완료: '{yaml_path}'")
+        epochs = self.epoch_spinbox.value()
+        base_model = self.base_model_selector.currentText()
+        self.train_btn.setEnabled(False)
+        
+        # (v1.2) TrainingThread에 training_runs 경로 전달
+        training_runs_path = os.path.join(self.data_manager.workspace_root, 'training_runs')
+        self.training_thread = TrainingThread(yaml_path, epochs, base_model, training_runs_path)
+        
+        self.training_thread.progress.connect(self.log_viewer.append)
+        self.training_thread.results_path_ready.connect(self.log_training_path)
+        self.training_thread.finished.connect(self.training_finished)
+        self.training_thread.start()
+
+    def log_training_path(self, path):
+        self.latest_run_dir = path
+        self.log_viewer.append(f"훈련 결과 저장 경로: {os.path.abspath(path)}")
+        self.save_model_btn.setEnabled(True)
+
+    def training_finished(self, success, message):
+        QMessageBox.information(self, '훈련 완료' if success else '훈련 오류', message)
+        self.train_btn.setEnabled(True)
+
+    def save_latest_training_result(self):
+        if not self.latest_run_dir: QMessageBox.warning(self, '오류', '저장할 최신 훈련 결과가 없습니다.'); return
+        text, ok = QInputDialog.getText(self, '모델 버전 저장', '모델 버전 이름을 입력하세요 (예: v1-slime):')
+        if ok and text:
+            if self.data_manager.save_model_version(self.latest_run_dir, text):
+                self.log_viewer.append(f"모델 '{text}' 버전 저장 완료.")
+                self.populate_model_list()
+                self.model_selector.setCurrentText(text)
+            else: QMessageBox.critical(self, '오류', '모델 저장 실패.')
+
+    def start_exporting(self):
+        selected_model = self.model_selector.currentText()
+        if not selected_model: return
+        model_path = os.path.join(self.data_manager.models_path, selected_model, 'weights', 'best.pt')
+        if not os.path.exists(model_path): QMessageBox.warning(self, '오류', f"best.pt 파일을 찾을 수 없습니다."); return
+        self.export_btn.setEnabled(False)
+        self.export_thread = ExportThread(model_path)
+        self.export_thread.progress.connect(self.log_viewer.append)
+        self.export_thread.finished.connect(self.exporting_finished)
+        self.export_thread.start()
+
+    def exporting_finished(self, success, message):
+        QMessageBox.information(self, '최적화 완료' if success else '최적화 오류', message)
+        self.export_btn.setEnabled(True)
+
+    def delete_saved_model(self):
+        model_name = self.model_selector.currentText()
+        if not model_name: QMessageBox.warning(self, "오류", "삭제할 모델을 선택하세요."); return
+        reply = QMessageBox.question(self, "삭제 확인", f"'{model_name}' 모델을 정말로 삭제하시겠습니까?", QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No, QMessageBox.StandardButton.No)
+        if reply == QMessageBox.StandardButton.Yes:
+            success, message = self.data_manager.delete_model_version(model_name)
+            if success:
+                self.log_viewer.append(message); self.populate_model_list()
+            else: QMessageBox.critical(self, "삭제 오류", message)
+
+    def get_checked_class_indices(self):
+        """QTreeWidget에서 체크된 클래스들의 인덱스를 가져옵니다."""
+        all_classes = self.data_manager.get_class_list()
+        checked_indices = []
+        for i in range(self.class_tree_widget.topLevelItemCount()):
+            category_item = self.class_tree_widget.topLevelItem(i)
+            for j in range(category_item.childCount()):
+                class_item = category_item.child(j)
+                if class_item.checkState(0) == Qt.CheckState.Checked:
+                    class_name = class_item.text(0)
+                    if class_name in all_classes:
+                        checked_indices.append(all_classes.index(class_name))
+        return checked_indices
+
+    def toggle_detection(self, checked):
+        if checked:
+            selected_model = self.model_selector.currentText()
+            if not selected_model: self.detect_btn.setChecked(False); return
+            model_path_engine = os.path.join(self.data_manager.models_path, selected_model, 'weights', 'best.engine')
+            model_path_pt = os.path.join(self.data_manager.models_path, selected_model, 'weights', 'best.pt')
+            model_to_use = model_path_engine if os.path.exists(model_path_engine) else model_path_pt
+            if not os.path.exists(model_to_use): QMessageBox.warning(self, '오류', f"가중치 파일을 찾을 수 없습니다."); self.detect_btn.setChecked(False); return
+            target_indices = self.get_checked_class_indices()
+            if not target_indices: QMessageBox.warning(self, '오류', "탐지할 클래스를 하나 이상 체크해주세요."); self.detect_btn.setChecked(False); return
+
+            all_classes = self.data_manager.get_class_list()
+            char_class_index = all_classes.index(CHARACTER_CLASS_NAME) if CHARACTER_CLASS_NAME in all_classes else -1
+
+            capture_region = None
+            if self.auto_target_radio.isChecked():
+                target_windows = gw.getWindowsWithTitle('Maple') or gw.getWindowsWithTitle('메이플')
+                if not target_windows: QMessageBox.warning(self, '오류', '메이플랜드 창을 찾을 수 없습니다.'); self.detect_btn.setChecked(False); return
+                win = target_windows[0]
+                if win.isMinimized: win.restore(); QThread.msleep(500)
+                capture_region = {'top': win.top, 'left': win.left, 'width': win.width, 'height': win.height}
+            else:
+                if not self.manual_capture_region: QMessageBox.warning(self, '오류', "'영역 지정'으로 탐지 영역을 설정해주세요."); self.detect_btn.setChecked(False); return
+                capture_region = self.manual_capture_region
+            if capture_region['width'] <= 0 or capture_region['height'] <= 0: QMessageBox.warning(self, '오류', "탐지 영역 크기가 유효하지 않습니다."); self.detect_btn.setChecked(False); return
+
+            self.detection_thread = DetectionThread(model_to_use, capture_region, target_indices,
+                                                    self.conf_char_spinbox.value(), self.conf_monster_spinbox.value(),
+                                                    char_class_index, self.debug_checkbox.isChecked())
+
+            if self.is_popup_active and self.detection_popup:
+                self.detection_thread.frame_ready.connect(self.detection_popup.update_frame)
+            else:
+                self.detection_thread.frame_ready.connect(self.update_detection_frame)
+
+            self.detection_thread.detection_logged.connect(self.log_detection_results)
+            self.detection_thread.start()
+            self.detect_btn.setText('실시간 탐지 중단')
+        else:
+            if self.detection_thread: self.detection_thread.stop(); self.detection_thread.wait()
+            self.detect_btn.setText('실시간 탐지 시작')
+            self.detection_view.setText('탐지 중단됨');
+            self.detection_view.setPixmap(QPixmap())
+
+    def toggle_detection_popup(self):
+        if self.is_popup_active:
+            if self.detection_popup:
+                self.detection_popup.close()
+        else:
+            self.is_popup_active = True
+            self.popup_btn.setText("↙")
+            self.popup_btn.setToolTip("탐지 화면을 메인 창으로 복귀")
+
+            self.detection_popup = DetectionPopup(self.last_popup_scale, self)
+            self.detection_popup.closed.connect(self.handle_popup_closed)
+            self.detection_popup.scale_changed.connect(self.on_popup_scale_changed)
+
+            if self.detection_thread and self.detection_thread.isRunning():
+                try: self.detection_thread.frame_ready.disconnect(self.update_detection_frame)
+                except TypeError: pass
+                self.detection_thread.frame_ready.connect(self.detection_popup.update_frame)
+
+            self.detection_view.setText("탐지 화면이 팝업으로 표시 중입니다.")
+            self.detection_view.setPixmap(QPixmap())
+            self.detection_popup.show()
+
+    def on_popup_scale_changed(self, value):
+        """팝업의 스케일 값이 변경되면 저장합니다."""
+        self.last_popup_scale = value
+
+    def handle_popup_closed(self):
+        self.is_popup_active = False
+        self.popup_btn.setText("↗")
+        self.popup_btn.setToolTip("탐지 화면을 팝업으로 열기")
+
+        if self.detection_thread and self.detection_thread.isRunning():
+            try: self.detection_thread.frame_ready.disconnect(self.detection_popup.update_frame)
+            except TypeError: pass
+            self.detection_thread.frame_ready.connect(self.update_detection_frame)
+
+        if self.detect_btn.isChecked():
+            self.detection_view.setText("")
+        else:
+            self.detection_view.setText("탐지 중단됨")
+
+        self.detection_popup = None
+
+    def log_detection_results(self, log_messages):
+        for msg in log_messages: self.log_viewer.append(msg)
+        self.log_viewer.verticalScrollBar().setValue(self.log_viewer.verticalScrollBar().maximum())
+
+    def update_detection_frame(self, q_image):
+        self.detection_view.setPixmap(QPixmap.fromImage(q_image).scaled(self.detection_view.size(), Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation))
+
+    def populate_preset_list(self):
+        self.preset_selector.blockSignals(True)
+        self.preset_selector.clear()
+        presets = self.data_manager.get_presets()
+        self.preset_selector.addItems(presets.keys())
+        self.preset_selector.blockSignals(False)
+
+    def add_preset(self):
+        preset_name, ok = QInputDialog.getText(self, "프리셋 추가", "새 프리셋 이름:")
+        if ok and preset_name:
+            presets = self.data_manager.get_presets()
+            if preset_name in presets: QMessageBox.warning(self, "오류", "이미 존재하는 프리셋 이름입니다."); return
+
+            checked_classes = [self.data_manager.get_class_list()[i] for i in self.get_checked_class_indices()]
+            presets[preset_name] = checked_classes
+            self.data_manager.save_presets(presets)
+            self.populate_preset_list()
+            self.preset_selector.setCurrentText(preset_name)
+
+    def update_preset(self):
+        preset_name = self.preset_selector.currentText()
+        if not preset_name: QMessageBox.warning(self, "오류", "수정할 프리셋을 선택하세요."); return
+        presets = self.data_manager.get_presets()
+        checked_classes = [self.data_manager.get_class_list()[i] for i in self.get_checked_class_indices()]
+        presets[preset_name] = checked_classes
+        self.data_manager.save_presets(presets)
+        QMessageBox.information(self, "성공", f"'{preset_name}' 프리셋이 업데이트되었습니다.")
+
+    def delete_preset(self):
+        preset_name = self.preset_selector.currentText()
+        if not preset_name: QMessageBox.warning(self, "오류", "삭제할 프리셋을 선택하세요."); return
+        if QMessageBox.question(self, "삭제 확인", f"'{preset_name}' 프리셋을 정말 삭제하시겠습니까?") == QMessageBox.StandardButton.Yes:
+            presets = self.data_manager.get_presets()
+            if preset_name in presets:
+                del presets[preset_name]
+                self.data_manager.save_presets(presets)
+                self.populate_preset_list()
+
+    def load_preset(self):
+        preset_name = self.preset_selector.currentText()
+        if not preset_name: return
+        presets = self.data_manager.get_presets()
+        checked_classes = presets.get(preset_name, [])
+
+        self.class_tree_widget.blockSignals(True)
+        for i in range(self.class_tree_widget.topLevelItemCount()):
+            category_item = self.class_tree_widget.topLevelItem(i)
+            for j in range(category_item.childCount()):
+                class_item = category_item.child(j)
+                if class_item.text(0) in checked_classes:
+                    class_item.setCheckState(0, Qt.CheckState.Checked)
+                else:
+                    class_item.setCheckState(0, Qt.CheckState.Unchecked)
+        self.class_tree_widget.blockSignals(False)
+
+    def save_tree_state_to_manifest(self):
+        old_manifest = self.data_manager.get_manifest()
+        all_class_data = {}
+        for category in old_manifest:
+            for class_name, img_list in old_manifest[category].items():
+                all_class_data[class_name] = img_list
+
+        new_manifest = {category: {} for category in CATEGORIES}
+        current_categories_order = [self.class_tree_widget.topLevelItem(i).text(0) for i in range(self.class_tree_widget.topLevelItemCount())]
+
+        for category_name in current_categories_order:
+            if category_name not in new_manifest:
+                 new_manifest[category_name] = {}
+
+        for i in range(self.class_tree_widget.topLevelItemCount()):
+            category_item = self.class_tree_widget.topLevelItem(i)
+            category_name = category_item.text(0)
+
+            for j in range(category_item.childCount()):
+                class_item = category_item.child(j)
+                class_name = class_item.text(0)
+
+                if class_name in all_class_data:
+                    new_manifest[category_name][class_name] = all_class_data.get(class_name, [])
+
+        self.data_manager.save_manifest(new_manifest)
+
+        checked_states = self.get_checked_states()
+        self.populate_class_list()
+        self.set_checked_states(checked_states)
+        self.populate_preset_list()
+        self.log_viewer.append("클래스 순서 또는 카테고리가 변경되었습니다.")
+
+    def get_checked_states(self):
+        """현재 트리의 모든 클래스 아이템의 체크 상태를 dict로 저장합니다."""
+        states = {}
+        for i in range(self.class_tree_widget.topLevelItemCount()):
+            category_item = self.class_tree_widget.topLevelItem(i)
+            for j in range(category_item.childCount()):
+                class_item = category_item.child(j)
+                states[class_item.text(0)] = class_item.checkState(0)
+        return states
+
+    def set_checked_states(self, states):
+        """ 저장된 체크 상태를 트리에 복원합니다. """
+        self.class_tree_widget.blockSignals(True)
+        for i in range(self.class_tree_widget.topLevelItemCount()):
+            category_item = self.class_tree_widget.topLevelItem(i)
+            for j in range(category_item.childCount()):
+                class_item = category_item.child(j)
+                if class_item.text(0) in states:
+                    class_item.setCheckState(0, states[class_item.text(0)])
+        self.class_tree_widget.blockSignals(False)
+
+    def handle_item_check(self, item, column):
+        """체크박스 상태 변경 시, 프리셋을 '사용자 설정'으로 변경"""
+        if self.preset_selector.count() > 0:
+            self.preset_selector.blockSignals(True)
+            self.preset_selector.setCurrentIndex(-1)
+            self.preset_selector.blockSignals(False)
+
+    def cleanup_on_close(self):
+        """
+        애플리케이션 종료 시 호출될 정리 메서드.
+        실행 중인 모든 스레드를 안전하게 종료합니다.
+        """
+        if self.detection_popup:
+            self.detection_popup.close()
+        if self.detection_thread and self.detection_thread.isRunning():
+            self.detection_thread.stop()
+            self.detection_thread.wait()
+        if hasattr(self, 'sam_thread') and self.sam_thread.isRunning():
+            self.sam_thread.quit()
+            self.sam_thread.wait()
