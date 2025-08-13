@@ -8,7 +8,7 @@
 #         - UI에 '학습 방해 요소 (네거티브)' 카테고리를 추가하여 관리 편의성 증대.
 # - v1.2: src/workspace 분리 구조에 맞게 모든 경로 설정을 수정.
 # - v1.1: LearningTab 위젯에 레이아웃이 중복으로 설정되던 버그 수정.
-# - main.py에서 이 파일을 모듈로 불러와 탭의 내용으로 사용합니다.
+# - main.py에서 이 파일을 모듈로 불러와 탭으로 사용합니다.
 
 import warnings
 warnings.filterwarnings("ignore", category=DeprecationWarning)
