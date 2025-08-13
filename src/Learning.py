@@ -2,6 +2,7 @@
 # 2025년 08月 12日 16:10 (KST)
 # 기능: 데이터 관리, YOLOv8 훈련, 실시간 객체 탐지 기능을 통합한 GUI 위젯
 # 설명:
+# - v1.4: [기능개선] 마지막으로 사용한 모델을 기억하고 프로그램 재시작 시 자동으로 선택하는 기능 추가.
 # - v1.3: [기능추가] '방해 요소' 지정 및 관리 기능 추가.
 #         - 편집기에서 특정 영역을 지정하여 '방해 요소' 네거티브 샘플로 저장하는 기능.
 #         - 잘라낸 방해 요소 이미지를 별도로 관리하고, 학습 시 오탐 감소에 활용.
@@ -966,6 +967,7 @@ class DataManager:
         self.models_path = os.path.join(self.workspace_root, 'models')
         self.config_path = os.path.join(self.workspace_root, 'config')
         self.presets_path = os.path.join(self.config_path, 'presets.json')
+        self.settings_path = os.path.join(self.config_path, 'settings.json') # 설정 파일 경로 추가
         self.ensure_dirs_and_files()
         self.migrate_manifest_if_needed()
 
@@ -997,7 +999,9 @@ class DataManager:
                     json.dump(initial_manifest, f, indent=4, ensure_ascii=False)
         if not os.path.exists(self.presets_path):
             with open(self.presets_path, 'w', encoding='utf-8') as f: json.dump({}, f)
-
+        if not os.path.exists(self.settings_path):
+            with open(self.settings_path, 'w', encoding='utf-8') as f: json.dump({}, f)
+            
     def migrate_manifest_if_needed(self):
         """이전 버전의 manifest.json(플랫 구조)을 새 계층 구조로 자동 변환합니다."""
         try:
@@ -1231,6 +1235,26 @@ class DataManager:
                     manifest[category].remove(filename)
 
         self.save_manifest(manifest)
+
+    def load_settings(self):
+        """
+        settings.json 파일에서 설정을 불러옵니다.
+        """
+        try:
+            with open(self.settings_path, 'r', encoding='utf-8') as f:
+                return json.load(f)
+        except (json.JSONDecodeError, FileNotFoundError):
+            return {} # 파일이 없거나 비어있으면 빈 딕셔너리 반환
+
+    def save_settings(self, settings_data):
+        """
+        주어진 딕셔너리를 settings.json 파일에 저장합니다.
+        """
+        # 안전한 저장을 위해 기존 설정을 불러와 업데이트
+        current_settings = self.load_settings()
+        current_settings.update(settings_data)
+        with open(self.settings_path, 'w', encoding='utf-8') as f:
+            json.dump(current_settings, f, indent=4, ensure_ascii=False)
 
     # v1.3: 방해 요소 추가 메서드 신설
     def add_distractor(self, cropped_image_data):
@@ -1484,6 +1508,9 @@ class LearningTab(QWidget):
         self.detection_popup = None
         self.is_popup_active = False
         self.last_popup_scale = 50 # 팝업창 크기 기억을 위한 변수
+        # v1.4: 마지막 사용 모델 로드
+        settings = self.data_manager.load_settings()
+        self.last_used_model = settings.get('last_used_model', None)
         self.initUI()
         self.init_sam()
 
@@ -1750,8 +1777,13 @@ class LearningTab(QWidget):
             self.progress_bar.hide()
 
     def populate_model_list(self):
-        self.model_selector.clear()
-        self.model_selector.addItems(self.data_manager.get_saved_models())
+            self.model_selector.clear()
+            saved_models = self.data_manager.get_saved_models()
+            self.model_selector.addItems(saved_models)
+            
+            # v1.4: 마지막으로 사용한 모델이 목록에 있으면 선택
+            if self.last_used_model and self.last_used_model in saved_models:
+                self.model_selector.setCurrentText(self.last_used_model)
 
     def populate_class_list(self):
         """manifest.json 데이터를 기반으로 QTreeWidget을 채웁니다."""
@@ -2301,6 +2333,9 @@ class LearningTab(QWidget):
         if checked:
             selected_model = self.model_selector.currentText()
             if not selected_model: self.detect_btn.setChecked(False); QMessageBox.warning(self, '오류', "사용할 모델을 선택하세요."); return
+            # v1.4: 탐지 시작 시, 선택된 모델을 설정에 저장
+            self.data_manager.save_settings({'last_used_model': selected_model})
+            self.last_used_model = selected_model # 내부 변수도 갱신
             model_path_engine = os.path.join(self.data_manager.models_path, selected_model, 'weights', 'best.engine')
             model_path_pt = os.path.join(self.data_manager.models_path, selected_model, 'weights', 'best.pt')
             model_to_use = model_path_engine if os.path.exists(model_path_engine) else model_path_pt
