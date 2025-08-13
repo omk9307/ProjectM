@@ -2785,7 +2785,12 @@ class MapTab(QWidget):
         self.detect_anchor_btn = QPushButton("탐지 시작")
         self.detect_anchor_btn.setCheckable(True)
         self.detect_anchor_btn.clicked.connect(self.toggle_anchor_detection)
+        # 디버그 뷰 체크박스 추가
+        self.debug_view_checkbox = QCheckBox("디버그 뷰 표시")
+        self.debug_view_checkbox.toggled.connect(self.toggle_debug_view)
         detect_layout.addWidget(self.detect_anchor_btn)
+        #  체크박스를 레이아웃에 추가 ---
+        detect_layout.addWidget(self.debug_view_checkbox)
         detect_groupbox.setLayout(detect_layout)
         left_layout.addWidget(detect_groupbox)
         left_layout.addStretch(1)
@@ -3546,6 +3551,22 @@ class MapTab(QWidget):
         # 순서 변경 후 목록을 다시 채워서 번호 업데이트
         self.populate_waypoint_list()
 
+    def toggle_debug_view(self, checked):
+        """디버그 뷰 체크박스의 상태에 따라 디버그 창을 표시하거나 숨깁니다."""
+        # 탐지가 실행 중일 때만 동작하도록 함
+        if not (self.detection_thread and self.detection_thread.isRunning()):
+            if self.debug_dialog:
+                self.debug_dialog.close()
+            return
+            
+        if checked:
+            if not self.debug_dialog:
+                self.debug_dialog = DebugViewDialog(self)
+            self.debug_dialog.show()
+        else:
+            if self.debug_dialog:
+                self.debug_dialog.close()
+
     def toggle_anchor_detection(self, checked):
         if checked:
             if not self.minimap_region: 
@@ -3565,10 +3586,11 @@ class MapTab(QWidget):
             self.general_log_viewer.clear()
             self.detection_log_viewer.clear()
             self.update_general_log("탐지를 시작합니다...", "SaddleBrown")
-            if not self.debug_dialog:
-                self.debug_dialog = DebugViewDialog(self)
-            self.debug_dialog.show()
-
+            if self.debug_view_checkbox.isChecked():
+                if not self.debug_dialog:
+                    self.debug_dialog = DebugViewDialog(self)
+                self.debug_dialog.show()
+                
             self.detection_thread = AnchorDetectionThread(self.minimap_region, self.key_features)
             self.detection_thread.detection_ready.connect(self.on_detection_ready)
             # --- 수정: status_updated 시그널을 올바른 슬롯에 연결 ---
@@ -3592,11 +3614,21 @@ class MapTab(QWidget):
         """
         탐지 스레드로부터 받은 정보를 처리하고, RANSAC을 이용해 플레이어의 전역 좌표를 강건하게 추정합니다.
         """
+        # --- 핵심 수정: 신뢰도 기반 사전 필터링 ---
+        # RANSAC에 입력하기 전에, 각 지형의 개별 threshold를 통과한 지형들만 후보로 삼는다.
+        reliable_features = []
+        for f in found_features:
+            if f['id'] in self.key_features and f['conf'] >= self.key_features[f['id']].get('threshold', 0.85):
+                reliable_features.append(f)
+        
+        # --- 이하 모든 로직은 'found_features' 대신 'reliable_features'를 사용합니다. ---
+
         # 1. 데이터 준비: RANSAC에 사용할 (로컬 좌표, 전역 좌표) 쌍 생성
         source_points, dest_points, valid_features_map = [], [], {}
         feature_ids = []  # 추가: src/dst와 inliers 마스크를 동일한 순서로 매핑하기 위한 리스트 (중요)
 
-        for feature in found_features:
+        # --- 수정: found_features -> reliable_features ---
+        for feature in reliable_features:
             feature_id = feature['id']
             if feature_id in self.global_positions:
                 valid_features_map[feature_id] = feature
@@ -3611,7 +3643,7 @@ class MapTab(QWidget):
                 dst_cy = global_pos.y() + size.height()/2
                 source_points.append([src_cx, src_cy])
                 dest_points.append([dst_cx, dst_cy])
-                feature_ids.append(feature_id)  # 추가: source/dest와 같은 순서로 ID 보관 (나중에 inliers와 매핑)
+                feature_ids.append(feature_id)
 
         # 플레이어의 로컬 기준점 계산 (발밑 중앙)
         player_anchor_local = QPointF(self.minimap_region['width'] / 2.0, self.minimap_region['height'] / 2.0)
@@ -3649,39 +3681,33 @@ class MapTab(QWidget):
             dst_pts = np.float32(dest_points)
             
             # 아핀 변환과 정상치를 찾음
-            # 추가: ransacReprojThreshold(픽셀 허용오차)와 maxIters 지정 권장
-            ransac_thresh = getattr(self, 'ransac_reproj_threshold', 3.0)   # 추가: 튜닝 가능
-            max_iters = getattr(self, 'ransac_max_iters', 2000)            # 추가: 튜닝 가능
+            ransac_thresh = getattr(self, 'ransac_reproj_threshold', 3.0)
+            max_iters = getattr(self, 'ransac_max_iters', 2000)
             transform_matrix, inliers = cv2.estimateAffinePartial2D(
                 src_pts, dst_pts,
                 method=cv2.RANSAC,
                 ransacReprojThreshold=ransac_thresh,
                 maxIters=max_iters
-            )  # 변경: 파라미터 명시
+            )
              
-            # inliers 마스크가 None이 아니면 처리 (inliers shape 주의: Nx1 또는 1xN)
             if inliers is None:
                 transform_matrix = None
             else:
-                inliers = inliers.reshape(-1)  # 변경: 1D 플랫 형태로 보장
-                # feature_ids와 inliers는 같은 순서로 만들어졌기 때문에 바로 매핑 가능
+                inliers = inliers.reshape(-1)
                 inlier_features = []
                 for idx, fid in enumerate(feature_ids):
                     if inliers[idx] == 1:
                         inlier_features.append(valid_features_map[fid])
                         inlier_ids.add(fid)
 
-                # 1) transform_matrix가 있고 inlier가 충분히 있으면 M으로 플레이어 좌표 직접 변환 (권장)
                 min_inliers_for_confidence = getattr(self, 'min_inliers_for_confidence', 3)
                 if transform_matrix is not None and len(inlier_features) >= min_inliers_for_confidence:
-                    # transform_matrix: 2x3 (A|t)
                     A = transform_matrix[:, :2]
                     t = transform_matrix[:, 2]
                     px, py = player_anchor_local.x(), player_anchor_local.y()
                     transformed = (A @ np.array([px, py], dtype=np.float32)) + t
-                    avg_player_global_pos = QPointF(float(transformed[0]), float(transformed[1]))  # 변경: M 적용 결과 사용
+                    avg_player_global_pos = QPointF(float(transformed[0]), float(transformed[1]))
                 else:
-                    # fallback: inlier_features로 가중 평균(이전 방식)
                     if inlier_features:
                         total_confidence = sum(f['conf'] for f in inlier_features)
                         if total_confidence > 0:
@@ -3700,22 +3726,21 @@ class MapTab(QWidget):
             # 위치 계산 실패 시 디버그 뷰만 업데이트하고 종료
             if self.debug_dialog and self.debug_dialog.isVisible():
                 self.debug_dialog.update_debug_info(frame_bgr, {'all_features': found_features, 'inlier_ids': set(), 'player_pos_local': None})
+            # --- 수정: 로그 업데이트 추가 ---
+            self.update_detection_log_from_features([], [])
             return
 
         # 3. EMA 필터링으로 위치 스무딩
-        # 변경: adaptive EMA 계수 사용 (inlier 수 및 평균 confidence 기반)
-        min_alpha = getattr(self, 'min_alpha', 0.05)   # 추가: 환경에 맞게 클래스 속성으로 지정 가능
+        min_alpha = getattr(self, 'min_alpha', 0.05)
         max_alpha = getattr(self, 'max_alpha', 0.5)
         inlier_count = max(1, len(inlier_ids))
         avg_conf = 0.0
         if inlier_count > 0:
-            # inlier_features는 RANSAC 실패 시 존재하지 않을 수 있으므로 방어적으로 계산
             try:
                 inlier_features_for_conf = [valid_features_map[fid] for fid in inlier_ids]
                 avg_conf = sum(f['conf'] for f in inlier_features_for_conf) / len(inlier_features_for_conf)
             except Exception:
-                avg_conf = 1.0 # Fallback 시에는 신뢰도 1로 간주
-        # alpha: inlier_count과 avg_conf에 따라 동적으로 조정 (둘 다 높으면 빠르게 반영)
+                avg_conf = 1.0
         alpha = min_alpha + (max_alpha - min_alpha) * (min(1.0, avg_conf) * min(1.0, inlier_count / 6.0))
         if self.smoothed_player_pos is None:
             self.smoothed_player_pos = avg_player_global_pos
@@ -3732,15 +3757,14 @@ class MapTab(QWidget):
                 'all_features': found_features,
                 'inlier_ids': inlier_ids,
                 'player_pos_local': player_anchor_local,
-                'ransac_matrix': transform_matrix,     # 추가: 변환 행렬 로깅
-                'ransac_inliers': list(inlier_ids)     # 추가: inliers 목록/마스크
+                'ransac_matrix': transform_matrix,
+                'ransac_inliers': list(inlier_ids)
             }
             self.debug_dialog.update_debug_info(frame_bgr, debug_data)
 
         # 5. 메인 뷰 렌더링 데이터 준비 및 업데이트
         my_player_global_rects = []
         other_player_global_rects = []
-        # 변경: transform_matrix(M)이 있으면 M으로 rect의 네 꼭짓점을 변환 -> 바운딩 박스 생성
         if transform_matrix is not None:
             A = transform_matrix[:, :2]
             t = transform_matrix[:, 2]
@@ -3749,12 +3773,9 @@ class MapTab(QWidget):
                 return float(res[0]), float(res[1])
 
             def transform_rect(rect):
-                # rect: QRect or QRectF in local coords. 변환 후 바운딩 QRectF 반환
                 corners = [
-                    (rect.left(), rect.top()),
-                    (rect.right(), rect.top()),
-                    (rect.right(), rect.bottom()),
-                    (rect.left(), rect.bottom()),
+                    (rect.left(), rect.top()), (rect.right(), rect.top()),
+                    (rect.right(), rect.bottom()), (rect.left(), rect.bottom()),
                 ]
                 txs, tys = zip(*[transform_point(x, y) for (x, y) in corners])
                 min_x, max_x = min(txs), max(txs)
@@ -3764,90 +3785,52 @@ class MapTab(QWidget):
             my_player_global_rects = [transform_rect(rect) for rect in my_player_rects]
             other_player_global_rects = [transform_rect(rect) for rect in other_player_rects]
         else:
-            # 변경: 단순 translation 대신, "각 feature가 제시하는 rect의 글로벌 후보"를
-            # 가중평균(conf)으로 합쳐서 rect 중심을 구하는 방식으로 처리합니다.
             def local_rect_to_global_center(rect, features_source):
-                """
-                rect: QRectF (local coords)
-                features_source: iterable of feature dicts to use (e.g., inlier_features or valid_features_map.values())
-                반환: QPointF 글로벌 좌표(중심)
-                """
                 if not features_source:
-                    # 마지막 수단: player 중심의 글로벌 위치를 rect의 중심으로 사용 (가능하면 피하기)
                     return QPointF(final_player_pos.x(), final_player_pos.y())
 
-                rx = rect.center().x()
-                ry = rect.center().y()
-                sum_x = 0.0
-                sum_y = 0.0
-                sum_w = 0.0
+                rx, ry = rect.center().x(), rect.center().y()
+                sum_x, sum_y, sum_w = 0.0, 0.0, 0.0
                 for f in features_source:
                     fid = f['id']
-                    if fid not in self.global_positions:
-                        continue
-                    # feature 중심 local/global 동일한 기준으로 계산
+                    if fid not in self.global_positions: continue
                     f_local = QPointF(f['local_pos']) + QPointF(f['size'].width()/2, f['size'].height()/2)
                     f_global = self.global_positions[fid] + QPointF(f['size'].width()/2, f['size'].height()/2)
-                    # local offset from feature to rect center
-                    dx_local = rx - f_local.x()
-                    dy_local = ry - f_local.y()
-                    # candidate global = feature_global + local offset (assume no rotation/scale in fallback)
-                    cand_x = f_global.x() + dx_local
-                    cand_y = f_global.y() + dy_local
+                    dx_local, dy_local = rx - f_local.x(), ry - f_local.y()
+                    cand_x, cand_y = f_global.x() + dx_local, f_global.y() + dy_local
                     w = f.get('conf', 1.0)
                     sum_x += cand_x * w
                     sum_y += cand_y * w
                     sum_w += w
-                if sum_w <= 0:
-                    return QPointF(final_player_pos.x(), final_player_pos.y())
+                if sum_w <= 0: return QPointF(final_player_pos.x(), final_player_pos.y())
                 return QPointF(sum_x / sum_w, sum_y / sum_w)
 
-            # 사용: inlier_features가 있으면 inlier 기준, 없으면 valid_features_map 기준으로 계산
-            fallback_features = None
-            try:
-                fallback_features = [valid_features_map[fid] for fid in inlier_ids] if inlier_ids else list(valid_features_map.values())
-            except Exception:
-                fallback_features = list(valid_features_map.values())
+            fallback_features = [valid_features_map[fid] for fid in inlier_ids] if inlier_ids else list(valid_features_map.values())
 
-            my_player_global_rects = []
             for rect in my_player_rects:
                 center_global = local_rect_to_global_center(rect, fallback_features)
-                # rect 크기는 로컬 기준과 동일하다고 가정 -> 중심 기준으로 QRectF 생성
-                my_player_global_rects.append(QRectF(center_global.x() - rect.width()/2,
-                                                    center_global.y() - rect.height()/2,
-                                                    rect.width(), rect.height()))
+                my_player_global_rects.append(QRectF(center_global.x() - rect.width()/2, center_global.y() - rect.height()/2, rect.width(), rect.height()))
 
-            other_player_global_rects = []
-            for rect in other_player_rects:
+            for rect in other_player_global_rects:
                 center_global = local_rect_to_global_center(rect, fallback_features)
-                other_player_global_rects.append(QRectF(center_global.x() - rect.width()/2,
-                                                       center_global.y() - rect.height()/2,
-                                                       rect.width(), rect.height()))
+                other_player_global_rects.append(QRectF(center_global.x() - rect.width()/2, center_global.y() - rect.height()/2, rect.width(), rect.height()))
         
-        # 카메라 위치 결정
         camera_pos_to_send = final_player_pos if self.center_on_player_checkbox.isChecked() else self.minimap_view_label.camera_center_global
         
-        # 뷰 업데이트
         self.minimap_view_label.update_view_data(
             camera_center=camera_pos_to_send,
             active_features=found_features,
             my_players=my_player_global_rects,
             other_players=other_player_global_rects,
-            target_wp_id=None, # 3단계에서 구현 예정
-            reached_wp_id=None # 3단계에서 구현 예정
+            target_wp_id=None,
+            reached_wp_id=None
         )
         
-        # 편집기에 위치 전송
         self.global_pos_updated.emit(final_player_pos)
         
-        # 탐지 임계값을 넘는 지형만 필터링해서 로그에 표시
-        inlier_list = [f for f in found_features if f['id'] in inlier_ids and 
-                                                    f['id'] in self.key_features and 
-                                                    f['conf'] >= self.key_features[f['id']].get('threshold', 0.85)]
-        
-        outlier_list = [f for f in found_features if f['id'] not in inlier_ids and 
-                                                     f['id'] in self.key_features and 
-                                                     f['conf'] >= self.key_features[f['id']].get('threshold', 0.85)]
+        # --- 수정: found_features -> reliable_features ---
+        inlier_list = [f for f in reliable_features if f['id'] in inlier_ids]
+        outlier_list = [f for f in reliable_features if f['id'] not in inlier_ids]
         
         self.update_detection_log_from_features(inlier_list, outlier_list)
 
