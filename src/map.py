@@ -260,7 +260,7 @@ class KeyFeatureManagerDialog(QDialog):
         left_layout = QVBoxLayout()
         self.feature_list_widget = QListWidget()
         self.feature_list_widget.setViewMode(QListWidget.ViewMode.IconMode)
-        self.feature_list_widget.setIconSize(QSize(128, 128)) # 썸네일 크기 증가
+        self.feature_list_widget.setIconSize(QSize(128, 128))
         self.feature_list_widget.setResizeMode(QListWidget.ResizeMode.Adjust)
         self.feature_list_widget.itemSelectionChanged.connect(self.show_feature_details)
         button_layout = QHBoxLayout()
@@ -297,12 +297,20 @@ class KeyFeatureManagerDialog(QDialog):
         self.usage_label = QLabel("사용 중인 웨이포인트:")
         self.usage_list_widget = QListWidget()
         control_buttons_layout = QHBoxLayout()
+        
+        self.set_as_anchor_btn = QPushButton("기준 앵커로 지정")
+        self.set_as_anchor_btn.setToolTip("이 지형을 맵 전체의 (0, 0) 원점으로 설정합니다.\n기준 앵커는 맵 좌표계의 기준이 됩니다.")
+        self.set_as_anchor_btn.clicked.connect(self.set_as_reference_anchor)
+        self.set_as_anchor_btn.setEnabled(False)
+        
         self.rename_button = QPushButton("이름 변경")
         self.rename_button.clicked.connect(self.rename_selected_feature)
         self.rename_button.setEnabled(False)
         self.delete_button = QPushButton("선택한 지형 삭제")
         self.delete_button.clicked.connect(self.delete_selected_feature)
         self.delete_button.setEnabled(False)
+        
+        control_buttons_layout.addWidget(self.set_as_anchor_btn)
         control_buttons_layout.addWidget(self.rename_button)
         control_buttons_layout.addWidget(self.delete_button)
 
@@ -316,16 +324,82 @@ class KeyFeatureManagerDialog(QDialog):
         main_layout.addWidget(left_group, 2)
         main_layout.addWidget(right_group, 1)
 
+    def set_as_reference_anchor(self):
+        """선택된 지형을 맵의 기준 앵커로 설정하고, 모든 좌표계를 변환합니다."""
+        selected_items = self.feature_list_widget.selectedItems()
+        if not selected_items: return
+        
+        new_anchor_id = selected_items[0].data(Qt.ItemDataRole.UserRole)
+        old_anchor_id = self.parent_map_tab.reference_anchor_id
+
+        if old_anchor_id == new_anchor_id:
+            QMessageBox.information(self, "알림", "이미 기준 앵커로 설정되어 있습니다.")
+            return
+
+        # 1. 현재 좌표계 (old_anchor_id 기준)를 먼저 계산
+        current_global_pos = self.parent_map_tab.global_positions
+        if not current_global_pos or new_anchor_id not in current_global_pos:
+            QMessageBox.warning(self, "오류", "좌표 변환에 필요한 정보를 계산할 수 없습니다.\n먼저 '전체 웨이포인트 갱신'을 시도해주세요.")
+            return
+            
+        # 2. 새로운 원점이 될 지형의 현재 좌표를 구함. 이것이 변환 벡터가 됨.
+        translation_vector = current_global_pos[new_anchor_id]
+
+        # 3. 모든 핵심 지형/웨이포인트의 링크를 새로운 기준에 맞게 변환
+        #    (핵심 지형 <-> 웨이포인트 간의 상대 오프셋은 불변)
+        #    이 과정은 모든 웨이포인트의 key_feature_ids에 있는 offset_to_target을 재계산
+        for route_data in self.parent_map_tab.route_profiles.values():
+            for wp in route_data.get('waypoints', []):
+                wp_name = wp.get('name')
+                if wp_name not in current_global_pos: continue
+
+                # 웨이포인트의 '목표 지점'의 전역 좌표
+                wp_target_global_pos = current_global_pos[wp_name]['target_pos']
+                
+                new_links = []
+                for link in wp.get('key_feature_ids', []):
+                    feature_id = link['id']
+                    if feature_id not in current_global_pos: continue
+
+                    # 핵심 지형의 전역 좌표
+                    feature_global_pos = current_global_pos[feature_id]
+                    
+                    # 두 전역 좌표 간의 상대 오프셋은 앵커가 바뀌어도 동일함
+                    offset_vector = wp_target_global_pos - feature_global_pos
+                    
+                    new_links.append({
+                        'id': feature_id,
+                        'offset_to_target': [offset_vector.x(), offset_vector.y()]
+                    })
+                wp['key_feature_ids'] = new_links
+        
+        # 4. 모든 지형선(terrain_lines)과 오브젝트(transition_objects)의 좌표를 변환
+        geometry_data = self.parent_map_tab.geometry_data
+        for line in geometry_data.get("terrain_lines", []):
+            line['points'] = [[p[0] - translation_vector.x(), p[1] - translation_vector.y()] for p in line['points']]
+        for obj in geometry_data.get("transition_objects", []):
+            obj['points'] = [[p[0] - translation_vector.x(), p[1] - translation_vector.y()] for p in obj['points']]
+
+        # 5. 새로운 기준 앵커 ID를 설정
+        self.parent_map_tab.reference_anchor_id = new_anchor_id
+        
+        # 6. 변경된 모든 데이터를 저장. 이 함수는 _calculate_global_positions와 뷰 갱신을 트리거함.
+        self.parent_map_tab.save_profile_data()
+        self.parent_map_tab.update_general_log(f"'{new_anchor_id}'이(가) 새로운 기준 앵커로 설정되었습니다. 모든 좌표가 재계산되었습니다.", "purple")
+        
+        # UI 즉시 갱신
+        self.populate_feature_list()
+        for i in range(self.feature_list_widget.count()):
+            item = self.feature_list_widget.item(i)
+            if item.data(Qt.ItemDataRole.UserRole) == new_anchor_id:
+                item.setSelected(True)
+                break
+
+    
     def on_update_all_clicked(self):
-        """'전체 웨이포인트 갱신' 버튼 클릭 시 호출되는 슬롯."""
-        # MapTab의 갱신 메서드를 호출하고 성공 여부를 받음
         success = self.parent_map_tab.update_all_waypoints_with_features()
-
         if success:
-            # 성공했다면, MapTab으로부터 최신 웨이포인트 데이터를 다시 가져와 내부 데이터를 갱신
             self.all_waypoints = self.parent_map_tab.get_all_waypoints_with_route_name()
-
-            # 현재 선택된 아이템의 상세 정보를 다시 로드하여 UI를 새로고침
             self.show_feature_details()
 
     def on_threshold_changed(self, value):
@@ -341,7 +415,6 @@ class KeyFeatureManagerDialog(QDialog):
             context_img_data = base64.b64decode(feature_data['context_image_base64'])
             pixmap = QPixmap()
             pixmap.loadFromData(context_img_data)
-
             painter = QPainter(pixmap)
             rect_coords = feature_data.get('rect_in_context')
             if rect_coords and len(rect_coords) == 4:
@@ -351,13 +424,14 @@ class KeyFeatureManagerDialog(QDialog):
                 painter.drawRect(rect)
             painter.end()
             return pixmap
-        else: # 하위 호환
+        else:
             img_data = base64.b64decode(feature_data['image_base64'])
             pixmap = QPixmap()
             pixmap.loadFromData(img_data)
             return pixmap
 
     def add_new_feature(self):
+        # ... (이 메서드는 변경 없음) ...
         if not self.parent_map_tab.minimap_region:
             QMessageBox.warning(self, "오류", "먼저 메인 화면에서 '미니맵 범위 지정'을 해주세요.")
             return
@@ -375,7 +449,6 @@ class KeyFeatureManagerDialog(QDialog):
                 QMessageBox.warning(self, "오류", "너무 작은 영역은 지형으로 등록할 수 없습니다.")
                 return
 
-            # 문맥적 썸네일 데이터 생성
             _, context_buffer = cv2.imencode('.png', frame_bgr)
             context_base64 = base64.b64encode(context_buffer).decode('utf-8')
 
@@ -388,38 +461,42 @@ class KeyFeatureManagerDialog(QDialog):
                 'image_base64': feature_base64,
                 'context_image_base64': context_base64,
                 'rect_in_context': [rect.x(), rect.y(), rect.width(), rect.height()],
-                'threshold': 0.85 # 기본값
+                'threshold': 0.85
             }
 
             self.parent_map_tab.save_profile_data()
             self.parent_map_tab.update_general_log(f"새 핵심 지형 '{new_id}'가 추가되었습니다.", "green")
             self.populate_feature_list()
 
-            # 새로 추가된 지형이 선택되도록 함
             for i in range(self.feature_list_widget.count()):
                 item = self.feature_list_widget.item(i)
                 if item.data(Qt.ItemDataRole.UserRole) == new_id:
                     item.setSelected(True)
                     break
 
-            # 사용자에게 즉시 갱신할지 물어봄
             reply = QMessageBox.question(self, "갱신 확인",
                                         "새로운 핵심 지형이 추가되었습니다.\n"
                                         "즉시 전체 웨이포인트와의 연결을 갱신하시겠습니까?",
                                         QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
 
             if reply == QMessageBox.StandardButton.Yes:
-                # 기존에 만들어둔, UI 갱신까지 책임지는 슬롯을 호출
                 self.on_update_all_clicked()
 
     def populate_feature_list(self):
+        """리스트를 채울 때 기준 앵커를 시각적으로 표시합니다."""
         self.feature_list_widget.clear()
         sorted_keys = sorted(self.key_features.keys(), key=lambda x: int(x[1:]) if x.startswith("P") and x[1:].isdigit() else float('inf'))
+        anchor_id = self.parent_map_tab.reference_anchor_id
+        
         for feature_id in sorted_keys:
             data = self.key_features[feature_id]
             try:
                 thumbnail = self._create_context_thumbnail(data)
-                item = QListWidgetItem(QIcon(thumbnail), feature_id)
+                
+                # --- 수정: 기준 앵커에 별표(★) 추가 ---
+                display_name = f"★ {feature_id}" if feature_id == anchor_id else feature_id
+                
+                item = QListWidgetItem(QIcon(thumbnail), display_name)
                 item.setData(Qt.ItemDataRole.UserRole, feature_id)
                 self.feature_list_widget.addItem(item)
             except Exception as e: print(f"지형 로드 오류 (ID: {feature_id}): {e}")
@@ -431,6 +508,7 @@ class KeyFeatureManagerDialog(QDialog):
             self.delete_button.setEnabled(False)
             self.rename_button.setEnabled(False)
             self.threshold_spinbox.setEnabled(False)
+            self.set_as_anchor_btn.setEnabled(False)
             return
 
         item = selected_items[0]
@@ -438,19 +516,23 @@ class KeyFeatureManagerDialog(QDialog):
         feature_data = self.key_features.get(feature_id)
         if not feature_data: return
 
-        # 미리보기 이미지 업데이트
         pixmap = self._create_context_thumbnail(feature_data)
         self.image_preview_label.setPixmap(pixmap.scaled(self.image_preview_label.size(), Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation))
 
-        # 정보 업데이트
-        self.info_label.setText(f"<b>이름:</b> {feature_id}")
+        # --- 수정: 기준 앵커 정보 표시 ---
+        anchor_id = self.parent_map_tab.reference_anchor_id
+        if feature_id == anchor_id:
+            self.info_label.setText(f"<b>이름:</b> {feature_id} <font color='cyan'>(기준 앵커)</font>")
+            self.set_as_anchor_btn.setEnabled(False) # 이미 앵커이므로 비활성화
+        else:
+            self.info_label.setText(f"<b>이름:</b> {feature_id}")
+            self.set_as_anchor_btn.setEnabled(True)
 
         self.threshold_spinbox.blockSignals(True)
         self.threshold_spinbox.setValue(feature_data.get('threshold', 0.85))
         self.threshold_spinbox.setEnabled(True)
         self.threshold_spinbox.blockSignals(False)
 
-        # 사용처 목록 업데이트
         self.usage_list_widget.clear()
         used_by = [f"[{wp['route_name']}] {wp['name']}" for wp in self.all_waypoints if any(f['id'] == feature_id for f in wp.get('key_feature_ids', []))]
         if used_by: self.usage_list_widget.addItems(used_by)
@@ -471,6 +553,11 @@ class KeyFeatureManagerDialog(QDialog):
                 if 'key_feature_ids' in wp:
                     for feature_link in wp['key_feature_ids']:
                         if feature_link['id'] == old_name: feature_link['id'] = new_name
+            
+            # --- 수정: 기준 앵커 ID도 이름 변경에 맞춰 업데이트 ---
+            if self.parent_map_tab.reference_anchor_id == old_name:
+                self.parent_map_tab.reference_anchor_id = new_name
+            
             self.parent_map_tab.save_profile_data()
             self.parent_map_tab.update_general_log(f"핵심 지형 '{old_name}'의 이름이 '{new_name}'(으)로 변경되었습니다.", "blue")
             self.populate_feature_list()
@@ -482,34 +569,37 @@ class KeyFeatureManagerDialog(QDialog):
         selected_items = self.feature_list_widget.selectedItems()
         if not selected_items: return
         feature_id = selected_items[0].data(Qt.ItemDataRole.UserRole)
+        
+        # --- 수정: 기준 앵커는 삭제할 수 없도록 방지 ---
+        if feature_id == self.parent_map_tab.reference_anchor_id:
+            QMessageBox.warning(self, "삭제 불가", "기준 앵커로 지정된 지형은 삭제할 수 없습니다.\n다른 지형을 먼저 기준 앵커로 지정해주세요.")
+            return
+
         used_by_waypoints = [f"[{wp['route_name']}] {wp['name']}" for wp in self.all_waypoints if any(f['id'] == feature_id for f in wp.get('key_feature_ids', []))]
         warning_message = f"'{feature_id}' 지형을 영구적으로 삭제하시겠습니까?"
         if used_by_waypoints:
             warning_message += "\n\n경고: 이 지형은 아래 웨이포인트에서 사용 중입니다.\n삭제 시, 해당 웨이포인트들의 위치 정확도가 떨어질 수 있습니다.\n\n- " + "\n- ".join(used_by_waypoints)
         reply = QMessageBox.question(self, "삭제 확인", warning_message, QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel, QMessageBox.StandardButton.Cancel)
         if reply == QMessageBox.StandardButton.Yes:
-                    # 1. 핵심 지형 목록에서 삭제 (참조이므로 즉시 반영됨)
-                    if feature_id in self.key_features:
-                        del self.key_features[feature_id]
+            if feature_id in self.key_features:
+                del self.key_features[feature_id]
 
-                    # 2. MapTab의 원본 웨이포인트 데이터에서 해당 지형 링크 제거
-                    for route_profile in self.parent_map_tab.route_profiles.values():
-                        for wp in route_profile.get('waypoints', []):
-                            if 'key_feature_ids' in wp:
-                                wp['key_feature_ids'] = [f for f in wp['key_feature_ids'] if f['id'] != feature_id]
-                    
-                    # 3. 변경된 데이터를 저장 (이 과정에서 _update_map_data_and_views가 자동 호출됨)
-                    self.parent_map_tab.save_profile_data()
-                    self.parent_map_tab.update_general_log(f"핵심 지형 '{feature_id}'가 영구적으로 삭제되었습니다.", "orange")
-                    
-                    # 4. UI 갱신
-                    self.populate_feature_list()
-                    self.image_preview_label.setText("지형을 선택하세요.")
-                    self.info_label.setText("이름: -")
-                    self.usage_list_widget.clear()
-                    self.delete_button.setEnabled(False)
-                    self.rename_button.setEnabled(False)
-                    self.threshold_spinbox.setEnabled(False)
+            for route_profile in self.parent_map_tab.route_profiles.values():
+                for wp in route_profile.get('waypoints', []):
+                    if 'key_feature_ids' in wp:
+                        wp['key_feature_ids'] = [f for f in wp['key_feature_ids'] if f['id'] != feature_id]
+            
+            self.parent_map_tab.save_profile_data()
+            self.parent_map_tab.update_general_log(f"핵심 지형 '{feature_id}'가 영구적으로 삭제되었습니다.", "orange")
+            
+            self.populate_feature_list()
+            self.image_preview_label.setText("지형을 선택하세요.")
+            self.info_label.setText("이름: -")
+            self.usage_list_widget.clear()
+            self.delete_button.setEnabled(False)
+            self.rename_button.setEnabled(False)
+            self.threshold_spinbox.setEnabled(False)
+            self.set_as_anchor_btn.setEnabled(False)
                     
 class AdvancedWaypointCanvas(QLabel):
     def __init__(self, pixmap, initial_target=None, initial_features_data=None, parent=None):
@@ -1048,8 +1138,8 @@ class FullMinimapEditorDialog(QDialog):
             
     def update_locked_position(self, global_pos):
             self.locked_position = global_pos
-            y_pos = global_pos.y() # y_pos 변수를 새로 정의
-            x_pos = global_pos.x() # x_pos 변수를 새로 정의
+            y_pos = global_pos.y()
+            x_pos = global_pos.x()
             
             if not self.y_indicator_line:
                 pen = QPen(QColor(255, 0, 0, 150), 1, Qt.PenStyle.DashLine)
@@ -1059,17 +1149,14 @@ class FullMinimapEditorDialog(QDialog):
             scene_rect = self.scene.sceneRect()
             if not scene_rect.isValid(): return
             
-            # Y축 고정선 업데이트
             self.y_indicator_line.setLine(scene_rect.left(), y_pos, scene_rect.right(), y_pos)
             
-            # X축 고정선 업데이트 (X축 고정선이 없으면 생성)
             if not hasattr(self, 'x_indicator_line'):
                 pen = QPen(QColor(255, 0, 0, 150), 1, Qt.PenStyle.DashLine)
                 self.x_indicator_line = self.scene.addLine(0, 0, 1, 1, pen)
                 self.x_indicator_line.setZValue(200)
             self.x_indicator_line.setLine(x_pos, scene_rect.top(), x_pos, scene_rect.bottom())
 
-            # 체크박스 상태에 따라 가시성 제어
             self.y_indicator_line.setVisible(self.is_y_locked)
             self.x_indicator_line.setVisible(self.is_x_locked)
         
@@ -1895,6 +1982,7 @@ class MapTab(QWidget):
         self.my_player_global_rects = [] # 내 캐릭터의 전역 좌표
         self.other_player_global_rects = [] # 다른 유저의 전역 좌표
         self.active_feature_info = [] # 활성 지형의 전역 좌표 및 정보
+        self.reference_anchor_id = None # 기준 앵커 ID를 저장할 변수
         
         self.render_options = {
             'background': True, 'features': True, 'waypoints': True,
@@ -2072,10 +2160,16 @@ class MapTab(QWidget):
             self.route_profiles, self.active_route_profile_name = {}, None
             self.geometry_data = {}
             
+            # --- 수정: 기준 앵커 ID 초기화 ---
+            self.reference_anchor_id = None
+
             config = {}
             if os.path.exists(config_file):
                 with open(config_file, 'r', encoding='utf-8') as f:
                     config = json.load(f)
+
+            # --- 수정: 설정 파일에서 기준 앵커 ID 로드 ---
+            self.reference_anchor_id = config.get('reference_anchor_id')
 
             saved_options = config.get('render_options', {})
             self.render_options = {
@@ -2096,7 +2190,7 @@ class MapTab(QWidget):
                 self.geometry_data = {"terrain_lines": [], "transition_objects": []}
 
             config_updated, features_updated = self.migrate_data_structures(config, features)
- 
+
             if config_updated:
                 self.route_profiles = config.get('route_profiles', {})
                 self.active_route_profile_name = config.get('active_route_profile')
@@ -2112,7 +2206,7 @@ class MapTab(QWidget):
                 self.save_profile_data()
 
             self.global_positions = self._calculate_global_positions()
-            self._generate_full_map_pixmap() # --- v9.0.0: 전체 맵 이미지 생성
+            self._generate_full_map_pixmap()
             self.update_ui_for_new_profile()
             self.update_general_log(f"'{profile_name}' 맵 프로필을 로드했습니다.", "blue")
         except Exception as e:
@@ -2164,7 +2258,9 @@ class MapTab(QWidget):
                 'minimap_region': self.minimap_region,
                 'active_route_profile': self.active_route_profile_name,
                 'route_profiles': self.route_profiles,
-                'render_options': self.render_options
+                'render_options': self.render_options,
+                # --- 수정: 기준 앵커 ID 저장 ---
+                'reference_anchor_id': self.reference_anchor_id
             }
             with open(config_file, 'w', encoding='utf-8') as f: json.dump(config_data, f, indent=4, ensure_ascii=False)
             with open(features_file, 'w', encoding='utf-8') as f: json.dump(self.key_features, f, indent=4, ensure_ascii=False)
@@ -2873,29 +2969,33 @@ class MapTab(QWidget):
             self.update_general_log("맵 데이터를 최신 정보로 갱신했습니다.", "purple")
 
     def _calculate_global_positions(self):
-        """핵심 지형과 웨이포인트의 관계를 분석하여 전역 좌표를 계산합니다."""
+        """명시적으로 지정된 '기준 앵커'를 원점으로 하여 모든 지형과 웨이포인트의 전역 좌표를 계산합니다."""
         if not self.key_features:
+            self.reference_anchor_id = None
             return {}
 
-        all_waypoints = self.get_all_waypoints_with_route_name()
-        
         global_positions = {}
         
-        sorted_keys = sorted(self.key_features.keys())
-        if not sorted_keys:
-            return {}
-            
-        first_feature_id = sorted_keys[0]
-        global_positions[first_feature_id] = QPointF(0, 0)
+        anchor_id = self.reference_anchor_id
         
+        if not anchor_id or anchor_id not in self.key_features:
+            try:
+                new_anchor_id = sorted(self.key_features.keys())[0]
+                self.reference_anchor_id = new_anchor_id
+                anchor_id = new_anchor_id
+                self.update_general_log(f"경고: 기준 앵커가 없어, '{new_anchor_id}'을(를) 새 기준으로 자동 설정합니다. 관리자에서 확인 후 저장해주세요.", "orange")
+            except IndexError:
+                return {}
+        
+        global_positions[anchor_id] = QPointF(0, 0)
+
+        all_waypoints = self.get_all_waypoints_with_route_name()
         if not all_waypoints:
-            for feature_id in sorted_keys[1:]:
-                global_positions[feature_id] = QPointF(0, 0)
             return global_positions
 
         pending_waypoints = all_waypoints[:]
         
-        for _ in range(len(all_waypoints) + len(self.key_features)):
+        for _ in range(len(all_waypoints) + len(self.key_features) + 5):
             found_new = False
             remaining_waypoints = []
 
@@ -2908,7 +3008,6 @@ class MapTab(QWidget):
 
                 if known_ref_feature:
                     found_new = True
-                    
                     try:
                         img_data = base64.b64decode(wp['image_base64'])
                         np_arr = np.frombuffer(img_data, np.uint8)
@@ -2952,7 +3051,7 @@ class MapTab(QWidget):
                     remaining_waypoints.append(wp)
             
             pending_waypoints = remaining_waypoints
-            if not found_new:
+            if not found_new or not pending_waypoints:
                 break
 
         return global_positions

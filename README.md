@@ -1,157 +1,157 @@
-ProjectM - ÅëÇÕ ±â¼ú »ó¼¼ ¼³¸í¼­ (v9.0.6 - ÆíÁý±â ÁÜ/ÆÐ´× ¹× µ¿±âÈ­ °­È­ ¹öÀü)
-ÀÌ ¹®¼­´Â ProjectM ¾ÖÇÃ¸®ÄÉÀÌ¼ÇÀÇ ¾ÆÅ°ÅØÃ³, ÁÖ¿ä ±â´É ¸ðµâ, ±×¸®°í °¢ Å¬·¡½ºÀÇ ¿ªÇÒ ¹× ÃÖ±Ù ¾÷µ¥ÀÌÆ® ³»¿ªÀ» »ó¼¼ÇÏ°Ô ¼³¸íÇÕ´Ï´Ù.
-ÀüÃ¼ ½Ã½ºÅÛ ¾ÆÅ°ÅØÃ³
-ÀÌ ¾ÖÇÃ¸®ÄÉÀÌ¼ÇÀº ¸ðµâÇü ÅÇ ±â¹Ý ¾ÆÅ°ÅØÃ³¸¦ Ã¤ÅÃÇÏ°í ÀÖ½À´Ï´Ù.
-¸ÞÀÎ ¼Ð (main.py): QTabWidgetÀ» »ç¿ëÇÏ¿© °¢ ±â´É ¸ðµâ(Learning.py, map.py µî)À» µ¿ÀûÀ¸·Î ·ÎµåÇÏ´Â ²®µ¥±â(Shell) ¿ªÇÒÀ» ÇÕ´Ï´Ù. ÀÌ¸¦ ÅëÇØ °¢ ±â´É ÅÇÀº µ¶¸³ÀûÀ¸·Î °³¹ß ¹× ¼öÁ¤µÉ ¼ö ÀÖÀ¸¸ç, ÇÑ ÅÇ¿¡¼­ ¿À·ù°¡ ¹ß»ýÇÏ´õ¶óµµ ´Ù¸¥ ÅÇ¿¡ ¿µÇâÀ» ÁÖÁö ¾Ê½À´Ï´Ù.
-±â´É ¸ðµâ (ÅÇ): °¢ .py ÆÄÀÏÀº ÇÏ³ªÀÇ ÅÇ¿¡ ÇØ´çÇÏ´Â ¿ÏÀüÇÑ ±â´ÉÀ» ±¸ÇöÇÕ´Ï´Ù. ¸ðµç ÅÇÀº QWidgetÀ» »ó¼Ó¹ÞÀº ¸ÞÀÎ Å¬·¡½º(¿¹: LearningTab, MapTab)¸¦ Æ÷ÇÔÇÏ¸ç, ÀÌ Å¬·¡½º°¡ ÇØ´ç ÅÇÀÇ UI¿Í ·ÎÁ÷À» ÃÑ°ýÇÕ´Ï´Ù.
-UI¿Í ·ÎÁ÷ÀÇ ºÐ¸®: º¹ÀâÇÑ ÅÇ(LearningTab)ÀÇ °æ¿ì, UI¸¦ ´ã´çÇÏ´Â ¸ÞÀÎ Å¬·¡½º¿Í µ¥ÀÌÅÍ Ã³¸®¸¦ ´ã´çÇÏ´Â ¹é¿£µå Å¬·¡½º(DataManager)¸¦ ºÐ¸®ÇÏ¿© ÄÚµåÀÇ °¡µ¶¼º°ú À¯Áöº¸¼ö¼ºÀ» ³ô¿´½À´Ï´Ù.
-ºñµ¿±â Ã³¸® (QThread): ¸ðµ¨ ÈÆ·Ã, ½Ç½Ã°£ °´Ã¼ Å½Áö, ¹Ì´Ï¸Ê ºÐ¼® µî ½Ã°£ÀÌ ¸¹ÀÌ ¼Ò¿äµÇ´Â ÀÛ¾÷Àº ¸ðµÎ º°µµÀÇ QThread¿¡¼­ ½ÇÇàµË´Ï´Ù. ÀÌ´Â GUIÀÇ "ÀÀ´ä ¾øÀ½" »óÅÂ¸¦ ¹æÁöÇÏ°í »ç¿ëÀÚ °æÇèÀ» Çâ»ó½ÃÅ°´Â ÇÙ½ÉÀûÀÎ ¼³°è ¿øÄ¢ÀÔ´Ï´Ù. ½º·¹µå´Â pyqtSignalÀ» »ç¿ëÇÏ¿© ÀÛ¾÷ ÁøÇà »óÈ², °á°ú, ¿¡·¯ µîÀ» ¸ÞÀÎ GUI ½º·¹µå·Î ¾ÈÀüÇÏ°Ô Àü´ÞÇÕ´Ï´Ù.
-¸®¼Ò½º °ü¸®: main.pyÀÇ closeEvent´Â ÇÁ·Î±×·¥ Á¾·á ½Ã °¢ ÅÇ¿¡ Á¤ÀÇµÈ cleanup_on_close ¸Þ¼­µå¸¦ È£ÃâÇÏ¿©, ½ÇÇà ÁßÀÎ ¸ðµç ½º·¹µå¸¦ ¾ÈÀüÇÏ°Ô Á¾·áÇÏ°í ¼³Á¤À» ÀúÀåÇÏ´Â µî ¸®¼Ò½º¸¦ Á¤¸®ÇÏ´Â ¿ªÇÒÀ» ¼öÇàÇÕ´Ï´Ù.
-ÇâÈÄ °èÈ¹: map.pyÀÇ ³»ºñ°ÔÀÌ¼Ç ¾Ë°í¸®ÁòÀ» ±â¹ÝÀ¸·Î, ¶óÁîº£¸®ÆÄÀÌ¸¦ COM Æ÷Æ®¸¦ ÅëÇØ Å°º¸µåÃ³·³ ¿¬µ¿ÇÒ ¿¹Á¤ÀÔ´Ï´Ù. PC¿¡¼­´Â ÀÌµ¿ ¸í·É(Á¶ÀÛÅ°)¸¦ »ý¼ºÇÏ¿© ¶óÁîº£¸®ÆÄÀÌ·Î Àü¼ÛÇÏ°í, ¶óÁîº£¸®ÆÄÀÌ°¡ PC¿¡ Å° ÀÔ·ÂÀ» º¸³» Ä³¸¯ÅÍ¸¦ Á¶ÀÛÇÏµµ·Ï ±¸ÇöÇÏ¿© Å½Áö À§ÇèÀ» °¨¼Ò½ÃÅ³ °ÍÀÔ´Ï´Ù.
-Learning.py - µ¥ÀÌÅÍ °ü¸® ¹× AI ÈÆ·Ã/Å½Áö ¸ðµâ
-µ¥ÀÌÅÍ¼Â ±¸Ãà, YOLOv8 ¸ðµ¨ ÈÆ·Ã, ½Ç½Ã°£ °´Ã¼ Å½Áö ±â´ÉÀ» ÅëÇÕ Á¦°øÇÏ´Â ¾ÖÇÃ¸®ÄÉÀÌ¼ÇÀÇ ÇÙ½É ¸ðµâÀÔ´Ï´Ù. »ç¿ëÀÚ´Â ÀÌ ÅÇÀ» ÅëÇØ ÀÌ¹ÌÁö Ä¸Ã³ºÎÅÍ ¶óº§¸µ, ÈÆ·Ã, ½Ç½Ã°£ Å×½ºÆ®±îÁö AI ¸ðµ¨ °³¹ßÀÇ ÀüÃ¼ ÆÄÀÌÇÁ¶óÀÎÀ» GUI È¯°æ¿¡¼­ ¼öÇàÇÒ ¼ö ÀÖ½À´Ï´Ù.
-YOLOv8: UltralyticsÀÇ YOLOv8 ¸ðµ¨À» »ç¿ëÇÏ¿© °´Ã¼ ºÐÇÒ(Segmentation) ¸ðµ¨À» ÈÆ·ÃÇÏ°í Ãß·ÐÇÕ´Ï´Ù.
-Segment Anything (SAM): Meta AIÀÇ SAM ¸ðµ¨À» 'AI ¾î½Ã½ºÆ®' ±â´ÉÀ¸·Î È°¿ëÇÏ¿©, »ç¿ëÀÚ°¡ ¸î ¹øÀÇ Å¬¸¯¸¸À¸·Î °´Ã¼ÀÇ ¸¶½ºÅ©¸¦ ¼Õ½±°Ô »ý¼ºÇÒ ¼ö ÀÖµµ·Ï Áö¿øÇÕ´Ï´Ù.
-µ¥ÀÌÅÍ Áß½É ¿öÅ©ÇÃ·Î¿ì: workspace/ Æú´õ¸¦ Áß½ÉÀ¸·Î ¸ðµç µ¥ÀÌÅÍ(ÀÌ¹ÌÁö, ¶óº§, ¸ðµ¨)¸¦ Ã¼°èÀûÀ¸·Î °ü¸®ÇÕ´Ï´Ù.
-Learning.py Å¬·¡½ºº° »ó¼¼ ºÐ¼®:
-LearningTab(QWidget): 'ÇÐ½À' ÅÇÀÇ ¸ðµç UI¿Í ºñÁî´Ï½º ·ÎÁ÷À» ÃÑ°ýÇÏ´Â ¸ÞÀÎ Å¬·¡½º.
-¿ªÇÒ: 3´Ü ·¹ÀÌ¾Æ¿ô(Å¬·¡½º ¸ñ·Ï, ÀÌ¹ÌÁö ¸ñ·Ï, ÈÆ·Ã/Å½Áö)À» ±¸¼ºÇÏ°í, ¸ðµç ¹öÆ°°ú À§Á¬ÀÇ ½Ã±×³Î-½½·Ô ¿¬°áÀ» °ü¸®ÇÕ´Ï´Ù.
-ÁÖ¿ä »óÈ£ÀÛ¿ë: »ç¿ëÀÚ ÀÔ·Â(¹öÆ° Å¬¸¯ µî)À» ¹Þ¾Æ DataManager¿¡ µ¥ÀÌÅÍ Ã³¸®¸¦ ¿äÃ»ÇÕ´Ï´Ù. ÈÆ·Ã, Å½Áö µî ¹«°Å¿î ÀÛ¾÷À» TrainingThread, DetectionThread µî º°µµ ½º·¹µå·Î À§ÀÓÇÕ´Ï´Ù. PolygonAnnotationEditor, SAMAnnotationEditor °°Àº ÆíÁý ´ÙÀÌ¾ó·Î±×¸¦ »ý¼ºÇÏ°í, °á°ú µ¥ÀÌÅÍ¸¦ ¹Þ¾Æ DataManager¸¦ ÅëÇØ ÀúÀåÇÕ´Ï´Ù. SAMManager¸¦ ÅëÇØ AI ¾î½Ã½ºÆ® ¸ðµ¨ÀÇ ·ÎµùÀ» °ü¸®ÇÕ´Ï´Ù.
-ÃÖ±Ù º¯°æ »çÇ×: map.py¿Í °ü·ÃµÈ Á÷Á¢ÀûÀÎ º¯°æ »çÇ×Àº ¾ø½À´Ï´Ù.
-DataManager: ÆÄÀÏ ½Ã½ºÅÛ°úÀÇ ¸ðµç »óÈ£ÀÛ¿ëÀ» ´ã´çÇÏ´Â ¹é¿£µå Å¬·¡½º.
-¿ªÇÒ: workspace/ Æú´õ ³»ÀÇ ¸ðµç °æ·Î¸¦ °ü¸®ÇÏ¸ç, Å¬·¡½º, ÀÌ¹ÌÁö, ¶óº§, ¸ðµ¨, ÇÁ¸®¼Â¿¡ ´ëÇÑ CRUD(»ý¼º, ÀÐ±â, °»½Å, »èÁ¦) ·ÎÁ÷À» Ä¸½¶È­ÇÕ´Ï´Ù.
-ÁÖ¿ä ¸Þ¼­µå:
-get_manifest() / save_manifest(): Å¬·¡½º ±¸Á¶¿Í ÀÌ¹ÌÁö ¸ñ·ÏÀ» ´ãÀº manifest.jsonÀ» °ü¸®.
-rename_class(): Å¬·¡½º ÀÌ¸§ º¯°æ ½Ã, manifest.json »Ó¸¸ ¾Æ´Ï¶ó ¸ðµç .txt ¶óº§ ÆÄÀÏÀÇ Å¬·¡½º ÀÎµ¦½º±îÁö ÀÚµ¿À¸·Î ¾÷µ¥ÀÌÆ®ÇÏ¿© µ¥ÀÌÅÍ Á¤ÇÕ¼ºÀ» À¯ÁöÇÕ´Ï´Ù.
-rebuild_manifest_from_labels(): manifest.jsonÀÌ ¼Õ»óµÇ¾úÀ» ¶§, ¸ðµç ¶óº§ ÆÄÀÏÀ» ½ºÄµÇÏ¿© µ¥ÀÌÅÍ ¸ñ·ÏÀ» º¹±¸ÇÏ´Â °­·ÂÇÑ ±â´ÉÀ» Á¦°øÇÕ´Ï´Ù.
-create_yaml_file(): ÈÆ·Ã ½ÃÀÛ Àü, ÇöÀç Å¬·¡½º ¸ñ·ÏÀ» ±â¹ÝÀ¸·Î YOLO ÈÆ·Ã¿¡ ÇÊ¿äÇÑ data.yaml ÆÄÀÏÀ» µ¿ÀûÀ¸·Î »ý¼ºÇÕ´Ï´Ù.
-ÃÖ±Ù º¯°æ »çÇ×: map.py¿Í °ü·ÃµÈ Á÷Á¢ÀûÀÎ º¯°æ »çÇ×Àº ¾ø½À´Ï´Ù.
-TrainingThread(QThread): YOLOv8 ¸ðµ¨ ÈÆ·ÃÀ» ¹é±×¶ó¿îµå¿¡¼­ ¼öÇà.
-¿ªÇÒ: model.train()À» È£ÃâÇÏ¿© ÈÆ·ÃÀ» ½ÇÇàÇÏ°í, progress ½Ã±×³Î·Î ·Î±×¸¦, finished ½Ã±×³Î·Î °á°ú¸¦ GUI¿¡ Àü´ÞÇÕ´Ï´Ù.
-ÃÖ±Ù º¯°æ »çÇ×: map.py¿Í °ü·ÃµÈ Á÷Á¢ÀûÀÎ º¯°æ »çÇ×Àº ¾ø½À´Ï´Ù.
-ExportThread(QThread): ÈÆ·ÃµÈ .pt ¸ðµ¨À» TensorRT(.engine) Çü½ÄÀ¸·Î ÃÖÀûÈ­.
-¿ªÇÒ: ¸ðµ¨ ÃÖÀûÈ­ ÀÛ¾÷À» ¹é±×¶ó¿îµå¿¡¼­ Ã³¸®ÇÕ´Ï´Ù.
-ÃÖ±Ù º¯°æ »çÇ×: map.py¿Í °ü·ÃµÈ Á÷Á¢ÀûÀÎ º¯°æ »çÇ×Àº ¾ø½À´Ï´Ù.
-DetectionThread(QThread): ½Ç½Ã°£ °´Ã¼ Å½Áö¸¦ ¼öÇà.
-¿ªÇÒ: ÁöÁ¤µÈ È­¸é ¿µ¿ªÀ» mss·Î °è¼Ó Ä¸Ã³ÇÏ°í, YOLO ¸ðµ¨·Î Ãß·ÐÇÑ µÚ, °á°ú°¡ ±×·ÁÁø ÇÁ·¹ÀÓÀ» frame_ready ½Ã±×³Î·Î GUI¿¡ Àü¼ÛÇÕ´Ï´Ù. Ä³¸¯ÅÍ¿Í ¸ó½ºÅÍÀÇ ½Å·Úµµ¸¦ ºÐ¸® Àû¿ëÇÏ°í, Ä³¸¯ÅÍ´Â °¡Àå ½Å·Úµµ ³ôÀº ÇÏ³ª¸¸ Å½ÁöÇÏ´Â ·ÎÁ÷À» Æ÷ÇÔÇÕ´Ï´Ù.
-ÃÖ±Ù º¯°æ »çÇ×: map.py¿Í °ü·ÃµÈ Á÷Á¢ÀûÀÎ º¯°æ »çÇ×Àº ¾ø½À´Ï´Ù.
-SAMManager(QObject): SAM ¸ðµ¨ÀÇ ´Ù¿î·Îµå ¹× ·ÎµùÀ» °ü¸®.
-¿ªÇÒ: LearningTabÀÇ init_sam¿¡¼­ »ý¼ºµÇ¾î º°µµ ½º·¹µå·Î ÀÌµ¿µË´Ï´Ù. ¸ðµ¨ ÆÄÀÏÀÌ ¾øÀ» °æ¿ì ÀÚµ¿À¸·Î ´Ù¿î·ÎµåÇÏ°í, GPU¸¦ »ç¿ëÇÏ¿© ¸ðµ¨À» ¸Þ¸ð¸®¿¡ ·ÎµåÇÕ´Ï´Ù. ·ÎµùÀÌ ¿Ï·áµÇ¸é model_ready ½Ã±×³ÎÀ» ÅëÇØ SamPredictor °´Ã¼¸¦ LearningTab¿¡ Àü´ÞÇÕ´Ï´Ù.
-ÃÖ±Ù º¯°æ »çÇ×: map.py¿Í °ü·ÃµÈ Á÷Á¢ÀûÀÎ º¯°æ »çÇ×Àº ¾ø½À´Ï´Ù.
-PolygonAnnotationEditor(QDialog) / SAMAnnotationEditor(QDialog): °¢°¢ ¼öµ¿, AI ¾î½Ã½ºÆ® ¶óº§¸µÀ» À§ÇÑ ´ÙÀÌ¾ó·Î±× Ã¢.
-¿ªÇÒ: ³»ºÎ¿¡ Àü¿ë Äµ¹ö½º(CanvasLabel ¶Ç´Â SAMCanvasLabel)¸¦ Æ÷ÇÔÇÏ¸ç, È®´ë/Ãà¼Ò, Å¬·¡½º ¼±ÅÃ, ´ÜÃàÅ°(C, D, Z, R) Ã³¸® µî ÆíÁý¿¡ ÇÊ¿äÇÑ ¸ðµç UI¿Í ·ÎÁ÷À» Á¦°øÇÕ´Ï´Ù.
-ÁÖ¿ä »óÈ£ÀÛ¿ë: LearningTabÀÇ data_manager·ÎºÎÅÍ ÀüÃ¼ Å¬·¡½º ¸ñ·ÏÀ» ¹Þ¾Æ¿Í ¼±ÅÃ UI¸¦ ±¸¼ºÇÏ°í, ÀúÀå ½Ã ÆíÁýµÈ ´Ù°¢Çü µ¥ÀÌÅÍ¸¦ ¹ÝÈ¯ÇÕ´Ï´Ù.
-ÃÖ±Ù º¯°æ »çÇ×: map.py¿Í °ü·ÃµÈ Á÷Á¢ÀûÀÎ º¯°æ »çÇ×Àº ¾ø½À´Ï´Ù.
-BaseCanvasLabel(QLabel): µÎ Äµ¹ö½ºÀÇ °øÅë ±â´ÉÀ» Á¤ÀÇÇÏ´Â ºÎ¸ð Å¬·¡½º.
-¿ªÇÒ: ÁÜ/ÆÐ´×, ±âÁ¸ ´Ù°¢Çü ±×¸®±â, ¸¶¿ì½º ¿À¹ö ½Ã ÇÏÀÌ¶óÀÌÆ®, ´Ù°¢Çü »èÁ¦ µî °øÅë ·ÎÁ÷À» Ã³¸®ÇÏ¿© ÄÚµå Áßº¹À» ¹æÁöÇÕ´Ï´Ù.
-ÃÖ±Ù º¯°æ »çÇ×: map.py¿Í °ü·ÃµÈ Á÷Á¢ÀûÀÎ º¯°æ »çÇ×Àº ¾ø½À´Ï´Ù.
-CanvasLabel(BaseCanvasLabel): ¼öµ¿ ÆíÁý¿ë Äµ¹ö½º.
-¿ªÇÒ: ÇöÀç »ç¿ëÀÚ°¡ ±×¸®°í ÀÖ´Â ´Ù°¢ÇüÀ» Ãß°¡·Î ±×¸®´Â ·ÎÁ÷À» Æ÷ÇÔ.
-ÃÖ±Ù º¯°æ »çÇ×: map.py¿Í °ü·ÃµÈ Á÷Á¢ÀûÀÎ º¯°æ »çÇ×Àº ¾ø½À´Ï´Ù.
-SAMCanvasLabel(BaseCanvasLabel): AI ÆíÁý¿ë Äµ¹ö½º.
-¿ªÇÒ: SAMÀÌ ¿¹ÃøÇÑ ¸¶½ºÅ©¿Í »ç¿ëÀÚÀÇ ÀÔ·Â(±àÁ¤/ºÎÁ¤ Å¬¸¯)À» ½Ã°¢È­.
-ÃÖ±Ù º¯°æ »çÇ×: map.py¿Í °ü·ÃµÈ Á÷Á¢ÀûÀÎ º¯°æ »çÇ×Àº ¾ø½À´Ï´Ù.
-ClassTreeWidget(QTreeWidget): Å¬·¡½º ¸ñ·ÏÀ» À§ÇÑ Ä¿½ºÅÒ À§Á¬.
-¿ªÇÒ: Å¬·¡½º-Ä«Å×°í¸® °£ µå·¡±×¾Øµå·ÓÀ» Áö¿øÇÏ¸ç, °èÃþ ±¸Á¶ ±ÔÄ¢(¿¹: Å¬·¡½º¸¦ ÃÖ»óÀ§·Î ÀÌµ¿ ºÒ°¡)À» °­Á¦ÇÕ´Ï´Ù. µå·Ó ¿Ï·á ½Ã drop_completed ½Ã±×³ÎÀ» ¹ß»ý½ÃÄÑ manifest.jsonÀ» ¾÷µ¥ÀÌÆ®ÇÏµµ·Ï ÇÕ´Ï´Ù.
-ÃÖ±Ù º¯°æ »çÇ×: map.py¿Í °ü·ÃµÈ Á÷Á¢ÀûÀÎ º¯°æ »çÇ×Àº ¾ø½À´Ï´Ù.
-ScreenSnipper, DetectionPopup, EditModeDialog, MultiCaptureDialog: °¢°¢ È­¸é ¿µ¿ª ÁöÁ¤, Å½Áö ºä ÆË¾÷, ÆíÁý ¸ðµå ¼±ÅÃ, ´ÙÁß Ä¸Ã³ ¼±ÅÃÀ» À§ÇÑ À¯Æ¿¸®Æ¼ ´ÙÀÌ¾ó·Î±×.
-ÃÖ±Ù º¯°æ »çÇ×: map.py¿Í °ü·ÃµÈ Á÷Á¢ÀûÀÎ º¯°æ »çÇ×Àº ¾ø½À´Ï´Ù.
-map.py - ÀüÃ¼ ¹Ì´Ï¸Ê ÆíÁý ¹× ³»ºñ°ÔÀÌ¼Ç ½Ã½ºÅÛ
-v9.0.0 ´ë±Ô¸ð ½Ã½ºÅÛ °³ÆíÀ» ±âÁ¡À¸·Î, ±âÁ¸ÀÇ ¿þÀÌÆ÷ÀÎÆ® ±â¹Ý À§Ä¡ ÃßÁ¤ ¹æ½Ä¿¡¼­ ¹þ¾î³ª ÀüÃ¼ ¸Ê µ¥ÀÌÅÍ¸¦ Á÷Á¢ È°¿ëÇÏ´Â 'Ä«¸Þ¶ó ºä' ¹æ½ÄÀ¸·Î ½Ã½ºÅÛÀ» Àü¸é °³ÆíÇß½À´Ï´Ù. ÀÌ¸¦ ÅëÇØ ½Ã½ºÅÛÀÇ º¹Àâµµ¸¦ ³·Ãß°í Á¤È®¼º°ú Á÷°ü¼ºÀ» Å©°Ô Çâ»ó½ÃÄ×½À´Ï´Ù.
-ÇÙ½É °³³ä º¯°æ »çÇ×:
-ÀüÃ¼ ¸Ê ±â¹Ý ·»´õ¸µ: ´õ ÀÌ»ó °³º° ¿þÀÌÆ÷ÀÎÆ®ÀÇ ¹Ì´Ï¸Ê Á¶°¢À» »ç¿ëÇÏÁö ¾Ê½À´Ï´Ù. ´ë½Å, ÇÁ·ÎÇÊ ·Îµå ½Ã _generate_full_map_pixmapÀ» ÅëÇØ ¸ðµç ¿þÀÌÆ÷ÀÎÆ® ¹è°æ°ú ÁöÇü/¿ÀºêÁ§Æ® Á¤º¸¸¦ ÇÕ¼ºÇÑ ´Ü ÇÏ³ªÀÇ °Å´ëÇÑ 'ÀüÃ¼ ¸Ê' ÀÌ¹ÌÁö¸¦ ¹Ì¸® »ý¼ºÇÕ´Ï´Ù.
-Å½Áö ·ÎÁ÷ ´Ü¼øÈ­: AnchorDetectionThreadÀÇ ¿ªÇÒÀÌ ´ëÆø Ãà¼ÒµÇ¾ú½À´Ï´Ù. ÀÌÁ¦ ÀÌ ½º·¹µå´Â º¹ÀâÇÑ À§Ä¡ º¸Á¤ÀÌ³ª °æ·Î ¾È³» ¾øÀÌ, ¿ÀÁ÷ ½Ç½Ã°£ ¹Ì´Ï¸Ê È­¸é¿¡¼­ 'ÇÙ½É ÁöÇü'°ú 'ÇÃ·¹ÀÌ¾î'¸¦ Å½ÁöÇÏ°í ±× ·ÎÄÃ ÁÂÇ¥¸¦ MapTab¿¡ Àü´ÞÇÏ´Â ¿ªÇÒ¸¸ ¼öÇàÇÕ´Ï´Ù.
-Ä«¸Þ¶ó ºä (Camera View): RealtimeMinimapView¶ó´Â »õ·Î¿î À§Á¬ÀÌ ½Ç½Ã°£ ºä¸¦ Àü´ãÇÕ´Ï´Ù. ÀÌ À§Á¬Àº MapTabÀ¸·ÎºÎÅÍ ÇÃ·¹ÀÌ¾îÀÇ Àü¿ª ÁÂÇ¥¸¦ Àü´Þ¹Þ¾Æ, ¹Ì¸® »ý¼ºµÈ 'ÀüÃ¼ ¸Ê' ÀÌ¹ÌÁö À§¿¡¼­ ÇØ´ç ÁÂÇ¥¸¦ Áß½ÉÀ¸·Î ÇÏ´Â ¿µ¿ªÀ» Àß¶ó³»¾î º¸¿©ÁÝ´Ï´Ù. ÀÌ´Â ¸¶Ä¡ °Å´ëÇÑ Áöµµ À§¸¦ Ä«¸Þ¶ó°¡ µû¶ó´Ù´Ï´Â °Í°ú °°Àº È¿°ú¸¦ ³À´Ï´Ù.
-µ¥ÀÌÅÍ µ¿±âÈ­ °­È­ (v9.0.6): µ¥ÀÌÅÍ°¡ º¯°æ(Ãß°¡, ¼öÁ¤, »èÁ¦)µÉ ¶§¸¶´Ù save_profile_data ÇÔ¼ö°¡ È£ÃâµË´Ï´Ù. ÀÌ ÇÔ¼ö´Â ÆÄÀÏ ÀúÀå Á÷ÈÄ, _update_map_data_and_views¶ó´Â Áß¾Ó °ü¸® ÇÔ¼ö¸¦ È£ÃâÇÏ¿© Àü¿ª ÁÂÇ¥°è Àç°è»ê°ú ÀüÃ¼ ¸Ê ÀÌ¹ÌÁö Àç»ý¼ºÀ» ÀÚµ¿À¸·Î ¼öÇàÇÕ´Ï´Ù. ÀÌ¸¦ ÅëÇØ 'ÇÙ½É ÁöÇü °ü¸®ÀÚ', '¿þÀÌÆ÷ÀÎÆ® ÆíÁý±â', '½Ç½Ã°£ ºä' °£ÀÇ µ¥ÀÌÅÍ ºÒÀÏÄ¡ ¹®Á¦¸¦ ÇØ°áÇÏ°í Ç×»ó ÃÖ½Å »óÅÂ¸¦ À¯ÁöÇÕ´Ï´Ù.
-map.py Å¬·¡½ºº° »ó¼¼ ºÐ¼®:
-CroppingLabel(QLabel): FeatureCropDialog¿¡¼­ ¿µ¿ªÀ» ½Ã°¢ÀûÀ¸·Î Ç¥½ÃÇÏ´Â µ¥ »ç¿ëµÇ´Â °£´ÜÇÑ QLabel ¼­ºêÅ¬·¡½º.
-¿ªÇÒ: FeatureCropDialogÀÇ ¹è°æ ÀÌ¹ÌÁö À§¿¡ »ç¿ëÀÚ°¡ µå·¡±×ÇÏ´Â »ç°¢Çü ¿µ¿ªÀ» ½Ç½Ã°£À¸·Î ±×·ÁÁÝ´Ï´Ù.
-ÃÖ±Ù º¯°æ »çÇ×: FeatureCropDialog°¡ QGraphicsView ±â¹ÝÀ¸·Î º¯°æµÇ¸é¼­, ÀÌ Å¬·¡½º´Â ÇöÀç »ç¿ëµÇÁö ¾Ê½À´Ï´Ù. (´Ù¸¸ ÄÚµå ÆÄÀÏ¿¡´Â ¿©ÀüÈ÷ Á¸ÀçÇÕ´Ï´Ù.)
-FeatureCropDialog(QDialog): »õ·Î¿î ÇÙ½É ÁöÇüÀ» Ãß°¡ÇÒ ¶§, ¹Ì´Ï¸Ê ÀÌ¹ÌÁö¿¡¼­ Æ¯Á¤ ¿µ¿ªÀ» Àß¶ó³¾ ¼ö ÀÖµµ·Ï µ½´Â ´ÙÀÌ¾ó·Î±×.
-¿ªÇÒ: Ä¸Ã³µÈ ¹Ì´Ï¸Ê ÀÌ¹ÌÁö À§¿¡¼­ »ç¿ëÀÚ°¡ ¸¶¿ì½º µå·¡±×·Î ÇÙ½É ÁöÇü ¿µ¿ªÀ» ÁöÁ¤ÇÏ°í, ÇØ´ç ¿µ¿ªÀÇ ÀÌ¹ÌÁö µ¥ÀÌÅÍ¸¦ ¹ÝÈ¯ÇÕ´Ï´Ù.
-ÁÖ¿ä »óÈ£ÀÛ¿ë: MapTab¿¡¼­ È£ÃâµÇ¸ç, ¼±ÅÃµÈ ¿µ¿ªÀÇ QRect °´Ã¼¸¦ ¹ÝÈ¯ÇÕ´Ï´Ù.
-ÃÖ±Ù º¯°æ »çÇ× (v9.0.5):
-±âÁ¸ QLabel ±â¹Ý¿¡¼­ QGraphicsView ±â¹Ý(ZoomableView)À¸·Î ÀüÈ¯µÇ¾î ÈÙ È®´ë/Ãà¼Ò ¹× ÈÙ Å¬¸¯ ÆÐ´× ±â´ÉÀÌ Ãß°¡µÇ¾ú½À´Ï´Ù.
-´ÙÀÌ¾ó·Î±×°¡ È­¸é¿¡ ¿ÏÀüÈ÷ Ç¥½ÃµÈ ÈÄ fitInView¸¦ È£ÃâÇÏ¿© ÃÊ±â ¹èÀ²ÀÌ ÃÖÀûÈ­µÇ¾ú½À´Ï´Ù (ÀÌ¹ÌÁö°¡ ³Ê¹« ÀÛ°Ô º¸ÀÌ´ø ¹®Á¦ ÇØ°á).
-¿µ¿ª ÁöÁ¤ ½Ã Ä¿¼­°¡ ½ÊÀÚ(+) ¸ð¾çÀ¸·Î °íÁ¤µË´Ï´Ù.
-KeyFeatureManagerDialog(QDialog): µî·ÏµÈ ÇÙ½É ÁöÇüÀ» °ü¸®(Ãß°¡, ÀÌ¸§ º¯°æ, »èÁ¦)ÇÏ°í, °¢ ÁöÇüÀÌ ¾î¶² ¿þÀÌÆ÷ÀÎÆ®¿¡¼­ »ç¿ëµÇ°í ÀÖ´ÂÁö º¸¿©ÁÖ´Â ´ÙÀÌ¾ó·Î±×.
-¿ªÇÒ: ÇÙ½É ÁöÇü µ¥ÀÌÅÍ(self.key_features)ÀÇ CRUD ÀÛ¾÷À» ¼öÇàÇÏ°í, °ü·Ã ¿þÀÌÆ÷ÀÎÆ®¿ÍÀÇ ¿¬°á »óÅÂ¸¦ ½Ã°¢È­ÇÕ´Ï´Ù.
-ÁÖ¿ä »óÈ£ÀÛ¿ë: MapTabÀÇ self.key_features¿Í self.route_profiles¸¦ ÂüÁ¶ÇÏ¿© µ¥ÀÌÅÍ¸¦ Ç¥½ÃÇÏ°í ¼öÁ¤ÇÕ´Ï´Ù. parent_map_tab.save_profile_data()¸¦ È£ÃâÇÏ¿© º¯°æ»çÇ×À» ÀúÀåÇÕ´Ï´Ù.
-ÃÖ±Ù º¯°æ »çÇ× (v9.0.6):
-'ÀüÃ¼ ¿þÀÌÆ÷ÀÎÆ® °»½Å' (on_update_all_clicked) ±â´ÉÀÌ MapTab.update_all_waypoints_with_features¸¦ È£ÃâÇÏµµ·Ï º¯°æµÇ¾î, ¿þÀÌÆ÷ÀÎÆ®¿Í ÇÙ½É ÁöÇü °£ÀÇ ¿¬°á Á¤º¸ ºÒÀÏÄ¡ ¹®Á¦¸¦ ÇØ°áÇß½À´Ï´Ù.
-ÁöÇü »èÁ¦ ½Ã MapTabÀÇ ¿øº» ¿þÀÌÆ÷ÀÎÆ® µ¥ÀÌÅÍ¿¡¼­ ÇØ´ç ÁöÇü ¸µÅ©°¡ Áï½Ã Á¦°ÅµÇ°í ÀúÀåµË´Ï´Ù.
-AdvancedWaypointCanvas(QLabel): AdvancedWaypointEditorDialog¿¡¼­ ¿þÀÌÆ÷ÀÎÆ®ÀÇ ¸ñÇ¥ ÁöÁ¡ ¹× °ü·Ã ÇÙ½É ÁöÇüÀ» ±×¸®´Â µ¥ »ç¿ëµÇ´ø Äµ¹ö½º.
-¿ªÇÒ: ¿þÀÌÆ÷ÀÎÆ® ÆíÁý ½Ã ¹è°æ ¹Ì´Ï¸Ê ÀÌ¹ÌÁö À§¿¡ ¸ñÇ¥ ÁöÁ¡(ÃÊ·Ï»ö)°ú Å½ÁöµÈ ÇÙ½É ÁöÇü(ÆÄ¶õ»ö)À» Ç¥½ÃÇÏ°í, »ç¿ëÀÚ°¡ »õ·Î¿î ÇÙ½É ÁöÇü(ÁÖÈ²»ö)À» ±×¸®°Å³ª ±âÁ¸ ÁöÇüÀ» »èÁ¦ÇÒ ¼ö ÀÖµµ·Ï ¸¶¿ì½º ÀÌº¥Æ®¸¦ Ã³¸®Çß½À´Ï´Ù.
-ÃÖ±Ù º¯°æ »çÇ×: AdvancedWaypointEditorDialog°¡ QGraphicsView ±â¹ÝÀ¸·Î ¿ÏÀüÈ÷ Àç±¸ÇöµÇ¸é¼­, ÀÌ Å¬·¡½º´Â ÇöÀç »ç¿ëµÇÁö ¾Ê½À´Ï´Ù. (´Ù¸¸ ÄÚµå ÆÄÀÏ¿¡´Â ¿©ÀüÈ÷ Á¸ÀçÇÕ´Ï´Ù.)
-AdvancedWaypointEditorDialog(QDialog): °³º° ¿þÀÌÆ÷ÀÎÆ®¸¦ »ó¼¼ÇÏ°Ô ÆíÁýÇÏ´Â ´ÙÀÌ¾ó·Î±×. ¸ñÇ¥ ÁöÁ¡ ¹× ¿¬°áµÈ ÇÙ½É ÁöÇüÀ» ÁöÁ¤/¼öÁ¤ÇÒ ¼ö ÀÖ½À´Ï´Ù.
-¿ªÇÒ: Æ¯Á¤ ¿þÀÌÆ÷ÀÎÆ®ÀÇ ÀÌ¸§, ¹Ì´Ï¸Ê ÀÌ¹ÌÁö, ¸ñÇ¥ ÁöÁ¡, ±×¸®°í ¿þÀÌÆ÷ÀÎÆ®¿Í °ü·ÃµÈ ÇÙ½É ÁöÇü(ÀÌ¹Ì Å½ÁöµÈ °Í, »õ·Î Ãß°¡ÇÒ °Í, »èÁ¦ÇÒ °Í)À» ½Ã°¢ÀûÀ¸·Î ÆíÁýÇÒ ¼ö ÀÖµµ·Ï ÇÕ´Ï´Ù.
-ÁÖ¿ä »óÈ£ÀÛ¿ë: MapTab¿¡¼­ È£ÃâµÇ¸ç, ¼öÁ¤µÈ ¿þÀÌÆ÷ÀÎÆ® µ¥ÀÌÅÍ¿Í ÇÙ½É ÁöÇü º¯°æ Á¤º¸¸¦ MapTabÀ¸·Î Àü´ÞÇÕ´Ï´Ù. parent_map_tab.key_features¸¦ ÂüÁ¶ÇÏ¿© ÆíÁýÇÕ´Ï´Ù.
-ÃÖ±Ù º¯°æ »çÇ× (v9.0.5):
-±âÁ¸ QLabel ±â¹Ý¿¡¼­ QGraphicsView ±â¹Ý(ZoomableView)À¸·Î ÀüÈ¯µÇ¾î ÈÙ È®´ë/Ãà¼Ò ¹× ÈÙ Å¬¸¯ ÆÐ´× ±â´ÉÀÌ Ãß°¡µÇ¾ú½À´Ï´Ù.
-´ÙÀÌ¾ó·Î±×°¡ È­¸é¿¡ ¿ÏÀüÈ÷ Ç¥½ÃµÈ ÈÄ fitInView¸¦ È£ÃâÇÏ¿© ÃÊ±â ¹èÀ²ÀÌ ÃÖÀûÈ­µÇ¾ú½À´Ï´Ù.
-ÆíÁý ¸ðµå(¸ñÇ¥ ÁöÁ¡, ÇÙ½É ÁöÇü)¿¡ µû¶ó Ä¿¼­°¡ ½ÊÀÚ(+) ¸ð¾çÀ¸·Î À¯ÁöµË´Ï´Ù.
-CustomGraphicsView(QGraphicsView): FullMinimapEditorDialog¿¡¼­ »ç¿ëµÇ´Â Ä¿½ºÅÒ QGraphicsView.
-¿ªÇÒ: ÀüÃ¼ ¸Ê ÆíÁý±â¿¡¼­ È®´ë/Ãà¼Ò, ÆÐ´×, ¸¶¿ì½º ÀÌº¥Æ® Àü´Þ ±â´ÉÀ» Á¦°øÇÕ´Ï´Ù.
-ÁÖ¿ä »óÈ£ÀÛ¿ë: FullMinimapEditorDialogÀÇ on_scene_mouse_press, on_scene_mouse_move µî°ú ¿¬°áµÇ¾î ÁöÇü ±×¸®±â/»èÁ¦ ·ÎÁ÷À» ¼öÇàÇÕ´Ï´Ù.
-ÃÖ±Ù º¯°æ »çÇ×: map.pyÀÇ CustomGraphicsView ÀÚÃ¼¿¡´Â v7.8.1 ÀÌÈÄ Á÷Á¢ÀûÀÎ º¯°æ »çÇ×ÀÌ ¾ø½À´Ï´Ù.
-FullMinimapEditorDialog(QDialog): ÀüÃ¼ ¸Ê¿¡ ÁöÇü¼±(terrain_lines)°ú Ãþ ÀÌµ¿ ¿ÀºêÁ§Æ®(transition_objects)¸¦ Á÷Á¢ ±×¸®°í ÆíÁýÇÏ´Â ´ÙÀÌ¾ó·Î±×.
-¿ªÇÒ: ¸ðµç ¿þÀÌÆ÷ÀÎÆ®ÀÇ ¹Ì´Ï¸ÊµéÀ» ÇÕ¼ºÇÑ ÀüÃ¼ ¸Ê À§¿¡¼­, ÇÃ·¹ÀÌ¾î°¡ ÀÌµ¿ °¡´ÉÇÑ ÁöÇü°ú Ãþ ÀÌµ¿ ¿ÀºêÁ§Æ®ÀÇ À§Ä¡ ¹× ÇüÅÂ¸¦ Á¤ÀÇÇÕ´Ï´Ù.
-ÁÖ¿ä »óÈ£ÀÛ¿ë: MapTabÀ¸·ÎºÎÅÍ ¸ðµç ¸Ê µ¥ÀÌÅÍ(key_features, route_profiles, geometry_data, global_positions)¸¦ ¹Þ¾Æ ¸ÊÀ» ·»´õ¸µÇÏ°í, º¯°æµÈ geometry_data¸¦ MapTabÀ¸·Î ¹ÝÈ¯ÇÏ¿© ÀúÀåÇÏµµ·Ï ÇÕ´Ï´Ù. MapTabÀÇ ½Ç½Ã°£ ÇÃ·¹ÀÌ¾î À§Ä¡(global_pos_updated ½Ã±×³Î)¸¦ ¹Þ¾Æ Y/XÃà °íÁ¤¼± À§Ä¡¸¦ ¾÷µ¥ÀÌÆ®ÇÕ´Ï´Ù.
-ÃÖ±Ù º¯°æ »çÇ×: map.pyÀÇ FullMinimapEditorDialog ÀÚÃ¼¿¡´Â Á÷Á¢ÀûÀÎ º¯°æ »çÇ×ÀÌ ¾ø½À´Ï´Ù.
-RealtimeMinimapView(QLabel): (½Å±Ô Å¬·¡½º, v9.0.0 µµÀÔ) ÀüÃ¼ ¸ÊÀ» ±â¹ÝÀ¸·Î ÇÃ·¹ÀÌ¾î ½ÃÁ¡ÀÇ 'Ä«¸Þ¶ó ºä'¸¦ ½Ç½Ã°£À¸·Î ·»´õ¸µÇÏ´Â Ä¿½ºÅÒ À§Á¬.
-¿ªÇÒ: MapTab¿¡¼­ °è»êµÈ ÇÃ·¹ÀÌ¾îÀÇ Àü¿ª ÁÂÇ¥¸¦ Áß½ÉÀ¸·Î ÀüÃ¼ ¸ÊÀÇ ÀÏºÎ¸¦ Àß¶ó³»¾î Ç¥½ÃÇÏ°í, ±× À§¿¡ ÇÃ·¹ÀÌ¾î, ´Ù¸¥ À¯Àú, ÇÙ½É ÁöÇü, ¿þÀÌÆ÷ÀÎÆ®, ÁöÇü¼±, ¿ÀºêÁ§Æ® µîÀ» µ¿ÀûÀ¸·Î ¿À¹ö·¹ÀÌÇÏ¿© º¸¿©ÁÝ´Ï´Ù. ¸¶¿ì½º ÈÙ ÁÜ ¹× µå·¡±× ÆÐ´×À» Áö¿øÇÕ´Ï´Ù.
-ÁÖ¿ä »óÈ£ÀÛ¿ë: MapTabÀ¸·ÎºÎÅÍ camera_center, active_features, my_players, other_players µî ·»´õ¸µ¿¡ ÇÊ¿äÇÑ ÃÖ½Å µ¥ÀÌÅÍ¸¦ update_view_data ¸Þ¼­µå¸¦ ÅëÇØ Àü´Þ¹Þ¾Æ È­¸éÀ» °»½ÅÇÕ´Ï´Ù.
-ÃÖ±Ù º¯°æ »çÇ× (v9.0.1+):
-(v9.0.1) ÇÙ½É ÁöÇü ·»´õ¸µ °³¼±: °¨ÁöµÈ ÁöÇüÀº ÆÄ¶õ»ö ½Ç¼±, ¹Ì°¨Áö ÁöÇüÀº Èò»ö Á¡¼± Å×µÎ¸®·Î Ç¥½ÃÇÏ¸ç, ³»ºÎ¸¦ Ã¤¿ìÁö ¾Êµµ·Ï º¯°æµÇ¾ú½À´Ï´Ù. ÇÙ½É ÁöÇü ÀÌ¸§Àº »ç°¢Çü Áß¾Ó¿¡ Ç¥½ÃµË´Ï´Ù.
-(v9.0.1) ¿þÀÌÆ÷ÀÎÆ® ·»´õ¸µ °³¼±: ¿þÀÌÆ÷ÀÎÆ® ÀÌ¸§ ´ë½Å °æ·Î ¼ø¼­(¼ýÀÚ)°¡ »ç°¢Çü Áß¾Ó¿¡ Ç¥½ÃµË´Ï´Ù.
-(v9.0.2) Å½Áö Á¤È®µµ Ç¥½Ã: °¨ÁöµÈ ÇÙ½É ÁöÇü »ç°¢ÇüÀÇ ¹Ù±ùÂÊ À§(¼öÆò Áß¾Ó)¿¡ ½Ç½Ã°£ Å½Áö Á¤È®µµ(¼Ò¼öÁ¡ µÑÂ° ÀÚ¸®±îÁö, ³ë¶õ»ö, 7pt, ÀÏ¹Ý ÆùÆ®)°¡ Ç¥½ÃµË´Ï´Ù.
-(v9.0.4) Ä«¸Þ¶ó ÀÚµ¿ ÃßÀû Á¦¾î: MapTabÀÇ 'Ä³¸¯ÅÍ Áß½É' Ã¼Å©¹Ú½º »óÅÂ¿¡ µû¶ó Ä«¸Þ¶ó°¡ ÇÃ·¹ÀÌ¾î¸¦ ÀÚµ¿ ÃßÀûÇÒÁö(self.camera_center_global ¾÷µ¥ÀÌÆ®) ¾Æ´Ï¸é »ç¿ëÀÚ°¡ µå·¡±×ÇÑ À§Ä¡¿¡ ¸Ó¹«¸¦Áö °áÁ¤ÇÏµµ·Ï ·ÎÁ÷ÀÌ º¯°æµÇ¾ú½À´Ï´Ù.
-AnchorDetectionThread(QThread): ÁöÁ¤µÈ ¹Ì´Ï¸Ê ¿µ¿ªÀ» °è¼Ó ½ºÄµÇÏ¿©, µî·ÏµÈ ÇÙ½É ÁöÇü°ú ÇÃ·¹ÀÌ¾î ¾ÆÀÌÄÜÀÇ ·ÎÄÃ ÁÂÇ¥¸¦ Å½ÁöÇÏ°í ¸ÞÀÎ ½º·¹µå·Î Àü´ÞÇÏ´Â ¿ªÇÒ¸¸ ¼öÇàÇÏ´Â ½º·¹µå.
-¿ªÇÒ: ½ºÅ©¸°¼¦ Ä¸Ã³, HSV »ö»ó ¸¶½ºÅ·À» ÅëÇÑ ÇÃ·¹ÀÌ¾î ¾ÆÀÌÄÜ Å½Áö, ÅÛÇÃ¸´ ¸ÅÄªÀ» ÅëÇÑ ÇÙ½É ÁöÇü Å½Áö¸¦ ¹é±×¶ó¿îµå¿¡¼­ ¼öÇàÇÕ´Ï´Ù. Å½ÁöµÈ °´Ã¼ÀÇ id, local_pos, conf Á¤º¸¸¦ detection_ready ½Ã±×³ÎÀ» ÅëÇØ MapTabÀ¸·Î Àü´ÞÇÕ´Ï´Ù.
-ÃÖ±Ù º¯°æ »çÇ×: map.pyÀÇ AnchorDetectionThread ÀÚÃ¼¿¡´Â Á÷Á¢ÀûÀÎ º¯°æ »çÇ×ÀÌ ¾ø½À´Ï´Ù.
-MapTab(QWidget): '¸Ê' ÅÇÀÇ ¸ðµç UI¿Í ÇÙ½É ·ÎÁ÷À» ÃÑ°ýÇÏ´Â ¸ÞÀÎ ÄÁÆ®·Ñ·¯ Å¬·¡½º.
-¿ªÇÒ: ¸Ê ÇÁ·ÎÇÊ ·Îµå/ÀúÀå, ¹Ì´Ï¸Ê ¿µ¿ª ¼³Á¤, ¿þÀÌÆ÷ÀÎÆ®/°æ·Î ÇÁ·ÎÇÊ/ÇÙ½É ÁöÇü °ü¸®, ÀüÃ¼ ¸Ê µ¥ÀÌÅÍ(ÁöÇü¼±, ¿ÀºêÁ§Æ®) ÆíÁý±â ½ÇÇà, ½Ç½Ã°£ Å½Áö Á¦¾î µî ¸Ê ½Ã½ºÅÛ Àü¹ÝÀ» °ü¸®ÇÕ´Ï´Ù. _calculate_global_positions·Î Àü¿ª ÁÂÇ¥°è¸¦ °è»êÇÏ°í _generate_full_map_pixmapÀ¸·Î ÀüÃ¼ ¸Ê ÀÌ¹ÌÁö¸¦ »ý¼ºÇÏ¿© ¸Þ¸ð¸®¿¡ º¸°üÇÕ´Ï´Ù.
-ÁÖ¿ä »óÈ£ÀÛ¿ë: AnchorDetectionThread·ÎºÎÅÍ Å½Áö °á°ú¸¦ ¹Þ¾Æ ÇÃ·¹ÀÌ¾îÀÇ Àü¿ª ÁÂÇ¥¸¦ °è»êÇÏ°í RealtimeMinimapView¿¡ ·»´õ¸µÀ» Áö½ÃÇÕ´Ï´Ù. KeyFeatureManagerDialog, AdvancedWaypointEditorDialog, FullMinimapEditorDialog µî ¸ðµç ÇÏÀ§ ´ÙÀÌ¾ó·Î±×¿Í µ¥ÀÌÅÍ¸¦ ÁÖ°í¹ÞÀ¸¸ç, save_profile_data¸¦ ÅëÇØ µ¥ÀÌÅÍ ¹«°á¼ºÀ» º¸ÀåÇÕ´Ï´Ù. global_pos_updated ½Ã±×³Î·Î FullMinimapEditorDialog¿¡ ÇÃ·¹ÀÌ¾î À§Ä¡¸¦ Àü´ÞÇÕ´Ï´Ù.
-ÃÖ±Ù º¯°æ »çÇ×:
-(v9.0.3) global_pos_updated ½Ã±×³ÎÀÇ Å¸ÀÔÀÌ (float, float)¿¡¼­ QPointF·Î º¯°æµÇ¾î X, Y ÁÂÇ¥ Àü´ÞÀÇ Á¤È®¼º°ú ¾ÈÁ¤¼ºÀÌ Çâ»óµÇ¾ú½À´Ï´Ù.
-(v9.0.3) on_detection_ready ¸Þ¼­µå¿¡¼­ ÇÃ·¹ÀÌ¾îÀÇ YÃà À§Ä¡ °è»ê ½Ã player_rect.bottom() ´ë½Å float(player_rect.y() + player_rect.height())¸¦ »ç¿ëÇÏ¿© Á¤È®ÇÑ ¹Ù´Ú ÁÂÇ¥¸¦ ¾òµµ·Ï ¼öÁ¤µÇ¾ú°í, PLAYER_Y_OFFSET »ó¼ö¸¦ ÅëÇØ ¹Ì¼¼ Y ÁÂÇ¥ º¸Á¤ ±â´ÉÀÌ Ãß°¡µÇ¾ú½À´Ï´Ù.
-(v9.0.4) initUI¿¡ '½Ç½Ã°£ ¹Ì´Ï¸Ê ºä' ¶óº§ ¿·¿¡ **'Ä³¸¯ÅÍ Áß½É' QCheckBox**°¡ Ãß°¡µÇ¾ú½À´Ï´Ù.
-(v9.0.4) on_detection_ready ¸Þ¼­µå¿¡¼­ ÀÌ Ã¼Å©¹Ú½ºÀÇ »óÅÂ¿¡ µû¶ó RealtimeMinimapViewÀÇ Ä«¸Þ¶ó°¡ ÇÃ·¹ÀÌ¾î¸¦ ÀÚµ¿ ÃßÀûÇÒÁö ¿©ºÎ¸¦ Á¦¾îÇÏµµ·Ï ·ÎÁ÷ÀÌ º¯°æµÇ¾ú½À´Ï´Ù.
-(v9.0.6) update_all_waypoints_with_features ¸Þ¼­µå°¡ self.route_profilesÀÇ ¿øº» µ¥ÀÌÅÍ¸¦ Á÷Á¢ ¼öÁ¤ÇÏµµ·Ï º¯°æµÇ¾î, ÇÙ½É ÁöÇü°ú ¿þÀÌÆ÷ÀÎÆ® °£ÀÇ ¿¬°á Á¤º¸ µ¿±âÈ­ ¹®Á¦(»ç¿ëÃ³ ºÒÀÏÄ¡ µî)°¡ ¿ÏÀüÈ÷ ÇØ°áµÇ¾ú½À´Ï´Ù.
-ZoomableView(QGraphicsView): (v9.0.5 µµÀÔ) QGraphicsView¸¦ »ó¼Ó¹Þ¾Æ ÈÙ È®´ë/Ãà¼Ò ¹× ÈÙ Å¬¸¯ ÆÐ´× ±â´ÉÀ» Á¦°øÇÏ´Â Àç»ç¿ë °¡´ÉÇÑ ºä Å¬·¡½º.
-¿ªÇÒ: FeatureCropDialog¿Í AdvancedWaypointEditorDialogÀÇ ÇÙ½É ºä·Î »ç¿ëµÇ¾î, ÀÌ¹ÌÁö ÆíÁý ½Ã »ç¿ëÀÚ¿¡°Ô À¯¿¬ÇÑ ºä Á¦¾î ±â´ÉÀ» Á¦°øÇÕ´Ï´Ù. set_drawing_mode ¸Þ¼­µå¸¦ ÅëÇØ Ä¿¼­ ¸ð¾ç(½ÊÀÚ ¶Ç´Â ¼Õ¹Ù´Ú)°ú µå·¡±× ¸ðµå¸¦ ÀüÈ¯ÇÒ ¼ö ÀÖ½À´Ï´Ù.
-ÁÖ¿ä »óÈ£ÀÛ¿ë: mousePressEvent, mouseMoveEvent, mouseReleaseEvent¸¦ ¿À¹ö¶óÀÌµùÇÏ¿© ÈÙ Å¬¸¯ ÀÌº¥Æ®¸¦ Ã³¸®ÇÕ´Ï´Ù.
-ÃÖ±Ù º¯°æ »çÇ×: ZoomableViewÀÇ µµÀÔ ÀÚÃ¼°¡ ÃÖ±Ù º¯°æ »çÇ×ÀÇ ÇÙ½ÉÀÔ´Ï´Ù.
-main.py - ¾ÖÇÃ¸®ÄÉÀÌ¼Ç ¼Ð ¹× ·Î´õ
-¾ÖÇÃ¸®ÄÉÀÌ¼ÇÀÇ ÁøÀÔÁ¡(Entry Point)À¸·Î, ÀüÃ¼ ÇÁ·Î±×·¥ÀÇ »À´ë¸¦ ±¸¼ºÇÏ°í °¢ ±â´É ¸ðµâÀ» ÅÇÀ¸·Î ÅëÇÕÇÏ´Â ¿ªÇÒÀ» ÇÕ´Ï´Ù.
-MainWindow(QMainWindow): ¾ÖÇÃ¸®ÄÉÀÌ¼ÇÀÇ ¸ÞÀÎ À©µµ¿ì.
-¿ªÇÒ: QTabWidgetÀ» Áß¾Ó À§Á¬À¸·Î ¼³Á¤ÇÏ°í, load_tabs ¸Þ¼­µå¸¦ ÅëÇØ ÁöÁ¤µÈ ¸ðµâµéÀ» ¼øÂ÷ÀûÀ¸·Î ·ÎµåÇÕ´Ï´Ù.
-ÁÖ¿ä ±â´É:
-µ¿Àû ¸ðµâ ·Îµù: importlib¸¦ »ç¿ëÇÏ¿© ¸ðµâ ÀÌ¸§(¹®ÀÚ¿­)À¸·Î ½ÇÁ¦ ¸ðµâÀ» ÀÓÆ÷Æ®ÇÕ´Ï´Ù. ÀÌ ´öºÐ¿¡ ¼³Á¤ ÆÄÀÏ º¯°æ¸¸À¸·Î »õ·Î¿î ÅÇÀ» ½±°Ô Ãß°¡ÇÏ°Å³ª Á¦°ÅÇÒ ¼ö ÀÖ´Â È®Àå¼º ÀÖ´Â ±¸Á¶¸¦ °¡Áý´Ï´Ù.
-¿À·ù Ã³¸®: try-except ±¸¹®À» »ç¿ëÇÏ¿© Æ¯Á¤ ÅÇ ·Îµù¿¡ ½ÇÆÐÇÏ´õ¶óµµ ÇÁ·Î±×·¥ÀÌ Áß´ÜµÇÁö ¾Ê°í, ´ë½Å »ç¿ëÀÚ¿¡°Ô ¿øÀÎÀ» ¾Ë·ÁÁÖ´Â '¿À·ù ÅÇ'À» Ç¥½ÃÇÕ´Ï´Ù.
-»óÅÂ ÀúÀå (QSettings): ÇÁ·Î±×·¥ Á¾·á ½Ã closeEvent¿¡¼­ ÇöÀç Ã¢ÀÇ À§Ä¡¿Í Å©±â¸¦ ÀúÀåÇÏ°í, Àç½ÃÀÛ ½Ã ÀÌ¸¦ º¹¿øÇÏ¿© »ç¿ëÀÚ ÆíÀÇ¼ºÀ» ³ôÀÔ´Ï´Ù.
-ÀÚ¿ø ÇØÁ¦: closeEvent¿¡¼­ °¢ ÅÇ À§Á¬ÀÇ cleanup_on_close ¸Þ¼­µå¸¦ ¼øÂ÷ÀûÀ¸·Î È£ÃâÇÏ¿©, ¸ðµç ¹é±×¶ó¿îµå ½º·¹µå°¡ ¾ÈÀüÇÏ°Ô Á¾·áµÇµµ·Ï º¸ÀåÇÕ´Ï´Ù.
-ÃÖ±Ù º¯°æ »çÇ×: map.py¿Í °ü·ÃµÈ Á÷Á¢ÀûÀÎ º¯°æ »çÇ×Àº ¾ø½À´Ï´Ù.
-ÇâÈÄ °³¹ß °èÈ¹ (º¯µ¿ °¡´É¼º ÀÖÀ½): Ãþ°£ ³»ºñ°ÔÀÌ¼Ç ½Ã½ºÅÛ
-ÇöÀç±îÁö ±¸ÃàµÈ 'ÀüÃ¼ ¹Ì´Ï¸Ê ÆíÁý±â'ÀÇ ÁöÇü µ¥ÀÌÅÍ¸¦ È°¿ëÇÏ¿©, º¹Ãþ ±¸Á¶ÀÇ ¸Ê¿¡¼­ Ãþ°£ ÀÌµ¿À» Æ÷ÇÔÇÑ ÃÖ´Ü °æ·Î¸¦ Å½»öÇÏ´Â °íÂ÷¿ø ³»ºñ°ÔÀÌ¼Ç ½Ã½ºÅÛÀ» ±¸ÇöÇÕ´Ï´Ù.
-¸ñÇ¥: »ç¿ëÀÚ°¡ ¸ÊÀÇ ¾î´À ÁöÁ¡ÀÌµç ¸ñÇ¥·Î ¼³Á¤ÇÏ¸é, ÇöÀç À§Ä¡¿¡¼­ ¸ñÇ¥±îÁö ÁöÇü¼±À» µû¶ó ÀÌµ¿ÇÏ°í, ÇÊ¿äÇÑ °æ¿ì Ãþ ÀÌµ¿ ¿ÀºêÁ§Æ®(»ç´Ù¸®, Æ÷Å»)¸¦ »ç¿ëÇÏ¿© ÃþÀ» ¹Ù²Ù´Â ÀüÃ¼ °æ·Î¸¦ »ý¼ºÇÏ°í ¾È³»ÇÕ´Ï´Ù.
-ÇÙ½É °³³ä:
-Ãþ (Floor) °ü¸®: »ç¿ëÀÚ°¡ "1Ãþ", "2Ãþ" µî Ãþ Á¤º¸¸¦ »ý¼ºÇÏ°í °ü¸®ÇÏ´Â ±â´É.
-ÁöÇü¼±¿¡ Ãþ Á¤º¸ ÇÒ´ç: »ç¿ëÀÚ°¡ ÆíÁý±â¿¡¼­ Æ¯Á¤ ÁöÇü¼±À» ¼±ÅÃÇÏ°í, ÇØ´ç ÁöÇü¼±ÀÌ ¸î Ãþ¿¡ ¼ÓÇÏ´ÂÁö ÁöÁ¤ÇÏ´Â ±â´É. (±âº»°ªÀº 1Ãþ)
-Ãþ ÀÌµ¿ ¿ÀºêÁ§Æ® ¿¬°á: »ç¿ëÀÚ°¡ Ãþ ÀÌµ¿ ¿ÀºêÁ§Æ®(»ç´Ù¸® µî)¸¦ ¼±ÅÃÇÏ°í, ÀÌ ¿ÀºêÁ§Æ®°¡ ¾î¶² ÁöÇü¼±(½ÃÀÛ Ãþ)¿¡¼­ ½ÃÀÛÇÏ¿© ¾î¶² ÁöÇü¼±(µµÂø Ãþ)À¸·Î ¿¬°áµÇ´ÂÁö ¸í½ÃÀûÀ¸·Î ÁöÁ¤ÇÏ´Â ±â´É. ÀÌ´Â ¾ç¹æÇâ ÀÌµ¿À» ±âº»À¸·Î ÇÕ´Ï´Ù.
-±¸Çö °èÈ¹:
-µ¥ÀÌÅÍ ±¸Á¶ È®Àå: map_geometry.jsonÀ» ¼öÁ¤ÇÕ´Ï´Ù.
-terrain_linesÀÇ °¢ °´Ã¼¿¡ "floor": 1 °ú °°Àº Ãþ Á¤º¸ ÇÊµå¸¦ Ãß°¡ÇÕ´Ï´Ù.
-transition_objectsÀÇ °¢ °´Ã¼¿¡ "start_line_id": "...", "end_line_id": "..." ¿Í °°ÀÌ ¿¬°áµÈ µÎ ÁöÇü¼±ÀÇ ID¸¦ ÀúÀåÇÏ´Â ÇÊµå¸¦ Ãß°¡ÇÕ´Ï´Ù.
-ÆíÁý±â UI/UX Ãß°¡: FullMinimapEditorDialog¿¡ ´ÙÀ½ ±â´ÉÀ» Ãß°¡ÇÕ´Ï´Ù.
-Ãþ °ü¸® ÆÐ³Î: ÃþÀ» Ãß°¡/»èÁ¦/ÀÌ¸§ º¯°æÇÒ ¼ö ÀÖ´Â UI.
-ÁöÇü¼± ¼Ó¼º ÆíÁý: ÁöÇü¼±À» ¼±ÅÃÇÏ°í µå·Ó´Ù¿î ¸Þ´º µîÀ» ÅëÇØ »ý¼ºµÈ Ãþ ¸ñ·Ï Áß ÇÏ³ª¸¦ ÇÒ´çÇÏ´Â ±â´É.
-¿ÀºêÁ§Æ® ¿¬°á µµ±¸: Ãþ ÀÌµ¿ ¿ÀºêÁ§Æ®¸¦ ¼±ÅÃÇÑ ÈÄ, ½ÃÀÛ ÁöÇü¼±°ú µµÂø ÁöÇü¼±À» ¼ø¼­´ë·Î Å¬¸¯ÇÏ¿© ¿¬°á °ü°è¸¦ ¼³Á¤ÇÏ´Â ±â´É.
-³»ºñ°ÔÀÌ¼Ç ¾Ë°í¸®Áò °íµµÈ­:
-°æ·Î Å½»ö ½Ã, ¸Ê ÀüÃ¼¸¦ ÇÏ³ªÀÇ °Å´ëÇÑ **±×·¡ÇÁ(Graph)**·Î °£ÁÖÇÕ´Ï´Ù.
-³ëµå(Node): ¸ðµç ÁöÇü¼±ÀÇ °¢ ²ÀÁþÁ¡, Ãþ ÀÌµ¿ ¿ÀºêÁ§Æ®ÀÇ ½ÃÀÛ/³¡Á¡.
-¿§Áö(Edge):
-°°Àº ÁöÇü¼± À§ÀÇ ÀÎÁ¢ÇÑ ²ÀÁþÁ¡µéÀ» ÀÕ´Â ¼±ºÐ (°¡ÁßÄ¡: °Å¸®).
-Ãþ ÀÌµ¿ ¿ÀºêÁ§Æ® ÀÚÃ¼ (°¡ÁßÄ¡: ÀÌµ¿ ½Ã°£ ¶Ç´Â °Å¸®).
-Ãþ ÀÌµ¿ ¿ÀºêÁ§Æ®ÀÇ ³¡Á¡°ú ¿¬°áµÈ ÁöÇü¼± À§ÀÇ °¡Àå °¡±î¿î Á¡À» ÀÕ´Â °¡»óÀÇ ¿¬°á¼±.
-A* (A-Star) ¾Ë°í¸®Áò µîÀ» »ç¿ëÇÏ¿© ÀÌ ±×·¡ÇÁ »ó¿¡¼­ ÇöÀç À§Ä¡¿¡¼­ ¸ñÇ¥ ÁöÁ¡±îÁöÀÇ ÃÖ´Ü °æ·Î¸¦ °è»êÇÕ´Ï´Ù. °è»êµÈ °æ·Î´Â [ÁöÇü¼± ÀÌµ¿ -> ¿ÀºêÁ§Æ® ÀÌ¿ë -> ´Ù¸¥ ÁöÇü¼± ÀÌµ¿] °ú °°Àº ÀÏ·ÃÀÇ Çàµ¿ °èÈ¹À¸·Î Ãâ·ÂµË´Ï´Ù.
+ProjectM - í†µí•© ê¸°ìˆ  ìƒì„¸ ì„¤ëª…ì„œ (v9.0.6 - íŽ¸ì§‘ê¸° ì¤Œ/íŒ¨ë‹ ë° ë™ê¸°í™” ê°•í™” ë²„ì „)
+ì´ ë¬¸ì„œëŠ” ProjectM ì• í”Œë¦¬ì¼€ì´ì…˜ì˜ ì•„í‚¤í…ì²˜, ì£¼ìš” ê¸°ëŠ¥ ëª¨ë“ˆ, ê·¸ë¦¬ê³  ê° í´ëž˜ìŠ¤ì˜ ì—­í•  ë° ìµœê·¼ ì—…ë°ì´íŠ¸ ë‚´ì—­ì„ ìƒì„¸í•˜ê²Œ ì„¤ëª…í•©ë‹ˆë‹¤.
+ì „ì²´ ì‹œìŠ¤í…œ ì•„í‚¤í…ì²˜
+ì´ ì• í”Œë¦¬ì¼€ì´ì…˜ì€ ëª¨ë“ˆí˜• íƒ­ ê¸°ë°˜ ì•„í‚¤í…ì²˜ë¥¼ ì±„íƒí•˜ê³  ìžˆìŠµë‹ˆë‹¤.
+ë©”ì¸ ì…¸ (main.py): QTabWidgetì„ ì‚¬ìš©í•˜ì—¬ ê° ê¸°ëŠ¥ ëª¨ë“ˆ(Learning.py, map.py ë“±)ì„ ë™ì ìœ¼ë¡œ ë¡œë“œí•˜ëŠ” ê»ë°ê¸°(Shell) ì—­í• ì„ í•©ë‹ˆë‹¤. ì´ë¥¼ í†µí•´ ê° ê¸°ëŠ¥ íƒ­ì€ ë…ë¦½ì ìœ¼ë¡œ ê°œë°œ ë° ìˆ˜ì •ë  ìˆ˜ ìžˆìœ¼ë©°, í•œ íƒ­ì—ì„œ ì˜¤ë¥˜ê°€ ë°œìƒí•˜ë”ë¼ë„ ë‹¤ë¥¸ íƒ­ì— ì˜í–¥ì„ ì£¼ì§€ ì•ŠìŠµë‹ˆë‹¤.
+ê¸°ëŠ¥ ëª¨ë“ˆ (íƒ­): ê° .py íŒŒì¼ì€ í•˜ë‚˜ì˜ íƒ­ì— í•´ë‹¹í•˜ëŠ” ì™„ì „í•œ ê¸°ëŠ¥ì„ êµ¬í˜„í•©ë‹ˆë‹¤. ëª¨ë“  íƒ­ì€ QWidgetì„ ìƒì†ë°›ì€ ë©”ì¸ í´ëž˜ìŠ¤(ì˜ˆ: LearningTab, MapTab)ë¥¼ í¬í•¨í•˜ë©°, ì´ í´ëž˜ìŠ¤ê°€ í•´ë‹¹ íƒ­ì˜ UIì™€ ë¡œì§ì„ ì´ê´„í•©ë‹ˆë‹¤.
+UIì™€ ë¡œì§ì˜ ë¶„ë¦¬: ë³µìž¡í•œ íƒ­(LearningTab)ì˜ ê²½ìš°, UIë¥¼ ë‹´ë‹¹í•˜ëŠ” ë©”ì¸ í´ëž˜ìŠ¤ì™€ ë°ì´í„° ì²˜ë¦¬ë¥¼ ë‹´ë‹¹í•˜ëŠ” ë°±ì—”ë“œ í´ëž˜ìŠ¤(DataManager)ë¥¼ ë¶„ë¦¬í•˜ì—¬ ì½”ë“œì˜ ê°€ë…ì„±ê³¼ ìœ ì§€ë³´ìˆ˜ì„±ì„ ë†’ì˜€ìŠµë‹ˆë‹¤.
+ë¹„ë™ê¸° ì²˜ë¦¬ (QThread): ëª¨ë¸ í›ˆë ¨, ì‹¤ì‹œê°„ ê°ì²´ íƒì§€, ë¯¸ë‹ˆë§µ ë¶„ì„ ë“± ì‹œê°„ì´ ë§Žì´ ì†Œìš”ë˜ëŠ” ìž‘ì—…ì€ ëª¨ë‘ ë³„ë„ì˜ QThreadì—ì„œ ì‹¤í–‰ë©ë‹ˆë‹¤. ì´ëŠ” GUIì˜ "ì‘ë‹µ ì—†ìŒ" ìƒíƒœë¥¼ ë°©ì§€í•˜ê³  ì‚¬ìš©ìž ê²½í—˜ì„ í–¥ìƒì‹œí‚¤ëŠ” í•µì‹¬ì ì¸ ì„¤ê³„ ì›ì¹™ìž…ë‹ˆë‹¤. ìŠ¤ë ˆë“œëŠ” pyqtSignalì„ ì‚¬ìš©í•˜ì—¬ ìž‘ì—… ì§„í–‰ ìƒí™©, ê²°ê³¼, ì—ëŸ¬ ë“±ì„ ë©”ì¸ GUI ìŠ¤ë ˆë“œë¡œ ì•ˆì „í•˜ê²Œ ì „ë‹¬í•©ë‹ˆë‹¤.
+ë¦¬ì†ŒìŠ¤ ê´€ë¦¬: main.pyì˜ closeEventëŠ” í”„ë¡œê·¸ëž¨ ì¢…ë£Œ ì‹œ ê° íƒ­ì— ì •ì˜ëœ cleanup_on_close ë©”ì„œë“œë¥¼ í˜¸ì¶œí•˜ì—¬, ì‹¤í–‰ ì¤‘ì¸ ëª¨ë“  ìŠ¤ë ˆë“œë¥¼ ì•ˆì „í•˜ê²Œ ì¢…ë£Œí•˜ê³  ì„¤ì •ì„ ì €ìž¥í•˜ëŠ” ë“± ë¦¬ì†ŒìŠ¤ë¥¼ ì •ë¦¬í•˜ëŠ” ì—­í• ì„ ìˆ˜í–‰í•©ë‹ˆë‹¤.
+í–¥í›„ ê³„íš: map.pyì˜ ë‚´ë¹„ê²Œì´ì…˜ ì•Œê³ ë¦¬ì¦˜ì„ ê¸°ë°˜ìœ¼ë¡œ, ë¼ì¦ˆë² ë¦¬íŒŒì´ë¥¼ COM í¬íŠ¸ë¥¼ í†µí•´ í‚¤ë³´ë“œì²˜ëŸ¼ ì—°ë™í•  ì˜ˆì •ìž…ë‹ˆë‹¤. PCì—ì„œëŠ” ì´ë™ ëª…ë ¹(ì¡°ìž‘í‚¤)ë¥¼ ìƒì„±í•˜ì—¬ ë¼ì¦ˆë² ë¦¬íŒŒì´ë¡œ ì „ì†¡í•˜ê³ , ë¼ì¦ˆë² ë¦¬íŒŒì´ê°€ PCì— í‚¤ ìž…ë ¥ì„ ë³´ë‚´ ìºë¦­í„°ë¥¼ ì¡°ìž‘í•˜ë„ë¡ êµ¬í˜„í•˜ì—¬ íƒì§€ ìœ„í—˜ì„ ê°ì†Œì‹œí‚¬ ê²ƒìž…ë‹ˆë‹¤.
+Learning.py - ë°ì´í„° ê´€ë¦¬ ë° AI í›ˆë ¨/íƒì§€ ëª¨ë“ˆ
+ë°ì´í„°ì…‹ êµ¬ì¶•, YOLOv8 ëª¨ë¸ í›ˆë ¨, ì‹¤ì‹œê°„ ê°ì²´ íƒì§€ ê¸°ëŠ¥ì„ í†µí•© ì œê³µí•˜ëŠ” ì• í”Œë¦¬ì¼€ì´ì…˜ì˜ í•µì‹¬ ëª¨ë“ˆìž…ë‹ˆë‹¤. ì‚¬ìš©ìžëŠ” ì´ íƒ­ì„ í†µí•´ ì´ë¯¸ì§€ ìº¡ì²˜ë¶€í„° ë¼ë²¨ë§, í›ˆë ¨, ì‹¤ì‹œê°„ í…ŒìŠ¤íŠ¸ê¹Œì§€ AI ëª¨ë¸ ê°œë°œì˜ ì „ì²´ íŒŒì´í”„ë¼ì¸ì„ GUI í™˜ê²½ì—ì„œ ìˆ˜í–‰í•  ìˆ˜ ìžˆìŠµë‹ˆë‹¤.
+YOLOv8: Ultralyticsì˜ YOLOv8 ëª¨ë¸ì„ ì‚¬ìš©í•˜ì—¬ ê°ì²´ ë¶„í• (Segmentation) ëª¨ë¸ì„ í›ˆë ¨í•˜ê³  ì¶”ë¡ í•©ë‹ˆë‹¤.
+Segment Anything (SAM): Meta AIì˜ SAM ëª¨ë¸ì„ 'AI ì–´ì‹œìŠ¤íŠ¸' ê¸°ëŠ¥ìœ¼ë¡œ í™œìš©í•˜ì—¬, ì‚¬ìš©ìžê°€ ëª‡ ë²ˆì˜ í´ë¦­ë§Œìœ¼ë¡œ ê°ì²´ì˜ ë§ˆìŠ¤í¬ë¥¼ ì†ì‰½ê²Œ ìƒì„±í•  ìˆ˜ ìžˆë„ë¡ ì§€ì›í•©ë‹ˆë‹¤.
+ë°ì´í„° ì¤‘ì‹¬ ì›Œí¬í”Œë¡œìš°: workspace/ í´ë”ë¥¼ ì¤‘ì‹¬ìœ¼ë¡œ ëª¨ë“  ë°ì´í„°(ì´ë¯¸ì§€, ë¼ë²¨, ëª¨ë¸)ë¥¼ ì²´ê³„ì ìœ¼ë¡œ ê´€ë¦¬í•©ë‹ˆë‹¤.
+Learning.py í´ëž˜ìŠ¤ë³„ ìƒì„¸ ë¶„ì„:
+LearningTab(QWidget): 'í•™ìŠµ' íƒ­ì˜ ëª¨ë“  UIì™€ ë¹„ì¦ˆë‹ˆìŠ¤ ë¡œì§ì„ ì´ê´„í•˜ëŠ” ë©”ì¸ í´ëž˜ìŠ¤.
+ì—­í• : 3ë‹¨ ë ˆì´ì•„ì›ƒ(í´ëž˜ìŠ¤ ëª©ë¡, ì´ë¯¸ì§€ ëª©ë¡, í›ˆë ¨/íƒì§€)ì„ êµ¬ì„±í•˜ê³ , ëª¨ë“  ë²„íŠ¼ê³¼ ìœ„ì ¯ì˜ ì‹œê·¸ë„-ìŠ¬ë¡¯ ì—°ê²°ì„ ê´€ë¦¬í•©ë‹ˆë‹¤.
+ì£¼ìš” ìƒí˜¸ìž‘ìš©: ì‚¬ìš©ìž ìž…ë ¥(ë²„íŠ¼ í´ë¦­ ë“±)ì„ ë°›ì•„ DataManagerì— ë°ì´í„° ì²˜ë¦¬ë¥¼ ìš”ì²­í•©ë‹ˆë‹¤. í›ˆë ¨, íƒì§€ ë“± ë¬´ê±°ìš´ ìž‘ì—…ì„ TrainingThread, DetectionThread ë“± ë³„ë„ ìŠ¤ë ˆë“œë¡œ ìœ„ìž„í•©ë‹ˆë‹¤. PolygonAnnotationEditor, SAMAnnotationEditor ê°™ì€ íŽ¸ì§‘ ë‹¤ì´ì–¼ë¡œê·¸ë¥¼ ìƒì„±í•˜ê³ , ê²°ê³¼ ë°ì´í„°ë¥¼ ë°›ì•„ DataManagerë¥¼ í†µí•´ ì €ìž¥í•©ë‹ˆë‹¤. SAMManagerë¥¼ í†µí•´ AI ì–´ì‹œìŠ¤íŠ¸ ëª¨ë¸ì˜ ë¡œë”©ì„ ê´€ë¦¬í•©ë‹ˆë‹¤.
+ìµœê·¼ ë³€ê²½ ì‚¬í•­: map.pyì™€ ê´€ë ¨ëœ ì§ì ‘ì ì¸ ë³€ê²½ ì‚¬í•­ì€ ì—†ìŠµë‹ˆë‹¤.
+DataManager: íŒŒì¼ ì‹œìŠ¤í…œê³¼ì˜ ëª¨ë“  ìƒí˜¸ìž‘ìš©ì„ ë‹´ë‹¹í•˜ëŠ” ë°±ì—”ë“œ í´ëž˜ìŠ¤.
+ì—­í• : workspace/ í´ë” ë‚´ì˜ ëª¨ë“  ê²½ë¡œë¥¼ ê´€ë¦¬í•˜ë©°, í´ëž˜ìŠ¤, ì´ë¯¸ì§€, ë¼ë²¨, ëª¨ë¸, í”„ë¦¬ì…‹ì— ëŒ€í•œ CRUD(ìƒì„±, ì½ê¸°, ê°±ì‹ , ì‚­ì œ) ë¡œì§ì„ ìº¡ìŠí™”í•©ë‹ˆë‹¤.
+ì£¼ìš” ë©”ì„œë“œ:
+get_manifest() / save_manifest(): í´ëž˜ìŠ¤ êµ¬ì¡°ì™€ ì´ë¯¸ì§€ ëª©ë¡ì„ ë‹´ì€ manifest.jsonì„ ê´€ë¦¬.
+rename_class(): í´ëž˜ìŠ¤ ì´ë¦„ ë³€ê²½ ì‹œ, manifest.json ë¿ë§Œ ì•„ë‹ˆë¼ ëª¨ë“  .txt ë¼ë²¨ íŒŒì¼ì˜ í´ëž˜ìŠ¤ ì¸ë±ìŠ¤ê¹Œì§€ ìžë™ìœ¼ë¡œ ì—…ë°ì´íŠ¸í•˜ì—¬ ë°ì´í„° ì •í•©ì„±ì„ ìœ ì§€í•©ë‹ˆë‹¤.
+rebuild_manifest_from_labels(): manifest.jsonì´ ì†ìƒë˜ì—ˆì„ ë•Œ, ëª¨ë“  ë¼ë²¨ íŒŒì¼ì„ ìŠ¤ìº”í•˜ì—¬ ë°ì´í„° ëª©ë¡ì„ ë³µêµ¬í•˜ëŠ” ê°•ë ¥í•œ ê¸°ëŠ¥ì„ ì œê³µí•©ë‹ˆë‹¤.
+create_yaml_file(): í›ˆë ¨ ì‹œìž‘ ì „, í˜„ìž¬ í´ëž˜ìŠ¤ ëª©ë¡ì„ ê¸°ë°˜ìœ¼ë¡œ YOLO í›ˆë ¨ì— í•„ìš”í•œ data.yaml íŒŒì¼ì„ ë™ì ìœ¼ë¡œ ìƒì„±í•©ë‹ˆë‹¤.
+ìµœê·¼ ë³€ê²½ ì‚¬í•­: map.pyì™€ ê´€ë ¨ëœ ì§ì ‘ì ì¸ ë³€ê²½ ì‚¬í•­ì€ ì—†ìŠµë‹ˆë‹¤.
+TrainingThread(QThread): YOLOv8 ëª¨ë¸ í›ˆë ¨ì„ ë°±ê·¸ë¼ìš´ë“œì—ì„œ ìˆ˜í–‰.
+ì—­í• : model.train()ì„ í˜¸ì¶œí•˜ì—¬ í›ˆë ¨ì„ ì‹¤í–‰í•˜ê³ , progress ì‹œê·¸ë„ë¡œ ë¡œê·¸ë¥¼, finished ì‹œê·¸ë„ë¡œ ê²°ê³¼ë¥¼ GUIì— ì „ë‹¬í•©ë‹ˆë‹¤.
+ìµœê·¼ ë³€ê²½ ì‚¬í•­: map.pyì™€ ê´€ë ¨ëœ ì§ì ‘ì ì¸ ë³€ê²½ ì‚¬í•­ì€ ì—†ìŠµë‹ˆë‹¤.
+ExportThread(QThread): í›ˆë ¨ëœ .pt ëª¨ë¸ì„ TensorRT(.engine) í˜•ì‹ìœ¼ë¡œ ìµœì í™”.
+ì—­í• : ëª¨ë¸ ìµœì í™” ìž‘ì—…ì„ ë°±ê·¸ë¼ìš´ë“œì—ì„œ ì²˜ë¦¬í•©ë‹ˆë‹¤.
+ìµœê·¼ ë³€ê²½ ì‚¬í•­: map.pyì™€ ê´€ë ¨ëœ ì§ì ‘ì ì¸ ë³€ê²½ ì‚¬í•­ì€ ì—†ìŠµë‹ˆë‹¤.
+DetectionThread(QThread): ì‹¤ì‹œê°„ ê°ì²´ íƒì§€ë¥¼ ìˆ˜í–‰.
+ì—­í• : ì§€ì •ëœ í™”ë©´ ì˜ì—­ì„ mssë¡œ ê³„ì† ìº¡ì²˜í•˜ê³ , YOLO ëª¨ë¸ë¡œ ì¶”ë¡ í•œ ë’¤, ê²°ê³¼ê°€ ê·¸ë ¤ì§„ í”„ë ˆìž„ì„ frame_ready ì‹œê·¸ë„ë¡œ GUIì— ì „ì†¡í•©ë‹ˆë‹¤. ìºë¦­í„°ì™€ ëª¬ìŠ¤í„°ì˜ ì‹ ë¢°ë„ë¥¼ ë¶„ë¦¬ ì ìš©í•˜ê³ , ìºë¦­í„°ëŠ” ê°€ìž¥ ì‹ ë¢°ë„ ë†’ì€ í•˜ë‚˜ë§Œ íƒì§€í•˜ëŠ” ë¡œì§ì„ í¬í•¨í•©ë‹ˆë‹¤.
+ìµœê·¼ ë³€ê²½ ì‚¬í•­: map.pyì™€ ê´€ë ¨ëœ ì§ì ‘ì ì¸ ë³€ê²½ ì‚¬í•­ì€ ì—†ìŠµë‹ˆë‹¤.
+SAMManager(QObject): SAM ëª¨ë¸ì˜ ë‹¤ìš´ë¡œë“œ ë° ë¡œë”©ì„ ê´€ë¦¬.
+ì—­í• : LearningTabì˜ init_samì—ì„œ ìƒì„±ë˜ì–´ ë³„ë„ ìŠ¤ë ˆë“œë¡œ ì´ë™ë©ë‹ˆë‹¤. ëª¨ë¸ íŒŒì¼ì´ ì—†ì„ ê²½ìš° ìžë™ìœ¼ë¡œ ë‹¤ìš´ë¡œë“œí•˜ê³ , GPUë¥¼ ì‚¬ìš©í•˜ì—¬ ëª¨ë¸ì„ ë©”ëª¨ë¦¬ì— ë¡œë“œí•©ë‹ˆë‹¤. ë¡œë”©ì´ ì™„ë£Œë˜ë©´ model_ready ì‹œê·¸ë„ì„ í†µí•´ SamPredictor ê°ì²´ë¥¼ LearningTabì— ì „ë‹¬í•©ë‹ˆë‹¤.
+ìµœê·¼ ë³€ê²½ ì‚¬í•­: map.pyì™€ ê´€ë ¨ëœ ì§ì ‘ì ì¸ ë³€ê²½ ì‚¬í•­ì€ ì—†ìŠµë‹ˆë‹¤.
+PolygonAnnotationEditor(QDialog) / SAMAnnotationEditor(QDialog): ê°ê° ìˆ˜ë™, AI ì–´ì‹œìŠ¤íŠ¸ ë¼ë²¨ë§ì„ ìœ„í•œ ë‹¤ì´ì–¼ë¡œê·¸ ì°½.
+ì—­í• : ë‚´ë¶€ì— ì „ìš© ìº”ë²„ìŠ¤(CanvasLabel ë˜ëŠ” SAMCanvasLabel)ë¥¼ í¬í•¨í•˜ë©°, í™•ëŒ€/ì¶•ì†Œ, í´ëž˜ìŠ¤ ì„ íƒ, ë‹¨ì¶•í‚¤(C, D, Z, R) ì²˜ë¦¬ ë“± íŽ¸ì§‘ì— í•„ìš”í•œ ëª¨ë“  UIì™€ ë¡œì§ì„ ì œê³µí•©ë‹ˆë‹¤.
+ì£¼ìš” ìƒí˜¸ìž‘ìš©: LearningTabì˜ data_managerë¡œë¶€í„° ì „ì²´ í´ëž˜ìŠ¤ ëª©ë¡ì„ ë°›ì•„ì™€ ì„ íƒ UIë¥¼ êµ¬ì„±í•˜ê³ , ì €ìž¥ ì‹œ íŽ¸ì§‘ëœ ë‹¤ê°í˜• ë°ì´í„°ë¥¼ ë°˜í™˜í•©ë‹ˆë‹¤.
+ìµœê·¼ ë³€ê²½ ì‚¬í•­: map.pyì™€ ê´€ë ¨ëœ ì§ì ‘ì ì¸ ë³€ê²½ ì‚¬í•­ì€ ì—†ìŠµë‹ˆë‹¤.
+BaseCanvasLabel(QLabel): ë‘ ìº”ë²„ìŠ¤ì˜ ê³µí†µ ê¸°ëŠ¥ì„ ì •ì˜í•˜ëŠ” ë¶€ëª¨ í´ëž˜ìŠ¤.
+ì—­í• : ì¤Œ/íŒ¨ë‹, ê¸°ì¡´ ë‹¤ê°í˜• ê·¸ë¦¬ê¸°, ë§ˆìš°ìŠ¤ ì˜¤ë²„ ì‹œ í•˜ì´ë¼ì´íŠ¸, ë‹¤ê°í˜• ì‚­ì œ ë“± ê³µí†µ ë¡œì§ì„ ì²˜ë¦¬í•˜ì—¬ ì½”ë“œ ì¤‘ë³µì„ ë°©ì§€í•©ë‹ˆë‹¤.
+ìµœê·¼ ë³€ê²½ ì‚¬í•­: map.pyì™€ ê´€ë ¨ëœ ì§ì ‘ì ì¸ ë³€ê²½ ì‚¬í•­ì€ ì—†ìŠµë‹ˆë‹¤.
+CanvasLabel(BaseCanvasLabel): ìˆ˜ë™ íŽ¸ì§‘ìš© ìº”ë²„ìŠ¤.
+ì—­í• : í˜„ìž¬ ì‚¬ìš©ìžê°€ ê·¸ë¦¬ê³  ìžˆëŠ” ë‹¤ê°í˜•ì„ ì¶”ê°€ë¡œ ê·¸ë¦¬ëŠ” ë¡œì§ì„ í¬í•¨.
+ìµœê·¼ ë³€ê²½ ì‚¬í•­: map.pyì™€ ê´€ë ¨ëœ ì§ì ‘ì ì¸ ë³€ê²½ ì‚¬í•­ì€ ì—†ìŠµë‹ˆë‹¤.
+SAMCanvasLabel(BaseCanvasLabel): AI íŽ¸ì§‘ìš© ìº”ë²„ìŠ¤.
+ì—­í• : SAMì´ ì˜ˆì¸¡í•œ ë§ˆìŠ¤í¬ì™€ ì‚¬ìš©ìžì˜ ìž…ë ¥(ê¸ì •/ë¶€ì • í´ë¦­)ì„ ì‹œê°í™”.
+ìµœê·¼ ë³€ê²½ ì‚¬í•­: map.pyì™€ ê´€ë ¨ëœ ì§ì ‘ì ì¸ ë³€ê²½ ì‚¬í•­ì€ ì—†ìŠµë‹ˆë‹¤.
+ClassTreeWidget(QTreeWidget): í´ëž˜ìŠ¤ ëª©ë¡ì„ ìœ„í•œ ì»¤ìŠ¤í…€ ìœ„ì ¯.
+ì—­í• : í´ëž˜ìŠ¤-ì¹´í…Œê³ ë¦¬ ê°„ ë“œëž˜ê·¸ì•¤ë“œë¡­ì„ ì§€ì›í•˜ë©°, ê³„ì¸µ êµ¬ì¡° ê·œì¹™(ì˜ˆ: í´ëž˜ìŠ¤ë¥¼ ìµœìƒìœ„ë¡œ ì´ë™ ë¶ˆê°€)ì„ ê°•ì œí•©ë‹ˆë‹¤. ë“œë¡­ ì™„ë£Œ ì‹œ drop_completed ì‹œê·¸ë„ì„ ë°œìƒì‹œì¼œ manifest.jsonì„ ì—…ë°ì´íŠ¸í•˜ë„ë¡ í•©ë‹ˆë‹¤.
+ìµœê·¼ ë³€ê²½ ì‚¬í•­: map.pyì™€ ê´€ë ¨ëœ ì§ì ‘ì ì¸ ë³€ê²½ ì‚¬í•­ì€ ì—†ìŠµë‹ˆë‹¤.
+ScreenSnipper, DetectionPopup, EditModeDialog, MultiCaptureDialog: ê°ê° í™”ë©´ ì˜ì—­ ì§€ì •, íƒì§€ ë·° íŒì—…, íŽ¸ì§‘ ëª¨ë“œ ì„ íƒ, ë‹¤ì¤‘ ìº¡ì²˜ ì„ íƒì„ ìœ„í•œ ìœ í‹¸ë¦¬í‹° ë‹¤ì´ì–¼ë¡œê·¸.
+ìµœê·¼ ë³€ê²½ ì‚¬í•­: map.pyì™€ ê´€ë ¨ëœ ì§ì ‘ì ì¸ ë³€ê²½ ì‚¬í•­ì€ ì—†ìŠµë‹ˆë‹¤.
+map.py - ì „ì²´ ë¯¸ë‹ˆë§µ íŽ¸ì§‘ ë° ë‚´ë¹„ê²Œì´ì…˜ ì‹œìŠ¤í…œ
+v9.0.0 ëŒ€ê·œëª¨ ì‹œìŠ¤í…œ ê°œíŽ¸ì„ ê¸°ì ìœ¼ë¡œ, ê¸°ì¡´ì˜ ì›¨ì´í¬ì¸íŠ¸ ê¸°ë°˜ ìœ„ì¹˜ ì¶”ì • ë°©ì‹ì—ì„œ ë²—ì–´ë‚˜ ì „ì²´ ë§µ ë°ì´í„°ë¥¼ ì§ì ‘ í™œìš©í•˜ëŠ” 'ì¹´ë©”ë¼ ë·°' ë°©ì‹ìœ¼ë¡œ ì‹œìŠ¤í…œì„ ì „ë©´ ê°œíŽ¸í–ˆìŠµë‹ˆë‹¤. ì´ë¥¼ í†µí•´ ì‹œìŠ¤í…œì˜ ë³µìž¡ë„ë¥¼ ë‚®ì¶”ê³  ì •í™•ì„±ê³¼ ì§ê´€ì„±ì„ í¬ê²Œ í–¥ìƒì‹œì¼°ìŠµë‹ˆë‹¤.
+í•µì‹¬ ê°œë… ë³€ê²½ ì‚¬í•­:
+ì „ì²´ ë§µ ê¸°ë°˜ ë Œë”ë§: ë” ì´ìƒ ê°œë³„ ì›¨ì´í¬ì¸íŠ¸ì˜ ë¯¸ë‹ˆë§µ ì¡°ê°ì„ ì‚¬ìš©í•˜ì§€ ì•ŠìŠµë‹ˆë‹¤. ëŒ€ì‹ , í”„ë¡œí•„ ë¡œë“œ ì‹œ _generate_full_map_pixmapì„ í†µí•´ ëª¨ë“  ì›¨ì´í¬ì¸íŠ¸ ë°°ê²½ê³¼ ì§€í˜•/ì˜¤ë¸Œì íŠ¸ ì •ë³´ë¥¼ í•©ì„±í•œ ë‹¨ í•˜ë‚˜ì˜ ê±°ëŒ€í•œ 'ì „ì²´ ë§µ' ì´ë¯¸ì§€ë¥¼ ë¯¸ë¦¬ ìƒì„±í•©ë‹ˆë‹¤.
+íƒì§€ ë¡œì§ ë‹¨ìˆœí™”: AnchorDetectionThreadì˜ ì—­í• ì´ ëŒ€í­ ì¶•ì†Œë˜ì—ˆìŠµë‹ˆë‹¤. ì´ì œ ì´ ìŠ¤ë ˆë“œëŠ” ë³µìž¡í•œ ìœ„ì¹˜ ë³´ì •ì´ë‚˜ ê²½ë¡œ ì•ˆë‚´ ì—†ì´, ì˜¤ì§ ì‹¤ì‹œê°„ ë¯¸ë‹ˆë§µ í™”ë©´ì—ì„œ 'í•µì‹¬ ì§€í˜•'ê³¼ 'í”Œë ˆì´ì–´'ë¥¼ íƒì§€í•˜ê³  ê·¸ ë¡œì»¬ ì¢Œí‘œë¥¼ MapTabì— ì „ë‹¬í•˜ëŠ” ì—­í• ë§Œ ìˆ˜í–‰í•©ë‹ˆë‹¤.
+ì¹´ë©”ë¼ ë·° (Camera View): RealtimeMinimapViewë¼ëŠ” ìƒˆë¡œìš´ ìœ„ì ¯ì´ ì‹¤ì‹œê°„ ë·°ë¥¼ ì „ë‹´í•©ë‹ˆë‹¤. ì´ ìœ„ì ¯ì€ MapTabìœ¼ë¡œë¶€í„° í”Œë ˆì´ì–´ì˜ ì „ì—­ ì¢Œí‘œë¥¼ ì „ë‹¬ë°›ì•„, ë¯¸ë¦¬ ìƒì„±ëœ 'ì „ì²´ ë§µ' ì´ë¯¸ì§€ ìœ„ì—ì„œ í•´ë‹¹ ì¢Œí‘œë¥¼ ì¤‘ì‹¬ìœ¼ë¡œ í•˜ëŠ” ì˜ì—­ì„ ìž˜ë¼ë‚´ì–´ ë³´ì—¬ì¤ë‹ˆë‹¤. ì´ëŠ” ë§ˆì¹˜ ê±°ëŒ€í•œ ì§€ë„ ìœ„ë¥¼ ì¹´ë©”ë¼ê°€ ë”°ë¼ë‹¤ë‹ˆëŠ” ê²ƒê³¼ ê°™ì€ íš¨ê³¼ë¥¼ ëƒ…ë‹ˆë‹¤.
+ë°ì´í„° ë™ê¸°í™” ê°•í™” (v9.0.6): ë°ì´í„°ê°€ ë³€ê²½(ì¶”ê°€, ìˆ˜ì •, ì‚­ì œ)ë  ë•Œë§ˆë‹¤ save_profile_data í•¨ìˆ˜ê°€ í˜¸ì¶œë©ë‹ˆë‹¤. ì´ í•¨ìˆ˜ëŠ” íŒŒì¼ ì €ìž¥ ì§í›„, _update_map_data_and_viewsë¼ëŠ” ì¤‘ì•™ ê´€ë¦¬ í•¨ìˆ˜ë¥¼ í˜¸ì¶œí•˜ì—¬ ì „ì—­ ì¢Œí‘œê³„ ìž¬ê³„ì‚°ê³¼ ì „ì²´ ë§µ ì´ë¯¸ì§€ ìž¬ìƒì„±ì„ ìžë™ìœ¼ë¡œ ìˆ˜í–‰í•©ë‹ˆë‹¤. ì´ë¥¼ í†µí•´ 'í•µì‹¬ ì§€í˜• ê´€ë¦¬ìž', 'ì›¨ì´í¬ì¸íŠ¸ íŽ¸ì§‘ê¸°', 'ì‹¤ì‹œê°„ ë·°' ê°„ì˜ ë°ì´í„° ë¶ˆì¼ì¹˜ ë¬¸ì œë¥¼ í•´ê²°í•˜ê³  í•­ìƒ ìµœì‹  ìƒíƒœë¥¼ ìœ ì§€í•©ë‹ˆë‹¤.
+map.py í´ëž˜ìŠ¤ë³„ ìƒì„¸ ë¶„ì„:
+CroppingLabel(QLabel): FeatureCropDialogì—ì„œ ì˜ì—­ì„ ì‹œê°ì ìœ¼ë¡œ í‘œì‹œí•˜ëŠ” ë° ì‚¬ìš©ë˜ëŠ” ê°„ë‹¨í•œ QLabel ì„œë¸Œí´ëž˜ìŠ¤.
+ì—­í• : FeatureCropDialogì˜ ë°°ê²½ ì´ë¯¸ì§€ ìœ„ì— ì‚¬ìš©ìžê°€ ë“œëž˜ê·¸í•˜ëŠ” ì‚¬ê°í˜• ì˜ì—­ì„ ì‹¤ì‹œê°„ìœ¼ë¡œ ê·¸ë ¤ì¤ë‹ˆë‹¤.
+ìµœê·¼ ë³€ê²½ ì‚¬í•­: FeatureCropDialogê°€ QGraphicsView ê¸°ë°˜ìœ¼ë¡œ ë³€ê²½ë˜ë©´ì„œ, ì´ í´ëž˜ìŠ¤ëŠ” í˜„ìž¬ ì‚¬ìš©ë˜ì§€ ì•ŠìŠµë‹ˆë‹¤. (ë‹¤ë§Œ ì½”ë“œ íŒŒì¼ì—ëŠ” ì—¬ì „ížˆ ì¡´ìž¬í•©ë‹ˆë‹¤.)
+FeatureCropDialog(QDialog): ìƒˆë¡œìš´ í•µì‹¬ ì§€í˜•ì„ ì¶”ê°€í•  ë•Œ, ë¯¸ë‹ˆë§µ ì´ë¯¸ì§€ì—ì„œ íŠ¹ì • ì˜ì—­ì„ ìž˜ë¼ë‚¼ ìˆ˜ ìžˆë„ë¡ ë•ëŠ” ë‹¤ì´ì–¼ë¡œê·¸.
+ì—­í• : ìº¡ì²˜ëœ ë¯¸ë‹ˆë§µ ì´ë¯¸ì§€ ìœ„ì—ì„œ ì‚¬ìš©ìžê°€ ë§ˆìš°ìŠ¤ ë“œëž˜ê·¸ë¡œ í•µì‹¬ ì§€í˜• ì˜ì—­ì„ ì§€ì •í•˜ê³ , í•´ë‹¹ ì˜ì—­ì˜ ì´ë¯¸ì§€ ë°ì´í„°ë¥¼ ë°˜í™˜í•©ë‹ˆë‹¤.
+ì£¼ìš” ìƒí˜¸ìž‘ìš©: MapTabì—ì„œ í˜¸ì¶œë˜ë©°, ì„ íƒëœ ì˜ì—­ì˜ QRect ê°ì²´ë¥¼ ë°˜í™˜í•©ë‹ˆë‹¤.
+ìµœê·¼ ë³€ê²½ ì‚¬í•­ (v9.0.5):
+ê¸°ì¡´ QLabel ê¸°ë°˜ì—ì„œ QGraphicsView ê¸°ë°˜(ZoomableView)ìœ¼ë¡œ ì „í™˜ë˜ì–´ íœ  í™•ëŒ€/ì¶•ì†Œ ë° íœ  í´ë¦­ íŒ¨ë‹ ê¸°ëŠ¥ì´ ì¶”ê°€ë˜ì—ˆìŠµë‹ˆë‹¤.
+ë‹¤ì´ì–¼ë¡œê·¸ê°€ í™”ë©´ì— ì™„ì „ížˆ í‘œì‹œëœ í›„ fitInViewë¥¼ í˜¸ì¶œí•˜ì—¬ ì´ˆê¸° ë°°ìœ¨ì´ ìµœì í™”ë˜ì—ˆìŠµë‹ˆë‹¤ (ì´ë¯¸ì§€ê°€ ë„ˆë¬´ ìž‘ê²Œ ë³´ì´ë˜ ë¬¸ì œ í•´ê²°).
+ì˜ì—­ ì§€ì • ì‹œ ì»¤ì„œê°€ ì‹­ìž(+) ëª¨ì–‘ìœ¼ë¡œ ê³ ì •ë©ë‹ˆë‹¤.
+KeyFeatureManagerDialog(QDialog): ë“±ë¡ëœ í•µì‹¬ ì§€í˜•ì„ ê´€ë¦¬(ì¶”ê°€, ì´ë¦„ ë³€ê²½, ì‚­ì œ)í•˜ê³ , ê° ì§€í˜•ì´ ì–´ë–¤ ì›¨ì´í¬ì¸íŠ¸ì—ì„œ ì‚¬ìš©ë˜ê³  ìžˆëŠ”ì§€ ë³´ì—¬ì£¼ëŠ” ë‹¤ì´ì–¼ë¡œê·¸.
+ì—­í• : í•µì‹¬ ì§€í˜• ë°ì´í„°(self.key_features)ì˜ CRUD ìž‘ì—…ì„ ìˆ˜í–‰í•˜ê³ , ê´€ë ¨ ì›¨ì´í¬ì¸íŠ¸ì™€ì˜ ì—°ê²° ìƒíƒœë¥¼ ì‹œê°í™”í•©ë‹ˆë‹¤.
+ì£¼ìš” ìƒí˜¸ìž‘ìš©: MapTabì˜ self.key_featuresì™€ self.route_profilesë¥¼ ì°¸ì¡°í•˜ì—¬ ë°ì´í„°ë¥¼ í‘œì‹œí•˜ê³  ìˆ˜ì •í•©ë‹ˆë‹¤. parent_map_tab.save_profile_data()ë¥¼ í˜¸ì¶œí•˜ì—¬ ë³€ê²½ì‚¬í•­ì„ ì €ìž¥í•©ë‹ˆë‹¤.
+ìµœê·¼ ë³€ê²½ ì‚¬í•­ (v9.0.6):
+'ì „ì²´ ì›¨ì´í¬ì¸íŠ¸ ê°±ì‹ ' (on_update_all_clicked) ê¸°ëŠ¥ì´ MapTab.update_all_waypoints_with_featuresë¥¼ í˜¸ì¶œí•˜ë„ë¡ ë³€ê²½ë˜ì–´, ì›¨ì´í¬ì¸íŠ¸ì™€ í•µì‹¬ ì§€í˜• ê°„ì˜ ì—°ê²° ì •ë³´ ë¶ˆì¼ì¹˜ ë¬¸ì œë¥¼ í•´ê²°í–ˆìŠµë‹ˆë‹¤.
+ì§€í˜• ì‚­ì œ ì‹œ MapTabì˜ ì›ë³¸ ì›¨ì´í¬ì¸íŠ¸ ë°ì´í„°ì—ì„œ í•´ë‹¹ ì§€í˜• ë§í¬ê°€ ì¦‰ì‹œ ì œê±°ë˜ê³  ì €ìž¥ë©ë‹ˆë‹¤.
+AdvancedWaypointCanvas(QLabel): AdvancedWaypointEditorDialogì—ì„œ ì›¨ì´í¬ì¸íŠ¸ì˜ ëª©í‘œ ì§€ì  ë° ê´€ë ¨ í•µì‹¬ ì§€í˜•ì„ ê·¸ë¦¬ëŠ” ë° ì‚¬ìš©ë˜ë˜ ìº”ë²„ìŠ¤.
+ì—­í• : ì›¨ì´í¬ì¸íŠ¸ íŽ¸ì§‘ ì‹œ ë°°ê²½ ë¯¸ë‹ˆë§µ ì´ë¯¸ì§€ ìœ„ì— ëª©í‘œ ì§€ì (ì´ˆë¡ìƒ‰)ê³¼ íƒì§€ëœ í•µì‹¬ ì§€í˜•(íŒŒëž€ìƒ‰)ì„ í‘œì‹œí•˜ê³ , ì‚¬ìš©ìžê°€ ìƒˆë¡œìš´ í•µì‹¬ ì§€í˜•(ì£¼í™©ìƒ‰)ì„ ê·¸ë¦¬ê±°ë‚˜ ê¸°ì¡´ ì§€í˜•ì„ ì‚­ì œí•  ìˆ˜ ìžˆë„ë¡ ë§ˆìš°ìŠ¤ ì´ë²¤íŠ¸ë¥¼ ì²˜ë¦¬í–ˆìŠµë‹ˆë‹¤.
+ìµœê·¼ ë³€ê²½ ì‚¬í•­: AdvancedWaypointEditorDialogê°€ QGraphicsView ê¸°ë°˜ìœ¼ë¡œ ì™„ì „ížˆ ìž¬êµ¬í˜„ë˜ë©´ì„œ, ì´ í´ëž˜ìŠ¤ëŠ” í˜„ìž¬ ì‚¬ìš©ë˜ì§€ ì•ŠìŠµë‹ˆë‹¤. (ë‹¤ë§Œ ì½”ë“œ íŒŒì¼ì—ëŠ” ì—¬ì „ížˆ ì¡´ìž¬í•©ë‹ˆë‹¤.)
+AdvancedWaypointEditorDialog(QDialog): ê°œë³„ ì›¨ì´í¬ì¸íŠ¸ë¥¼ ìƒì„¸í•˜ê²Œ íŽ¸ì§‘í•˜ëŠ” ë‹¤ì´ì–¼ë¡œê·¸. ëª©í‘œ ì§€ì  ë° ì—°ê²°ëœ í•µì‹¬ ì§€í˜•ì„ ì§€ì •/ìˆ˜ì •í•  ìˆ˜ ìžˆìŠµë‹ˆë‹¤.
+ì—­í• : íŠ¹ì • ì›¨ì´í¬ì¸íŠ¸ì˜ ì´ë¦„, ë¯¸ë‹ˆë§µ ì´ë¯¸ì§€, ëª©í‘œ ì§€ì , ê·¸ë¦¬ê³  ì›¨ì´í¬ì¸íŠ¸ì™€ ê´€ë ¨ëœ í•µì‹¬ ì§€í˜•(ì´ë¯¸ íƒì§€ëœ ê²ƒ, ìƒˆë¡œ ì¶”ê°€í•  ê²ƒ, ì‚­ì œí•  ê²ƒ)ì„ ì‹œê°ì ìœ¼ë¡œ íŽ¸ì§‘í•  ìˆ˜ ìžˆë„ë¡ í•©ë‹ˆë‹¤.
+ì£¼ìš” ìƒí˜¸ìž‘ìš©: MapTabì—ì„œ í˜¸ì¶œë˜ë©°, ìˆ˜ì •ëœ ì›¨ì´í¬ì¸íŠ¸ ë°ì´í„°ì™€ í•µì‹¬ ì§€í˜• ë³€ê²½ ì •ë³´ë¥¼ MapTabìœ¼ë¡œ ì „ë‹¬í•©ë‹ˆë‹¤. parent_map_tab.key_featuresë¥¼ ì°¸ì¡°í•˜ì—¬ íŽ¸ì§‘í•©ë‹ˆë‹¤.
+ìµœê·¼ ë³€ê²½ ì‚¬í•­ (v9.0.5):
+ê¸°ì¡´ QLabel ê¸°ë°˜ì—ì„œ QGraphicsView ê¸°ë°˜(ZoomableView)ìœ¼ë¡œ ì „í™˜ë˜ì–´ íœ  í™•ëŒ€/ì¶•ì†Œ ë° íœ  í´ë¦­ íŒ¨ë‹ ê¸°ëŠ¥ì´ ì¶”ê°€ë˜ì—ˆìŠµë‹ˆë‹¤.
+ë‹¤ì´ì–¼ë¡œê·¸ê°€ í™”ë©´ì— ì™„ì „ížˆ í‘œì‹œëœ í›„ fitInViewë¥¼ í˜¸ì¶œí•˜ì—¬ ì´ˆê¸° ë°°ìœ¨ì´ ìµœì í™”ë˜ì—ˆìŠµë‹ˆë‹¤.
+íŽ¸ì§‘ ëª¨ë“œ(ëª©í‘œ ì§€ì , í•µì‹¬ ì§€í˜•)ì— ë”°ë¼ ì»¤ì„œê°€ ì‹­ìž(+) ëª¨ì–‘ìœ¼ë¡œ ìœ ì§€ë©ë‹ˆë‹¤.
+CustomGraphicsView(QGraphicsView): FullMinimapEditorDialogì—ì„œ ì‚¬ìš©ë˜ëŠ” ì»¤ìŠ¤í…€ QGraphicsView.
+ì—­í• : ì „ì²´ ë§µ íŽ¸ì§‘ê¸°ì—ì„œ í™•ëŒ€/ì¶•ì†Œ, íŒ¨ë‹, ë§ˆìš°ìŠ¤ ì´ë²¤íŠ¸ ì „ë‹¬ ê¸°ëŠ¥ì„ ì œê³µí•©ë‹ˆë‹¤.
+ì£¼ìš” ìƒí˜¸ìž‘ìš©: FullMinimapEditorDialogì˜ on_scene_mouse_press, on_scene_mouse_move ë“±ê³¼ ì—°ê²°ë˜ì–´ ì§€í˜• ê·¸ë¦¬ê¸°/ì‚­ì œ ë¡œì§ì„ ìˆ˜í–‰í•©ë‹ˆë‹¤.
+ìµœê·¼ ë³€ê²½ ì‚¬í•­: map.pyì˜ CustomGraphicsView ìžì²´ì—ëŠ” v7.8.1 ì´í›„ ì§ì ‘ì ì¸ ë³€ê²½ ì‚¬í•­ì´ ì—†ìŠµë‹ˆë‹¤.
+FullMinimapEditorDialog(QDialog): ì „ì²´ ë§µì— ì§€í˜•ì„ (terrain_lines)ê³¼ ì¸µ ì´ë™ ì˜¤ë¸Œì íŠ¸(transition_objects)ë¥¼ ì§ì ‘ ê·¸ë¦¬ê³  íŽ¸ì§‘í•˜ëŠ” ë‹¤ì´ì–¼ë¡œê·¸.
+ì—­í• : ëª¨ë“  ì›¨ì´í¬ì¸íŠ¸ì˜ ë¯¸ë‹ˆë§µë“¤ì„ í•©ì„±í•œ ì „ì²´ ë§µ ìœ„ì—ì„œ, í”Œë ˆì´ì–´ê°€ ì´ë™ ê°€ëŠ¥í•œ ì§€í˜•ê³¼ ì¸µ ì´ë™ ì˜¤ë¸Œì íŠ¸ì˜ ìœ„ì¹˜ ë° í˜•íƒœë¥¼ ì •ì˜í•©ë‹ˆë‹¤.
+ì£¼ìš” ìƒí˜¸ìž‘ìš©: MapTabìœ¼ë¡œë¶€í„° ëª¨ë“  ë§µ ë°ì´í„°(key_features, route_profiles, geometry_data, global_positions)ë¥¼ ë°›ì•„ ë§µì„ ë Œë”ë§í•˜ê³ , ë³€ê²½ëœ geometry_dataë¥¼ MapTabìœ¼ë¡œ ë°˜í™˜í•˜ì—¬ ì €ìž¥í•˜ë„ë¡ í•©ë‹ˆë‹¤. MapTabì˜ ì‹¤ì‹œê°„ í”Œë ˆì´ì–´ ìœ„ì¹˜(global_pos_updated ì‹œê·¸ë„)ë¥¼ ë°›ì•„ Y/Xì¶• ê³ ì •ì„  ìœ„ì¹˜ë¥¼ ì—…ë°ì´íŠ¸í•©ë‹ˆë‹¤.
+ìµœê·¼ ë³€ê²½ ì‚¬í•­: map.pyì˜ FullMinimapEditorDialog ìžì²´ì—ëŠ” ì§ì ‘ì ì¸ ë³€ê²½ ì‚¬í•­ì´ ì—†ìŠµë‹ˆë‹¤.
+RealtimeMinimapView(QLabel): (ì‹ ê·œ í´ëž˜ìŠ¤, v9.0.0 ë„ìž…) ì „ì²´ ë§µì„ ê¸°ë°˜ìœ¼ë¡œ í”Œë ˆì´ì–´ ì‹œì ì˜ 'ì¹´ë©”ë¼ ë·°'ë¥¼ ì‹¤ì‹œê°„ìœ¼ë¡œ ë Œë”ë§í•˜ëŠ” ì»¤ìŠ¤í…€ ìœ„ì ¯.
+ì—­í• : MapTabì—ì„œ ê³„ì‚°ëœ í”Œë ˆì´ì–´ì˜ ì „ì—­ ì¢Œí‘œë¥¼ ì¤‘ì‹¬ìœ¼ë¡œ ì „ì²´ ë§µì˜ ì¼ë¶€ë¥¼ ìž˜ë¼ë‚´ì–´ í‘œì‹œí•˜ê³ , ê·¸ ìœ„ì— í”Œë ˆì´ì–´, ë‹¤ë¥¸ ìœ ì €, í•µì‹¬ ì§€í˜•, ì›¨ì´í¬ì¸íŠ¸, ì§€í˜•ì„ , ì˜¤ë¸Œì íŠ¸ ë“±ì„ ë™ì ìœ¼ë¡œ ì˜¤ë²„ë ˆì´í•˜ì—¬ ë³´ì—¬ì¤ë‹ˆë‹¤. ë§ˆìš°ìŠ¤ íœ  ì¤Œ ë° ë“œëž˜ê·¸ íŒ¨ë‹ì„ ì§€ì›í•©ë‹ˆë‹¤.
+ì£¼ìš” ìƒí˜¸ìž‘ìš©: MapTabìœ¼ë¡œë¶€í„° camera_center, active_features, my_players, other_players ë“± ë Œë”ë§ì— í•„ìš”í•œ ìµœì‹  ë°ì´í„°ë¥¼ update_view_data ë©”ì„œë“œë¥¼ í†µí•´ ì „ë‹¬ë°›ì•„ í™”ë©´ì„ ê°±ì‹ í•©ë‹ˆë‹¤.
+ìµœê·¼ ë³€ê²½ ì‚¬í•­ (v9.0.1+):
+(v9.0.1) í•µì‹¬ ì§€í˜• ë Œë”ë§ ê°œì„ : ê°ì§€ëœ ì§€í˜•ì€ íŒŒëž€ìƒ‰ ì‹¤ì„ , ë¯¸ê°ì§€ ì§€í˜•ì€ í°ìƒ‰ ì ì„  í…Œë‘ë¦¬ë¡œ í‘œì‹œí•˜ë©°, ë‚´ë¶€ë¥¼ ì±„ìš°ì§€ ì•Šë„ë¡ ë³€ê²½ë˜ì—ˆìŠµë‹ˆë‹¤. í•µì‹¬ ì§€í˜• ì´ë¦„ì€ ì‚¬ê°í˜• ì¤‘ì•™ì— í‘œì‹œë©ë‹ˆë‹¤.
+(v9.0.1) ì›¨ì´í¬ì¸íŠ¸ ë Œë”ë§ ê°œì„ : ì›¨ì´í¬ì¸íŠ¸ ì´ë¦„ ëŒ€ì‹  ê²½ë¡œ ìˆœì„œ(ìˆ«ìž)ê°€ ì‚¬ê°í˜• ì¤‘ì•™ì— í‘œì‹œë©ë‹ˆë‹¤.
+(v9.0.2) íƒì§€ ì •í™•ë„ í‘œì‹œ: ê°ì§€ëœ í•µì‹¬ ì§€í˜• ì‚¬ê°í˜•ì˜ ë°”ê¹¥ìª½ ìœ„(ìˆ˜í‰ ì¤‘ì•™)ì— ì‹¤ì‹œê°„ íƒì§€ ì •í™•ë„(ì†Œìˆ˜ì  ë‘˜ì§¸ ìžë¦¬ê¹Œì§€, ë…¸ëž€ìƒ‰, 7pt, ì¼ë°˜ í°íŠ¸)ê°€ í‘œì‹œë©ë‹ˆë‹¤.
+(v9.0.4) ì¹´ë©”ë¼ ìžë™ ì¶”ì  ì œì–´: MapTabì˜ 'ìºë¦­í„° ì¤‘ì‹¬' ì²´í¬ë°•ìŠ¤ ìƒíƒœì— ë”°ë¼ ì¹´ë©”ë¼ê°€ í”Œë ˆì´ì–´ë¥¼ ìžë™ ì¶”ì í• ì§€(self.camera_center_global ì—…ë°ì´íŠ¸) ì•„ë‹ˆë©´ ì‚¬ìš©ìžê°€ ë“œëž˜ê·¸í•œ ìœ„ì¹˜ì— ë¨¸ë¬´ë¥¼ì§€ ê²°ì •í•˜ë„ë¡ ë¡œì§ì´ ë³€ê²½ë˜ì—ˆìŠµë‹ˆë‹¤.
+AnchorDetectionThread(QThread): ì§€ì •ëœ ë¯¸ë‹ˆë§µ ì˜ì—­ì„ ê³„ì† ìŠ¤ìº”í•˜ì—¬, ë“±ë¡ëœ í•µì‹¬ ì§€í˜•ê³¼ í”Œë ˆì´ì–´ ì•„ì´ì½˜ì˜ ë¡œì»¬ ì¢Œí‘œë¥¼ íƒì§€í•˜ê³  ë©”ì¸ ìŠ¤ë ˆë“œë¡œ ì „ë‹¬í•˜ëŠ” ì—­í• ë§Œ ìˆ˜í–‰í•˜ëŠ” ìŠ¤ë ˆë“œ.
+ì—­í• : ìŠ¤í¬ë¦°ìƒ· ìº¡ì²˜, HSV ìƒ‰ìƒ ë§ˆìŠ¤í‚¹ì„ í†µí•œ í”Œë ˆì´ì–´ ì•„ì´ì½˜ íƒì§€, í…œí”Œë¦¿ ë§¤ì¹­ì„ í†µí•œ í•µì‹¬ ì§€í˜• íƒì§€ë¥¼ ë°±ê·¸ë¼ìš´ë“œì—ì„œ ìˆ˜í–‰í•©ë‹ˆë‹¤. íƒì§€ëœ ê°ì²´ì˜ id, local_pos, conf ì •ë³´ë¥¼ detection_ready ì‹œê·¸ë„ì„ í†µí•´ MapTabìœ¼ë¡œ ì „ë‹¬í•©ë‹ˆë‹¤.
+ìµœê·¼ ë³€ê²½ ì‚¬í•­: map.pyì˜ AnchorDetectionThread ìžì²´ì—ëŠ” ì§ì ‘ì ì¸ ë³€ê²½ ì‚¬í•­ì´ ì—†ìŠµë‹ˆë‹¤.
+MapTab(QWidget): 'ë§µ' íƒ­ì˜ ëª¨ë“  UIì™€ í•µì‹¬ ë¡œì§ì„ ì´ê´„í•˜ëŠ” ë©”ì¸ ì»¨íŠ¸ë¡¤ëŸ¬ í´ëž˜ìŠ¤.
+ì—­í• : ë§µ í”„ë¡œí•„ ë¡œë“œ/ì €ìž¥, ë¯¸ë‹ˆë§µ ì˜ì—­ ì„¤ì •, ì›¨ì´í¬ì¸íŠ¸/ê²½ë¡œ í”„ë¡œí•„/í•µì‹¬ ì§€í˜• ê´€ë¦¬, ì „ì²´ ë§µ ë°ì´í„°(ì§€í˜•ì„ , ì˜¤ë¸Œì íŠ¸) íŽ¸ì§‘ê¸° ì‹¤í–‰, ì‹¤ì‹œê°„ íƒì§€ ì œì–´ ë“± ë§µ ì‹œìŠ¤í…œ ì „ë°˜ì„ ê´€ë¦¬í•©ë‹ˆë‹¤. _calculate_global_positionsë¡œ ì „ì—­ ì¢Œí‘œê³„ë¥¼ ê³„ì‚°í•˜ê³  _generate_full_map_pixmapìœ¼ë¡œ ì „ì²´ ë§µ ì´ë¯¸ì§€ë¥¼ ìƒì„±í•˜ì—¬ ë©”ëª¨ë¦¬ì— ë³´ê´€í•©ë‹ˆë‹¤.
+ì£¼ìš” ìƒí˜¸ìž‘ìš©: AnchorDetectionThreadë¡œë¶€í„° íƒì§€ ê²°ê³¼ë¥¼ ë°›ì•„ í”Œë ˆì´ì–´ì˜ ì „ì—­ ì¢Œí‘œë¥¼ ê³„ì‚°í•˜ê³  RealtimeMinimapViewì— ë Œë”ë§ì„ ì§€ì‹œí•©ë‹ˆë‹¤. KeyFeatureManagerDialog, AdvancedWaypointEditorDialog, FullMinimapEditorDialog ë“± ëª¨ë“  í•˜ìœ„ ë‹¤ì´ì–¼ë¡œê·¸ì™€ ë°ì´í„°ë¥¼ ì£¼ê³ ë°›ìœ¼ë©°, save_profile_dataë¥¼ í†µí•´ ë°ì´í„° ë¬´ê²°ì„±ì„ ë³´ìž¥í•©ë‹ˆë‹¤. global_pos_updated ì‹œê·¸ë„ë¡œ FullMinimapEditorDialogì— í”Œë ˆì´ì–´ ìœ„ì¹˜ë¥¼ ì „ë‹¬í•©ë‹ˆë‹¤.
+ìµœê·¼ ë³€ê²½ ì‚¬í•­:
+(v9.0.3) global_pos_updated ì‹œê·¸ë„ì˜ íƒ€ìž…ì´ (float, float)ì—ì„œ QPointFë¡œ ë³€ê²½ë˜ì–´ X, Y ì¢Œí‘œ ì „ë‹¬ì˜ ì •í™•ì„±ê³¼ ì•ˆì •ì„±ì´ í–¥ìƒë˜ì—ˆìŠµë‹ˆë‹¤.
+(v9.0.3) on_detection_ready ë©”ì„œë“œì—ì„œ í”Œë ˆì´ì–´ì˜ Yì¶• ìœ„ì¹˜ ê³„ì‚° ì‹œ player_rect.bottom() ëŒ€ì‹  float(player_rect.y() + player_rect.height())ë¥¼ ì‚¬ìš©í•˜ì—¬ ì •í™•í•œ ë°”ë‹¥ ì¢Œí‘œë¥¼ ì–»ë„ë¡ ìˆ˜ì •ë˜ì—ˆê³ , PLAYER_Y_OFFSET ìƒìˆ˜ë¥¼ í†µí•´ ë¯¸ì„¸ Y ì¢Œí‘œ ë³´ì • ê¸°ëŠ¥ì´ ì¶”ê°€ë˜ì—ˆìŠµë‹ˆë‹¤.
+(v9.0.4) initUIì— 'ì‹¤ì‹œê°„ ë¯¸ë‹ˆë§µ ë·°' ë¼ë²¨ ì˜†ì— **'ìºë¦­í„° ì¤‘ì‹¬' QCheckBox**ê°€ ì¶”ê°€ë˜ì—ˆìŠµë‹ˆë‹¤.
+(v9.0.4) on_detection_ready ë©”ì„œë“œì—ì„œ ì´ ì²´í¬ë°•ìŠ¤ì˜ ìƒíƒœì— ë”°ë¼ RealtimeMinimapViewì˜ ì¹´ë©”ë¼ê°€ í”Œë ˆì´ì–´ë¥¼ ìžë™ ì¶”ì í• ì§€ ì—¬ë¶€ë¥¼ ì œì–´í•˜ë„ë¡ ë¡œì§ì´ ë³€ê²½ë˜ì—ˆìŠµë‹ˆë‹¤.
+(v9.0.6) update_all_waypoints_with_features ë©”ì„œë“œê°€ self.route_profilesì˜ ì›ë³¸ ë°ì´í„°ë¥¼ ì§ì ‘ ìˆ˜ì •í•˜ë„ë¡ ë³€ê²½ë˜ì–´, í•µì‹¬ ì§€í˜•ê³¼ ì›¨ì´í¬ì¸íŠ¸ ê°„ì˜ ì—°ê²° ì •ë³´ ë™ê¸°í™” ë¬¸ì œ(ì‚¬ìš©ì²˜ ë¶ˆì¼ì¹˜ ë“±)ê°€ ì™„ì „ížˆ í•´ê²°ë˜ì—ˆìŠµë‹ˆë‹¤.
+ZoomableView(QGraphicsView): (v9.0.5 ë„ìž…) QGraphicsViewë¥¼ ìƒì†ë°›ì•„ íœ  í™•ëŒ€/ì¶•ì†Œ ë° íœ  í´ë¦­ íŒ¨ë‹ ê¸°ëŠ¥ì„ ì œê³µí•˜ëŠ” ìž¬ì‚¬ìš© ê°€ëŠ¥í•œ ë·° í´ëž˜ìŠ¤.
+ì—­í• : FeatureCropDialogì™€ AdvancedWaypointEditorDialogì˜ í•µì‹¬ ë·°ë¡œ ì‚¬ìš©ë˜ì–´, ì´ë¯¸ì§€ íŽ¸ì§‘ ì‹œ ì‚¬ìš©ìžì—ê²Œ ìœ ì—°í•œ ë·° ì œì–´ ê¸°ëŠ¥ì„ ì œê³µí•©ë‹ˆë‹¤. set_drawing_mode ë©”ì„œë“œë¥¼ í†µí•´ ì»¤ì„œ ëª¨ì–‘(ì‹­ìž ë˜ëŠ” ì†ë°”ë‹¥)ê³¼ ë“œëž˜ê·¸ ëª¨ë“œë¥¼ ì „í™˜í•  ìˆ˜ ìžˆìŠµë‹ˆë‹¤.
+ì£¼ìš” ìƒí˜¸ìž‘ìš©: mousePressEvent, mouseMoveEvent, mouseReleaseEventë¥¼ ì˜¤ë²„ë¼ì´ë”©í•˜ì—¬ íœ  í´ë¦­ ì´ë²¤íŠ¸ë¥¼ ì²˜ë¦¬í•©ë‹ˆë‹¤.
+ìµœê·¼ ë³€ê²½ ì‚¬í•­: ZoomableViewì˜ ë„ìž… ìžì²´ê°€ ìµœê·¼ ë³€ê²½ ì‚¬í•­ì˜ í•µì‹¬ìž…ë‹ˆë‹¤.
+main.py - ì• í”Œë¦¬ì¼€ì´ì…˜ ì…¸ ë° ë¡œë”
+ì• í”Œë¦¬ì¼€ì´ì…˜ì˜ ì§„ìž…ì (Entry Point)ìœ¼ë¡œ, ì „ì²´ í”„ë¡œê·¸ëž¨ì˜ ë¼ˆëŒ€ë¥¼ êµ¬ì„±í•˜ê³  ê° ê¸°ëŠ¥ ëª¨ë“ˆì„ íƒ­ìœ¼ë¡œ í†µí•©í•˜ëŠ” ì—­í• ì„ í•©ë‹ˆë‹¤.
+MainWindow(QMainWindow): ì• í”Œë¦¬ì¼€ì´ì…˜ì˜ ë©”ì¸ ìœˆë„ìš°.
+ì—­í• : QTabWidgetì„ ì¤‘ì•™ ìœ„ì ¯ìœ¼ë¡œ ì„¤ì •í•˜ê³ , load_tabs ë©”ì„œë“œë¥¼ í†µí•´ ì§€ì •ëœ ëª¨ë“ˆë“¤ì„ ìˆœì°¨ì ìœ¼ë¡œ ë¡œë“œí•©ë‹ˆë‹¤.
+ì£¼ìš” ê¸°ëŠ¥:
+ë™ì  ëª¨ë“ˆ ë¡œë”©: importlibë¥¼ ì‚¬ìš©í•˜ì—¬ ëª¨ë“ˆ ì´ë¦„(ë¬¸ìžì—´)ìœ¼ë¡œ ì‹¤ì œ ëª¨ë“ˆì„ ìž„í¬íŠ¸í•©ë‹ˆë‹¤. ì´ ë•ë¶„ì— ì„¤ì • íŒŒì¼ ë³€ê²½ë§Œìœ¼ë¡œ ìƒˆë¡œìš´ íƒ­ì„ ì‰½ê²Œ ì¶”ê°€í•˜ê±°ë‚˜ ì œê±°í•  ìˆ˜ ìžˆëŠ” í™•ìž¥ì„± ìžˆëŠ” êµ¬ì¡°ë¥¼ ê°€ì§‘ë‹ˆë‹¤.
+ì˜¤ë¥˜ ì²˜ë¦¬: try-except êµ¬ë¬¸ì„ ì‚¬ìš©í•˜ì—¬ íŠ¹ì • íƒ­ ë¡œë”©ì— ì‹¤íŒ¨í•˜ë”ë¼ë„ í”„ë¡œê·¸ëž¨ì´ ì¤‘ë‹¨ë˜ì§€ ì•Šê³ , ëŒ€ì‹  ì‚¬ìš©ìžì—ê²Œ ì›ì¸ì„ ì•Œë ¤ì£¼ëŠ” 'ì˜¤ë¥˜ íƒ­'ì„ í‘œì‹œí•©ë‹ˆë‹¤.
+ìƒíƒœ ì €ìž¥ (QSettings): í”„ë¡œê·¸ëž¨ ì¢…ë£Œ ì‹œ closeEventì—ì„œ í˜„ìž¬ ì°½ì˜ ìœ„ì¹˜ì™€ í¬ê¸°ë¥¼ ì €ìž¥í•˜ê³ , ìž¬ì‹œìž‘ ì‹œ ì´ë¥¼ ë³µì›í•˜ì—¬ ì‚¬ìš©ìž íŽ¸ì˜ì„±ì„ ë†’ìž…ë‹ˆë‹¤.
+ìžì› í•´ì œ: closeEventì—ì„œ ê° íƒ­ ìœ„ì ¯ì˜ cleanup_on_close ë©”ì„œë“œë¥¼ ìˆœì°¨ì ìœ¼ë¡œ í˜¸ì¶œí•˜ì—¬, ëª¨ë“  ë°±ê·¸ë¼ìš´ë“œ ìŠ¤ë ˆë“œê°€ ì•ˆì „í•˜ê²Œ ì¢…ë£Œë˜ë„ë¡ ë³´ìž¥í•©ë‹ˆë‹¤.
+ìµœê·¼ ë³€ê²½ ì‚¬í•­: map.pyì™€ ê´€ë ¨ëœ ì§ì ‘ì ì¸ ë³€ê²½ ì‚¬í•­ì€ ì—†ìŠµë‹ˆë‹¤.
+í–¥í›„ ê°œë°œ ê³„íš (ë³€ë™ ê°€ëŠ¥ì„± ìžˆìŒ): ì¸µê°„ ë‚´ë¹„ê²Œì´ì…˜ ì‹œìŠ¤í…œ
+í˜„ìž¬ê¹Œì§€ êµ¬ì¶•ëœ 'ì „ì²´ ë¯¸ë‹ˆë§µ íŽ¸ì§‘ê¸°'ì˜ ì§€í˜• ë°ì´í„°ë¥¼ í™œìš©í•˜ì—¬, ë³µì¸µ êµ¬ì¡°ì˜ ë§µì—ì„œ ì¸µê°„ ì´ë™ì„ í¬í•¨í•œ ìµœë‹¨ ê²½ë¡œë¥¼ íƒìƒ‰í•˜ëŠ” ê³ ì°¨ì› ë‚´ë¹„ê²Œì´ì…˜ ì‹œìŠ¤í…œì„ êµ¬í˜„í•©ë‹ˆë‹¤.
+ëª©í‘œ: ì‚¬ìš©ìžê°€ ë§µì˜ ì–´ëŠ ì§€ì ì´ë“  ëª©í‘œë¡œ ì„¤ì •í•˜ë©´, í˜„ìž¬ ìœ„ì¹˜ì—ì„œ ëª©í‘œê¹Œì§€ ì§€í˜•ì„ ì„ ë”°ë¼ ì´ë™í•˜ê³ , í•„ìš”í•œ ê²½ìš° ì¸µ ì´ë™ ì˜¤ë¸Œì íŠ¸(ì‚¬ë‹¤ë¦¬, í¬íƒˆ)ë¥¼ ì‚¬ìš©í•˜ì—¬ ì¸µì„ ë°”ê¾¸ëŠ” ì „ì²´ ê²½ë¡œë¥¼ ìƒì„±í•˜ê³  ì•ˆë‚´í•©ë‹ˆë‹¤.
+í•µì‹¬ ê°œë…:
+ì¸µ (Floor) ê´€ë¦¬: ì‚¬ìš©ìžê°€ "1ì¸µ", "2ì¸µ" ë“± ì¸µ ì •ë³´ë¥¼ ìƒì„±í•˜ê³  ê´€ë¦¬í•˜ëŠ” ê¸°ëŠ¥.
+ì§€í˜•ì„ ì— ì¸µ ì •ë³´ í• ë‹¹: ì‚¬ìš©ìžê°€ íŽ¸ì§‘ê¸°ì—ì„œ íŠ¹ì • ì§€í˜•ì„ ì„ ì„ íƒí•˜ê³ , í•´ë‹¹ ì§€í˜•ì„ ì´ ëª‡ ì¸µì— ì†í•˜ëŠ”ì§€ ì§€ì •í•˜ëŠ” ê¸°ëŠ¥. (ê¸°ë³¸ê°’ì€ 1ì¸µ)
+ì¸µ ì´ë™ ì˜¤ë¸Œì íŠ¸ ì—°ê²°: ì‚¬ìš©ìžê°€ ì¸µ ì´ë™ ì˜¤ë¸Œì íŠ¸(ì‚¬ë‹¤ë¦¬ ë“±)ë¥¼ ì„ íƒí•˜ê³ , ì´ ì˜¤ë¸Œì íŠ¸ê°€ ì–´ë–¤ ì§€í˜•ì„ (ì‹œìž‘ ì¸µ)ì—ì„œ ì‹œìž‘í•˜ì—¬ ì–´ë–¤ ì§€í˜•ì„ (ë„ì°© ì¸µ)ìœ¼ë¡œ ì—°ê²°ë˜ëŠ”ì§€ ëª…ì‹œì ìœ¼ë¡œ ì§€ì •í•˜ëŠ” ê¸°ëŠ¥. ì´ëŠ” ì–‘ë°©í–¥ ì´ë™ì„ ê¸°ë³¸ìœ¼ë¡œ í•©ë‹ˆë‹¤.
+êµ¬í˜„ ê³„íš:
+ë°ì´í„° êµ¬ì¡° í™•ìž¥: map_geometry.jsonì„ ìˆ˜ì •í•©ë‹ˆë‹¤.
+terrain_linesì˜ ê° ê°ì²´ì— "floor": 1 ê³¼ ê°™ì€ ì¸µ ì •ë³´ í•„ë“œë¥¼ ì¶”ê°€í•©ë‹ˆë‹¤.
+transition_objectsì˜ ê° ê°ì²´ì— "start_line_id": "...", "end_line_id": "..." ì™€ ê°™ì´ ì—°ê²°ëœ ë‘ ì§€í˜•ì„ ì˜ IDë¥¼ ì €ìž¥í•˜ëŠ” í•„ë“œë¥¼ ì¶”ê°€í•©ë‹ˆë‹¤.
+íŽ¸ì§‘ê¸° UI/UX ì¶”ê°€: FullMinimapEditorDialogì— ë‹¤ìŒ ê¸°ëŠ¥ì„ ì¶”ê°€í•©ë‹ˆë‹¤.
+ì¸µ ê´€ë¦¬ íŒ¨ë„: ì¸µì„ ì¶”ê°€/ì‚­ì œ/ì´ë¦„ ë³€ê²½í•  ìˆ˜ ìžˆëŠ” UI.
+ì§€í˜•ì„  ì†ì„± íŽ¸ì§‘: ì§€í˜•ì„ ì„ ì„ íƒí•˜ê³  ë“œë¡­ë‹¤ìš´ ë©”ë‰´ ë“±ì„ í†µí•´ ìƒì„±ëœ ì¸µ ëª©ë¡ ì¤‘ í•˜ë‚˜ë¥¼ í• ë‹¹í•˜ëŠ” ê¸°ëŠ¥.
+ì˜¤ë¸Œì íŠ¸ ì—°ê²° ë„êµ¬: ì¸µ ì´ë™ ì˜¤ë¸Œì íŠ¸ë¥¼ ì„ íƒí•œ í›„, ì‹œìž‘ ì§€í˜•ì„ ê³¼ ë„ì°© ì§€í˜•ì„ ì„ ìˆœì„œëŒ€ë¡œ í´ë¦­í•˜ì—¬ ì—°ê²° ê´€ê³„ë¥¼ ì„¤ì •í•˜ëŠ” ê¸°ëŠ¥.
+ë‚´ë¹„ê²Œì´ì…˜ ì•Œê³ ë¦¬ì¦˜ ê³ ë„í™”:
+ê²½ë¡œ íƒìƒ‰ ì‹œ, ë§µ ì „ì²´ë¥¼ í•˜ë‚˜ì˜ ê±°ëŒ€í•œ **ê·¸ëž˜í”„(Graph)**ë¡œ ê°„ì£¼í•©ë‹ˆë‹¤.
+ë…¸ë“œ(Node): ëª¨ë“  ì§€í˜•ì„ ì˜ ê° ê¼­ì§“ì , ì¸µ ì´ë™ ì˜¤ë¸Œì íŠ¸ì˜ ì‹œìž‘/ëì .
+ì—£ì§€(Edge):
+ê°™ì€ ì§€í˜•ì„  ìœ„ì˜ ì¸ì ‘í•œ ê¼­ì§“ì ë“¤ì„ ìž‡ëŠ” ì„ ë¶„ (ê°€ì¤‘ì¹˜: ê±°ë¦¬).
+ì¸µ ì´ë™ ì˜¤ë¸Œì íŠ¸ ìžì²´ (ê°€ì¤‘ì¹˜: ì´ë™ ì‹œê°„ ë˜ëŠ” ê±°ë¦¬).
+ì¸µ ì´ë™ ì˜¤ë¸Œì íŠ¸ì˜ ëì ê³¼ ì—°ê²°ëœ ì§€í˜•ì„  ìœ„ì˜ ê°€ìž¥ ê°€ê¹Œìš´ ì ì„ ìž‡ëŠ” ê°€ìƒì˜ ì—°ê²°ì„ .
+A* (A-Star) ì•Œê³ ë¦¬ì¦˜ ë“±ì„ ì‚¬ìš©í•˜ì—¬ ì´ ê·¸ëž˜í”„ ìƒì—ì„œ í˜„ìž¬ ìœ„ì¹˜ì—ì„œ ëª©í‘œ ì§€ì ê¹Œì§€ì˜ ìµœë‹¨ ê²½ë¡œë¥¼ ê³„ì‚°í•©ë‹ˆë‹¤. ê³„ì‚°ëœ ê²½ë¡œëŠ” [ì§€í˜•ì„  ì´ë™ -> ì˜¤ë¸Œì íŠ¸ ì´ìš© -> ë‹¤ë¥¸ ì§€í˜•ì„  ì´ë™] ê³¼ ê°™ì€ ì¼ë ¨ì˜ í–‰ë™ ê³„íšìœ¼ë¡œ ì¶œë ¥ë©ë‹ˆë‹¤.
