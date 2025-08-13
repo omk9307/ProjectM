@@ -1,4 +1,4 @@
-ProjectM - 통합 기술 상세 설명서 (v9.0.6 - 편집기 줌/패닝 및 동기화 강화 버전)
+ProjectM - 통합 기술 상세 설명서 (v9.0.7 - 기준 앵커 시스템 도입 버전)
 이 문서는 ProjectM 애플리케이션의 아키텍처, 주요 기능 모듈, 그리고 각 클래스의 역할 및 최근 업데이트 내역을 상세하게 설명합니다.
 전체 시스템 아키텍처
 이 애플리케이션은 모듈형 탭 기반 아키텍처를 채택하고 있습니다.
@@ -63,6 +63,7 @@ v9.0.0 대규모 시스템 개편을 기점으로, 기존의 웨이포인트 기
 탐지 로직 단순화: AnchorDetectionThread의 역할이 대폭 축소되었습니다. 이제 이 스레드는 복잡한 위치 보정이나 경로 안내 없이, 오직 실시간 미니맵 화면에서 '핵심 지형'과 '플레이어'를 탐지하고 그 로컬 좌표를 MapTab에 전달하는 역할만 수행합니다.
 카메라 뷰 (Camera View): RealtimeMinimapView라는 새로운 위젯이 실시간 뷰를 전담합니다. 이 위젯은 MapTab으로부터 플레이어의 전역 좌표를 전달받아, 미리 생성된 '전체 맵' 이미지 위에서 해당 좌표를 중심으로 하는 영역을 잘라내어 보여줍니다. 이는 마치 거대한 지도 위를 카메라가 따라다니는 것과 같은 효과를 냅니다.
 데이터 동기화 강화 (v9.0.6): 데이터가 변경(추가, 수정, 삭제)될 때마다 save_profile_data 함수가 호출됩니다. 이 함수는 파일 저장 직후, _update_map_data_and_views라는 중앙 관리 함수를 호출하여 전역 좌표계 재계산과 전체 맵 이미지 재생성을 자동으로 수행합니다. 이를 통해 '핵심 지형 관리자', '웨이포인트 편집기', '실시간 뷰' 간의 데이터 불일치 문제를 해결하고 항상 최신 상태를 유지합니다.
+기준 앵커 시스템 (v9.0.7): 알파벳 순서에 의존하던 불안정한 좌표계 기준을 폐기하고, 사용자가 명시적으로 맵의 원점((0,0))이 될 **'기준 앵커'**를 지정하는 시스템을 도입했습니다. 이를 통해 핵심 지형의 추가, 삭제, 이름 변경에도 전체 맵 좌표계가 안정적으로 유지됩니다.
 map.py 클래스별 상세 분석:
 CroppingLabel(QLabel): FeatureCropDialog에서 영역을 시각적으로 표시하는 데 사용되는 간단한 QLabel 서브클래스.
 역할: FeatureCropDialog의 배경 이미지 위에 사용자가 드래그하는 사각형 영역을 실시간으로 그려줍니다.
@@ -77,19 +78,24 @@ FeatureCropDialog(QDialog): 새로운 핵심 지형을 추가할 때, 미니맵 
 KeyFeatureManagerDialog(QDialog): 등록된 핵심 지형을 관리(추가, 이름 변경, 삭제)하고, 각 지형이 어떤 웨이포인트에서 사용되고 있는지 보여주는 다이얼로그.
 역할: 핵심 지형 데이터(self.key_features)의 CRUD 작업을 수행하고, 관련 웨이포인트와의 연결 상태를 시각화합니다.
 주요 상호작용: MapTab의 self.key_features와 self.route_profiles를 참조하여 데이터를 표시하고 수정합니다. parent_map_tab.save_profile_data()를 호출하여 변경사항을 저장합니다.
-최근 변경 사항 (v9.0.6):
-'전체 웨이포인트 갱신' (on_update_all_clicked) 기능이 MapTab.update_all_waypoints_with_features를 호출하도록 변경되어, 웨이포인트와 핵심 지형 간의 연결 정보 불일치 문제를 해결했습니다.
-지형 삭제 시 MapTab의 원본 웨이포인트 데이터에서 해당 지형 링크가 즉시 제거되고 저장됩니다.
+최근 변경 사항:
+(v9.0.6) '전체 웨이포인트 갱신' (on_update_all_clicked) 기능이 MapTab.update_all_waypoints_with_features를 호출하도록 변경되어, 웨이포인트와 핵심 지형 간의 연결 정보 불일치 문제를 해결했습니다.
+(v9.0.7) 기준 앵커 시스템 도입:
+'기준 앵커로 지정' 버튼이 추가되었습니다.
+리스트에서 현재 기준 앵커는 별표(★)로 표시됩니다.
+set_as_reference_anchor: 새로운 기준 앵커 지정 시, 기존 맵 데이터(지형선, 오브젝트 등)의 절대 좌표와 웨이포인트-지형 간 상대 좌표를 모두 재계산하여 전체 좌표계를 새로운 기준에 맞게 변환합니다. 이를 통해 기준 앵커를 변경해도 기존 맵 구조가 깨지지 않습니다.
+기준 앵커로 지정된 지형은 삭제할 수 없도록 안전장치가 추가되었습니다.
 AdvancedWaypointCanvas(QLabel): AdvancedWaypointEditorDialog에서 웨이포인트의 목표 지점 및 관련 핵심 지형을 그리는 데 사용되던 캔버스.
 역할: 웨이포인트 편집 시 배경 미니맵 이미지 위에 목표 지점(초록색)과 탐지된 핵심 지형(파란색)을 표시하고, 사용자가 새로운 핵심 지형(주황색)을 그리거나 기존 지형을 삭제할 수 있도록 마우스 이벤트를 처리했습니다.
 최근 변경 사항: AdvancedWaypointEditorDialog가 QGraphicsView 기반으로 완전히 재구현되면서, 이 클래스는 현재 사용되지 않습니다. (다만 코드 파일에는 여전히 존재합니다.)
 AdvancedWaypointEditorDialog(QDialog): 개별 웨이포인트를 상세하게 편집하는 다이얼로그. 목표 지점 및 연결된 핵심 지형을 지정/수정할 수 있습니다.
 역할: 특정 웨이포인트의 이름, 미니맵 이미지, 목표 지점, 그리고 웨이포인트와 관련된 핵심 지형(이미 탐지된 것, 새로 추가할 것, 삭제할 것)을 시각적으로 편집할 수 있도록 합니다.
 주요 상호작용: MapTab에서 호출되며, 수정된 웨이포인트 데이터와 핵심 지형 변경 정보를 MapTab으로 전달합니다. parent_map_tab.key_features를 참조하여 편집합니다.
-최근 변경 사항 (v9.0.5):
-기존 QLabel 기반에서 QGraphicsView 기반(ZoomableView)으로 전환되어 휠 확대/축소 및 휠 클릭 패닝 기능이 추가되었습니다.
-다이얼로그가 화면에 완전히 표시된 후 fitInView를 호출하여 초기 배율이 최적화되었습니다.
-편집 모드(목표 지점, 핵심 지형)에 따라 커서가 십자(+) 모양으로 유지됩니다.
+최근 변경 사항:
+(v9.0.5) 기존 QLabel 기반에서 QGraphicsView 기반(ZoomableView)으로 전환되어 휠 확대/축소 및 휠 클릭 패닝 기능이 추가되었습니다.
+(v9.0.5) 다이얼로그가 화면에 완전히 표시된 후 fitInView를 호출하여 초기 배율이 최적화되었습니다.
+(v9.0.5) 편집 모드(목표 지점, 핵심 지형)에 따라 커서가 십자(+) 모양으로 유지됩니다.
+(v9.0.6) get_waypoint_data 메서드에서 반환하는 좌표를 정수(int)로 변환하여 QRect 생성자 TypeError를 해결했습니다.
 CustomGraphicsView(QGraphicsView): FullMinimapEditorDialog에서 사용되는 커스텀 QGraphicsView.
 역할: 전체 맵 편집기에서 확대/축소, 패닝, 마우스 이벤트 전달 기능을 제공합니다.
 주요 상호작용: FullMinimapEditorDialog의 on_scene_mouse_press, on_scene_mouse_move 등과 연결되어 지형 그리기/삭제 로직을 수행합니다.
@@ -118,10 +124,14 @@ MapTab(QWidget): '맵' 탭의 모든 UI와 핵심 로직을 총괄하는 메인 
 (v9.0.4) initUI에 '실시간 미니맵 뷰' 라벨 옆에 **'캐릭터 중심' QCheckBox**가 추가되었습니다.
 (v9.0.4) on_detection_ready 메서드에서 이 체크박스의 상태에 따라 RealtimeMinimapView의 카메라가 플레이어를 자동 추적할지 여부를 제어하도록 로직이 변경되었습니다.
 (v9.0.6) update_all_waypoints_with_features 메서드가 self.route_profiles의 원본 데이터를 직접 수정하도록 변경되어, 핵심 지형과 웨이포인트 간의 연결 정보 동기화 문제(사용처 불일치 등)가 완전히 해결되었습니다.
+(v9.0.7) 기준 앵커 시스템 도입:
+reference_anchor_id 멤버 변수가 추가되어 맵의 기준점을 명시적으로 관리합니다.
+load_profile_data / save_profile_data에서 reference_anchor_id를 파일에 읽고 씁니다.
+_calculate_global_positions는 이제 알파벳 순서가 아닌 reference_anchor_id를 원점으로 사용합니다. 기준 앵커가 삭제되었을 경우, 다른 지형을 자동으로 새 앵커로 지정하는 자동 복구(Self-Healing) 기능이 포함되어 좌표계의 안정성을 보장합니다.
 ZoomableView(QGraphicsView): (v9.0.5 도입) QGraphicsView를 상속받아 휠 확대/축소 및 휠 클릭 패닝 기능을 제공하는 재사용 가능한 뷰 클래스.
 역할: FeatureCropDialog와 AdvancedWaypointEditorDialog의 핵심 뷰로 사용되어, 이미지 편집 시 사용자에게 유연한 뷰 제어 기능을 제공합니다. set_drawing_mode 메서드를 통해 커서 모양(십자 또는 손바닥)과 드래그 모드를 전환할 수 있습니다.
 주요 상호작용: mousePressEvent, mouseMoveEvent, mouseReleaseEvent를 오버라이딩하여 휠 클릭 이벤트를 처리합니다.
-최근 변경 사항: ZoomableView의 도입 자체가 최근 변경 사항의 핵심입니다.
+최근 변경 사항: (v9.0.5) ZoomableView의 도입 자체가 최근 변경 사항의 핵심이며, 이후 이벤트 처리 방식이 안정화되었습니다.
 main.py - 애플리케이션 셸 및 로더
 애플리케이션의 진입점(Entry Point)으로, 전체 프로그램의 뼈대를 구성하고 각 기능 모듈을 탭으로 통합하는 역할을 합니다.
 MainWindow(QMainWindow): 애플리케이션의 메인 윈도우.
