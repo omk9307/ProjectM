@@ -103,8 +103,8 @@ PLAYER_Y_OFFSET = 1 # 플레이어 Y축 좌표 보정을 위한 오프셋. 양�
 #아이콘 크기 관련 상수 재정의 ---
 MIN_ICON_WIDTH = 9
 MIN_ICON_HEIGHT = 9
-MAX_ICON_WIDTH = 14
-MAX_ICON_HEIGHT = 14
+MAX_ICON_WIDTH = 20
+MAX_ICON_HEIGHT = 20
 PLAYER_ICON_STD_WIDTH = 11
 PLAYER_ICON_STD_HEIGHT = 11
 
@@ -1385,7 +1385,7 @@ class FullMinimapEditorDialog(QDialog):
                 center_x = sum(all_points_x) / len(all_points_x)
                 
                 floor_text = group[0].get('dynamic_name', f"{group[0].get('floor', 'N/A')}층")
-                font = QFont("맑은 고딕", 9, QFont.Weight.Bold)
+                font = QFont("맑은 고딕", 5, QFont.Weight.Bold) #층 이름 폰트 크기 미니맵 지형 편집기
                 
                 text_item = QGraphicsTextItem()
                 text_item.setHtml(f"<span style='color: white; text-shadow: 1px 1px 0 #000, -1px -1px 0 #000, 1px -1px 0 #000, -1px 1px 0 #000;'>{floor_text}</span>")
@@ -2631,15 +2631,16 @@ class RealtimeMinimapView(QLabel):
                 global_pos = QPointF(wp_data['pos'][0], wp_data['pos'][1])
                 local_pos = global_to_local(global_pos)
                 
-                # --- 수정: 줌 레벨에 따라 크기 변경 ---
+                # 줌 레벨에 따라 크기 변경 ---
                 scaled_size = WAYPOINT_SIZE * self.zoom_level
                 local_rect = QRectF(local_pos.x() - scaled_size/2, local_pos.y() - scaled_size, scaled_size, scaled_size)
-                # --- 수정 끝 ---
 
                 if wp_data['id'] == self.target_waypoint_id:
+                    # 목표 웨이포인트는 빨간색으로 강조
                     painter.setPen(QPen(Qt.GlobalColor.red, 2))
                     painter.setBrush(QBrush(QColor(255, 0, 0, 80)))
                 else:
+                    # 일반 웨이포인트는 초록색
                     painter.setPen(QPen(QColor(0, 255, 0), 2))
                     painter.setBrush(QBrush(QColor(0, 255, 0, 80)))
                 
@@ -2648,15 +2649,18 @@ class RealtimeMinimapView(QLabel):
                 order_text = wp_order_map.get(wp_data['id'], "")
                 if order_text:
                     font = QFont("맑은 고딕", 10, QFont.Weight.Bold)
-                    self._draw_text_with_outline(painter, local_rect.toRect(), Qt.AlignmentFlag.AlignCenter, order_text, font, Qt.GlobalColor.white, Qt.GlobalColor.black)
+                    # 목표 웨이포인트의 순서 텍스트도 빨간색으로 강조
+                    text_color = Qt.GlobalColor.red if wp_data['id'] == self.target_waypoint_id else Qt.GlobalColor.white
+                    self._draw_text_with_outline(painter, local_rect.toRect(), Qt.AlignmentFlag.AlignCenter, order_text, font, text_color, Qt.GlobalColor.black)
 
+                # 마지막으로 도달한 웨이포인트에 "도착" 표시
                 if wp_data['id'] == self.last_reached_waypoint_id:
                     font = QFont("맑은 고딕", 8, QFont.Weight.Bold)
                     tm = QFontMetrics(font)
                     text_rect = tm.boundingRect("도착")
-                    text_rect.moveCenter(local_rect.center().toPoint())
+                    # 도착 텍스트 위치를 사각형 중앙보다 약간 위로 조정
+                    text_rect.moveCenter(local_rect.center().toPoint() - QPoint(0, int(scaled_size * 0.1)))
                     self._draw_text_with_outline(painter, text_rect, Qt.AlignmentFlag.AlignCenter, "도착", font, Qt.GlobalColor.yellow, Qt.GlobalColor.black)
-
             painter.restore()
 
         # 내 캐릭터, 다른 유저 
@@ -3869,6 +3873,14 @@ class MapTab(QWidget):
         """
         탐지 스레드로부터 받은 정보를 처리하고, RANSAC을 이용해 플레이어의 전역 좌표를 강건하게 추정합니다.
         """
+        
+        if not my_player_rects:
+            self.update_detection_log_message("플레이어 아이콘 탐지 실패", "red")
+            # 디버그 뷰에도 현재 상태 전송 (플레이어 위치 없음)
+            if self.debug_dialog and self.debug_dialog.isVisible():
+                self.debug_dialog.update_debug_info(frame_bgr, {'all_features': found_features, 'inlier_ids': set(), 'player_pos_local': None})
+            return
+
         # --- 핵심 수정: 신뢰도 기반 사전 필터링 ---
         # RANSAC에 입력하기 전에, 각 지형의 개별 threshold를 통과한 지형들만 후보로 삼는다.
         reliable_features = []
@@ -4081,9 +4093,9 @@ class MapTab(QWidget):
             active_features=found_features,
             my_players=my_player_global_rects,
             other_players=other_player_global_rects,
-            target_wp_id=None,
-            reached_wp_id=None,
-            final_player_pos=final_player_pos # --- 수정: final_player_pos 전달 ---
+            target_wp_id=self.target_waypoint_id,
+            reached_wp_id=self.last_reached_wp_id,
+            final_player_pos=final_player_pos
         )
         
         self.global_pos_updated.emit(final_player_pos)
@@ -4220,169 +4232,197 @@ class MapTab(QWidget):
             self.minimap_view_label.camera_center_global = center_point
             self.minimap_view_label.update() # 뷰 갱신
 
-    def _calculate_waypoint_cost(self, player_pos, player_floor, wp_data, all_transition_objects):
-        """플레이어 위치에서 특정 웨이포인트까지의 상대적 이동 비용을 계산합니다."""
-        wp_pos = QPointF(wp_data['pos'][0], wp_data['pos'][1])
-        wp_floor = wp_data['floor']
+    def _calculate_path_cost(self, start_pos, start_floor, target_wp_data, all_transition_objects):
+        """
+        시작 위치/층에서 목표 웨이포인트까지의 예상 이동 비용(x축 거리)을 계산합니다.
+        상승 시에는 층 이동 오브젝트를 경유하는 비용을 누적합니다.
+        """
+        target_pos = QPointF(target_wp_data['pos'][0], target_wp_data['pos'][1])
+        target_floor = target_wp_data['floor']
         
-        player_x = player_pos.x()
-        wp_x = wp_pos.x()
-
-        if player_floor == wp_floor:
-            # 같은 층: 직선 거리
-            return math.hypot(player_pos.x() - wp_pos.x(), player_pos.y() - wp_pos.y())
+        if start_floor == target_floor:
+            # 같은 층: 직선 x축 거리
+            return abs(start_pos.x() - target_pos.x())
         
-        elif player_floor < wp_floor:
-            # 올라가야 할 때: (플레이어->가장 가까운 층이동오브젝트) + (오브젝트->웨이포인트) x축 거리
-            # 현재 층에서 시작하는 층 이동 오브젝트를 찾음
-            target_floor_objects = [obj for obj in all_transition_objects if obj.get('floor') == player_floor]
-            if not target_floor_objects:
-                return float('inf') # 올라갈 방법 없음
-
-            min_dist_to_obj = float('inf')
-            closest_obj_x = 0
-            for obj in target_floor_objects:
-                obj_x = obj.get("points", [[0,0]])[0][0]
-                dist = abs(player_x - obj_x)
-                if dist < min_dist_to_obj:
-                    min_dist_to_obj = dist
-                    closest_obj_x = obj_x
+        elif start_floor < target_floor:
+            # 올라가야 할 때: 층별로 경유 비용 누적
+            total_cost = 0
+            current_pos_x = start_pos.x()
             
-            return min_dist_to_obj + abs(closest_obj_x - wp_x)
+            # 한 층씩 올라가며 비용 계산
+            for floor_level in range(int(start_floor), int(target_floor)):
+                next_floor_level = floor_level + 1
+                
+                # 다음 층(next_floor_level)에 있는 층 이동 오브젝트들을 찾음
+                candidate_objects = [obj for obj in all_transition_objects if obj.get('floor') == next_floor_level]
+                
+                if not candidate_objects:
+                    return float('inf') # 올라갈 방법이 없으면 비용 무한대
+
+                # 현재 위치에서 가장 가까운 층 이동 오브젝트 찾기
+                closest_obj = min(candidate_objects, key=lambda obj: abs(current_pos_x - obj['points'][0][0]))
+                closest_obj_x = closest_obj['points'][0][0]
+                
+                # 현재 위치에서 오브젝트까지 가는 비용 추가
+                total_cost += abs(current_pos_x - closest_obj_x)
+                # 위치를 오브젝트 위치로 갱신
+                current_pos_x = closest_obj_x
+
+            # 마지막 오브젝트 위치에서 최종 목표 웨이포인트까지의 비용 추가
+            total_cost += abs(current_pos_x - target_pos.x())
+            return total_cost
         
-        else: # player_floor > wp_floor
+        else: # start_floor > target_floor
             # 내려가야 할 때: 단순 x축 거리 (낙하 가능)
-            return abs(player_x - wp_x)
+            return abs(start_pos.x() - target_pos.x())
 
     def _update_player_state_and_navigation(self, final_player_pos):
-        """플레이어의 현재 위치를 기반으로 층, 상태를 판단하고 다음 목표를 결정합니다."""
-        if final_player_pos is None:
-            return
+            """플레이어의 현재 위치를 기반으로 층, 상태를 판단하고 다음 목표를 결정합니다."""
+            if final_player_pos is None:
+                return
 
-        # 1. 현재 층 및 상태 판단 로직 (기존 구현)
-        contact_terrain = None
-        min_y_dist = 5.0
-        player_x = final_player_pos.x()
-        player_y = final_player_pos.y()
-        for line_data in self.geometry_data.get("terrain_lines", []):
-            points = line_data.get("points", [])
-            if len(points) < 2: continue
-            
-            # 다중 세그먼트 라인을 위한 수정
-            for i in range(len(points) - 1):
-                p1 = points[i]
-                p2 = points[i+1]
-                min_lx, max_lx = min(p1[0], p2[0]), max(p1[0], p2[0])
-
-                if not (min_lx <= player_x <= max_lx):
-                    continue
-
-                line_y = p1[1] + (p2[1] - p1[1]) * ((player_x - p1[0]) / (p2[0] - p1[0])) if (p2[0] - p1[0]) != 0 else p1[1]
-                y_dist = abs(player_y - line_y)
-
-                if y_dist < min_y_dist:
-                    min_y_dist = y_dist
-                    contact_terrain = line_data
-        
-        if contact_terrain:
-            self.player_nav_state = 'on_terrain'
-            self.current_player_floor = contact_terrain.get('floor')
-            self.last_terrain_line_id = contact_terrain.get('id')
-        else:
-            is_climbing = False
-            climbing_margin = 5
-            for obj_data in self.geometry_data.get("transition_objects", []):
-                obj_x = obj_data.get("points", [[0,0]])[0][0]
-                if abs(player_x - obj_x) < climbing_margin:
-                    is_climbing = True
-                    break
-            if is_climbing: self.player_nav_state = 'climbing'
-            else:
-                delta_y = player_y - self.last_player_pos.y()
-                if delta_y < -1: self.player_nav_state = 'jumping'
-                elif delta_y > 1: self.player_nav_state = 'falling'
-
-        # 2. 현재 목표(Current Target) 결정 로직
-        active_route = self.route_profiles.get(self.active_route_profile_name)
-        if not active_route: return
-        all_waypoints_map = {wp['id']: wp for wp in self.geometry_data.get("waypoints", [])}
-        
-        # 2a. 시작점이 아직 찾아지지 않았다면, 지능형 시작점 탐색 실행
-        if not self.start_waypoint_found and self.current_player_floor is not None:
-            forward_path = active_route.get("forward_path", [])
-            backward_path = active_route.get("backward_path", [])
-            all_wp_ids_in_path = set(forward_path + backward_path)
-            
-            if not all_wp_ids_in_path: return
-            
-            current_floor_wps = [wp for wp in all_waypoints_map.values() if wp['id'] in all_wp_ids_in_path and wp.get('floor') == self.current_player_floor]
-            
-            start_wp_candidate = None
-            if current_floor_wps:
-                start_wp_candidate = min(current_floor_wps, key=lambda wp: math.hypot(final_player_pos.x() - wp['pos'][0], final_player_pos.y() - wp['pos'][1]))
-            else:
-                other_floor_wps = [wp for wp in all_waypoints_map.values() if wp['id'] in all_wp_ids_in_path]
-                if other_floor_wps:
-                    all_objs = self.geometry_data.get("transition_objects", [])
-                    start_wp_candidate = min(other_floor_wps, key=lambda wp: self._calculate_waypoint_cost(final_player_pos, self.current_player_floor, wp, all_objs))
-
-            if start_wp_candidate:
-                start_wp_id = start_wp_candidate['id']
+            # 1. 현재 층 및 상태 판단 로직
+            contact_terrain = None
+            min_y_dist = 5.0
+            player_x = final_player_pos.x()
+            player_y = final_player_pos.y()
+            for line_data in self.geometry_data.get("terrain_lines", []):
+                points = line_data.get("points", [])
+                if len(points) < 2: continue
                 
-                if start_wp_id in forward_path:
-                    forward_index = forward_path.index(start_wp_id)
-                    forward_len = len(forward_path)
-                    dist_to_start = forward_index
-                    dist_to_end = forward_len - 1 - forward_index
+                for i in range(len(points) - 1):
+                    p1 = points[i]
+                    p2 = points[i+1]
+                    min_lx, max_lx = min(p1[0], p2[0]), max(p1[0], p2[0])
+
+                    if not (min_lx <= player_x <= max_lx):
+                        continue
+
+                    line_y = p1[1] + (p2[1] - p1[1]) * ((player_x - p1[0]) / (p2[0] - p1[0])) if (p2[0] - p1[0]) != 0 else p1[1]
+                    y_dist = abs(player_y - line_y)
+
+                    if y_dist < min_y_dist:
+                        min_y_dist = y_dist
+                        contact_terrain = line_data
+            
+            if contact_terrain:
+                self.player_nav_state = 'on_terrain'
+                self.current_player_floor = contact_terrain.get('floor')
+                self.last_terrain_line_id = contact_terrain.get('id')
+            else:
+                is_climbing = False
+                climbing_margin = 5
+                for obj_data in self.geometry_data.get("transition_objects", []):
+                    obj_x = obj_data.get("points", [[0,0]])[0][0]
+                    if abs(player_x - obj_x) < climbing_margin:
+                        is_climbing = True
+                        break
+                if is_climbing: self.player_nav_state = 'climbing'
+                else:
+                    delta_y = player_y - self.last_player_pos.y()
+                    if delta_y < -1: self.player_nav_state = 'jumping'
+                    elif delta_y > 1: self.player_nav_state = 'falling'
+
+            # 2. 현재 목표(Current Target) 결정 로직
+            active_route = self.route_profiles.get(self.active_route_profile_name)
+            if not active_route: return
+            all_waypoints_map = {wp['id']: wp for wp in self.geometry_data.get("waypoints", [])}
+            
+            # 2a. 시작점이 아직 찾아지지 않았다면, 지능형 시작점 탐색 실행
+            if not self.start_waypoint_found and self.current_player_floor is not None:
+                forward_path = active_route.get("forward_path", [])
+                backward_path = active_route.get("backward_path", [])
+                all_wp_ids_in_path = set(forward_path + backward_path)
+                
+                if not all_wp_ids_in_path: return
+                
+                # 1. 경로에 있는 모든 웨이포인트를 층별로 그룹화
+                wps_by_floor = defaultdict(list)
+                for wp_id in all_wp_ids_in_path:
+                    if wp_id in all_waypoints_map:
+                        wp_data = all_waypoints_map[wp_id]
+                        wps_by_floor[wp_data.get('floor')].append(wp_data)
+
+                if not wps_by_floor: return
+
+                # 2. 가장 가까운 층(들) 찾기
+                min_floor_diff = float('inf')
+                for floor in wps_by_floor.keys():
+                    diff = abs(self.current_player_floor - floor)
+                    if diff < min_floor_diff:
+                        min_floor_diff = diff
+                
+                # 3. 최우선 후보군 필터링 (가장 가까운 층에 있는 모든 웨이포인트)
+                final_candidate_wps = []
+                for floor, wps in wps_by_floor.items():
+                    if abs(self.current_player_floor - floor) == min_floor_diff:
+                        final_candidate_wps.extend(wps)
+
+                # 4. 최종 후보군 내에서 비용이 가장 낮은 웨이포인트 찾기
+                start_wp_candidate = None
+                if final_candidate_wps:
+                    all_objs = self.geometry_data.get("transition_objects", [])
+                    start_wp_candidate = min(final_candidate_wps, 
+                                            key=lambda wp: self._calculate_path_cost(final_player_pos, self.current_player_floor, wp, all_objs))
+
+                if start_wp_candidate:
+                    start_wp_id = start_wp_candidate['id']
                     
-                    if dist_to_start <= dist_to_end:
-                        self.is_forward = True
-                        self.current_path_index = forward_index
+                    # 진행 방향 결정
+                    if start_wp_id in forward_path:
+                        forward_index = forward_path.index(start_wp_id)
+                        forward_len = len(forward_path)
+                        dist_to_start = forward_index
+                        dist_to_end = forward_len - 1 - forward_index
+                        
+                        if dist_to_start <= dist_to_end:
+                            self.is_forward = True
+                            self.current_path_index = forward_index
+                        else:
+                            self.is_forward = False
+                            path_to_use = backward_path if backward_path else list(reversed(forward_path))
+                            if start_wp_id in path_to_use: self.current_path_index = path_to_use.index(start_wp_id)
+                            else: self.is_forward = True; self.current_path_index = forward_index
                     else:
                         self.is_forward = False
-                        path_to_use = backward_path if backward_path else list(reversed(forward_path))
+                        path_to_use = backward_path if backward_path else []
                         if start_wp_id in path_to_use: self.current_path_index = path_to_use.index(start_wp_id)
-                        else: self.is_forward = True; self.current_path_index = forward_index
-                else:
-                    self.is_forward = False
-                    path_to_use = backward_path if backward_path else []
-                    if start_wp_id in path_to_use: self.current_path_index = path_to_use.index(start_wp_id)
-                
-                self.target_waypoint_id = start_wp_id
-                self.start_waypoint_found = True
-                self.update_general_log(f"가장 가까운 웨이포인트 '{start_wp_candidate['name']}'에서 내비게이션 시작.", "purple")
-
-        # 2b. (시작점 찾은 후) 현재 목표에 도달했는지 확인
-        elif self.target_waypoint_id:
-            target_wp_data = all_waypoints_map.get(self.target_waypoint_id)
-            if target_wp_data:
-                target_pos = QPointF(target_wp_data['pos'][0], target_wp_data['pos'][1])
-                if (abs(final_player_pos.x() - target_pos.x()) < 10 and abs(final_player_pos.y() - target_pos.y()) < 15):
-                    self.last_reached_wp_id = self.target_waypoint_id
                     
-                    current_path_list = active_route.get("forward_path" if self.is_forward else "backward_path", [])
-                    if not current_path_list and self.is_forward is False:
-                        current_path_list = list(reversed(active_route.get("forward_path", [])))
+                    self.target_waypoint_id = start_wp_id
+                    self.start_waypoint_found = True
+                    self.update_general_log(f"가장 가까운 경로의 웨이포인트 '{start_wp_candidate['name']}'({start_wp_candidate['floor']}층)에서 내비게이션 시작.", "purple")
 
-                    self.current_path_index += 1
-
-                    if self.current_path_index < len(current_path_list):
-                        self.target_waypoint_id = current_path_list[self.current_path_index]
-                    else:
-                        self.is_forward = not self.is_forward
-                        next_path_list = active_route.get("forward_path" if self.is_forward else "backward_path", [])
-                        if not next_path_list and self.is_forward is False:
-                            next_path_list = list(reversed(active_route.get("forward_path", [])))
+            # 2b. (시작점 찾은 후) 현재 목표에 도달했는지 확인
+            elif self.target_waypoint_id:
+                target_wp_data = all_waypoints_map.get(self.target_waypoint_id)
+                if target_wp_data:
+                    target_pos = QPointF(target_wp_data['pos'][0], target_wp_data['pos'][1])
+                    if (abs(final_player_pos.x() - target_pos.x()) < 10 and abs(final_player_pos.y() - target_pos.y()) < 15):
+                        self.last_reached_wp_id = self.target_waypoint_id
                         
-                        if next_path_list:
-                            self.current_path_index = 0
-                            self.target_waypoint_id = next_path_list[0]
-                        else:
-                            self.target_waypoint_id = None
-                            self.update_general_log("경로 완주. 순환할 경로가 없습니다.", "green")
+                        current_path_list = active_route.get("forward_path" if self.is_forward else "backward_path", [])
+                        if not current_path_list and self.is_forward is False:
+                            current_path_list = list(reversed(active_route.get("forward_path", [])))
 
-        # 3. 마무리
-        self.last_player_pos = final_player_pos
+                        self.current_path_index += 1
+
+                        if self.current_path_index < len(current_path_list):
+                            self.target_waypoint_id = current_path_list[self.current_path_index]
+                        else:
+                            self.is_forward = not self.is_forward
+                            next_path_list = active_route.get("forward_path" if self.is_forward else "backward_path", [])
+                            if not next_path_list and self.is_forward is False:
+                                next_path_list = list(reversed(active_route.get("forward_path", [])))
+                            
+                            if next_path_list:
+                                self.current_path_index = 0
+                                self.target_waypoint_id = next_path_list[0]
+                            else:
+                                self.target_waypoint_id = None
+                                self.update_general_log("경로 완주. 순환할 경로가 없습니다.", "green")
+
+            # 3. 마무리
+            self.last_player_pos = final_player_pos
 
     def update_general_log(self, message, color):
         self.general_log_viewer.append(f'<font color="{color}">{message}</font>')
