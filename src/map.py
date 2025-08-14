@@ -2672,7 +2672,13 @@ class MapTab(QWidget):
         self.active_feature_info = []
         self.reference_anchor_id = None
         self.smoothed_player_pos = None
-        # --- 수정: 지형 간 상대 위치 벡터 저장 ---
+        
+        self.player_nav_state = 'on_terrain'  # 'on_terrain', 'climbing', 'jumping', 'falling'
+        self.current_player_floor = None
+        self.last_terrain_line_id = None
+        self.last_player_pos = QPointF(0, 0)
+        
+        #지형 간 상대 위치 벡터 저장 ---
         self.feature_offsets = {}
         
         self.render_options = {
@@ -3756,6 +3762,10 @@ class MapTab(QWidget):
         
         final_player_pos = self.smoothed_player_pos # 최종 플레이어의 전역 좌표
 
+        # 상태 업데이트 메서드 호출 추가
+        self._update_player_state_and_navigation(final_player_pos)
+
+
         # 4. 디버그 뷰 업데이트
         if self.debug_dialog and self.debug_dialog.isVisible():
             debug_data = {
@@ -3964,6 +3974,74 @@ class MapTab(QWidget):
             center_point = content_rect.center()
             self.minimap_view_label.camera_center_global = center_point
             self.minimap_view_label.update() # 뷰 갱신
+
+    def _update_player_state_and_navigation(self, final_player_pos):
+        """플레이어의 현재 위치를 기반으로 층, 상태(지형 위, 등반, 점프, 낙하)를 판단하고 내비게이션 정보를 업데이트합니다."""
+        if final_player_pos is None:
+            return
+
+        # 1. 지형 접촉 확인
+        contact_terrain = None
+        min_y_dist = 5.0  # 지형 위에 있다고 판단할 최대 y축 거리
+        
+        player_x = final_player_pos.x()
+        player_y = final_player_pos.y()
+
+        for line_data in self.geometry_data.get("terrain_lines", []):
+            points = line_data.get("points", [])
+            if len(points) < 2: continue
+
+            # 지형선의 x축 범위 내에 플레이어가 있는지 확인
+            min_x = min(p[0] for p in points)
+            max_x = max(p[0] for p in points)
+            if not (min_x <= player_x <= max_x):
+                continue
+            
+            # 플레이어 x좌표에 해당하는 지형선의 y좌표 계산
+            # (단순화를 위해 두 점 사이의 직선으로 가정)
+            # TODO: 다중 세그먼트 라인에 대한 더 정확한 y좌표 계산 로직 추가 가능
+            p1 = points[0]
+            p2 = points[-1]
+            line_y_at_player_x = p1[1] + (p2[1] - p1[1]) * ((player_x - p1[0]) / (p2[0] - p1[0])) if (p2[0] - p1[0]) != 0 else p1[1]
+            
+            y_dist = abs(player_y - line_y_at_player_x)
+
+            if y_dist < min_y_dist:
+                min_y_dist = y_dist
+                contact_terrain = line_data
+
+        # 2. 상태 분기
+        if contact_terrain:
+            self.player_nav_state = 'on_terrain'
+            self.current_player_floor = contact_terrain.get('floor')
+            self.last_terrain_line_id = contact_terrain.get('id')
+        else: # 공중에 있을 때
+            # 층 이동 오브젝트 확인 (x축 기준)
+            is_climbing = False
+            climbing_margin = 5 # 층 이동 오브젝트 x축 판정 여유
+            for obj_data in self.geometry_data.get("transition_objects", []):
+                # 층 이동 오브젝트는 수직이므로 x좌표는 동일
+                obj_x = obj_data.get("points", [[0,0]])[0][0]
+                if abs(player_x - obj_x) < climbing_margin:
+                    # 현재 층과 연결된 오브젝트인지 확인하면 더 정확하지만, 일단 x좌표만으로 판단
+                    is_climbing = True
+                    break
+            
+            if is_climbing:
+                self.player_nav_state = 'climbing'
+            else: # 일반적인 공중 상태 (점프/낙하)
+                delta_y = player_y - self.last_player_pos.y()
+                if delta_y < -1: # y값이 작아짐 (위로 이동)
+                    self.player_nav_state = 'jumping'
+                elif delta_y > 1: # y값이 커짐 (아래로 이동)
+                    self.player_nav_state = 'falling'
+                # y 변화가 거의 없으면 이전 상태(점프 최고점 등) 유지
+
+        # 3. 마무리: 다음 프레임을 위해 현재 위치 저장
+        self.last_player_pos = final_player_pos
+
+        # 4. (임시) 디버그 정보 출력 - 추후 네비게이터 UI 업데이트로 대체
+        # print(f"상태: {self.player_nav_state}, 층: {self.current_player_floor}, 위치: ({player_x:.1f}, {player_y:.1f})")
 
     def update_general_log(self, message, color):
         self.general_log_viewer.append(f'<font color="{color}">{message}</font>')
