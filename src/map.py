@@ -2997,6 +2997,7 @@ class MapTab(QWidget):
             self._generate_full_map_pixmap()
             self.update_ui_for_new_profile()
             self.update_general_log(f"'{profile_name}' 맵 프로필을 로드했습니다.", "blue")
+            self._center_realtime_view_on_map()
         except Exception as e:
             self.update_general_log(f"'{profile_name}' 프로필 로드 오류: {e}", "red")
             self.update_ui_for_no_profile()
@@ -3915,6 +3916,54 @@ class MapTab(QWidget):
             
             painter.end()
             self.update_general_log(f"배경 지도 이미지 생성 완료. (크기: {self.full_map_pixmap.width()}x{self.full_map_pixmap.height()})", "green")
+
+    def _calculate_content_bounding_rect(self):
+        """현재 맵의 모든 시각적 요소(지형, 오브젝트 등)를 포함하는 전체 경계를 계산합니다."""
+        if not self.global_positions and not self.geometry_data:
+            return QRectF()
+
+        content_rect = QRectF()
+        
+        # 1. 핵심 지형의 경계 계산
+        for feature_id, pos in self.global_positions.items():
+            if feature_id in self.key_features:
+                feature_data = self.key_features[feature_id]
+                size_data = feature_data.get('size')
+                if size_data and len(size_data) == 2:
+                    size = QSizeF(size_data[0], size_data[1])
+                    feature_rect = QRectF(pos, size)
+                    content_rect = content_rect.united(feature_rect)
+
+        # 2. 모든 지오메트리 포인트 수집
+        all_points = []
+        for line in self.geometry_data.get("terrain_lines", []):
+            all_points.extend(line.get("points", []))
+        for obj in self.geometry_data.get("transition_objects", []):
+            all_points.extend(obj.get("points", []))
+        for wp in self.geometry_data.get("waypoints", []):
+            all_points.append(wp.get("pos", [0, 0]))
+        for jump in self.geometry_data.get("jump_links", []):
+            all_points.append(jump.get("start_vertex_pos", [0, 0]))
+            all_points.append(jump.get("end_vertex_pos", [0, 0]))
+
+        # 3. 지오메트리 포인트들의 경계 계산 및 통합
+        if all_points:
+            min_x = min(p[0] for p in all_points)
+            max_x = max(p[0] for p in all_points)
+            min_y = min(p[1] for p in all_points)
+            max_y = max(p[1] for p in all_points)
+            geometry_rect = QRectF(min_x, min_y, max_x - min_x, max_y - min_y)
+            content_rect = content_rect.united(geometry_rect)
+            
+        return content_rect
+
+    def _center_realtime_view_on_map(self):
+        """실시간 미니맵 뷰를 맵 콘텐츠의 중앙으로 이동시킵니다."""
+        content_rect = self._calculate_content_bounding_rect()
+        if not content_rect.isNull():
+            center_point = content_rect.center()
+            self.minimap_view_label.camera_center_global = center_point
+            self.minimap_view_label.update() # 뷰 갱신
 
     def update_general_log(self, message, color):
         self.general_log_viewer.append(f'<font color="{color}">{message}</font>')
