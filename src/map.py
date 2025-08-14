@@ -1340,9 +1340,13 @@ class FullMinimapEditorDialog(QDialog):
 
     def _update_all_floor_texts(self):
             # 기존 층 번호 텍스트 모두 삭제
+            items_to_remove = []
             for item in self.scene.items():
-                if isinstance(item, QGraphicsTextItem) and item.data(0) == "floor_text":
-                    self.scene.removeItem(item)
+                if item.data(0) in ["floor_text", "floor_text_bg"]:
+                    items_to_remove.append(item)
+            
+            for item in items_to_remove:
+                self.scene.removeItem(item)
 
             from collections import defaultdict, deque
             terrain_lines = self.geometry_data.get("terrain_lines", [])
@@ -1386,14 +1390,36 @@ class FullMinimapEditorDialog(QDialog):
                 
                 floor_text = group[0].get('dynamic_name', f"{group[0].get('floor', 'N/A')}층")
                 font = QFont("맑은 고딕", 5, QFont.Weight.Bold) #층 이름 폰트 크기 미니맵 지형 편집기
-                
-                text_item = QGraphicsTextItem()
-                text_item.setHtml(f"<span style='color: white; text-shadow: 1px 1px 0 #000, -1px -1px 0 #000, 1px -1px 0 #000, -1px 1px 0 #000;'>{floor_text}</span>")
+                    
+                text_item = QGraphicsTextItem(floor_text)
                 text_item.setFont(font)
-                text_rect = text_item.boundingRect()
+                text_item.setDefaultTextColor(Qt.GlobalColor.white)
                 
-                text_item.setPos(center_x - text_rect.width() / 2, max_y - 4)
+                # 마우스 이벤트 무시 설정 (클릭 버그 수정)
+                text_item.setAcceptedMouseButtons(Qt.MouseButton.NoButton)
+
+                text_rect = text_item.boundingRect()
+                padding_x = 2
+                padding_y = 0
+                bg_rect_geom = text_rect.adjusted(-padding_x, -padding_y, padding_x, padding_y)
+
+                base_pos_x = center_x - bg_rect_geom.width() / 2
+                base_pos_y = max_y + 4
+
+                background_rect = RoundedRectItem(QRectF(0, 0, bg_rect_geom.width(), bg_rect_geom.height()), 3, 3)
+                background_rect.setBrush(QColor(0, 0, 0, 120))
+                background_rect.setPen(QPen(Qt.GlobalColor.transparent))
+                background_rect.setPos(base_pos_x, base_pos_y)
+                
+                text_item.setPos(base_pos_x + padding_x, base_pos_y + padding_y)
+
+                background_rect.setData(0, "floor_text_bg")
                 text_item.setData(0, "floor_text")
+                
+                background_rect.setZValue(5)
+                text_item.setZValue(6)
+
+                self.scene.addItem(background_rect)
                 self.scene.addItem(text_item)
 
     def _draw_text_with_outline(self, painter, rect, flags, text, font, text_color, outline_color):
@@ -1629,6 +1655,87 @@ class FullMinimapEditorDialog(QDialog):
             color_map[feature_id] = colors[i % len(colors)]
         return color_map
 
+    #MapTab의 _assign_dynamic_names 메서드를 여기에 복사 ---
+    def _assign_dynamic_names(self):
+        """
+        (Dialog 내부용) 현재 편집 중인 geometry_data에 동적 이름을 부여합니다.
+        """
+        if not self.geometry_data:
+            return
+
+        terrain_lines = self.geometry_data.get("terrain_lines", [])
+        lines_by_id = {line['id']: line for line in terrain_lines}
+        line_id_to_group_name = {}
+
+        if terrain_lines:
+            adj = defaultdict(list)
+            point_to_lines = defaultdict(list)
+            for line in terrain_lines:
+                for p in line['points']:
+                    point_to_lines[tuple(p)].append(line['id'])
+            
+            for p, ids in point_to_lines.items():
+                for i in range(len(ids)):
+                    for j in range(i + 1, len(ids)):
+                        adj[ids[i]].append(ids[j])
+                        adj[ids[j]].append(ids[i])
+
+            visited = set()
+            all_groups = []
+            for line_id in lines_by_id:
+                if line_id not in visited:
+                    current_group = []
+                    q = deque([line_id])
+                    visited.add(line_id)
+                    while q:
+                        current_id = q.popleft()
+                        current_group.append(lines_by_id[current_id])
+                        for neighbor_id in adj[current_id]:
+                            if neighbor_id not in visited:
+                                visited.add(neighbor_id)
+                                q.append(neighbor_id)
+                    all_groups.append(current_group)
+
+            groups_by_floor = defaultdict(list)
+            for group in all_groups:
+                if group:
+                    floor = group[0].get('floor', 0)
+                    groups_by_floor[floor].append(group)
+            
+            for floor, groups in groups_by_floor.items():
+                sorted_groups = sorted(groups, key=lambda g: sum(p[0] for line in g for p in line['points']) / sum(len(line['points']) for line in g))
+                
+                for i, group in enumerate(sorted_groups):
+                    group_name = f"{floor}층_{chr(ord('A') + i)}"
+                    for line in group:
+                        line['dynamic_name'] = group_name
+                        line_id_to_group_name[line['id']] = group_name
+
+        transition_objects = self.geometry_data.get("transition_objects", [])
+        if transition_objects:
+            objs_by_parent_group = defaultdict(list)
+            for obj in transition_objects:
+                parent_id = obj.get('parent_line_id')
+                if parent_id and parent_id in line_id_to_group_name:
+                    parent_group_name = line_id_to_group_name[parent_id]
+                    objs_by_parent_group[parent_group_name].append(obj)
+
+            for parent_name, objs in objs_by_parent_group.items():
+                sorted_objs = sorted(objs, key=lambda o: o['points'][0][0])
+                for i, obj in enumerate(sorted_objs):
+                    obj['dynamic_name'] = f"{parent_name}_{i + 1}"
+
+        jump_links = self.geometry_data.get("jump_links", [])
+        if jump_links:
+            jumps_by_floor = defaultdict(list)
+            for jump in jump_links:
+                jumps_by_floor[jump.get('floor', 0)].append(jump)
+
+            for floor, jumps in jumps_by_floor.items():
+                sorted_jumps = sorted(jumps, key=lambda j: (j['start_vertex_pos'][0] + j['end_vertex_pos'][0]) / 2)
+                for i, jump in enumerate(sorted_jumps):
+                    jump['dynamic_name'] = f"{floor}층_J{i + 1}"
+
     def populate_scene(self):
             self.scene.clear()
             self.lod_text_items = []
@@ -1677,61 +1784,47 @@ class FullMinimapEditorDialog(QDialog):
                     line_item = self._add_object_line(QPointF(points[0][0], points[0][1]), QPointF(points[1][0], points[1][1]), obj_data['id'])
                     if 'dynamic_name' in obj_data:
                         name = obj_data['dynamic_name']
-                    # 1. 텍스트 아이템 생성
-                    text_item = QGraphicsTextItem(name)
-                    font = QFont("맑은 고딕", 3, QFont.Weight.Bold) # 폰트 크기 6pt로 설정
-                    text_item.setFont(font)
-                    text_item.setDefaultTextColor(QColor("orange"))
-                    
-                    # 2. 텍스트 위치 계산
-                    text_rect = text_item.boundingRect()
-                    # 1. 여백(padding)을 추가하여 배경 사각형 크기 정의
-                    padding_x = -3
-                    padding_y = -3
-                    bg_rect_geom = text_rect.adjusted(-padding_x, -padding_y, padding_x, padding_y)
+                        font = QFont("맑은 고딕", 3, QFont.Weight.Bold)
+                        text_item = QGraphicsTextItem(name)
+                        text_item.setFont(font)
+                        text_item.setDefaultTextColor(QColor("orange"))
+                        
+                        text_rect = text_item.boundingRect()
+                        padding_x = -3
+                        padding_y = -3
+                        bg_rect_geom = text_rect.adjusted(-padding_x, -padding_y, padding_x, padding_y)
 
-                    # --- 수정 시작: 층 이동 오브젝트 이름 위치 계산 로직 변경 ---
-                    line_center = line_item.boundingRect().center()
-                    
-                    # 이름표(배경 포함)의 X, Y 위치를 라인의 중앙에 맞춤
-                    base_pos_x = line_center.x() - bg_rect_geom.width() / 2
-                    base_pos_y = line_center.y() - bg_rect_geom.height() / 2
-                    
-                    # 3. 둥근 모서리 사각형 생성
-                    background_rect = RoundedRectItem(QRectF(0, 0, bg_rect_geom.width(), bg_rect_geom.height()), 3, 3) # 3,3은 곡률
-                    background_rect.setBrush(QColor(0, 0, 0, 120))
-                    background_rect.setPen(QPen(Qt.GlobalColor.transparent))
-                    background_rect.setPos(base_pos_x, base_pos_y)
-                    background_rect.setData(0, "transition_object_name_bg")
-                    
-                    # 텍스트 위치를 배경 사각형 중앙에 맞춤
-                    text_item.setPos(base_pos_x + padding_x, base_pos_y + padding_y)
-                    # 4. Z-value 설정 및 씬에 추가
-                    background_rect.setZValue(10)
-                    text_item.setZValue(11) # 텍스트가 위로 오도록
-                    
-                    self.scene.addItem(background_rect)
-                    self.scene.addItem(text_item)
-                    
-                    # 5. LOD 관리 대상에 추가
-                    self.lod_text_items.append(text_item)
-                    self.lod_text_items.append(background_rect)
-                    # --- 수정 끝 ---
-        
+                        line_center = line_item.boundingRect().center()
+                        
+                        base_pos_x = line_center.x() - bg_rect_geom.width() / 2
+                        base_pos_y = line_center.y() - bg_rect_geom.height() / 2
+                        
+                        background_rect = RoundedRectItem(QRectF(0, 0, bg_rect_geom.width(), bg_rect_geom.height()), 3, 3)
+                        background_rect.setBrush(QColor(0, 0, 0, 120))
+                        background_rect.setPen(QPen(Qt.GlobalColor.transparent))
+                        background_rect.setPos(base_pos_x, base_pos_y)
+                        background_rect.setData(0, "transition_object_name_bg")
+                        
+                        text_item.setPos(base_pos_x + padding_x, base_pos_y + padding_y)
+                        background_rect.setZValue(10)
+                        text_item.setZValue(11)
+                        
+                        self.scene.addItem(background_rect)
+                        self.scene.addItem(text_item)
+                        
+                        self.lod_text_items.append(text_item)
+                        self.lod_text_items.append(background_rect)
+            
             for jump_data in self.geometry_data.get("jump_links", []):
                 line_item = self._add_jump_link_line(QPointF(jump_data['start_vertex_pos'][0], jump_data['start_vertex_pos'][1]), QPointF(jump_data['end_vertex_pos'][0], jump_data['end_vertex_pos'][1]), jump_data['id'])
                 if 'dynamic_name' in jump_data:
                     name = jump_data['dynamic_name']
                     
-                    # --- 수정 시작: 텍스트 + 배경 사각형 생성 ---
-                    # 1. 텍스트 아이템 생성
                     text_item = QGraphicsTextItem(name)
-                    font = QFont("맑은 고딕", 3, QFont.Weight.Bold) # 폰트 크기 6pt로 설정
+                    font = QFont("맑은 고딕", 3, QFont.Weight.Bold)
                     text_item.setFont(font)
                     text_item.setDefaultTextColor(QColor("lime"))
                     
-                    # 2. 텍스트 위치 계산
-                    # --- 수정 시작: 배경 사각형 크기 및 모양 조정 ---
                     text_rect = text_item.boundingRect()
                     padding_x = -3
                     padding_y = -3
@@ -1739,7 +1832,7 @@ class FullMinimapEditorDialog(QDialog):
 
                     line_center = line_item.boundingRect().center()
                     base_pos_x = line_center.x() - bg_rect_geom.width() / 2
-                    base_pos_y = line_center.y() - bg_rect_geom.height() / 2 - 7 # 지형 점프 연결 이름 Y축 위치 조정 
+                    base_pos_y = line_center.y() - bg_rect_geom.height() / 2 - 7
                     
                     background_rect = RoundedRectItem(QRectF(0, 0, bg_rect_geom.width(), bg_rect_geom.height()), 3, 3)
                     background_rect.setBrush(QColor(0, 0, 0, 120))
@@ -1749,17 +1842,15 @@ class FullMinimapEditorDialog(QDialog):
                     
                     text_item.setPos(base_pos_x + padding_x, base_pos_y + padding_y)
                     
-                    # 4. Z-value 설정 및 씬에 추가
                     background_rect.setZValue(10)
                     text_item.setZValue(11)
                     
                     self.scene.addItem(background_rect)
                     self.scene.addItem(text_item)
                     
-                    # 5. LOD 관리 대상에 추가
                     self.lod_text_items.append(text_item)
                     self.lod_text_items.append(background_rect)
-                    
+                        
             # 4. 웨이포인트 순서 계산 및 그리기
             wp_order_map = {}
             route = self.route_profiles.get(self.active_route_profile, {})
@@ -1772,7 +1863,8 @@ class FullMinimapEditorDialog(QDialog):
                     wp_order_map[wp_id] = f"{i+1}"
 
             for wp_data in self.geometry_data.get("waypoints", []):
-                self._add_waypoint_rect(QPointF(wp_data['pos'][0], wp_data['pos'][1]), wp_data['id'], wp_data['name'], wp_order_map.get(wp_data['id'], ""))
+                # --- 수정: order_text 대신 wp_data['name']을 중앙 텍스트로 전달 ---
+                self._add_waypoint_rect(QPointF(wp_data['pos'][0], wp_data['pos'][1]), wp_data['id'], wp_data['name'], wp_data['name'])
                 
             # 5. 모든 층 번호 텍스트를 마지막에 그림
             self._update_all_floor_texts()
@@ -1960,13 +2052,27 @@ class FullMinimapEditorDialog(QDialog):
                         break
                 
                 if line_id_to_change:
-                    for line_data in self.geometry_data["terrain_lines"]:
-                        if line_data["id"] == line_id_to_change:
-                            new_floor = self.floor_spinbox.value()
-                            line_data["floor"] = new_floor
-                            self.parent_map_tab.update_general_log(f"지형선({line_id_to_change[:8]})의 층을 {new_floor}로 변경했습니다.", "blue")
-                            self._update_all_floor_texts() # 층 번호 즉시 갱신
-                            break
+                    # --- 수정 시작: 다이얼로그 내부 데이터만 수정하도록 변경 ---
+                    new_floor = self.floor_spinbox.value()
+                    
+                    # 1. Dialog의 데이터 복사본에서 해당 ID를 가진 모든 라인의 층 변경
+                    clicked_line = next((line for line in self.geometry_data["terrain_lines"] if line["id"] == line_id_to_change), None)
+                    if clicked_line:
+                        # 같은 그룹에 속한 모든 라인을 찾기 위해 dynamic_name을 사용 (이름이 없다면 먼저 생성)
+                        if 'dynamic_name' not in clicked_line:
+                            self._assign_dynamic_names()
+                        
+                        target_group_name = clicked_line.get('dynamic_name')
+                        for line_data in self.geometry_data["terrain_lines"]:
+                            if line_data.get('dynamic_name') == target_group_name:
+                                line_data["floor"] = new_floor
+
+                    # 2. Dialog 내부의 동적 이름 생성 메서드 호출
+                    self._assign_dynamic_names()
+                    
+                    # 3. UI 갱신 (MapTab의 로그는 여기서 출력하지 않음)
+                    self._update_all_floor_texts()
+                    
             elif button == Qt.MouseButton.RightButton:
                 deleted = False
                 items_at_pos = self.view.items(self.view.mapFromScene(scene_pos))
@@ -2050,30 +2156,39 @@ class FullMinimapEditorDialog(QDialog):
         # --- v10.0.0 수정 끝 ---
     
     def _add_waypoint_rect(self, pos, wp_id, name, order_text):
-        """씬에 웨이포인트 사각형과 순서를 추가합니다."""
-        size = 12
-        rect_item = self.scene.addRect(0, 0, size, size, QPen(Qt.GlobalColor.green), QBrush(QColor(0, 255, 0, 80)))
-        rect_item.setPos(pos - QPointF(size/2, size))
-        rect_item.setData(0, "waypoint_v10")
-        rect_item.setData(1, wp_id)
+            """씬에 웨이포인트 사각형과 순서를 추가합니다."""
+            size = 12
+            rect_item = self.scene.addRect(0, 0, size, size, QPen(Qt.GlobalColor.green), QBrush(QColor(0, 255, 0, 80)))
+            rect_item.setPos(pos - QPointF(size/2, size))
+            rect_item.setData(0, "waypoint_v10")
+            rect_item.setData(1, wp_id)
 
-        # 이름 텍스트는 툴팁으로 변경
-        rect_item.setToolTip(name)
+            # 이름 텍스트는 툴팁으로 변경
+            rect_item.setToolTip(name)
 
-        # 순서 텍스트를 사각형 중앙에 추가
-        text_item = QGraphicsTextItem(order_text)
-        font = QFont("맑은 고딕", 8, QFont.Weight.Bold)
-        text_item.setFont(font)
-        text_item.setDefaultTextColor(Qt.GlobalColor.white)
-        
-        text_rect = text_item.boundingRect()
-        center_pos = rect_item.pos() + QPointF(size/2, size/2)
-        text_item.setPos(center_pos - QPointF(text_rect.width()/2, text_rect.height()/2))
-        
-        text_item.setData(0, "waypoint_v10")
-        text_item.setData(1, wp_id)
-        self.scene.addItem(text_item)
-        return rect_item
+            # --- 수정: 중앙 텍스트(order_text)에 폰트 크기 동적 조절 로직 추가 ---
+            text_item = QGraphicsTextItem(order_text)
+            
+            font_size = 8
+            if len(order_text) > 5:
+                font_size = 6
+            elif len(order_text) > 8:
+                font_size = 4
+
+            font = QFont("맑은 고딕", font_size, QFont.Weight.Bold)
+            text_item.setFont(font)
+            text_item.setDefaultTextColor(Qt.GlobalColor.white)
+            
+            text_rect = text_item.boundingRect()
+            center_pos = rect_item.pos() + QPointF(size/2, size/2)
+            text_item.setPos(center_pos - QPointF(text_rect.width()/2, text_rect.height()/2))
+            
+            text_item.setData(0, "waypoint_v10")
+            text_item.setData(1, wp_id)
+            # 텍스트도 마우스 이벤트를 무시하도록 설정
+            text_item.setAcceptedMouseButtons(Qt.MouseButton.NoButton)
+            self.scene.addItem(text_item)
+            return rect_item
 
     def _add_jump_link_line(self, p1, p2, link_id):
         """씬에 지형 점프 연결선을 추가합니다."""
@@ -2121,8 +2236,12 @@ class FullMinimapEditorDialog(QDialog):
                 "points": points_data,
                 "floor": self.floor_spinbox.value()
             })
-            # --- 수정 (9): 층 번호 즉시 갱신 ---
+            
+            # 1. 모든 동적 이름을 다시 계산
+            self._assign_dynamic_names()
+            # 2. 갱신된 이름을 사용하여 텍스트 다시 그리기
             self._update_all_floor_texts()
+            
         elif len(self.current_line_points) == 1:
             # 점만 하나 찍고 끝낸 경우, 해당 꼭짓점 아이템 삭제
             items_to_remove = []
@@ -2187,28 +2306,44 @@ class FullMinimapEditorDialog(QDialog):
                 break
         
         if line_id_to_delete:
-            dependent_objects = [
-                obj for obj in self.geometry_data.get("transition_objects", [])
-                if obj.get("parent_line_id") == line_id_to_delete
-            ]
-            for obj in dependent_objects:
-                self._delete_object_by_id(obj['id'], update_view=False)
+            # 삭제할 그룹의 이름을 먼저 찾음 ---
+            line_to_delete = next((line for line in self.geometry_data.get("terrain_lines", []) if line.get("id") == line_id_to_delete), None)
+            if not line_to_delete: return
+            target_group_name = line_to_delete.get('dynamic_name')
 
-            items_to_remove = []
-            for item in self.scene.items():
-                if item.data(1) == line_id_to_delete:
-                    items_to_remove.append(item)
-            
-            for item in items_to_remove:
-                self.scene.removeItem(item)
+            # 같은 그룹에 속한 모든 라인 ID 찾기
+            ids_in_group = [line['id'] for line in self.geometry_data.get("terrain_lines", []) if line.get('dynamic_name') == target_group_name]
 
+            for group_line_id in ids_in_group:
+                # 종속된 오브젝트 삭제
+                dependent_objects = [
+                    obj for obj in self.geometry_data.get("transition_objects", [])
+                    if obj.get("parent_line_id") == group_line_id
+                ]
+                for obj in dependent_objects:
+                    self._delete_object_by_id(obj['id'], update_view=False)
+
+                # 씬에서 아이템 삭제
+                items_to_remove = []
+                for item in self.scene.items():
+                    if item.data(1) == group_line_id:
+                        items_to_remove.append(item)
+                
+                for item in items_to_remove:
+                    self.scene.removeItem(item)
+
+            # 데이터에서 라인 삭제
             self.geometry_data["terrain_lines"] = [
                 line for line in self.geometry_data.get("terrain_lines", [])
-                if line.get("id") != line_id_to_delete
+                if line.get("id") not in ids_in_group
             ]
 
             self._update_snap_indicator(None)
+            
+            #  이름 갱신 및 UI 업데이트 ---
+            self._assign_dynamic_names()
             self._update_all_floor_texts()
+            
             self.view.viewport().update()
 
     def _get_closest_point_on_terrain(self, scene_pos):
@@ -2253,6 +2388,10 @@ class FullMinimapEditorDialog(QDialog):
                 "floor": getattr(self, 'current_object_floor', self.floor_spinbox.value()) # --- 수정 (7): 자동 할당된 층 사용 ---
             })
 
+            # 이름 갱신 및 전체 씬 다시 그리기 ---
+            self._assign_dynamic_names()
+            self.populate_scene() # populate_scene이 모든 것을 다시 그려주므로 가장 확실함
+
         if self.preview_object_item and self.preview_object_item in self.scene.items():
             self.scene.removeItem(self.preview_object_item)
         
@@ -2272,20 +2411,24 @@ class FullMinimapEditorDialog(QDialog):
         return line
 
     def _delete_object_by_id(self, obj_id_to_delete, update_view=True):
-        """주어진 ID를 가진 수직 이동 오브젝트를 삭제합니다."""
-        if obj_id_to_delete:
-            items_to_remove = [item for item in self.scene.items() if item.data(1) == obj_id_to_delete]
-            for item in items_to_remove:
-                self.scene.removeItem(item)
-            
-            self.geometry_data["transition_objects"] = [
-                obj for obj in self.geometry_data.get("transition_objects", [])
-                if obj.get("id") != obj_id_to_delete
-            ]
+        """주어진 ID를 가진 수직 이동 오브젝트와 관련 이름표를 삭제하고 뷰를 갱신합니다."""
+        if not obj_id_to_delete: return
 
+        # --- 수정 시작: 삭제 후 전체 뷰를 갱신하는 로직으로 변경 ---
+        # 1. 데이터에서 해당 오브젝트 삭제
+        original_count = len(self.geometry_data.get("transition_objects", []))
+        self.geometry_data["transition_objects"] = [
+            obj for obj in self.geometry_data.get("transition_objects", [])
+            if obj.get("id") != obj_id_to_delete
+        ]
+        
+        # 삭제가 실제로 일어났는지 확인
+        if len(self.geometry_data.get("transition_objects", [])) < original_count:
             if update_view:
-                self._update_snap_indicator(None)
-                self.view.viewport().update()
+                # 2. 이름 다시 부여
+                self._assign_dynamic_names()
+                # 3. 전체 씬을 다시 그려서 완벽하게 갱신
+                self.populate_scene()
 
     def _finish_drawing_jump_link(self):
         """점프 연결선 그리기를 완료/취소합니다."""
@@ -2358,7 +2501,7 @@ class RealtimeMinimapView(QLabel):
         self.setText("탐지를 시작하세요.")
 
         # 렌더링 상태 변수
-        self.zoom_level = 1.0
+        self.zoom_level = 1.3 # 기본 실시간 미니맵 뷰 확대배율
         self.camera_center_global = QPointF(0, 0)
         self.active_features = []
         self.my_player_rects = []
@@ -2368,7 +2511,8 @@ class RealtimeMinimapView(QLabel):
         # v10.0.0: 네비게이션 렌더링 데이터
         self.target_waypoint_id = None
         self.last_reached_waypoint_id = None
-
+        #진행 방향 플래그 추가 ---
+        self.is_forward = True
         # 패닝(드래그) 상태 변수
         self.is_panning = False
         self.last_pan_pos = QPoint()
@@ -2404,7 +2548,7 @@ class RealtimeMinimapView(QLabel):
             self.setCursor(Qt.CursorShape.ArrowCursor)
         super().mouseReleaseEvent(event)
 
-    def update_view_data(self, camera_center, active_features, my_players, other_players, target_wp_id, reached_wp_id, final_player_pos):
+    def update_view_data(self, camera_center, active_features, my_players, other_players, target_wp_id, reached_wp_id, final_player_pos, is_forward):
         """MapTab으로부터 렌더링에 필요한 최신 데이터를 받습니다."""
         self.camera_center_global = camera_center
         self.active_features = active_features
@@ -2413,6 +2557,7 @@ class RealtimeMinimapView(QLabel):
         self.target_waypoint_id = target_wp_id
         self.last_reached_waypoint_id = reached_wp_id
         self.final_player_pos_global = final_player_pos
+        self.is_forward = is_forward
         self.update()
 
     def paintEvent(self, event):
@@ -2528,7 +2673,7 @@ class RealtimeMinimapView(QLabel):
                     group_name_text = dynamic_group_names.get(first_line_id, f"{group[0].get('floor', 'N/A')}층")
                     
                     group_rect_global = group_polygon_global.boundingRect()
-                    font = QFont("맑은 고딕", 9, QFont.Weight.Bold)
+                    font = QFont("맑은 고딕", 10, QFont.Weight.Bold) #실시간 미니맵 뷰 지형층 이름 폰트 크기
                     
                     # 이름 위치 계산 (글로벌 좌표 기준)
                     text_pos_global = QPointF(group_rect_global.center().x(), group_rect_global.bottom() + 4)
@@ -2615,18 +2760,20 @@ class RealtimeMinimapView(QLabel):
             painter.save()
             WAYPOINT_SIZE = 12.0 # 전역 좌표계 기준 크기
             
-            # 웨이포인트 순서 맵 생성
+            # 웨이포인트 순서 맵 생성 (현재 방향에 맞는 순서 맵만 생성)
             wp_order_map = {}
             if self.parent_tab.active_route_profile_name:
                 route = self.parent_tab.route_profiles.get(self.parent_tab.active_route_profile_name, {})
-                for i, wp_id in enumerate(route.get("forward_path", [])):
-                    wp_order_map[wp_id] = f"{i+1}"
-                for i, wp_id in enumerate(route.get("backward_path", [])):
-                    if wp_id in wp_order_map:
-                        wp_order_map[wp_id] = f"{wp_order_map[wp_id]}/{i+1}"
-                    else:
-                        wp_order_map[wp_id] = f"{i+1}"
+                path_key = "forward_path" if self.is_forward else "backward_path"
+                path_ids = route.get(path_key, [])
+                
+                # 역방향 경로가 비어있을 경우, 정방향을 뒤집어서 사용
+                if not path_ids and not self.is_forward:
+                    path_ids = list(reversed(route.get("forward_path", [])))
 
+                for i, wp_id in enumerate(path_ids):
+                    wp_order_map[wp_id] = f"{i+1}"
+                    
             for wp_data in self.parent_tab.geometry_data.get("waypoints", []):
                 global_pos = QPointF(wp_data['pos'][0], wp_data['pos'][1])
                 local_pos = global_to_local(global_pos)
@@ -2646,21 +2793,30 @@ class RealtimeMinimapView(QLabel):
                 
                 painter.drawRect(local_rect)
                 
+                #  순서와 이름 렌더링 로직 변경 ---
+                # 1. 중앙에 순서 표시
                 order_text = wp_order_map.get(wp_data['id'], "")
                 if order_text:
-                    font = QFont("맑은 고딕", 10, QFont.Weight.Bold)
-                    # 목표 웨이포인트의 순서 텍스트도 빨간색으로 강조
+                    font_order = QFont("맑은 고딕", 10, QFont.Weight.Bold) # 실시간 미니맵 뷰 순서 폰트 크기
                     text_color = Qt.GlobalColor.red if wp_data['id'] == self.target_waypoint_id else Qt.GlobalColor.white
-                    self._draw_text_with_outline(painter, local_rect.toRect(), Qt.AlignmentFlag.AlignCenter, order_text, font, text_color, Qt.GlobalColor.black)
+                    self._draw_text_with_outline(painter, local_rect.toRect(), Qt.AlignmentFlag.AlignCenter, order_text, font_order, text_color, Qt.GlobalColor.black)
 
-                # 마지막으로 도달한 웨이포인트에 "도착" 표시
+                # 2. 바깥쪽 좌측 상단에 이름 표시
+                name_text = wp_data.get('name', '')
+                if name_text:
+                    #  이름 폰트 크기 8pt로 변경 ---
+                    font_name = QFont("맑은 고딕", 8)
+                    #  이름 위치를 사각형 바깥쪽 위로 조정 ---
+                    tm = QFontMetrics(font_name)
+                    name_rect = tm.boundingRect(name_text)
+                    name_rect.moveBottomLeft(local_rect.topLeft().toPoint() + QPoint(0, -2))
+                    self._draw_text_with_outline(painter, name_rect, Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignBottom, name_text, font_name, Qt.GlobalColor.white, Qt.GlobalColor.black)
+
+                # 3. "도착" 표시
                 if wp_data['id'] == self.last_reached_waypoint_id:
-                    font = QFont("맑은 고딕", 8, QFont.Weight.Bold)
-                    tm = QFontMetrics(font)
-                    text_rect = tm.boundingRect("도착")
-                    # 도착 텍스트 위치를 사각형 중앙보다 약간 위로 조정
-                    text_rect.moveCenter(local_rect.center().toPoint() - QPoint(0, int(scaled_size * 0.1)))
-                    self._draw_text_with_outline(painter, text_rect, Qt.AlignmentFlag.AlignCenter, "도착", font, Qt.GlobalColor.yellow, Qt.GlobalColor.black)
+                    font_arrival = QFont("맑은 고딕", 8, QFont.Weight.Bold)
+                    self._draw_text_with_outline(painter, local_rect.toRect(), Qt.AlignmentFlag.AlignCenter, "도착", font_arrival, Qt.GlobalColor.yellow, Qt.GlobalColor.black)
+
             painter.restore()
 
         # 내 캐릭터, 다른 유저 
@@ -4095,7 +4251,8 @@ class MapTab(QWidget):
             other_players=other_player_global_rects,
             target_wp_id=self.target_waypoint_id,
             reached_wp_id=self.last_reached_wp_id,
-            final_player_pos=final_player_pos
+            final_player_pos=final_player_pos,
+            is_forward=self.is_forward
         )
         
         self.global_pos_updated.emit(final_player_pos)
