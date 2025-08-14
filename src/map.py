@@ -1134,7 +1134,8 @@ class CustomGraphicsView(QGraphicsView):
     mousePressed = pyqtSignal(QPointF, Qt.MouseButton)
     mouseMoved = pyqtSignal(QPointF)
     mouseReleased = pyqtSignal(QPointF, Qt.MouseButton)
-
+    zoomChanged = pyqtSignal()
+    
     def __init__(self, scene, parent_dialog=None):
         super().__init__(scene)
         self.parent_dialog = parent_dialog
@@ -1145,11 +1146,13 @@ class CustomGraphicsView(QGraphicsView):
         if current_mode == "select": # '기본' 모드일 때
             factor = 1.15 if event.angleDelta().y() > 0 else 1 / 1.15
             self.scale(factor, factor)
+            self.zoomChanged.emit()
             event.accept() # 이벤트 전파를 막아 스크롤 방지
         else: # '지형 입력', '오브젝트 추가' 모드일 때
             if event.modifiers() == Qt.KeyboardModifier.ControlModifier:
                 factor = 1.15 if event.angleDelta().y() > 0 else 1 / 1.15
                 self.scale(factor, factor)
+                self.zoomChanged.emit()
             else:
                 super().wheelEvent(event) # 기본 스크롤 동작 수행
     
@@ -1268,6 +1271,20 @@ class DebugViewDialog(QDialog):
         self.image_label.setPixmap(scaled_pixmap)
 
 # --- v7.0.0: 전체 미니맵 편집기 다이얼로그 추가 ---
+
+# 둥근 모서리 사각형을 위한 커스텀 아이템 추가 ---
+class RoundedRectItem(QGraphicsRectItem):
+    def __init__(self, rect, radius_x, radius_y, parent=None):
+        super().__init__(rect, parent)
+        self.radius_x = radius_x
+        self.radius_y = radius_y
+
+    def paint(self, painter, option, widget):
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.setBrush(self.brush())
+        painter.setPen(self.pen())
+        painter.drawRoundedRect(self.rect(), self.radius_x, self.radius_y)
+
 class FullMinimapEditorDialog(QDialog):
     """
     맵 프로필의 모든 지형/웨이포인트 정보를 종합하여 전체 맵을 시각화하고,
@@ -1287,6 +1304,8 @@ class FullMinimapEditorDialog(QDialog):
         self.global_positions = global_positions
         self.parent_map_tab = parent
         self.active_route_profile = active_route_profile
+        self.lod_threshold = 2.5  # 이름이 보이기 시작하는 줌 LOD 배율 (1.0 = 100%)
+        self.lod_text_items = []  # LOD 적용 대상 텍스트 아이템 리스트
         
         # 그리기 상태 변수
         self.current_mode = "select" # "select", "terrain", "object", "waypoint", "jump"
@@ -1315,71 +1334,62 @@ class FullMinimapEditorDialog(QDialog):
         self._update_visibility()
 
     def _update_all_floor_texts(self):
-        # 기존 층 번호 텍스트 모두 삭제
-        for item in self.scene.items():
-            if isinstance(item, QGraphicsTextItem) and item.data(0) == "floor_text":
-                self.scene.removeItem(item)
+            # 기존 층 번호 텍스트 모두 삭제
+            for item in self.scene.items():
+                if isinstance(item, QGraphicsTextItem) and item.data(0) == "floor_text":
+                    self.scene.removeItem(item)
 
-        from collections import defaultdict, deque
-        terrain_lines = self.geometry_data.get("terrain_lines", [])
-        if not terrain_lines: return # 지형선이 없으면 실행 안함
+            from collections import defaultdict, deque
+            terrain_lines = self.geometry_data.get("terrain_lines", [])
+            if not terrain_lines: return
 
-        adj = defaultdict(list)
-        lines_by_id = {line['id']: line for line in terrain_lines}
-        point_to_lines = defaultdict(list)
-        for line in terrain_lines:
-            for p in line['points']:
-                point_to_lines[tuple(p)].append(line['id'])
-        for p, ids in point_to_lines.items():
-            for i in range(len(ids)):
-                for j in range(i + 1, len(ids)):
-                    adj[ids[i]].append(ids[j])
-                    adj[ids[j]].append(ids[i])
-        visited = set()
-        groups = []
-        for line_id in lines_by_id:
-            if line_id not in visited:
-                current_group_data = []
-                q = deque([line_id])
-                visited.add(line_id)
-                while q:
-                    current_id = q.popleft()
-                    current_group_data.append(lines_by_id[current_id])
-                    for neighbor_id in adj[current_id]:
-                        if neighbor_id not in visited:
-                            visited.add(neighbor_id)
-                            q.append(neighbor_id)
-                groups.append(current_group_data)
+            adj = defaultdict(list)
+            lines_by_id = {line['id']: line for line in terrain_lines}
+            point_to_lines = defaultdict(list)
+            for line in terrain_lines:
+                for p in line['points']:
+                    point_to_lines[tuple(p)].append(line['id'])
+            for p, ids in point_to_lines.items():
+                for i in range(len(ids)):
+                    for j in range(i + 1, len(ids)):
+                        adj[ids[i]].append(ids[j])
+                        adj[ids[j]].append(ids[i])
+            visited = set()
+            groups = []
+            for line_id in lines_by_id:
+                if line_id not in visited:
+                    current_group_data = []
+                    q = deque([line_id])
+                    visited.add(line_id)
+                    while q:
+                        current_id = q.popleft()
+                        current_group_data.append(lines_by_id[current_id])
+                        for neighbor_id in adj[current_id]:
+                            if neighbor_id not in visited:
+                                visited.add(neighbor_id)
+                                q.append(neighbor_id)
+                    groups.append(current_group_data)
 
-        for group in groups:
-            if not group: continue
-            
-            # --- 수정: 그룹의 실제 좌표를 기반으로 위치 계산 ---
-            all_points_x = []
-            max_y = -float('inf')
-            for line_data in group:
-                for p in line_data.get("points", []):
-                    all_points_x.append(p[0])
-                    if p[1] > max_y:
-                        max_y = p[1]
-            
-            if not all_points_x: continue
-            # 그룹의 x축 중앙 계산
-            center_x = sum(all_points_x) / len(all_points_x)
-            # --- 수정 끝 ---
-            
-            floor_text = f"{group[0].get('floor', 'N/A')}층"
-            font = QFont("맑은 고딕", 9, QFont.Weight.Bold)
-            
-            text_item = QGraphicsTextItem()
-            text_item.setHtml(f"<span style='color: white; text-shadow: 1px 1px 0 #000, -1px -1px 0 #000, 1px -1px 0 #000, -1px 1px 0 #000;'>{floor_text}</span>")
-            text_item.setFont(font)
-            text_rect = text_item.boundingRect()
-            
-            # --- 수정: 계산된 좌표를 기준으로 위치 설정 ---
-            text_item.setPos(center_x - text_rect.width() / 2, max_y - 4) # Y 간격 -4로 조정
-            text_item.setData(0, "floor_text")
-            self.scene.addItem(text_item)
+            for group in groups:
+                if not group: continue
+                
+                all_points_x = [p[0] for line_data in group for p in line_data.get("points", [])]
+                max_y = max(p[1] for line_data in group for p in line_data.get("points", [])) if any(line_data.get("points") for line_data in group) else 0
+                
+                if not all_points_x: continue
+                center_x = sum(all_points_x) / len(all_points_x)
+                
+                floor_text = group[0].get('dynamic_name', f"{group[0].get('floor', 'N/A')}층")
+                font = QFont("맑은 고딕", 9, QFont.Weight.Bold)
+                
+                text_item = QGraphicsTextItem()
+                text_item.setHtml(f"<span style='color: white; text-shadow: 1px 1px 0 #000, -1px -1px 0 #000, 1px -1px 0 #000, -1px 1px 0 #000;'>{floor_text}</span>")
+                text_item.setFont(font)
+                text_rect = text_item.boundingRect()
+                
+                text_item.setPos(center_x - text_rect.width() / 2, max_y - 4)
+                text_item.setData(0, "floor_text")
+                self.scene.addItem(text_item)
 
     def _draw_text_with_outline(self, painter, rect, flags, text, font, text_color, outline_color):
         """지정한 사각형 영역에 테두리가 있는 텍스트를 그립니다."""
@@ -1403,7 +1413,7 @@ class FullMinimapEditorDialog(QDialog):
                 bounding_rect.adjust(-50, -50, 50, 50)
                 self.view.fitInView(bounding_rect, Qt.AspectRatioMode.KeepAspectRatio)
             self._initial_fit_done = True
-            
+            self._update_lod_visibility()
     def initUI(self):
         main_layout = QHBoxLayout(self)
 
@@ -1488,8 +1498,18 @@ class FullMinimapEditorDialog(QDialog):
         zoom_layout = QHBoxLayout()
         zoom_in_btn = QPushButton("확대")
         zoom_out_btn = QPushButton("축소")
-        zoom_in_btn.clicked.connect(lambda: self.view.scale(1.2, 1.2))
-        zoom_out_btn.clicked.connect(lambda: self.view.scale(1/1.2, 1/1.2))
+        
+        #버튼 클릭 시 LOD 업데이트 함수 호출 추가
+        def zoom_in_and_update():
+            self.view.scale(1.2, 1.2)
+            self._update_lod_visibility()
+
+        def zoom_out_and_update():
+            self.view.scale(1/1.2, 1/1.2)
+            self._update_lod_visibility()
+
+        zoom_in_btn.clicked.connect(zoom_in_and_update)
+        zoom_out_btn.clicked.connect(zoom_out_and_update)
         zoom_layout.addWidget(zoom_in_btn)
         zoom_layout.addWidget(zoom_out_btn)
 
@@ -1516,6 +1536,8 @@ class FullMinimapEditorDialog(QDialog):
         self.view.setDragMode(QGraphicsView.DragMode.ScrollHandDrag)
         self.view.mousePressed.connect(self.on_scene_mouse_press)
         self.view.mouseMoved.connect(self.on_scene_mouse_move)
+        
+        self.view.zoomChanged.connect(self._update_lod_visibility)
         
         # 하단 버튼
         dialog_buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Save | QDialogButtonBox.StandardButton.Cancel)
@@ -1603,70 +1625,155 @@ class FullMinimapEditorDialog(QDialog):
         return color_map
 
     def populate_scene(self):
-        self.scene.clear()
-        
-        # 1. 배경 이미지 설정
-        if self.parent_map_tab.full_map_pixmap and not self.parent_map_tab.full_map_pixmap.isNull():
-            background_item = self.scene.addPixmap(self.parent_map_tab.full_map_pixmap)
-            background_item.setPos(self.parent_map_tab.full_map_bounding_rect.topLeft())
-            background_item.setZValue(-100)
-            background_item.setData(0, "background")
-        else:
-            text_item = self.scene.addText("배경 맵을 생성할 수 없습니다.\n핵심 지형을 1개 이상 등록하고, 문맥 이미지가 있는지 확인해주세요.")
-            text_item.setDefaultTextColor(Qt.GlobalColor.white)
-            return
-
-        # 2. 핵심 지형 그리기
-        if self.global_positions:
-            for item_id, pos in self.global_positions.items():
-                if item_id in self.key_features:
-                    feature_data = self.key_features[item_id]
-                    img_data = base64.b64decode(feature_data['image_base64'])
-                    pixmap = QPixmap(); pixmap.loadFromData(img_data)
-                    rect_item = self.scene.addRect(0, 0, pixmap.width(), pixmap.height(), QPen(QColor(0, 255, 255)), QBrush(QColor(0, 255, 255, 80)))
-                    rect_item.setPos(pos)
-                    rect_item.setData(0, "feature")
-                    text_item = self.scene.addText(item_id)
-                    text_item.setDefaultTextColor(Qt.GlobalColor.white)
-                    text_rect = text_item.boundingRect()
-                    text_item.setPos(pos + QPointF((pixmap.width() - text_rect.width()) / 2, (pixmap.height() - text_rect.height()) / 2))
-                    text_item.setData(0, "feature")
-
-        # 3. 모든 지오메트리 그리기 (층 번호 텍스트 제외)
-        for line_data in self.geometry_data.get("terrain_lines", []):
-            points = line_data.get("points", [])
-            if len(points) >= 2:
-                for i in range(len(points) - 1):
-                    p1 = QPointF(points[i][0], points[i][1])
-                    p2 = QPointF(points[i+1][0], points[i+1][1])
-                    self._add_terrain_line_segment(p1, p2, line_data['id'])
-                for p in points:
-                    self._add_vertex_indicator(QPointF(p[0], p[1]), line_data['id'])
-        
-        for obj_data in self.geometry_data.get("transition_objects", []):
-            points = obj_data.get("points", [])
-            if len(points) == 2:
-                self._add_object_line(QPointF(points[0][0], points[0][1]), QPointF(points[1][0], points[1][1]), obj_data['id'])
-        
-        for jump_data in self.geometry_data.get("jump_links", []):
-            self._add_jump_link_line(QPointF(jump_data['start_vertex_pos'][0], jump_data['start_vertex_pos'][1]), QPointF(jump_data['end_vertex_pos'][0], jump_data['end_vertex_pos'][1]), jump_data['id'])
-
-        # 4. 웨이포인트 순서 계산 및 그리기
-        wp_order_map = {}
-        route = self.route_profiles.get(self.active_route_profile, {})
-        for i, wp_id in enumerate(route.get("forward_path", [])):
-            wp_order_map[wp_id] = f"{i+1}"
-        for i, wp_id in enumerate(route.get("backward_path", [])):
-            if wp_id in wp_order_map:
-                wp_order_map[wp_id] = f"{wp_order_map[wp_id]}/{i+1}"
-            else:
-                wp_order_map[wp_id] = f"{i+1}"
-
-        for wp_data in self.geometry_data.get("waypoints", []):
-            self._add_waypoint_rect(QPointF(wp_data['pos'][0], wp_data['pos'][1]), wp_data['id'], wp_data['name'], wp_order_map.get(wp_data['id'], ""))
+            self.scene.clear()
+            self.lod_text_items = []
             
-        # 5. 모든 층 번호 텍스트를 마지막에 그림
-        self._update_all_floor_texts()
+            # 1. 배경 이미지 설정
+            if self.parent_map_tab.full_map_pixmap and not self.parent_map_tab.full_map_pixmap.isNull():
+                background_item = self.scene.addPixmap(self.parent_map_tab.full_map_pixmap)
+                background_item.setPos(self.parent_map_tab.full_map_bounding_rect.topLeft())
+                background_item.setZValue(-100)
+                background_item.setData(0, "background")
+            else:
+                text_item = self.scene.addText("배경 맵을 생성할 수 없습니다.\n핵심 지형을 1개 이상 등록하고, 문맥 이미지가 있는지 확인해주세요.")
+                text_item.setDefaultTextColor(Qt.GlobalColor.white)
+                return
+
+            # 2. 핵심 지형 그리기
+            if self.global_positions:
+                for item_id, pos in self.global_positions.items():
+                    if item_id in self.key_features:
+                        feature_data = self.key_features[item_id]
+                        img_data = base64.b64decode(feature_data['image_base64'])
+                        pixmap = QPixmap(); pixmap.loadFromData(img_data)
+                        rect_item = self.scene.addRect(0, 0, pixmap.width(), pixmap.height(), QPen(QColor(0, 255, 255)), QBrush(QColor(0, 255, 255, 80)))
+                        rect_item.setPos(pos)
+                        rect_item.setData(0, "feature")
+                        text_item = self.scene.addText(item_id)
+                        text_item.setDefaultTextColor(Qt.GlobalColor.white)
+                        text_rect = text_item.boundingRect()
+                        text_item.setPos(pos + QPointF((pixmap.width() - text_rect.width()) / 2, (pixmap.height() - text_rect.height()) / 2))
+                        text_item.setData(0, "feature")
+
+            # 3. 모든 지오메트리 그리기 (층 번호 텍스트 제외)
+            for line_data in self.geometry_data.get("terrain_lines", []):
+                points = line_data.get("points", [])
+                if len(points) >= 2:
+                    for i in range(len(points) - 1):
+                        p1 = QPointF(points[i][0], points[i][1])
+                        p2 = QPointF(points[i+1][0], points[i+1][1])
+                        self._add_terrain_line_segment(p1, p2, line_data['id'])
+                    for p in points:
+                        self._add_vertex_indicator(QPointF(p[0], p[1]), line_data['id'])
+            
+            for obj_data in self.geometry_data.get("transition_objects", []):
+                points = obj_data.get("points", [])
+                if len(points) == 2:
+                    line_item = self._add_object_line(QPointF(points[0][0], points[0][1]), QPointF(points[1][0], points[1][1]), obj_data['id'])
+                    if 'dynamic_name' in obj_data:
+                        name = obj_data['dynamic_name']
+                    # 1. 텍스트 아이템 생성
+                    text_item = QGraphicsTextItem(name)
+                    font = QFont("맑은 고딕", 3, QFont.Weight.Bold) # 폰트 크기 6pt로 설정
+                    text_item.setFont(font)
+                    text_item.setDefaultTextColor(QColor("orange"))
+                    
+                    # 2. 텍스트 위치 계산
+                    text_rect = text_item.boundingRect()
+                    # 1. 여백(padding)을 추가하여 배경 사각형 크기 정의
+                    padding_x = -3
+                    padding_y = -3
+                    bg_rect_geom = text_rect.adjusted(-padding_x, -padding_y, padding_x, padding_y)
+
+                    # --- 수정 시작: 층 이동 오브젝트 이름 위치 계산 로직 변경 ---
+                    line_center = line_item.boundingRect().center()
+                    
+                    # 이름표(배경 포함)의 X, Y 위치를 라인의 중앙에 맞춤
+                    base_pos_x = line_center.x() - bg_rect_geom.width() / 2
+                    base_pos_y = line_center.y() - bg_rect_geom.height() / 2
+                    
+                    # 3. 둥근 모서리 사각형 생성
+                    background_rect = RoundedRectItem(QRectF(0, 0, bg_rect_geom.width(), bg_rect_geom.height()), 3, 3) # 3,3은 곡률
+                    background_rect.setBrush(QColor(0, 0, 0, 120))
+                    background_rect.setPen(QPen(Qt.GlobalColor.transparent))
+                    background_rect.setPos(base_pos_x, base_pos_y)
+                    background_rect.setData(0, "transition_object_name_bg")
+                    
+                    # 텍스트 위치를 배경 사각형 중앙에 맞춤
+                    text_item.setPos(base_pos_x + padding_x, base_pos_y + padding_y)
+                    # 4. Z-value 설정 및 씬에 추가
+                    background_rect.setZValue(10)
+                    text_item.setZValue(11) # 텍스트가 위로 오도록
+                    
+                    self.scene.addItem(background_rect)
+                    self.scene.addItem(text_item)
+                    
+                    # 5. LOD 관리 대상에 추가
+                    self.lod_text_items.append(text_item)
+                    self.lod_text_items.append(background_rect)
+                    # --- 수정 끝 ---
+        
+            for jump_data in self.geometry_data.get("jump_links", []):
+                line_item = self._add_jump_link_line(QPointF(jump_data['start_vertex_pos'][0], jump_data['start_vertex_pos'][1]), QPointF(jump_data['end_vertex_pos'][0], jump_data['end_vertex_pos'][1]), jump_data['id'])
+                if 'dynamic_name' in jump_data:
+                    name = jump_data['dynamic_name']
+                    
+                    # --- 수정 시작: 텍스트 + 배경 사각형 생성 ---
+                    # 1. 텍스트 아이템 생성
+                    text_item = QGraphicsTextItem(name)
+                    font = QFont("맑은 고딕", 3, QFont.Weight.Bold) # 폰트 크기 6pt로 설정
+                    text_item.setFont(font)
+                    text_item.setDefaultTextColor(QColor("lime"))
+                    
+                    # 2. 텍스트 위치 계산
+                    # --- 수정 시작: 배경 사각형 크기 및 모양 조정 ---
+                    text_rect = text_item.boundingRect()
+                    padding_x = -3
+                    padding_y = -3
+                    bg_rect_geom = text_rect.adjusted(-padding_x, -padding_y, padding_x, padding_y)
+
+                    line_center = line_item.boundingRect().center()
+                    base_pos_x = line_center.x() - bg_rect_geom.width() / 2
+                    base_pos_y = line_center.y() - bg_rect_geom.height() / 2 - 7 # 지형 점프 연결 이름 Y축 위치 조정 
+                    
+                    background_rect = RoundedRectItem(QRectF(0, 0, bg_rect_geom.width(), bg_rect_geom.height()), 3, 3)
+                    background_rect.setBrush(QColor(0, 0, 0, 120))
+                    background_rect.setPen(QPen(Qt.GlobalColor.transparent))
+                    background_rect.setPos(base_pos_x, base_pos_y)
+                    background_rect.setData(0, "jump_link_name_bg")
+                    
+                    text_item.setPos(base_pos_x + padding_x, base_pos_y + padding_y)
+                    
+                    # 4. Z-value 설정 및 씬에 추가
+                    background_rect.setZValue(10)
+                    text_item.setZValue(11)
+                    
+                    self.scene.addItem(background_rect)
+                    self.scene.addItem(text_item)
+                    
+                    # 5. LOD 관리 대상에 추가
+                    self.lod_text_items.append(text_item)
+                    self.lod_text_items.append(background_rect)
+                    
+            # 4. 웨이포인트 순서 계산 및 그리기
+            wp_order_map = {}
+            route = self.route_profiles.get(self.active_route_profile, {})
+            for i, wp_id in enumerate(route.get("forward_path", [])):
+                wp_order_map[wp_id] = f"{i+1}"
+            for i, wp_id in enumerate(route.get("backward_path", [])):
+                if wp_id in wp_order_map:
+                    wp_order_map[wp_id] = f"{wp_order_map[wp_id]}/{i+1}"
+                else:
+                    wp_order_map[wp_id] = f"{i+1}"
+
+            for wp_data in self.geometry_data.get("waypoints", []):
+                self._add_waypoint_rect(QPointF(wp_data['pos'][0], wp_data['pos'][1]), wp_data['id'], wp_data['name'], wp_order_map.get(wp_data['id'], ""))
+                
+            # 5. 모든 층 번호 텍스트를 마지막에 그림
+            self._update_all_floor_texts()
+
+            # 초기 LOD 상태 설정
+            self._update_lod_visibility()
 
     def _update_visibility(self):
         """UI 컨트롤 상태에 따라 QGraphicsScene의 아이템 가시성을 업데이트합니다."""
@@ -1691,8 +1798,30 @@ class FullMinimapEditorDialog(QDialog):
                 item.setVisible(show_terrain)
             elif item_type == "transition_object":
                 item.setVisible(show_objects)
+            elif item_type in ["transition_object_name", "transition_object_name_bg"]: # 수정: _bg 타입 추가
+                item.setVisible(show_objects)
             elif item_type == "jump_link":
                 item.setVisible(show_jump_links)
+            elif item_type in ["jump_link_name", "jump_link_name_bg"]: # 수정: _bg 타입 추가
+                item.setVisible(show_jump_links)
+
+    def _update_lod_visibility(self):
+        """현재 줌 레벨에 따라 LOD 아이템들의 가시성을 조절합니다."""
+        # 뷰의 현재 스케일(줌 배율) 확인. x축 스케일만 봐도 무방.
+        current_zoom = self.view.transform().m11()
+        
+        is_visible = current_zoom >= self.lod_threshold
+        
+        for item in self.lod_text_items:
+            # 보기 옵션 체크박스도 함께 고려
+            item_type = item.data(0)
+            base_visible = True
+            if item_type in ["transition_object_name", "transition_object_name_bg"]: # 수정: _bg 타입 추가
+                base_visible = self.chk_show_objects.isChecked()
+            elif item_type in ["jump_link_name", "jump_link_name_bg"]: # 수정: _bg 타입 추가
+                base_visible = self.chk_show_jump_links.isChecked()
+
+            item.setVisible(is_visible and base_visible)
 
     def on_scene_mouse_press(self, scene_pos, button):
         if self.current_mode == "terrain":
@@ -3008,6 +3137,7 @@ class MapTab(QWidget):
 
             self.global_positions = self._calculate_global_positions()
             self._generate_full_map_pixmap()
+            self._assign_dynamic_names()
             self.update_ui_for_new_profile()
             self.update_general_log(f"'{profile_name}' 맵 프로필을 로드했습니다.", "blue")
             self._center_realtime_view_on_map()
@@ -3351,13 +3481,14 @@ class MapTab(QWidget):
             return
 
         self.global_positions = self._calculate_global_positions()
+        self._assign_dynamic_names()
         
         self.editor_dialog = FullMinimapEditorDialog(
             profile_name=self.active_profile_name,
             active_route_profile=self.active_route_profile_name,
             key_features=self.key_features,
             route_profiles=self.route_profiles,
-            geometry_data=self.geometry_data,
+            geometry_data=self.geometry_data, # 이름 정보가 포함된 데이터를 전달
             render_options=self.render_options,
             global_positions=self.global_positions,
             parent=self
@@ -4202,6 +4333,7 @@ class MapTab(QWidget):
             """데이터 변경 후 전역 좌표와 전체 맵 뷰를 갱신합니다."""
             self.global_positions = self._calculate_global_positions()
             self._generate_full_map_pixmap()
+            self._assign_dynamic_names() #동적 이름 부여 메서드 호출 추가
             self.update_general_log("맵 데이터를 최신 정보로 갱신했습니다.", "purple")
 
     def _calculate_global_positions(self):
@@ -4395,6 +4527,97 @@ class MapTab(QWidget):
                 self.feature_offsets[(id2, id1)] = -offset
 
         return global_positions
+
+    def _assign_dynamic_names(self):
+        """
+        모든 지형, 층 이동 오브젝트, 점프 링크에 동적 이름을 부여합니다.
+        이 이름은 저장되지 않고 런타임에 생성됩니다.
+        """
+        if not self.geometry_data:
+            return
+
+        # --- 1. 지형선 그룹화 및 이름 부여 ---
+        terrain_lines = self.geometry_data.get("terrain_lines", [])
+        lines_by_id = {line['id']: line for line in terrain_lines}
+        line_id_to_group_name = {}
+
+        if terrain_lines:
+            # 연결된 지형선을 찾기 위한 그래프 생성
+            adj = defaultdict(list)
+            point_to_lines = defaultdict(list)
+            for line in terrain_lines:
+                for p in line['points']:
+                    point_to_lines[tuple(p)].append(line['id'])
+            
+            for p, ids in point_to_lines.items():
+                for i in range(len(ids)):
+                    for j in range(i + 1, len(ids)):
+                        adj[ids[i]].append(ids[j])
+                        adj[ids[j]].append(ids[i])
+
+            # BFS로 연결된 그룹(컴포넌트) 찾기
+            visited = set()
+            all_groups = []
+            for line_id in lines_by_id:
+                if line_id not in visited:
+                    current_group = []
+                    q = deque([line_id])
+                    visited.add(line_id)
+                    while q:
+                        current_id = q.popleft()
+                        current_group.append(lines_by_id[current_id])
+                        for neighbor_id in adj[current_id]:
+                            if neighbor_id not in visited:
+                                visited.add(neighbor_id)
+                                q.append(neighbor_id)
+                    all_groups.append(current_group)
+
+            # 층별로 그룹을 나누고 x축 기준으로 정렬하여 이름 부여
+            groups_by_floor = defaultdict(list)
+            for group in all_groups:
+                if group:
+                    floor = group[0].get('floor', 0)
+                    groups_by_floor[floor].append(group)
+            
+            for floor, groups in groups_by_floor.items():
+                # 각 그룹의 중심 x좌표를 계산하여 정렬
+                sorted_groups = sorted(groups, key=lambda g: sum(p[0] for line in g for p in line['points']) / sum(len(line['points']) for line in g))
+                
+                for i, group in enumerate(sorted_groups):
+                    group_name = f"{floor}층_{chr(ord('A') + i)}"
+                    for line in group:
+                        line['dynamic_name'] = group_name
+                        line_id_to_group_name[line['id']] = group_name
+
+        # --- 2. 층 이동 오브젝트 이름 부여 ---
+        transition_objects = self.geometry_data.get("transition_objects", [])
+        if transition_objects:
+            # 부모 지형 그룹 이름별로 오브젝트 그룹화
+            objs_by_parent_group = defaultdict(list)
+            for obj in transition_objects:
+                parent_id = obj.get('parent_line_id')
+                if parent_id and parent_id in line_id_to_group_name:
+                    parent_group_name = line_id_to_group_name[parent_id]
+                    objs_by_parent_group[parent_group_name].append(obj)
+
+            for parent_name, objs in objs_by_parent_group.items():
+                # x축 기준으로 정렬하여 이름 부여
+                sorted_objs = sorted(objs, key=lambda o: o['points'][0][0])
+                for i, obj in enumerate(sorted_objs):
+                    obj['dynamic_name'] = f"{parent_name}_{i + 1}"
+
+        # --- 3. 지형 점프 연결 이름 부여 ---
+        jump_links = self.geometry_data.get("jump_links", [])
+        if jump_links:
+            jumps_by_floor = defaultdict(list)
+            for jump in jump_links:
+                jumps_by_floor[jump.get('floor', 0)].append(jump)
+
+            for floor, jumps in jumps_by_floor.items():
+                # x축 중심 기준으로 정렬하여 이름 부여
+                sorted_jumps = sorted(jumps, key=lambda j: (j['start_vertex_pos'][0] + j['end_vertex_pos'][0]) / 2)
+                for i, jump in enumerate(sorted_jumps):
+                    jump['dynamic_name'] = f"{floor}층_J{i + 1}"
 
     def cleanup_on_close(self):
         self.save_global_settings()
