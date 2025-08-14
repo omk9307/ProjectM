@@ -100,8 +100,13 @@ OTHER_PLAYER_ICON_LOWER2 = np.array([170, 120, 120])
 OTHER_PLAYER_ICON_UPPER2 = np.array([180, 255, 255])
 PLAYER_Y_OFFSET = 1 # 플레이어 Y축 좌표 보정을 위한 오프셋. 양수 값은 기준점을 아래로 이동시킵니다.
 
-MIN_ICON_WIDTH = 5  # 아이콘으로 인정할 최소 너비 (픽셀)
-MIN_ICON_HEIGHT = 5 # 아이콘으로 인정할 최소 높이 (픽셀)
+#아이콘 크기 관련 상수 재정의 ---
+MIN_ICON_WIDTH = 9
+MIN_ICON_HEIGHT = 9
+MAX_ICON_WIDTH = 14
+MAX_ICON_HEIGHT = 14
+PLAYER_ICON_STD_WIDTH = 11
+PLAYER_ICON_STD_HEIGHT = 11
 
 # --- v10.0.0: 네비게이터 위젯 클래스 ---
 class NavigatorDisplay(QWidget):
@@ -2358,6 +2363,7 @@ class RealtimeMinimapView(QLabel):
         self.active_features = []
         self.my_player_rects = []
         self.other_player_rects = []
+        self.final_player_pos_global = None
         
         # v10.0.0: 네비게이션 렌더링 데이터
         self.target_waypoint_id = None
@@ -2398,7 +2404,7 @@ class RealtimeMinimapView(QLabel):
             self.setCursor(Qt.CursorShape.ArrowCursor)
         super().mouseReleaseEvent(event)
 
-    def update_view_data(self, camera_center, active_features, my_players, other_players, target_wp_id, reached_wp_id):
+    def update_view_data(self, camera_center, active_features, my_players, other_players, target_wp_id, reached_wp_id, final_player_pos):
         """MapTab으로부터 렌더링에 필요한 최신 데이터를 받습니다."""
         self.camera_center_global = camera_center
         self.active_features = active_features
@@ -2406,6 +2412,7 @@ class RealtimeMinimapView(QLabel):
         self.other_player_rects = other_players
         self.target_waypoint_id = target_wp_id
         self.last_reached_waypoint_id = reached_wp_id
+        self.final_player_pos_global = final_player_pos
         self.update()
 
     def paintEvent(self, event):
@@ -2446,70 +2453,96 @@ class RealtimeMinimapView(QLabel):
 
         render_opts = self.parent_tab.render_options
         
-        # --- 수정 (2, 4): 지형선 및 층 번호 (그룹화 로직 포함) ---
+        # --- 수정 시작: 지형선 및 그룹 이름 렌더링 로직 전체 교체 ---
         if render_opts.get('terrain', True):
             painter.save()
             
-            # --- 수정: 효율적인 지형 그룹화 로직 (BFS 사용) ---
+            # 1. 지형 그룹화 로직 (FullMinimapEditorDialog에서 가져옴)
             from collections import defaultdict, deque
             terrain_lines = self.parent_tab.geometry_data.get("terrain_lines", [])
-            adj = defaultdict(list)
-            lines_by_id = {line['id']: line for line in terrain_lines}
-            
-            # 각 꼭짓점을 키로, 해당 꼭짓점을 포함하는 라인 ID들을 값으로 하는 맵 생성
-            point_to_lines = defaultdict(list)
-            for line in terrain_lines:
-                for p in line['points']:
-                    point_to_lines[tuple(p)].append(line['id'])
-            
-            # 인접 리스트 생성
-            for p, ids in point_to_lines.items():
-                for i in range(len(ids)):
-                    for j in range(i + 1, len(ids)):
-                        adj[ids[i]].append(ids[j])
-                        adj[ids[j]].append(ids[i])
-
-            visited = set()
-            groups = []
-            for line_id in lines_by_id:
-                if line_id not in visited:
-                    current_group = []
-                    q = deque([line_id])
-                    visited.add(line_id)
-                    while q:
-                        current_id = q.popleft()
-                        current_group.append(lines_by_id[current_id])
-                        for neighbor_id in adj[current_id]:
-                            if neighbor_id not in visited:
-                                visited.add(neighbor_id)
-                                q.append(neighbor_id)
-                    groups.append(current_group)
-            # --- 그룹화 로직 끝 ---
-
-            # 그룹별로 그리기
-            for group in groups:
-                if not group: continue
+            if terrain_lines:
+                adj = defaultdict(list)
+                lines_by_id = {line['id']: line for line in terrain_lines}
                 
-                group_polygon = QPolygonF()
-                pen = QPen(Qt.GlobalColor.magenta, 3) # --- 두께 3px로 변경 ---
-                painter.setPen(pen)
+                point_to_lines = defaultdict(list)
+                for line in terrain_lines:
+                    for p in line['points']:
+                        point_to_lines[tuple(p)].append(line['id'])
                 
-                for line_data in group:
-                    points = [global_to_local(QPointF(p[0], p[1])) for p in line_data.get("points", [])]
-                    if len(points) >= 2:
-                        painter.drawPolyline(*points)
-                        # --- 수정: QPolygonF 병합 로직 수정 ---
-                        group_polygon += QPolygonF(points)
+                for p, ids in point_to_lines.items():
+                    for i in range(len(ids)):
+                        for j in range(i + 1, len(ids)):
+                            adj[ids[i]].append(ids[j])
+                            adj[ids[j]].append(ids[i])
 
-                # 그룹의 층 번호 표시
-                floor_text = f"{group[0].get('floor', 'N/A')}층"
-                group_rect = group_polygon.boundingRect()
-                font = QFont("맑은 고딕", 9, QFont.Weight.Bold)
-                text_metrics = QFontMetrics(font)
-                text_rect = text_metrics.boundingRect(floor_text)
-                text_rect.moveCenter(group_rect.center().toPoint())
-                text_rect.moveBottom(int(group_rect.bottom()) + 16) # Y 간격 조정
-                self._draw_text_with_outline(painter, text_rect, Qt.AlignmentFlag.AlignCenter, floor_text, font, Qt.GlobalColor.white, Qt.GlobalColor.black)
+                visited = set()
+                all_groups = []
+                for line_id in lines_by_id:
+                    if line_id not in visited:
+                        current_group = []
+                        q = deque([line_id])
+                        visited.add(line_id)
+                        while q:
+                            current_id = q.popleft()
+                            current_group.append(lines_by_id[current_id])
+                            for neighbor_id in adj[current_id]:
+                                if neighbor_id not in visited:
+                                    visited.add(neighbor_id)
+                                    q.append(neighbor_id)
+                        all_groups.append(current_group)
+                
+                # 2. 층별 그룹 정렬 및 동적 이름 부여
+                groups_by_floor = defaultdict(list)
+                for group in all_groups:
+                    if group:
+                        floor = group[0].get('floor', 0)
+                        groups_by_floor[floor].append(group)
+                
+                dynamic_group_names = {} # key: 첫번째 line_id, value: "n층_A"
+                for floor, groups in groups_by_floor.items():
+                    # 각 그룹의 중심 x좌표 계산하여 정렬
+                    sorted_groups = sorted(groups, key=lambda g: sum(p[0] for line in g for p in line['points']) / sum(len(line['points']) for line in g if line.get('points')))
+                    for i, group in enumerate(sorted_groups):
+                        group_name = f"{floor}층_{chr(ord('A') + i)}"
+                        if group:
+                            first_line_id = group[0]['id']
+                            dynamic_group_names[first_line_id] = group_name
+
+                # 3. 그룹별로 지형선 및 이름 그리기
+                for group in all_groups:
+                    if not group: continue
+                    
+                    pen = QPen(Qt.GlobalColor.magenta, 2)
+                    painter.setPen(pen)
+                    
+                    group_polygon_global = QPolygonF()
+                    for line_data in group:
+                        points_global = [QPointF(p[0], p[1]) for p in line_data.get("points", [])]
+                        if len(points_global) >= 2:
+                            points_local = [global_to_local(p) for p in points_global]
+                            painter.drawPolyline(QPolygonF(points_local))
+                            group_polygon_global += QPolygonF(points_global)
+
+                    # 그룹의 동적 이름 표시
+                    first_line_id = group[0]['id']
+                    group_name_text = dynamic_group_names.get(first_line_id, f"{group[0].get('floor', 'N/A')}층")
+                    
+                    group_rect_global = group_polygon_global.boundingRect()
+                    font = QFont("맑은 고딕", 9, QFont.Weight.Bold)
+                    
+                    # 이름 위치 계산 (글로벌 좌표 기준)
+                    text_pos_global = QPointF(group_rect_global.center().x(), group_rect_global.bottom() + 4)
+                    
+                    # 로컬 좌표로 변환하여 그리기
+                    text_pos_local = global_to_local(text_pos_global)
+                    
+                    # 텍스트가 화면 밖으로 나가는 것 방지 (간단한 클리핑)
+                    if self.rect().contains(text_pos_local.toPoint()):
+                        tm = QFontMetrics(font)
+                        text_rect_local = tm.boundingRect(group_name_text)
+                        text_rect_local.moveCenter(text_pos_local.toPoint())
+                        self._draw_text_with_outline(painter, text_rect_local, Qt.AlignmentFlag.AlignCenter, group_name_text, font, Qt.GlobalColor.white, Qt.GlobalColor.black)
+
             painter.restore()
 
         if render_opts.get('objects', True):
@@ -2626,13 +2659,34 @@ class RealtimeMinimapView(QLabel):
 
             painter.restore()
 
-        # 내 캐릭터, 다른 유저 (기존과 동일)
+        # 내 캐릭터, 다른 유저 
         painter.save()
         painter.setPen(QPen(Qt.GlobalColor.yellow, 2)); painter.setBrush(Qt.BrushStyle.NoBrush)
-        for rect in self.my_player_rects:
-            local_top_left = global_to_local(rect.topLeft())
-            local_rect = QRectF(local_top_left, rect.size() * self.zoom_level)
-            painter.drawRect(local_rect)
+        if self.final_player_pos_global and self.my_player_rects:
+            # 첫 번째 탐지된 사각형을 기준으로 위치 보정
+            # (보통 my_player_rects에는 하나만 들어있음)
+            base_rect = self.my_player_rects[0]
+            
+            # 1. 전달받은 사각형(base_rect)의 글로벌 아랫변 중앙 좌표 계산
+            rect_bottom_center_global = base_rect.center() + QPointF(0, base_rect.height() / 2)
+            
+            # 2. 이 좌표와 실제 발밑 좌표(final_player_pos_global)의 차이(오프셋) 계산
+            offset = self.final_player_pos_global - rect_bottom_center_global
+            
+            # 3. 모든 my_player_rects에 동일한 오프셋을 적용하여 그리기
+            for rect in self.my_player_rects:
+                corrected_rect_global = rect.translated(offset)
+                
+                local_top_left = global_to_local(corrected_rect_global.topLeft())
+                local_rect = QRectF(local_top_left, corrected_rect_global.size() * self.zoom_level)
+                painter.drawRect(local_rect)
+        else:
+            # fallback: final_player_pos_global이 없는 경우 기존 방식대로 그림
+            for rect in self.my_player_rects:
+                local_top_left = global_to_local(rect.topLeft())
+                local_rect = QRectF(local_top_left, rect.size() * self.zoom_level)
+                painter.drawRect(local_rect)
+        # --- 수정 끝 ---
         painter.restore()
         
         painter.save()
@@ -2643,22 +2697,22 @@ class RealtimeMinimapView(QLabel):
             painter.drawRect(local_rect)
         painter.restore()
 
-        # 내 캐릭터, 다른 유저
-        painter.save()
-        painter.setPen(QPen(Qt.GlobalColor.yellow, 2)); painter.setBrush(Qt.BrushStyle.NoBrush)
-        for rect in self.my_player_rects:
-            local_top_left = global_to_local(rect.topLeft())
-            local_rect = QRectF(local_top_left, rect.size() * self.zoom_level)
-            painter.drawRect(local_rect)
-        painter.restore()
-        
-        painter.save()
-        painter.setPen(QPen(Qt.GlobalColor.red, 2)); painter.setBrush(Qt.BrushStyle.NoBrush)
-        for rect in self.other_player_rects:
-            local_top_left = global_to_local(rect.topLeft())
-            local_rect = QRectF(local_top_left, rect.size() * self.zoom_level)
-            painter.drawRect(local_rect)
-        painter.restore()
+        # --- 수정 시작: 정확한 플레이어 발밑 위치 표시 ---
+        if self.final_player_pos_global:
+            local_player_pos = global_to_local(self.final_player_pos_global)
+            
+            painter.save()
+            # 십자선 그리기
+            pen = QPen(QColor(255, 255, 0, 200), 1.5)
+            painter.setPen(pen)
+            painter.drawLine(local_player_pos + QPointF(-5, 0), local_player_pos + QPointF(5, 0))
+            painter.drawLine(local_player_pos + QPointF(0, -5), local_player_pos + QPointF(0, 5))
+            
+            # 중앙 원 그리기
+            painter.setBrush(QBrush(Qt.GlobalColor.yellow))
+            painter.drawEllipse(local_player_pos, 2, 2)
+            painter.restore()
+
         
     def _draw_text_with_outline(self, painter, rect, flags, text, font, text_color, outline_color):
         """지정한 사각형 영역에 테두리가 있는 텍스트를 그립니다."""
@@ -2754,25 +2808,66 @@ class AnchorDetectionThread(QThread):
     def find_player_icon(self, frame_bgr):
         hsv = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2HSV)
         mask = cv2.inRange(hsv, PLAYER_ICON_LOWER, PLAYER_ICON_UPPER)
-        contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        
+        # 연결 요소 분석 + 크기 필터링 + 표준 크기 정규화 ---
+        output = cv2.connectedComponentsWithStats(mask, 8, cv2.CV_32S)
+        num_labels = output[0]
+        stats = output[2]
+        
         valid_rects = []
-        for c in contours:
-            x, y, w, h = cv2.boundingRect(c)
-            if w >= MIN_ICON_WIDTH and h >= MIN_ICON_HEIGHT:
-                valid_rects.append(QRect(x, y, w, h))
+        for i in range(1, num_labels):
+            x = stats[i, cv2.CC_STAT_LEFT]
+            y = stats[i, cv2.CC_STAT_TOP]
+            w = stats[i, cv2.CC_STAT_WIDTH]
+            h = stats[i, cv2.CC_STAT_HEIGHT]
+            
+            # 1. 크기 필터링: 9 <= 크기 < 14 범위에 있는지 확인
+            if (MIN_ICON_WIDTH <= w < MAX_ICON_WIDTH and
+                MIN_ICON_HEIGHT <= h < MAX_ICON_HEIGHT):
+                
+                # 2. 표준 크기로 정규화
+                center_x = x + w / 2
+                center_y = y + h / 2
+                
+                new_x = int(center_x - PLAYER_ICON_STD_WIDTH / 2)
+                new_y = int(center_y - PLAYER_ICON_STD_HEIGHT / 2)
+                
+                valid_rects.append(QRect(new_x, new_y, PLAYER_ICON_STD_WIDTH, PLAYER_ICON_STD_HEIGHT))
+                
         return valid_rects
+
 
     def find_other_player_icons(self, frame_bgr):
         hsv = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2HSV)
         mask1 = cv2.inRange(hsv, OTHER_PLAYER_ICON_LOWER1, OTHER_PLAYER_ICON_UPPER1)
         mask2 = cv2.inRange(hsv, OTHER_PLAYER_ICON_LOWER2, OTHER_PLAYER_ICON_UPPER2)
         mask = cv2.bitwise_or(mask1, mask2)
-        contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        
+        #연결 요소 분석 + 크기 필터링 + 표준 크기 정규화 ---
+        output = cv2.connectedComponentsWithStats(mask, 8, cv2.CV_32S)
+        num_labels = output[0]
+        stats = output[2]
+        
         valid_rects = []
-        for c in contours:
-            x, y, w, h = cv2.boundingRect(c)
-            if w >= MIN_ICON_WIDTH and h >= MIN_ICON_HEIGHT:
-                valid_rects.append(QRect(x, y, w, h))
+        for i in range(1, num_labels):
+            x = stats[i, cv2.CC_STAT_LEFT]
+            y = stats[i, cv2.CC_STAT_TOP]
+            w = stats[i, cv2.CC_STAT_WIDTH]
+            h = stats[i, cv2.CC_STAT_HEIGHT]
+            
+            # 1. 크기 필터링: 9 <= 크기 < 14 범위에 있는지 확인
+            if (MIN_ICON_WIDTH <= w < MAX_ICON_WIDTH and
+                MIN_ICON_HEIGHT <= h < MAX_ICON_HEIGHT):
+                
+                # 2. 표준 크기로 정규화
+                center_x = x + w / 2
+                center_y = y + h / 2
+                
+                new_x = int(center_x - PLAYER_ICON_STD_WIDTH / 2)
+                new_y = int(center_y - PLAYER_ICON_STD_HEIGHT / 2)
+                
+                valid_rects.append(QRect(new_x, new_y, PLAYER_ICON_STD_WIDTH, PLAYER_ICON_STD_HEIGHT))
+                
         return valid_rects
 
     def stop(self):
@@ -3987,7 +4082,8 @@ class MapTab(QWidget):
             my_players=my_player_global_rects,
             other_players=other_player_global_rects,
             target_wp_id=None,
-            reached_wp_id=None
+            reached_wp_id=None,
+            final_player_pos=final_player_pos # --- 수정: final_player_pos 전달 ---
         )
         
         self.global_pos_updated.emit(final_player_pos)
