@@ -2146,6 +2146,11 @@ class FullMinimapEditorDialog(QDialog):
                             if obj_data.get("parent_line_id") in changed_line_ids:
                                 obj_data["floor"] = new_floor
 
+                        # 종속된 웨이포인트의 층 정보 동기화 ---
+                        for wp_data in self.geometry_data.get("waypoints", []):
+                            if wp_data.get("parent_line_id") in changed_line_ids:
+                                wp_data["floor"] = new_floor
+
                     # 3. 이름 재계산 및 UI 갱신
                     self._assign_dynamic_names()
                     self._update_all_floor_texts()
@@ -2539,7 +2544,7 @@ class FullMinimapEditorDialog(QDialog):
             self.preview_jump_link_item = None
 
     def _delete_waypoint_by_id(self, wp_id_to_delete):
-        """주어진 ID를 가진 웨이포인트를 삭제합니다."""
+        """주어진 ID를 가진 웨이포인트를 삭제하고, 모든 경로 프로필에서 해당 ID를 제거합니다."""
         if not wp_id_to_delete: return
         
         # 씬에서 아이템 삭제
@@ -2547,18 +2552,19 @@ class FullMinimapEditorDialog(QDialog):
         for item in items_to_remove:
             self.scene.removeItem(item)
             
-        # 데이터에서 삭제
+        # 다이얼로그의 geometry_data 복사본에서 웨이포인트 삭제
         self.geometry_data["waypoints"] = [
             wp for wp in self.geometry_data.get("waypoints", [])
             if wp.get("id") != wp_id_to_delete
         ]
         
-        # 모든 경로 프로필에서 해당 웨이포인트 ID 제거
-        for route in self.parent_map_tab.route_profiles.values():
-            if "forward_path" in route:
-                route["forward_path"] = [pid for pid in route["forward_path"] if pid != wp_id_to_delete]
-            if "backward_path" in route:
-                route["backward_path"] = [pid for pid in route["backward_path"] if pid != wp_id_to_delete]
+        # MapTab의 원본 route_profiles 데이터에서 직접 ID 제거 ---
+        if self.parent_map_tab and hasattr(self.parent_map_tab, 'route_profiles'):
+            for route in self.parent_map_tab.route_profiles.values():
+                if "forward_path" in route and isinstance(route["forward_path"], list):
+                    route["forward_path"] = [pid for pid in route["forward_path"] if pid != wp_id_to_delete]
+                if "backward_path" in route and isinstance(route["backward_path"], list):
+                    route["backward_path"] = [pid for pid in route["backward_path"] if pid != wp_id_to_delete]
 
         self.view.viewport().update()
 
@@ -3943,7 +3949,8 @@ class MapTab(QWidget):
                 self.save_profile_data()
                 self.update_general_log("지형 편집기 변경사항이 저장되었습니다.", "green")
                 self.global_positions = self._calculate_global_positions()
-                self._generate_full_map_pixmap()
+                self._generate_full_map_pixmap() 
+                self.populate_waypoint_list() # 변경사항을 웨이포인트 경로 관리 UI에 즉시 반영 ---
             else:
                 self.update_general_log("지형 편집이 취소되었습니다.", "black")
             
