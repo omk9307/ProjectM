@@ -58,6 +58,7 @@ import uuid
 import math
 import shutil
 import copy
+import traceback
 from collections import defaultdict, deque 
 
 from PyQt6.QtWidgets import (
@@ -1338,6 +1339,33 @@ class FullMinimapEditorDialog(QDialog):
         self.populate_scene()
         self._update_visibility()
 
+    def _get_floor_from_closest_terrain(self, point, terrain_lines):
+            """주어진 점에서 가장 가까운 지형선을 찾아 그 층 번호를 반환합니다."""
+            min_dist_sq = float('inf')
+            closest_floor = 0.0  # 기본값
+
+            for line_data in terrain_lines:
+                points = line_data.get("points", [])
+                for i in range(len(points) - 1):
+                    p1 = QPointF(points[i][0], points[i][1])
+                    p2 = QPointF(points[i+1][0], points[i+1][1])
+                    
+                    # 선분과의 거리 제곱 계산 (sqrt를 피하기 위해 제곱으로 비교)
+                    dx, dy = p2.x() - p1.x(), p2.y() - p1.y()
+                    if dx == 0 and dy == 0:
+                        dist_sq = (point.x() - p1.x())**2 + (point.y() - p1.y())**2
+                    else:
+                        t = ((point.x() - p1.x()) * dx + (point.y() - p1.y()) * dy) / (dx**2 + dy**2)
+                        t = max(0, min(1, t))
+                        closest_point_on_segment = QPointF(p1.x() + t * dx, p1.y() + t * dy)
+                        dist_sq = (point.x() - closest_point_on_segment.x())**2 + (point.y() - closest_point_on_segment.y())**2
+
+                    if dist_sq < min_dist_sq:
+                        min_dist_sq = dist_sq
+                        closest_floor = line_data.get('floor', 0.0)
+            
+            return closest_floor
+
     def _update_all_floor_texts(self):
             # 기존 층 번호 텍스트 모두 삭제
             items_to_remove = []
@@ -1725,19 +1753,57 @@ class FullMinimapEditorDialog(QDialog):
                 for i, obj in enumerate(sorted_objs):
                     obj['dynamic_name'] = f"{parent_name}_{i + 1}"
 
+        # --- 3. 지형 점프 연결 이름 부여 (v10.0.1 로직 개편 및 안정성 강화) ---
         jump_links = self.geometry_data.get("jump_links", [])
         if jump_links:
-            jumps_by_floor = defaultdict(list)
-            for jump in jump_links:
-                jumps_by_floor[jump.get('floor', 0)].append(jump)
+            try:
+                # 1. 모든 지형선 꼭짓점의 위치와 층 정보를 매핑
+                vertex_to_floor_map = {}
+                for line in terrain_lines:
+                    floor = line.get('floor', 0)
+                    for p in line['points']:
+                        vertex_to_floor_map[tuple(p)] = floor
 
-            for floor, jumps in jumps_by_floor.items():
-                sorted_jumps = sorted(jumps, key=lambda j: (j['start_vertex_pos'][0] + j['end_vertex_pos'][0]) / 2)
-                for i, jump in enumerate(sorted_jumps):
-                    jump['dynamic_name'] = f"{floor}층_J{i + 1}"
+                # 2. 각 점프 링크의 시작/종료 층 정보 찾기
+                for jump in jump_links:
+                    start_pos_tuple = tuple(jump['start_vertex_pos'])
+                    end_pos_tuple = tuple(jump['end_vertex_pos'])
 
+                    start_floor = vertex_to_floor_map.get(start_pos_tuple)
+                    end_floor = vertex_to_floor_map.get(end_pos_tuple)
+
+                    # Fallback: 만약 꼭짓점 맵에 없다면, 가장 가까운 지형선에서 층 정보 추론
+                    if start_floor is None:
+                        start_floor = self._get_floor_from_closest_terrain(QPointF(start_pos_tuple[0], start_pos_tuple[1]), terrain_lines)
+                    if end_floor is None:
+                        end_floor = self._get_floor_from_closest_terrain(QPointF(end_pos_tuple[0], end_pos_tuple[1]), terrain_lines)
+
+                    # 층 번호를 정렬하여 그룹 키로 사용
+                    floor_key = tuple(sorted((start_floor, end_floor)))
+                    jump['temp_floor_key'] = floor_key
+
+                # 3. (시작층, 종료층) 그룹별로 이름 부여
+                jumps_by_floor_pair = defaultdict(list)
+                for jump in jump_links:
+                    jumps_by_floor_pair[jump['temp_floor_key']].append(jump)
+
+                for floor_pair, jumps in jumps_by_floor_pair.items():
+                    sorted_jumps = sorted(jumps, key=lambda j: (j['start_vertex_pos'][0] + j['end_vertex_pos'][0]) / 2)
+                    
+                    f1_str = f"{floor_pair[0]:g}"
+                    f2_str = f"{floor_pair[1]:g}"
+                    
+                    for i, jump in enumerate(sorted_jumps):
+                        jump['dynamic_name'] = f"{f1_str}층_{f2_str}층{chr(ord('A') + i)}"
+                        if 'temp_floor_key' in jump:
+                            del jump['temp_floor_key']
+            except Exception as e:
+                print(f"Error assigning dynamic names to jump links: {e}")
+                
     def populate_scene(self):
             self.scene.clear()
+            # --- 수정: 씬 아이템을 참조하는 멤버 변수 초기화 ---
+            self.snap_indicator = None
             self.lod_text_items = []
             
             # 1. 배경 이미지 설정
@@ -2026,10 +2092,54 @@ class FullMinimapEditorDialog(QDialog):
                         "id": link_id,
                         "start_vertex_pos": [self.jump_link_start_pos.x(), self.jump_link_start_pos.y()],
                         "end_vertex_pos": [snapped_vertex_pos.x(), snapped_vertex_pos.y()],
-                        "floor": self.floor_spinbox.value()
+                        "floor": self.floor_spinbox.value() # 임시 층 정보, 이름 생성 시 재계산됨
                     }
                     self.geometry_data["jump_links"].append(new_link)
-                    self._add_jump_link_line(self.jump_link_start_pos, snapped_vertex_pos, link_id)
+                    
+                    # 1. 시각적 요소(라인) 추가
+                    line_item = self._add_jump_link_line(self.jump_link_start_pos, snapped_vertex_pos, link_id)
+                    
+                    # 2. 동적 이름 재계산 (데이터에만 적용)
+                    self._assign_dynamic_names()
+
+                    # 3. 방금 추가된 링크의 이름표만 생성하여 씬에 추가
+                    #    _assign_dynamic_names에 의해 new_link에 'dynamic_name'이 채워짐
+                    if 'dynamic_name' in new_link:
+                        name = new_link['dynamic_name']
+                        text_item = QGraphicsTextItem(name)
+                        font = QFont("맑은 고딕", 3, QFont.Weight.Bold)
+                        text_item.setFont(font)
+                        text_item.setDefaultTextColor(QColor("lime"))
+                        text_item.setData(0, "jump_link_name")
+                        text_item.setData(1, link_id)
+                        
+                        text_rect = text_item.boundingRect()
+                        padding_x = -3
+                        padding_y = -3
+                        bg_rect_geom = text_rect.adjusted(-padding_x, -padding_y, padding_x, padding_y)
+
+                        line_center = line_item.boundingRect().center()
+                        base_pos_x = line_center.x() - bg_rect_geom.width() / 2
+                        base_pos_y = line_center.y() - bg_rect_geom.height() / 2 - 7
+                        
+                        background_rect = RoundedRectItem(QRectF(0, 0, bg_rect_geom.width(), bg_rect_geom.height()), 3, 3)
+                        background_rect.setBrush(QColor(0, 0, 0, 120))
+                        background_rect.setPen(QPen(Qt.GlobalColor.transparent))
+                        background_rect.setPos(base_pos_x, base_pos_y)
+                        background_rect.setData(0, "jump_link_name_bg")
+                        background_rect.setData(1, link_id)
+                        
+                        text_item.setPos(base_pos_x + padding_x, base_pos_y + padding_y)
+                        
+                        background_rect.setZValue(10)
+                        text_item.setZValue(11)
+                        
+                        self.scene.addItem(background_rect)
+                        self.scene.addItem(text_item)
+                        
+                        self.lod_text_items.append(text_item)
+                        self.lod_text_items.append(background_rect)
+
                     self._finish_drawing_jump_link()
 
             elif button == Qt.MouseButton.RightButton:
@@ -2052,25 +2162,29 @@ class FullMinimapEditorDialog(QDialog):
                         break
                 
                 if line_id_to_change:
-                    # --- 수정 시작: 다이얼로그 내부 데이터만 수정하도록 변경 ---
                     new_floor = self.floor_spinbox.value()
                     
-                    # 1. Dialog의 데이터 복사본에서 해당 ID를 가진 모든 라인의 층 변경
                     clicked_line = next((line for line in self.geometry_data["terrain_lines"] if line["id"] == line_id_to_change), None)
                     if clicked_line:
-                        # 같은 그룹에 속한 모든 라인을 찾기 위해 dynamic_name을 사용 (이름이 없다면 먼저 생성)
                         if 'dynamic_name' not in clicked_line:
                             self._assign_dynamic_names()
                         
                         target_group_name = clicked_line.get('dynamic_name')
+                        
+                        # 1. 같은 그룹에 속한 모든 라인의 층 변경 및 ID 수집
+                        changed_line_ids = set()
                         for line_data in self.geometry_data["terrain_lines"]:
                             if line_data.get('dynamic_name') == target_group_name:
                                 line_data["floor"] = new_floor
+                                changed_line_ids.add(line_data["id"])
 
-                    # 2. Dialog 내부의 동적 이름 생성 메서드 호출
+                        # 2. 종속된 층 이동 오브젝트의 층 정보 동기화
+                        for obj_data in self.geometry_data.get("transition_objects", []):
+                            if obj_data.get("parent_line_id") in changed_line_ids:
+                                obj_data["floor"] = new_floor
+
+                    # 3. 이름 재계산 및 UI 갱신
                     self._assign_dynamic_names()
-                    
-                    # 3. UI 갱신 (MapTab의 로그는 여기서 출력하지 않음)
                     self._update_all_floor_texts()
                     
             elif button == Qt.MouseButton.RightButton:
@@ -2282,22 +2396,22 @@ class FullMinimapEditorDialog(QDialog):
     
     def _update_snap_indicator(self, snap_point):
         """스냅 가능한 위치에 표시기를 업데이트합니다."""
-        if not hasattr(self, 'snap_indicator'):
+        # --- 수정: 객체가 삭제되었는지 먼저 확인하여 RuntimeError 방지 ---
+        if hasattr(self, 'snap_indicator') and self.snap_indicator and self.snap_indicator.scene() is None:
             self.snap_indicator = None
 
-        if snap_point and not self.snap_indicator:
-            self.snap_indicator = self.scene.addEllipse(0, 0, 8, 8, QPen(QColor(0, 255, 0, 200), 2))
-            self.snap_indicator.setZValue(100)
-        
-        if self.snap_indicator:
-            if snap_point:
-                self.snap_indicator.setPos(snap_point - QPointF(4, 4))
-                self.snap_indicator.setVisible(True)
-            else:
+        if snap_point:
+            if not self.snap_indicator:
+                self.snap_indicator = self.scene.addEllipse(0, 0, 8, 8, QPen(QColor(0, 255, 0, 200), 2))
+                self.snap_indicator.setZValue(100)
+            self.snap_indicator.setPos(snap_point - QPointF(4, 4))
+            self.snap_indicator.setVisible(True)
+        else:
+            if self.snap_indicator:
                 self.snap_indicator.setVisible(False)
                      
     def _delete_terrain_at(self, scene_pos):
-        """주어진 위치에 있는 지형선 전체와 종속된 오브젝트를 삭제합니다."""
+        """주어진 위치의 지형 그룹 전체와, 종속된 오브젝트 및 점프 링크를 삭제합니다."""
         items_at_pos = self.view.items(self.view.mapFromScene(scene_pos))
         line_id_to_delete = None
         for item in items_at_pos:
@@ -2306,44 +2420,46 @@ class FullMinimapEditorDialog(QDialog):
                 break
         
         if line_id_to_delete:
-            # 삭제할 그룹의 이름을 먼저 찾음 ---
-            line_to_delete = next((line for line in self.geometry_data.get("terrain_lines", []) if line.get("id") == line_id_to_delete), None)
-            if not line_to_delete: return
-            target_group_name = line_to_delete.get('dynamic_name')
+            # --- 단계 1: 삭제할 지형 그룹과 모든 꼭짓점 식별 ---
+            line_to_delete_data = next((line for line in self.geometry_data.get("terrain_lines", []) if line.get("id") == line_id_to_delete), None)
+            if not line_to_delete_data: return
+            
+            # 이름이 없다면 먼저 부여
+            if 'dynamic_name' not in line_to_delete_data:
+                self._assign_dynamic_names()
+            target_group_name = line_to_delete_data.get('dynamic_name')
 
-            # 같은 그룹에 속한 모든 라인 ID 찾기
-            ids_in_group = [line['id'] for line in self.geometry_data.get("terrain_lines", []) if line.get('dynamic_name') == target_group_name]
+            ids_in_group = set()
+            vertices_in_group = set()
+            for line in self.geometry_data.get("terrain_lines", []):
+                if line.get('dynamic_name') == target_group_name:
+                    ids_in_group.add(line['id'])
+                    for p in line.get("points", []):
+                        vertices_in_group.add(tuple(p))
 
-            for group_line_id in ids_in_group:
-                # 종속된 오브젝트 삭제
-                dependent_objects = [
-                    obj for obj in self.geometry_data.get("transition_objects", [])
-                    if obj.get("parent_line_id") == group_line_id
-                ]
-                for obj in dependent_objects:
-                    self._delete_object_by_id(obj['id'], update_view=False)
+            # --- 단계 2: 데이터에서 모든 종속 항목 연쇄 삭제 ---
 
-                # 씬에서 아이템 삭제
-                items_to_remove = []
-                for item in self.scene.items():
-                    if item.data(1) == group_line_id:
-                        items_to_remove.append(item)
-                
-                for item in items_to_remove:
-                    self.scene.removeItem(item)
+            # 2a. 연결된 점프 링크 삭제
+            self.geometry_data["jump_links"] = [
+                jump for jump in self.geometry_data.get("jump_links", [])
+                if tuple(jump.get("start_vertex_pos")) not in vertices_in_group and \
+                   tuple(jump.get("end_vertex_pos")) not in vertices_in_group
+            ]
 
-            # 데이터에서 라인 삭제
+            # 2b. 종속된 층 이동 오브젝트 삭제
+            self.geometry_data["transition_objects"] = [
+                obj for obj in self.geometry_data.get("transition_objects", [])
+                if obj.get("parent_line_id") not in ids_in_group
+            ]
+            
+            # 2c. 지형 그룹 자체 삭제
             self.geometry_data["terrain_lines"] = [
                 line for line in self.geometry_data.get("terrain_lines", [])
                 if line.get("id") not in ids_in_group
             ]
 
-            self._update_snap_indicator(None)
-            
-            #  이름 갱신 및 UI 업데이트 ---
-            self._assign_dynamic_names()
-            self._update_all_floor_texts()
-            
+            # --- 단계 3: UI 전체 갱신 ---
+            self.populate_scene()
             self.view.viewport().update()
 
     def _get_closest_point_on_terrain(self, scene_pos):
@@ -2462,20 +2578,30 @@ class FullMinimapEditorDialog(QDialog):
 
         self.view.viewport().update()
 
+# 수정 후 코드
     def _delete_jump_link_by_id(self, link_id_to_delete):
-        """주어진 ID를 가진 지형 점프 연결선을 삭제합니다."""
+        """주어진 ID의 점프 링크를 삭제하고, UI를 즉시 갱신합니다."""
         if not link_id_to_delete: return
 
-        items_to_remove = [item for item in self.scene.items() if item.data(1) == link_id_to_delete]
-        for item in items_to_remove:
-            self.scene.removeItem(item)
-        
-        self.geometry_data["jump_links"] = [
-            link for link in self.geometry_data.get("jump_links", [])
-            if link.get("id") != link_id_to_delete
-        ]
-        self.view.viewport().update()
+        try:
+            # --- 단계 1: 데이터에서 링크 제거 ---
+            initial_count = len(self.geometry_data.get("jump_links", []))
+            self.geometry_data["jump_links"] = [
+                link for link in self.geometry_data.get("jump_links", [])
+                if link.get("id") != link_id_to_delete
+            ]
+            
+            # 실제로 데이터가 삭제되었는지 확인 후 UI 갱신
+            if len(self.geometry_data.get("jump_links", [])) < initial_count:
+                
+                # --- 단계 2: 전체 씬을 다시 그려서 UI를 완벽하게 갱신 ---
+                # _assign_dynamic_names는 populate_scene 내부에서 호출되므로 여기서 호출할 필요 없음
+                self.populate_scene()
+                self.view.viewport().update()
 
+        except Exception as e:
+            print(f"ERROR in _delete_jump_link_by_id: {e}")
+            traceback.print_exc()
     def get_updated_geometry_data(self):
         """편집된 지오메트리 데이터의 복사본을 반환합니다."""
         return self.geometry_data
@@ -3228,6 +3354,32 @@ class MapTab(QWidget):
         main_layout.addLayout(logs_layout, 1)
         main_layout.addLayout(right_layout, 2)
         self.update_general_log("MapTab이 초기화되었습니다. 맵 프로필을 선택해주세요.", "black")
+
+    def _get_floor_from_closest_terrain_data(self, point, terrain_lines):
+            """주어진 점에서 가장 가까운 지형선 데이터를 찾아 그 층 번호를 반환합니다."""
+            min_dist_sq = float('inf')
+            closest_floor = 0.0
+
+            for line_data in terrain_lines:
+                points = line_data.get("points", [])
+                for i in range(len(points) - 1):
+                    p1 = QPointF(points[i][0], points[i][1])
+                    p2 = QPointF(points[i+1][0], points[i+1][1])
+                    
+                    dx, dy = p2.x() - p1.x(), p2.y() - p1.y()
+                    if dx == 0 and dy == 0:
+                        dist_sq = (point.x() - p1.x())**2 + (point.y() - p1.y())**2
+                    else:
+                        t = ((point.x() - p1.x()) * dx + (point.y() - p1.y()) * dy) / (dx**2 + dy**2)
+                        t = max(0, min(1, t))
+                        closest_point_on_segment = QPointF(p1.x() + t * dx, p1.y() + t * dy)
+                        dist_sq = (point.x() - closest_point_on_segment.x())**2 + (point.y() - closest_point_on_segment.y())**2
+
+                    if dist_sq < min_dist_sq:
+                        min_dist_sq = dist_sq
+                        closest_floor = line_data.get('floor', 0.0)
+            
+            return closest_floor
 
     def update_detection_log(self, inliers, outliers):
         """정상치와 이상치 정보를 받아 탐지 상태 로그를 업데이트합니다."""
@@ -4899,18 +5051,52 @@ class MapTab(QWidget):
                 for i, obj in enumerate(sorted_objs):
                     obj['dynamic_name'] = f"{parent_name}_{i + 1}"
 
-        # --- 3. 지형 점프 연결 이름 부여 ---
+        # --- 3. 지형 점프 연결 이름 부여 (v10.0.1 로직 개편 및 안정성 강화) ---
         jump_links = self.geometry_data.get("jump_links", [])
         if jump_links:
-            jumps_by_floor = defaultdict(list)
-            for jump in jump_links:
-                jumps_by_floor[jump.get('floor', 0)].append(jump)
+            try:
+                # 1. 모든 지형선 꼭짓점의 위치와 층 정보를 매핑
+                vertex_to_floor_map = {}
+                for line in terrain_lines:
+                    floor = line.get('floor', 0)
+                    for p in line['points']:
+                        vertex_to_floor_map[tuple(p)] = floor
 
-            for floor, jumps in jumps_by_floor.items():
-                # x축 중심 기준으로 정렬하여 이름 부여
-                sorted_jumps = sorted(jumps, key=lambda j: (j['start_vertex_pos'][0] + j['end_vertex_pos'][0]) / 2)
-                for i, jump in enumerate(sorted_jumps):
-                    jump['dynamic_name'] = f"{floor}층_J{i + 1}"
+                # 2. 각 점프 링크의 시작/종료 층 정보 찾기
+                for jump in jump_links:
+                    start_pos_tuple = tuple(jump['start_vertex_pos'])
+                    end_pos_tuple = tuple(jump['end_vertex_pos'])
+
+                    start_floor = vertex_to_floor_map.get(start_pos_tuple)
+                    end_floor = vertex_to_floor_map.get(end_pos_tuple)
+
+                    # Fallback: 만약 꼭짓점 맵에 없다면, 가장 가까운 지형선에서 층 정보 추론
+                    if start_floor is None:
+                        start_floor = self._get_floor_from_closest_terrain_data(QPointF(start_pos_tuple[0], start_pos_tuple[1]), terrain_lines)
+                    if end_floor is None:
+                        end_floor = self._get_floor_from_closest_terrain_data(QPointF(end_pos_tuple[0], end_pos_tuple[1]), terrain_lines)
+
+                    # 층 번호를 정렬하여 그룹 키로 사용
+                    floor_key = tuple(sorted((start_floor, end_floor)))
+                    jump['temp_floor_key'] = floor_key
+
+                # 3. (시작층, 종료층) 그룹별로 이름 부여
+                jumps_by_floor_pair = defaultdict(list)
+                for jump in jump_links:
+                    jumps_by_floor_pair[jump['temp_floor_key']].append(jump)
+
+                for floor_pair, jumps in jumps_by_floor_pair.items():
+                    sorted_jumps = sorted(jumps, key=lambda j: (j['start_vertex_pos'][0] + j['end_vertex_pos'][0]) / 2)
+                    
+                    f1_str = f"{floor_pair[0]:g}"
+                    f2_str = f"{floor_pair[1]:g}"
+                    
+                    for i, jump in enumerate(sorted_jumps):
+                        jump['dynamic_name'] = f"{f1_str}층_{f2_str}층{chr(ord('A') + i)}"
+                        if 'temp_floor_key' in jump:
+                            del jump['temp_floor_key']
+            except Exception as e:
+                print(f"Error assigning dynamic names to jump links in MapTab: {e}")
 
     def cleanup_on_close(self):
         self.save_global_settings()
