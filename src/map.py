@@ -2,6 +2,21 @@
 # 2025년 08月 13日 10:30 (KST)
 # 기능: v10.0.0 - 지능형 내비게이션 시스템 도입 (1단계: 데이터 구조 및 UI 확장)
 # 설명:
+# - v10.0.2: [UI/UX 개선] 편집기 및 실시간 뷰의 가독성과 사용성을 개선.
+#           - [편집기 UI] 모든 편집 모드에서 휠 줌 및 휠 클릭 패닝이 가능하도록 개선.
+#           - [편집기 UI] '기본' 모드에서 웨이포인트 좌클릭 시 이름을 변경하는 기능 추가 및 관련 드래그 버그 수정.
+#           - [편집기 UI] 웨이포인트 추가 시 이름이 UI에 즉시 반영되도록 수정 및 관련 RuntimeError 해결.
+#           - [편집기 UI] 웨이포인트 스냅 로직을 개선하여 좁은 지형에서도 스냅이 잘 되도록 수정.
+#           - [편집기 UI] 웨이포인트가 다른 요소에 가려지지 않도록 최상위에 표시 (Z-value 조정).
+#           - [편집기 데이터] 지형 층 정보 변경 시, 종속된 웨이포인트의 층 정보도 함께 갱신되도록 수정.
+#           - [편집기 데이터] 웨이포인트 삭제 시, 모든 경로 프로필에서도 해당 웨이포인트 ID가 함께 삭제되도록 수정.
+#           - [실시간 뷰 UI] 웨이포인트 경로의 시작점과 끝점을 '출발지'/'목적지'로 표시하고, 목표 웨이포인트의 텍스트 색상을 흰색으로 변경.
+#           - [실시간 뷰 UI] '도착' 알림 텍스트의 위치를 조정.
+# - v10.0.1: [기능개선 및 버그수정] 지능형 내비게이션 시스템 1단계 안정화.
+#           - [기능개선] 지형 점프 연결(jump_link)이 다른 층 사이에서도 연결 가능하도록 역할을 확장.
+#           - [기능개선] 점프 링크의 동적 이름을 '시작층_종료층A/B/C...' 형식으로 변경하여 직관성 향상.
+#           - [버그수정] 지형 삭제 시, 종속된 층 이동 오브젝트와 연결된 점프 링크가 UI에 즉시 함께 삭제되도록 수정.
+#           - [버그수정] 점프 링크 추가/삭제 시 UI가 즉시 갱신되지 않던 문제와 관련 크래시 현상을 완전히 해결.
 # - v10.0.0 (1단계): [구조개편] 층(Floor) 개념, 지형 점프, 경로 분리 등 내비게이션 시스템을 위한 데이터 구조와 UI를 대규모로 확장.
 #           - [데이터 구조] 지형선(terrain_lines)에 'floor' 필드 추가.
 #           - [데이터 구조] 'waypoints', 'jump_links'를 map_geometry.json에 독립적으로 저장.
@@ -2971,12 +2986,22 @@ class RealtimeMinimapView(QLabel):
                 path_key = "forward_path" if self.is_forward else "backward_path"
                 path_ids = route.get(path_key, [])
                 
-                # 역방향 경로가 비어있을 경우, 정방향을 뒤집어서 사용
                 if not path_ids and not self.is_forward:
                     path_ids = list(reversed(route.get("forward_path", [])))
 
-                for i, wp_id in enumerate(path_ids):
-                    wp_order_map[wp_id] = f"{i+1}"
+                # --- 수정: 출발지/목적지 텍스트 처리 ---
+                if path_ids:
+                    # 먼저 모든 웨이포인트에 숫자 할당
+                    for i, wp_id in enumerate(path_ids):
+                        wp_order_map[wp_id] = f"{i+1}"
+                    
+                    # 시작점과 끝점 텍스트 덮어쓰기
+                    if len(path_ids) > 1:
+                        wp_order_map[path_ids[0]] = "출발지"
+                        wp_order_map[path_ids[-1]] = "목적지"
+                    elif len(path_ids) == 1:
+                        # 경로에 하나만 있을 경우 목적지로 표시
+                        wp_order_map[path_ids[0]] = "목적지"
                     
             for wp_data in self.parent_tab.geometry_data.get("waypoints", []):
                 global_pos = QPointF(wp_data['pos'][0], wp_data['pos'][1])
@@ -3002,7 +3027,7 @@ class RealtimeMinimapView(QLabel):
                 order_text = wp_order_map.get(wp_data['id'], "")
                 if order_text:
                     font_order = QFont("맑은 고딕", 10, QFont.Weight.Bold) # 실시간 미니맵 뷰 순서 폰트 크기
-                    text_color = Qt.GlobalColor.red if wp_data['id'] == self.target_waypoint_id else Qt.GlobalColor.white
+                    text_color = Qt.GlobalColor.white #목표 웨이포인트의 폰트 색상을 항상 흰색으로 ---
                     self._draw_text_with_outline(painter, local_rect.toRect(), Qt.AlignmentFlag.AlignCenter, order_text, font_order, text_color, Qt.GlobalColor.black)
 
                 # 2. 바깥쪽 좌측 상단에 이름 표시
@@ -3027,7 +3052,11 @@ class RealtimeMinimapView(QLabel):
                 # 3. "도착" 표시
                 if wp_data['id'] == self.last_reached_waypoint_id:
                     font_arrival = QFont("맑은 고딕", 8, QFont.Weight.Bold)
-                    self._draw_text_with_outline(painter, local_rect.toRect(), Qt.AlignmentFlag.AlignCenter, "도착", font_arrival, Qt.GlobalColor.yellow, Qt.GlobalColor.black)
+                    arrival_rect = QRectF(local_rect.x(), local_rect.y(), local_rect.width(), local_rect.height() / 2).toRect()
+                    # y축으로 1px 정도 살짝 내려서 중앙에 더 가깝게 보이도록 조정
+                    arrival_rect.translate(0, -4)
+                    
+                    self._draw_text_with_outline(painter, arrival_rect, Qt.AlignmentFlag.AlignCenter, "도착", font_arrival, Qt.GlobalColor.yellow, Qt.GlobalColor.black)
 
             painter.restore()
 
