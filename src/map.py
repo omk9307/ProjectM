@@ -136,6 +136,7 @@ MAX_ICON_HEIGHT = 20
 PLAYER_ICON_STD_WIDTH = 11
 PLAYER_ICON_STD_HEIGHT = 11
 INTERMEDIATE_ARRIVAL_X_THRESHOLD = 8 # v10.2.5: 중간 목표 도착 판정을 위한 x축 허용 오차 (픽셀)
+EDGE_ARRIVAL_X_THRESHOLD = 4 # v10.3.3: 낭떠러지 지점 도착 판정을 위한 더 엄격한 x축 허용 오차
 
 # --- v10.0.0: 네비게이터 위젯 클래스 ---
 class NavigatorDisplay(QWidget):
@@ -176,132 +177,135 @@ class NavigatorDisplay(QWidget):
         self.update() # paintEvent 다시 호출
 
     def paintEvent(self, event):
-        """수신된 내비게이션 데이터를 기반으로 위젯 UI를 그립니다."""
-        super().paintEvent(event)
-        painter = QPainter(self)
-        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+            """수신된 내비게이션 데이터를 기반으로 위젯 UI를 그립니다."""
+            super().paintEvent(event)
+            painter = QPainter(self)
+            painter.setRenderHint(QPainter.RenderHint.Antialiasing)
 
-        painter.fillRect(self.rect(), QColor("#2E2E2E"))
+            painter.fillRect(self.rect(), QColor("#2E2E2E"))
 
-        total_width = self.width()
-        total_height = self.height()
+            total_width = self.width()
+            total_height = self.height()
 
-        # --- 1. 좌측 영역: 상태 정보 ---
-        left_area_width = 100
-        left_rect = QRect(0, 0, left_area_width, total_height)
-        
-        font_floor = QFont("맑은 고딕", 14, QFont.Weight.Bold)
-        painter.setFont(font_floor)
-        painter.setPen(Qt.GlobalColor.white)
-        floor_rect = QRect(left_rect.x(), 5, left_rect.width(), 30)
-        painter.drawText(floor_rect, Qt.AlignmentFlag.AlignCenter, f"{self.current_floor}층")
-
-        font_terrain = QFont("맑은 고딕", 8)
-        painter.setFont(font_terrain)
-        painter.setPen(QColor("#9E9E9E"))
-        terrain_rect = QRect(left_rect.x(), 30, left_rect.width(), 20)
-        painter.drawText(terrain_rect, Qt.AlignmentFlag.AlignCenter, self.current_terrain_name)
-
-        font_dist = QFont("맑은 고딕", 10)
-        painter.setFont(font_dist)
-        painter.setPen(Qt.GlobalColor.white)
-        dist_text = f"{self.direction} {self.distance_px:.0f}px" if self.target_wp_id else "-"
-        dist_rect = QRect(left_rect.x(), 50, left_rect.width(), 25)
-        painter.drawText(dist_rect, Qt.AlignmentFlag.AlignCenter, dist_text)
-
-
-        # --- 2. 중앙 영역: 경로 및 진행 정보 ---
-        center_area_width = (total_width - left_area_width * 2.5) - 100
-        center_area_x = int((total_width - center_area_width) / 2)
-        center_rect = QRect(center_area_x, 0, int(center_area_width), total_height)
-
-        font_direction = QFont("맑은 고딕", 9)
-        painter.setFont(font_direction)
-        painter.setPen(Qt.GlobalColor.yellow)
-        direction_text = f"{'정방향' if self.is_forward else '역방향'}"
-        direction_rect = QRect(center_rect.x(), 5, center_rect.width(), 20)
-        painter.drawText(direction_rect, Qt.AlignmentFlag.AlignCenter, direction_text)
-        
-        path_area_rect = QRect(center_rect.x(), 20, center_rect.width(), 35)
-        
-        indicator_prev, indicator_curr, indicator_next = "", "", ""
-        current_idx = -1
-        total_steps = len(self.full_path)
-
-        if self.target_wp_id and self.target_wp_id in self.full_path:
-            current_idx = self.full_path.index(self.target_wp_id)
-            circled_nums = [chr(0x2460 + i) for i in range(20)]
-
-            def get_indicator(index):
-                if not self.full_path: return ""
-                if index == 0: return "🚩"
-                if index == len(self.full_path) - 1: return "🏁"
-                return circled_nums[index] if 0 <= index < len(circled_nums) else str(index + 1)
-
-            indicator_curr = get_indicator(current_idx)
-            if current_idx > 0:
-                indicator_prev = get_indicator(current_idx - 1)
-            if current_idx < total_steps - 1:
-                indicator_next = get_indicator(current_idx + 1)
-        
-        font_name_side = QFont("맑은 고딕", 11)
-        font_name_main = QFont("맑은 고딕", 13, QFont.Weight.Bold)
-        
-        # v10.2.3: 안내 텍스트에 아이콘 추가
-        main_guidance_text = self.guidance_text
-        if self.intermediate_target_type == 'climb':
-            main_guidance_text = f"⬆️ {self.guidance_text}"
-        elif self.intermediate_target_type == 'fall':
-            main_guidance_text = f"⬇️ {self.guidance_text}"
-        elif self.intermediate_target_type == 'walk':
-            main_guidance_text = f"{indicator_curr} {self.guidance_text}" if indicator_curr else self.guidance_text
-
-        painter.setFont(font_name_main)
-        painter.setPen(QColor("lime"))
-        painter.drawText(path_area_rect, Qt.AlignmentFlag.AlignCenter, main_guidance_text)
-
-        # 이전/다음 목표
-        painter.setFont(font_name_side)
-        painter.setPen(QColor("#9E9E9E"))
-        prev_text = f"{indicator_prev} {self.previous_waypoint_name}" if self.previous_waypoint_name else ""
-        painter.drawText(path_area_rect, Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, prev_text)
-        
-        next_text = f"{indicator_next} {self.next_waypoint_name}" if self.next_waypoint_name else ""
-        painter.drawText(path_area_rect, Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter, next_text)
-
-        # 진행 막대
-        progress_text = ""
-        progress_ratio = 0.0
-        if self.full_path:
-            total_steps = len(self.full_path)
-            current_step = 0
-            if self.last_reached_wp_id and self.last_reached_wp_id in self.full_path:
-                current_step = self.full_path.index(self.last_reached_wp_id) + 1
+            # --- 1. 좌측 영역: 상태 정보 ---
+            left_area_width = 100
+            left_rect = QRect(0, 0, left_area_width, total_height)
             
-            if current_step > 0 or self.target_wp_id:
-                progress_text = f"{current_step} / {total_steps}"
-                if total_steps > 0:
-                    progress_ratio = current_step / total_steps
-
-        bar_height = 18
-        bar_y = 58
-        progress_bar_rect = QRect(center_rect.x(), bar_y, center_rect.width(), bar_height)
-
-        painter.setPen(Qt.GlobalColor.black)
-        painter.setBrush(QColor("#1C1C1C"))
-        painter.drawRoundedRect(progress_bar_rect, 5, 5)
-
-        if progress_ratio > 0:
-            fill_width = int(progress_bar_rect.width() * progress_ratio)
-            progress_fill_rect = QRect(progress_bar_rect.x(), progress_bar_rect.y(), fill_width, progress_bar_rect.height())
-            painter.setBrush(QColor("dodgerblue"))
-            painter.drawRoundedRect(progress_fill_rect, 5, 5)
-
-        if progress_text:
+            font_floor = QFont("맑은 고딕", 14, QFont.Weight.Bold)
+            painter.setFont(font_floor)
             painter.setPen(Qt.GlobalColor.white)
-            painter.setFont(QFont("맑은 고딕", 8, QFont.Weight.Bold))
-            painter.drawText(progress_bar_rect, Qt.AlignmentFlag.AlignCenter, progress_text)
+            floor_rect = QRect(left_rect.x(), 5, left_rect.width(), 30)
+            painter.drawText(floor_rect, Qt.AlignmentFlag.AlignCenter, f"{self.current_floor}층")
+
+            font_terrain = QFont("맑은 고딕", 8)
+            painter.setFont(font_terrain)
+            painter.setPen(QColor("#9E9E9E"))
+            terrain_rect = QRect(left_rect.x(), 30, left_rect.width(), 20)
+            painter.drawText(terrain_rect, Qt.AlignmentFlag.AlignCenter, self.current_terrain_name)
+
+            font_direction_side = QFont("맑은 고딕", 9)
+            painter.setFont(font_direction_side)
+            painter.setPen(Qt.GlobalColor.yellow)
+            direction_text_side = f"{'정방향' if self.is_forward else '역방향'}"
+            dist_rect = QRect(left_rect.x(), 50, left_rect.width(), 25)
+            painter.drawText(dist_rect, Qt.AlignmentFlag.AlignCenter, direction_text_side)
+
+
+            # --- 2. 중앙 영역: 경로 및 진행 정보 ---
+            center_area_width = (total_width - left_area_width * 2.5) - 100
+            center_area_x = int((total_width - center_area_width) / 2)
+            center_rect = QRect(center_area_x, 0, int(center_area_width), total_height)
+
+            font_dist_top = QFont("맑은 고딕", 11)
+            painter.setFont(font_dist_top)
+            painter.setPen(Qt.GlobalColor.white)
+            dist_text_top = f"{self.direction} {self.distance_px:.0f}px" if self.target_wp_id else "-"
+            direction_rect = QRect(center_rect.x(), 5, center_rect.width(), 20)
+            painter.drawText(direction_rect, Qt.AlignmentFlag.AlignCenter, dist_text_top)
             
+            path_area_rect = QRect(center_rect.x(), 20, center_rect.width(), 35)
+            
+            indicator_prev, indicator_curr, indicator_next = "", "", ""
+            current_idx = -1
+            total_steps = len(self.full_path)
+
+            if self.target_wp_id and self.target_wp_id in self.full_path:
+                current_idx = self.full_path.index(self.target_wp_id)
+                circled_nums = [chr(0x2460 + i) for i in range(20)]
+
+                def get_indicator(index):
+                    if not self.full_path: return ""
+                    if index == 0: return "🚩"
+                    if index == len(self.full_path) - 1: return "🏁"
+                    return circled_nums[index] if 0 <= index < len(circled_nums) else str(index + 1)
+
+                indicator_curr = get_indicator(current_idx)
+                if current_idx > 0:
+                    indicator_prev = get_indicator(current_idx - 1)
+                if current_idx < total_steps - 1:
+                    indicator_next = get_indicator(current_idx + 1)
+            
+            font_name_side = QFont("맑은 고딕", 11)
+            
+            # v10.3.3: 긴 텍스트를 위한 동적 폰트 크기 조절
+            if len(self.guidance_text) > 10:
+                font_name_main = QFont("맑은 고딕", 11, QFont.Weight.Bold)
+            else:
+                font_name_main = QFont("맑은 고딕", 13, QFont.Weight.Bold)
+            
+            main_guidance_text = self.guidance_text
+            if self.intermediate_target_type == 'climb':
+                main_guidance_text = f"🔺 {self.guidance_text}"
+            elif self.intermediate_target_type == 'fall':
+                main_guidance_text = f"🔻 {self.guidance_text}"
+            elif self.intermediate_target_type == 'walk':
+                main_guidance_text = f"{indicator_curr} {self.guidance_text}" if indicator_curr else self.guidance_text
+
+            painter.setFont(font_name_main)
+            painter.setPen(QColor("lime"))
+            painter.drawText(path_area_rect, Qt.AlignmentFlag.AlignCenter, main_guidance_text)
+
+            painter.setFont(font_name_side)
+            painter.setPen(QColor("#9E9E9E"))
+            prev_text = f"{indicator_prev} {self.previous_waypoint_name}" if self.previous_waypoint_name else ""
+            painter.drawText(path_area_rect, Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, prev_text)
+            
+            next_text = f"{indicator_next} {self.next_waypoint_name}" if self.next_waypoint_name else ""
+            painter.drawText(path_area_rect, Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter, next_text)
+
+            # 2-3. 하단: 진행 막대
+            progress_text = ""
+            progress_ratio = 0.0
+            if self.full_path:
+                total_steps = len(self.full_path)
+                current_step = 0
+                if self.last_reached_wp_id and self.last_reached_wp_id in self.full_path:
+                    current_step = self.full_path.index(self.last_reached_wp_id) + 1
+                
+                if current_step > 0 or self.target_wp_id:
+                    progress_text = f"{current_step} / {total_steps}"
+                    if total_steps > 0:
+                        progress_ratio = current_step / total_steps
+
+            bar_height = 18
+            bar_y = 58
+            progress_bar_rect = QRect(center_rect.x(), bar_y, center_rect.width(), bar_height)
+
+            painter.setPen(Qt.GlobalColor.black)
+            painter.setBrush(QColor("#1C1C1C"))
+            painter.drawRoundedRect(progress_bar_rect, 5, 5)
+
+            if progress_ratio > 0:
+                fill_width = int(progress_bar_rect.width() * progress_ratio)
+                progress_fill_rect = QRect(progress_bar_rect.x(), progress_bar_rect.y(), fill_width, progress_bar_rect.height())
+                painter.setBrush(QColor("dodgerblue"))
+                painter.drawRoundedRect(progress_fill_rect, 5, 5)
+
+            if progress_text:
+                painter.setPen(Qt.GlobalColor.white)
+                painter.setFont(QFont("맑은 고딕", 8, QFont.Weight.Bold))
+                painter.drawText(progress_bar_rect, Qt.AlignmentFlag.AlignCenter, progress_text)
+
 # --- 위젯 클래스 ---
 class ZoomableView(QGraphicsView):
     """휠 확대를 지원하고, 휠 클릭 패닝이 가능한 QGraphicsView."""
@@ -4856,7 +4860,7 @@ class MapTab(QWidget):
         else: # start_floor > target_floor
             # 내려가야 할 때: 단순 x축 거리 (낙하 가능)
             return abs(start_pos.x() - target_pos.x())
-        
+      
     def _update_player_state_and_navigation(self, final_player_pos):
                 """플레이어의 현재 위치를 기반으로 층, 상태를 판단하고 다음 목표를 결정합니다."""
                 current_terrain_name = "" 
@@ -4865,17 +4869,15 @@ class MapTab(QWidget):
                     self.navigator_display.update_data("N/A", "", "없음", "", "", "-", 0, [], None, None, self.is_forward, 'walk')
                     return
 
-                # ==================== v10.2.5 수정 시작: 도착 상태 해제 로직 ====================
-                # 현재 상태가 '도착'일 때, 범위를 벗어났는지 먼저 확인
                 if self.intermediate_target_type in ['climb_arrived', 'fall_arrived'] and self.intermediate_target_pos:
-                    is_out_of_range = abs(final_player_pos.x() - self.intermediate_target_pos.x()) > INTERMEDIATE_ARRIVAL_X_THRESHOLD
+                    # v10.3.3: 낭떠러지 여부에 따라 다른 도착 범위 적용
+                    threshold = EDGE_ARRIVAL_X_THRESHOLD if "낭떠러지" in self.guidance_text else INTERMEDIATE_ARRIVAL_X_THRESHOLD
+                    is_out_of_range = abs(final_player_pos.x() - self.intermediate_target_pos.x()) > threshold
                     if is_out_of_range:
-                        # 범위를 벗어났으면 이전 안내 상태로 복귀
                         if self.intermediate_target_type == 'climb_arrived':
                             self.intermediate_target_type = 'climb'
                         elif self.intermediate_target_type == 'fall_arrived':
                             self.intermediate_target_type = 'fall'
-                # ==================== v10.2.5 수정 끝 ======================
 
                 # 1. 현재 층 및 상태 판단 로직
                 contact_terrain = None
@@ -4988,17 +4990,23 @@ class MapTab(QWidget):
                         self.update_general_log(f"가장 가까운 경로의 웨이포인트 '{start_wp_candidate['name']}'({start_wp_candidate['floor']}층)에서 내비게이션 시작.", "purple")
 
                 elif self.target_waypoint_id:
+                    # ==================== v10.3.3 수정 시작 ======================
                     if self.intermediate_target_type in ['climb', 'fall'] and self.intermediate_target_pos:
-                        # v10.2.5: 상수 사용
-                        is_arrived_at_intermediate = abs(final_player_pos.x() - self.intermediate_target_pos.x()) < INTERMEDIATE_ARRIVAL_X_THRESHOLD
+                        threshold = EDGE_ARRIVAL_X_THRESHOLD if "낭떠러지" in self.guidance_text else INTERMEDIATE_ARRIVAL_X_THRESHOLD
+                        is_arrived_at_intermediate = abs(final_player_pos.x() - self.intermediate_target_pos.x()) < threshold
                         
                         if is_arrived_at_intermediate:
                             if self.intermediate_target_type == 'climb':
                                 self.intermediate_target_type = 'climb_arrived'
-                                self.guidance_text = "도착. 상승 준비"
+                                self.guidance_text = f"층 변경 [{self.current_player_floor}층→{self.current_player_floor + 1}층]"
                             elif self.intermediate_target_type == 'fall':
                                 self.intermediate_target_type = 'fall_arrived'
-                                self.guidance_text = "도착. 하강 준비"
+                                # 정확한 다음 층 계산
+                                next_floor_down = self.current_player_floor - 1 # 최소 한 층 아래
+                                target_wp_floor = all_waypoints_map.get(self.target_waypoint_id, {}).get('floor', next_floor_down)
+                                # 발판 통과가 가능한 가장 가까운 아래 층 찾기 (임시 로직, 추후 개선)
+                                self.guidance_text = f"층 변경 [{self.current_player_floor}층→{next_floor_down}층]"
+                    # ==================== v10.3.3 수정 끝 ======================
                     
                     target_wp_data = all_waypoints_map.get(self.target_waypoint_id)
                     if target_wp_data:
@@ -5061,10 +5069,55 @@ class MapTab(QWidget):
                             self.intermediate_target_type = 'walk'
                             self.intermediate_target_pos = QPointF(target_wp_data['pos'][0], target_wp_data['pos'][1])
                             self.guidance_text = target_wp_data.get('name', '이름 없음')
+                    
                     else: 
                         self.intermediate_target_type = 'fall'
-                        self.intermediate_target_pos = QPointF(target_wp_data['pos'][0], target_wp_data['pos'][1])
-                        self.guidance_text = "낙하 지점으로 이동"
+                        candidates = []
+                        
+                        current_terrain_group = [
+                            line for line in self.geometry_data.get("terrain_lines", [])
+                            if line.get('dynamic_name') == current_terrain_name
+                        ]
+                        for line in current_terrain_group:
+                            points = line.get("points", [])
+                            if points:
+                                candidates.append({'type': 'edge', 'pos': QPointF(points[0][0], points[0][1])})
+                                candidates.append({'type': 'edge', 'pos': QPointF(points[-1][0], points[-1][1])})
+
+                        target_x = target_wp_data['pos'][0]
+                        
+                        if contact_terrain:
+                            current_y_on_terrain = -1
+                            points = contact_terrain.get("points", [])
+                            for i in range(len(points) - 1):
+                                p1, p2 = points[i], points[i+1]
+                                if min(p1[0], p2[0]) <= target_x <= max(p1[0], p2[0]):
+                                    current_y_on_terrain = p1[1] + (p2[1] - p1[1]) * ((target_x - p1[0]) / (p2[0] - p1[0])) if (p2[0] - p1[0]) != 0 else p1[1]
+                                    break
+                            
+                            if current_y_on_terrain != -1:
+                                terrains_below = [
+                                    line for line in self.geometry_data.get("terrain_lines", [])
+                                    if line.get('floor', float('inf')) < self.current_player_floor and
+                                    any(min(p1[0], p2[0]) <= target_x <= max(p1[0], p2[0]) for p1, p2 in zip(line.get("points", []), line.get("points", [])[1:]))
+                                ]
+                                if terrains_below:
+                                    closest_terrain_below = max(terrains_below, key=lambda t: t.get('floor'))
+                                    candidates.append({'type': 'platform', 'pos': QPointF(target_x, current_y_on_terrain)})
+
+                        if candidates:
+                            target_pos_final = QPointF(target_wp_data['pos'][0], target_wp_data['pos'][1])
+                            for cand in candidates:
+                                cost_to_cand = abs(final_player_pos.x() - cand['pos'].x())
+                                cost_after_cand = abs(cand['pos'].x() - target_pos_final.x())
+                                cand['cost'] = cost_to_cand + cost_after_cand
+                            
+                            best_candidate = min(candidates, key=lambda c: c['cost'])
+                            self.intermediate_target_pos = best_candidate['pos']
+                            self.guidance_text = "낭떠러지로 이동" if best_candidate['type'] == 'edge' else "아래 점프"
+                        else:
+                            self.intermediate_target_pos = QPointF(target_wp_data['pos'][0], target_wp_data['pos'][1])
+                            self.guidance_text = "낙하 지점으로 이동"
 
                 # 4. 최종 방향/거리 계산 및 NavigatorDisplay 업데이트
                 prev_name = ""
@@ -5078,13 +5131,14 @@ class MapTab(QWidget):
 
                 if self.intermediate_target_pos and self.intermediate_target_type not in ['climb_arrived', 'fall_arrived']:
                     distance = abs(final_player_pos.x() - self.intermediate_target_pos.x())
-                    # v10.2.5: 상수 사용
-                    if distance < INTERMEDIATE_ARRIVAL_X_THRESHOLD:
+                    # v10.3.3: 낭떠러지 여부에 따라 다른 도착 범위 적용
+                    threshold = EDGE_ARRIVAL_X_THRESHOLD if "낭떠러지" in self.guidance_text else INTERMEDIATE_ARRIVAL_X_THRESHOLD
+                    if distance < threshold:
                         direction = "도착 근접"
                     elif final_player_pos.x() < self.intermediate_target_pos.x():
-                        direction = "우측"
+                        direction = "→"
                     else:
-                        direction = "좌측"
+                        direction = "←"
                 
                 if self.target_waypoint_id in full_path:
                     current_idx = full_path.index(self.target_waypoint_id)
@@ -5114,7 +5168,7 @@ class MapTab(QWidget):
                 )
                 
                 # 5. 마무리
-                self.last_player_pos = final_player_pos        
+                self.last_player_pos = final_player_pos
         
     def update_general_log(self, message, color):
         self.general_log_viewer.append(f'<font color="{color}">{message}</font>')
