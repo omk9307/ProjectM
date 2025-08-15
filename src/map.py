@@ -2087,60 +2087,23 @@ class FullMinimapEditorDialog(QDialog):
                     self.is_drawing_jump_link = True
                     self.jump_link_start_pos = snapped_vertex_pos
                 else:
+                    # --- 단계 1: 새 링크 데이터 생성 및 추가 ---
                     link_id = f"jump-{uuid.uuid4()}"
                     new_link = {
                         "id": link_id,
                         "start_vertex_pos": [self.jump_link_start_pos.x(), self.jump_link_start_pos.y()],
                         "end_vertex_pos": [snapped_vertex_pos.x(), snapped_vertex_pos.y()],
-                        "floor": self.floor_spinbox.value() # 임시 층 정보, 이름 생성 시 재계산됨
+                        "floor": self.floor_spinbox.value()
                     }
                     self.geometry_data["jump_links"].append(new_link)
                     
-                    # 1. 시각적 요소(라인) 추가
-                    line_item = self._add_jump_link_line(self.jump_link_start_pos, snapped_vertex_pos, link_id)
-                    
-                    # 2. 동적 이름 재계산 (데이터에만 적용)
-                    self._assign_dynamic_names()
-
-                    # 3. 방금 추가된 링크의 이름표만 생성하여 씬에 추가
-                    #    _assign_dynamic_names에 의해 new_link에 'dynamic_name'이 채워짐
-                    if 'dynamic_name' in new_link:
-                        name = new_link['dynamic_name']
-                        text_item = QGraphicsTextItem(name)
-                        font = QFont("맑은 고딕", 3, QFont.Weight.Bold)
-                        text_item.setFont(font)
-                        text_item.setDefaultTextColor(QColor("lime"))
-                        text_item.setData(0, "jump_link_name")
-                        text_item.setData(1, link_id)
-                        
-                        text_rect = text_item.boundingRect()
-                        padding_x = -3
-                        padding_y = -3
-                        bg_rect_geom = text_rect.adjusted(-padding_x, -padding_y, padding_x, padding_y)
-
-                        line_center = line_item.boundingRect().center()
-                        base_pos_x = line_center.x() - bg_rect_geom.width() / 2
-                        base_pos_y = line_center.y() - bg_rect_geom.height() / 2 - 7
-                        
-                        background_rect = RoundedRectItem(QRectF(0, 0, bg_rect_geom.width(), bg_rect_geom.height()), 3, 3)
-                        background_rect.setBrush(QColor(0, 0, 0, 120))
-                        background_rect.setPen(QPen(Qt.GlobalColor.transparent))
-                        background_rect.setPos(base_pos_x, base_pos_y)
-                        background_rect.setData(0, "jump_link_name_bg")
-                        background_rect.setData(1, link_id)
-                        
-                        text_item.setPos(base_pos_x + padding_x, base_pos_y + padding_y)
-                        
-                        background_rect.setZValue(10)
-                        text_item.setZValue(11)
-                        
-                        self.scene.addItem(background_rect)
-                        self.scene.addItem(text_item)
-                        
-                        self.lod_text_items.append(text_item)
-                        self.lod_text_items.append(background_rect)
-
+                    # --- 단계 2: 그리기 상태를 먼저 안전하게 종료 ---
+                    # populate_scene() 호출 전에 현재 씬의 미리보기 아이템을 제거해야 함
                     self._finish_drawing_jump_link()
+
+                    # --- 단계 3: 이름 갱신 및 전체 씬 다시 그리기 ---
+                    self._assign_dynamic_names()
+                    self.populate_scene()
 
             elif button == Qt.MouseButton.RightButton:
                 if self.is_drawing_jump_link:
@@ -2578,7 +2541,6 @@ class FullMinimapEditorDialog(QDialog):
 
         self.view.viewport().update()
 
-# 수정 후 코드
     def _delete_jump_link_by_id(self, link_id_to_delete):
         """주어진 ID의 점프 링크를 삭제하고, UI를 즉시 갱신합니다."""
         if not link_id_to_delete: return
@@ -2594,14 +2556,15 @@ class FullMinimapEditorDialog(QDialog):
             # 실제로 데이터가 삭제되었는지 확인 후 UI 갱신
             if len(self.geometry_data.get("jump_links", [])) < initial_count:
                 
-                # --- 단계 2: 전체 씬을 다시 그려서 UI를 완벽하게 갱신 ---
-                # _assign_dynamic_names는 populate_scene 내부에서 호출되므로 여기서 호출할 필요 없음
+                # --- 단계 2: 이름 갱신 및 전체 씬 다시 그리기 (성공 사례 모방) ---
+                self._assign_dynamic_names()
                 self.populate_scene()
                 self.view.viewport().update()
 
         except Exception as e:
             print(f"ERROR in _delete_jump_link_by_id: {e}")
             traceback.print_exc()
+            
     def get_updated_geometry_data(self):
         """편집된 지오메트리 데이터의 복사본을 반환합니다."""
         return self.geometry_data
@@ -3380,6 +3343,46 @@ class MapTab(QWidget):
                         closest_floor = line_data.get('floor', 0.0)
             
             return closest_floor
+
+            """주어진 점프 링크 데이터와 라인 아이템을 기반으로 이름표를 생성하여 씬에 추가합니다."""
+            if 'dynamic_name' not in link_data or not line_item:
+                return
+
+            name = link_data['dynamic_name']
+            link_id = link_data['id']
+
+            # 텍스트 아이템 생성
+            text_item = QGraphicsTextItem(name)
+            font = QFont("맑은 고딕", 3, QFont.Weight.Bold)
+            text_item.setFont(font)
+            text_item.setDefaultTextColor(QColor("lime"))
+            text_item.setData(0, "jump_link_name")
+            text_item.setData(1, link_id)
+
+            # 배경 아이템 생성
+            text_rect = text_item.boundingRect()
+            padding_x, padding_y = -3, -3
+            bg_rect_geom = text_rect.adjusted(-padding_x, -padding_y, padding_x, padding_y)
+            line_center = line_item.boundingRect().center()
+            base_pos_x = line_center.x() - bg_rect_geom.width() / 2
+            base_pos_y = line_center.y() - bg_rect_geom.height() / 2 - 7
+
+            background_rect = RoundedRectItem(QRectF(0, 0, bg_rect_geom.width(), bg_rect_geom.height()), 3, 3)
+            background_rect.setBrush(QColor(0, 0, 0, 120))
+            background_rect.setPen(QPen(Qt.GlobalColor.transparent))
+            background_rect.setPos(base_pos_x, base_pos_y)
+            background_rect.setData(0, "jump_link_name_bg")
+            background_rect.setData(1, link_id)
+
+            text_item.setPos(base_pos_x + padding_x, base_pos_y + padding_y)
+            background_rect.setZValue(10)
+            text_item.setZValue(11)
+
+            # 씬에 추가 및 LOD 리스트에 등록
+            self.scene.addItem(background_rect)
+            self.scene.addItem(text_item)
+            self.lod_text_items.append(text_item)
+            self.lod_text_items.append(background_rect)
 
     def update_detection_log(self, inliers, outliers):
         """정상치와 이상치 정보를 받아 탐지 상태 로그를 업데이트합니다."""
