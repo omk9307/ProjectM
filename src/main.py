@@ -10,13 +10,42 @@
 
 import sys
 import importlib
+import traceback
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QTabWidget, QWidget, QVBoxLayout, QLabel
 )
-# ==================== v1.1 수정 시작 ====================
+from datetime import datetime
 from PyQt6.QtCore import Qt, QSettings
-# ==================== v1.1 수정 끝 ======================
 
+def log_uncaught_exceptions(ex_cls, ex, tb):
+    """
+    처리되지 않은 예외를 잡아 crash_log.txt 파일에 기록하는 전역 핸들러.
+    """
+    log_file = "crash_log.txt"
+    
+    # 현재 시간 기록
+    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    
+    # 오류 정보 포맷팅
+    tb_text = ''.join(traceback.format_tb(tb))
+    exception_text = f"Timestamp: {timestamp}\n"
+    exception_text += f"Exception Type: {ex_cls.__name__}\n"
+    exception_text += f"Exception Message: {ex}\n"
+    exception_text += "Traceback:\n"
+    exception_text += tb_text
+    
+    # 콘솔에도 출력
+    print(exception_text)
+    
+    # 파일에 기록 (기존 내용에 추가)
+    with open(log_file, "a", encoding="utf-8") as f:
+        f.write("="*80 + "\n")
+        f.write(exception_text)
+        f.write("="*80 + "\n\n")
+        
+    # Qt 기본 핸들러도 호출 (선택 사항, 하지만 보통 함께 호출해주는 것이 좋음)
+    sys.__excepthook__(ex_cls, ex, tb)
+    
 class MainWindow(QMainWindow):
     """
     메인 윈도우 클래스.
@@ -115,6 +144,7 @@ class MainWindow(QMainWindow):
 
 
 if __name__ == '__main__':
+    sys.excepthook = log_uncaught_exceptions # 전역 예외 처리기(훅) 설정
     app = QApplication(sys.argv)
     main_window = MainWindow()
     main_window.show()
