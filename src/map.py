@@ -1145,32 +1145,69 @@ class CustomGraphicsView(QGraphicsView):
     def __init__(self, scene, parent_dialog=None):
         super().__init__(scene)
         self.parent_dialog = parent_dialog
+        self._is_panning = False
+        self._last_pan_pos = QPoint()
 
     def wheelEvent(self, event):
-        current_mode = self.parent_dialog.current_mode if self.parent_dialog else "select"
+        # 모드와 관계없이 항상 휠 줌으로 작동 ---
+        factor = 1.15 if event.angleDelta().y() > 0 else 1 / 1.15
+        self.scale(factor, factor)
+        self.zoomChanged.emit()
+        event.accept()
 
-        if current_mode == "select": # '기본' 모드일 때
-            factor = 1.15 if event.angleDelta().y() > 0 else 1 / 1.15
-            self.scale(factor, factor)
-            self.zoomChanged.emit()
-            event.accept() # 이벤트 전파를 막아 스크롤 방지
-        else: # '지형 입력', '오브젝트 추가' 모드일 때
-            if event.modifiers() == Qt.KeyboardModifier.ControlModifier:
-                factor = 1.15 if event.angleDelta().y() > 0 else 1 / 1.15
-                self.scale(factor, factor)
-                self.zoomChanged.emit()
-            else:
-                super().wheelEvent(event) # 기본 스크롤 동작 수행
-    
     def mousePressEvent(self, event):
+        # 휠 클릭 패닝 로직 (기존과 동일)
+        if event.button() == Qt.MouseButton.MiddleButton:
+            self._is_panning = True
+            self._last_pan_pos = event.pos()
+            self.setCursor(Qt.CursorShape.ClosedHandCursor)
+            event.accept()
+            return
+        
+        #  웨이포인트 위에서 좌클릭 시 드래그 방지 ---
+        if event.button() == Qt.MouseButton.LeftButton:
+            item = self.itemAt(event.pos())
+            # '기본' 모드일 때만 이름 변경 로직이 작동해야 함
+            current_mode = self.parent_dialog.current_mode if self.parent_dialog else "select"
+            if current_mode == "select" and item and item.data(0) in ["waypoint_v10", "waypoint_lod_text"]:
+                # 웨이포인트가 클릭되었으므로, 이름 변경을 위해 시그널만 방출하고
+                # QGraphicsView의 기본 드래그 로직이 시작되지 않도록 이벤트를 여기서 종료한다.
+                self.mousePressed.emit(self.mapToScene(event.pos()), event.button())
+                event.accept()
+                return
+
+        # 웨이포인트 위에서의 클릭이 아니거나 다른 버튼 클릭이면, 기존 로직 수행
         self.mousePressed.emit(self.mapToScene(event.pos()), event.button())
         super().mousePressEvent(event)
 
     def mouseMoveEvent(self, event):
+        # --- 수정: 휠 클릭 패닝 로직 추가 ---
+        if self._is_panning:
+            delta = event.pos() - self._last_pan_pos
+            self.horizontalScrollBar().setValue(self.horizontalScrollBar().value() - delta.x())
+            self.verticalScrollBar().setValue(self.verticalScrollBar().value() - delta.y())
+            self._last_pan_pos = event.pos()
+            event.accept()
+            return
+            
+        # 휠 클릭이 아니면 기존 로직 수행
         self.mouseMoved.emit(self.mapToScene(event.pos()))
         super().mouseMoveEvent(event)
 
     def mouseReleaseEvent(self, event):
+        # --- 수정: 휠 클릭 패닝 로직 추가 ---
+        if event.button() == Qt.MouseButton.MiddleButton and self._is_panning:
+            self._is_panning = False
+            # 현재 모드에 맞는 커서로 복원
+            current_mode = self.parent_dialog.current_mode if self.parent_dialog else "select"
+            if current_mode == "select":
+                self.setCursor(Qt.CursorShape.ArrowCursor)
+            else:
+                self.setCursor(Qt.CursorShape.CrossCursor)
+            event.accept()
+            return
+
+        # 휠 클릭이 아니면 기존 로직 수행
         self.mouseReleased.emit(self.mapToScene(event.pos()), event.button())
         super().mouseReleaseEvent(event)
 
@@ -1417,7 +1454,7 @@ class FullMinimapEditorDialog(QDialog):
                 center_x = sum(all_points_x) / len(all_points_x)
                 
                 floor_text = group[0].get('dynamic_name', f"{group[0].get('floor', 'N/A')}층")
-                font = QFont("맑은 고딕", 5, QFont.Weight.Bold) #층 이름 폰트 크기 미니맵 지형 편집기
+                font = QFont("맑은 고딕", 4, QFont.Weight.Bold) #층 이름 폰트 크기 미니맵 지형 편집기
                     
                 text_item = QGraphicsTextItem(floor_text)
                 text_item.setFont(font)
@@ -1427,8 +1464,8 @@ class FullMinimapEditorDialog(QDialog):
                 text_item.setAcceptedMouseButtons(Qt.MouseButton.NoButton)
 
                 text_rect = text_item.boundingRect()
-                padding_x = 2
-                padding_y = 0
+                padding_x = -3 # 미니맵 지형 편집기 층 이름 텍스트 박스 크기 조절
+                padding_y = -3
                 bg_rect_geom = text_rect.adjusted(-padding_x, -padding_y, padding_x, padding_y)
 
                 base_pos_x = center_x - bg_rect_geom.width() / 2
@@ -1449,6 +1486,9 @@ class FullMinimapEditorDialog(QDialog):
 
                 self.scene.addItem(background_rect)
                 self.scene.addItem(text_item)
+                # 미니맵 지형 편집기 층 이름 LOD 적용 대상 리스트에 추가 ---
+                self.lod_text_items.append(background_rect)
+                self.lod_text_items.append(text_item)
 
     def _draw_text_with_outline(self, painter, rect, flags, text, font, text_color, outline_color):
         """지정한 사각형 영역에 테두리가 있는 텍스트를 그립니다."""
@@ -1471,8 +1511,10 @@ class FullMinimapEditorDialog(QDialog):
             if not bounding_rect.isNull():
                 bounding_rect.adjust(-50, -50, 50, 50)
                 self.view.fitInView(bounding_rect, Qt.AspectRatioMode.KeepAspectRatio)
+                self.view.scale(1.4, 1.4) #미니맵 지형 편집기 초기 배율 확대 1.0 기본
             self._initial_fit_done = True
             self._update_lod_visibility()
+            
     def initUI(self):
         main_layout = QHBoxLayout(self)
 
@@ -1804,6 +1846,7 @@ class FullMinimapEditorDialog(QDialog):
             self.scene.clear()
             # --- 수정: 씬 아이템을 참조하는 멤버 변수 초기화 ---
             self.snap_indicator = None
+            self.preview_waypoint_item = None # <-- 이 라인 추가
             self.lod_text_items = []
             
             # 1. 배경 이미지 설정
@@ -1828,6 +1871,7 @@ class FullMinimapEditorDialog(QDialog):
                         rect_item.setPos(pos)
                         rect_item.setData(0, "feature")
                         text_item = self.scene.addText(item_id)
+                        text_item.setFont(QFont("맑은 고딕", 5)) #미니맵 지형 편집기 핵심지형 폰트 크기
                         text_item.setDefaultTextColor(Qt.GlobalColor.white)
                         text_rect = text_item.boundingRect()
                         text_item.setPos(pos + QPointF((pixmap.width() - text_rect.width()) / 2, (pixmap.height() - text_rect.height()) / 2))
@@ -1979,14 +2023,43 @@ class FullMinimapEditorDialog(QDialog):
             # 보기 옵션 체크박스도 함께 고려
             item_type = item.data(0)
             base_visible = True
-            if item_type in ["transition_object_name", "transition_object_name_bg"]: # 수정: _bg 타입 추가
+            if item_type in ["transition_object_name", "transition_object_name_bg"]:
                 base_visible = self.chk_show_objects.isChecked()
-            elif item_type in ["jump_link_name", "jump_link_name_bg"]: # 수정: _bg 타입 추가
+            elif item_type in ["jump_link_name", "jump_link_name_bg"]:
                 base_visible = self.chk_show_jump_links.isChecked()
+            # 지형 이름표(floor_text) 가시성 제어 추가 ---
+            elif item_type in ["floor_text", "floor_text_bg"]:
+                base_visible = self.chk_show_terrain.isChecked()
+            # 웨이포인트 텍스트 가시성 제어 추가 ---
+            elif item_type == "waypoint_lod_text":
+                base_visible = self.chk_show_waypoints.isChecked()
 
             item.setVisible(is_visible and base_visible)
 
     def on_scene_mouse_press(self, scene_pos, button):
+        # --- 수정: '기본' 모드에서 웨이포인트 클릭 시 이름 변경 기능 추가 ---
+        if self.current_mode == "select" and button == Qt.MouseButton.LeftButton:
+            # 클릭 위치의 아이템 가져오기 (View 좌표로 변환 필요)
+            view_pos = self.view.mapFromScene(scene_pos)
+            item_at_pos = self.view.itemAt(view_pos)
+            
+            if item_at_pos and item_at_pos.data(0) in ["waypoint_v10", "waypoint_lod_text"]:
+                wp_id = item_at_pos.data(1)
+                waypoint_data = next((wp for wp in self.geometry_data.get("waypoints", []) if wp.get("id") == wp_id), None)
+                
+                if waypoint_data:
+                    old_name = waypoint_data.get("name", "")
+                    new_name, ok = QInputDialog.getText(self, "웨이포인트 이름 변경", "새 이름:", text=old_name)
+                    
+                    if ok and new_name and new_name != old_name:
+                        # 이름 중복 검사
+                        if any(wp.get('name') == new_name for wp in self.geometry_data.get("waypoints", [])):
+                            QMessageBox.warning(self, "오류", "이미 존재하는 웨이포인트 이름입니다.")
+                        else:
+                            waypoint_data["name"] = new_name
+                            self.populate_scene() # UI 즉시 갱신
+                    return # 이름 변경 로직 후 드래그 패닝 방지
+                
         if self.current_mode == "terrain":
             if button == Qt.MouseButton.LeftButton:
                 final_pos = None
@@ -2076,7 +2149,7 @@ class FullMinimapEditorDialog(QDialog):
                             "parent_line_id": parent_line_id
                         }
                         self.geometry_data["waypoints"].append(new_wp)
-                        self._add_waypoint_rect(snap_pos, wp_id, wp_name, "")
+                        self.populate_scene()
         
         elif self.current_mode == "jump":
             if button == Qt.MouseButton.LeftButton:
@@ -2214,11 +2287,15 @@ class FullMinimapEditorDialog(QDialog):
             terrain_info = self._get_closest_point_on_terrain(scene_pos)
             if terrain_info:
                 snap_pos, _ = terrain_info
-                if not self.preview_waypoint_item:
+                # --- 수정: None 체크 강화 ---
+                if self.preview_waypoint_item is None:
                     size = 12
                     self.preview_waypoint_item = self.scene.addRect(0, 0, size, size, QPen(QColor(0, 255, 0, 150), 2, Qt.PenStyle.DashLine))
-                self.preview_waypoint_item.setPos(snap_pos - QPointF(self.preview_waypoint_item.rect().width()/2, self.preview_waypoint_item.rect().height()))
-                self.preview_waypoint_item.setVisible(True)
+                
+                # self.preview_waypoint_item이 None이 아님을 보장
+                if self.preview_waypoint_item:
+                    self.preview_waypoint_item.setPos(snap_pos - QPointF(self.preview_waypoint_item.rect().width()/2, self.preview_waypoint_item.rect().height()))
+                    self.preview_waypoint_item.setVisible(True)
             elif self.preview_waypoint_item:
                 self.preview_waypoint_item.setVisible(False)
 
@@ -2251,11 +2328,12 @@ class FullMinimapEditorDialog(QDialog):
             # --- 수정: 중앙 텍스트(order_text)에 폰트 크기 동적 조절 로직 추가 ---
             text_item = QGraphicsTextItem(order_text)
             
-            font_size = 8
+            # --- 미니맵 편집기 웨이포인트 이름 폰트 크기 조정 ---
+            font_size = 3 # 기본 8 -> 5
             if len(order_text) > 5:
-                font_size = 6
+                font_size = 2 # 6 -> 3
             elif len(order_text) > 8:
-                font_size = 4
+                font_size = 1 # 4 -> 2 (매우 작으므로 최소 2로 설정)
 
             font = QFont("맑은 고딕", font_size, QFont.Weight.Bold)
             text_item.setFont(font)
@@ -2265,11 +2343,21 @@ class FullMinimapEditorDialog(QDialog):
             center_pos = rect_item.pos() + QPointF(size/2, size/2)
             text_item.setPos(center_pos - QPointF(text_rect.width()/2, text_rect.height()/2))
             
-            text_item.setData(0, "waypoint_v10")
+            # LOD 제어를 위해 텍스트 아이템에 별도 타입 부여 및 리스트 추가 ---
+            text_item.setData(0, "waypoint_lod_text") # 사각형(waypoint_v10)과 구분
             text_item.setData(1, wp_id)
             # 텍스트도 마우스 이벤트를 무시하도록 설정
             text_item.setAcceptedMouseButtons(Qt.MouseButton.NoButton)
+            
+            # --- 수정: 웨이포인트 아이템들을 최상위에 표시하기 위해 Z-value 설정 ---
+            rect_item.setZValue(20)
+            text_item.setZValue(21)
+            
             self.scene.addItem(text_item)
+            
+            # LOD 제어 대상 리스트에 추가
+            self.lod_text_items.append(text_item)
+            
             return rect_item
 
     def _add_jump_link_line(self, p1, p2, link_id):
@@ -2846,7 +2934,7 @@ class RealtimeMinimapView(QLabel):
                     threshold = feature_data.get('threshold', 0.85)
                     is_detected = realtime_conf >= threshold
 
-                    font_name = QFont("맑은 고딕", 11, QFont.Weight.Bold)
+                    font_name = QFont("맑은 고딕", 9, QFont.Weight.Bold) # 실시간 뷰의 핵심 지형 이름 폰트 크기
                     
                     if is_detected:
                         painter.setPen(QPen(QColor(0, 180, 255), 2, Qt.PenStyle.SolidLine))
