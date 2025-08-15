@@ -1,7 +1,19 @@
 # map.py
-# 2025년 08月 13日 10:30 (KST)
-# 기능: v10.0.0 - 지능형 내비게이션 시스템 도입 (1단계: 데이터 구조 및 UI 확장)
+# 2025년 08月 15日 16:30 (KST)
+# 기능: v10.1.3 - 내비게이션 도착 판정 로직 개선 (Phase 2)
 # 설명:
+# - [로직 개선] 웨이포인트 도착 판정 조건에 '플레이어와 목표의 층(Floor) 일치' 여부를 추가하여 안정성 대폭 향상.
+#           - [MapTab] 이제 플레이어가 목표와 같은 층의 지형선 위에 서 있을 때만 도착으로 인정하여, 점프 등으로 인한 오작동을 방지.
+# - [UI/UX 개선] NavigatorDisplay 위젯의 디자인을 최종 개선하여 가독성 및 공간 효율성 최적화.
+#           - [NavigatorDisplay] 순서 표시기(🚩, ① 등)를 웨이포인트 이름 앞으로 이동시켜 한 줄로 표시.
+#           - [NavigatorDisplay] 상단 중앙에 현재 진행 방향([정방향]/[역방향])을 표시하는 기능 추가.
+#           - [NavigatorDisplay] 중앙 정보 영역의 폭을 줄여 전체적인 레이아웃 균형 조정.
+# - v10.1.1 - 내비게이션 UI 디자인 개선 (Phase 2)
+# - [UI/UX 개선] NavigatorDisplay 위젯의 UI 레이아웃을 전면 개편하여 시인성 및 정보 전달력 강화.
+#           - [NavigatorDisplay] 이전/현재/다음 목표를 중앙에 집중 배치하고, 각 목표 위에 순서 표시기(①, ②, 출발지 등)를 추가.
+#           - [NavigatorDisplay] 진행 막대를 중앙으로 이동시키고, 진행률 텍스트(예: "2 / 5")를 막대 내부에 표시하도록 변경.
+#           - [NavigatorDisplay] 전체적인 위젯 요소의 배치와 간격을 조정하여 균형감 있는 디자인으로 개선.
+# - [기능 구현] 플레이어의 실시간 위치와 목표 웨이포인트 간의 방향/거리를 계산하여 NavigatorDisplay 위젯에 시각화하는 기능 추가.
 # - v10.0.2: [UI/UX 개선] 편집기 및 실시간 뷰의 가독성과 사용성을 개선.
 #           - [편집기 UI] 모든 편집 모드에서 휠 줌 및 휠 클릭 패닝이 가능하도록 개선.
 #           - [편집기 UI] '기본' 모드에서 웨이포인트 좌클릭 시 이름을 변경하는 기능 추가 및 관련 드래그 버그 수정.
@@ -134,22 +146,171 @@ class NavigatorDisplay(QWidget):
 
         # 데이터 초기화
         self.current_floor = "N/A"
+        self.current_terrain_name = ""
         self.target_waypoint_name = "없음"
+        self.previous_waypoint_name = ""
+        self.next_waypoint_name = ""
         self.direction = "-"
         self.distance_px = 0
         self.full_path = []
+        self.last_reached_wp_id = None
         self.target_wp_id = None
+        self.is_forward = True
 
-    def update_data(self, floor, target_name, direction, distance, full_path, target_id):
+    def update_data(self, floor, terrain_name, target_name, prev_name, next_name, direction, distance, full_path, last_reached_id, target_id, is_forward):
         """MapTab으로부터 최신 내비게이션 정보를 받아와 뷰를 갱신합니다."""
         self.current_floor = str(floor)
+        self.current_terrain_name = terrain_name
         self.target_waypoint_name = target_name
+        self.previous_waypoint_name = prev_name
+        self.next_waypoint_name = next_name
         self.direction = direction
         self.distance_px = distance
         self.full_path = full_path
+        self.last_reached_wp_id = last_reached_id
         self.target_wp_id = target_id
+        self.is_forward = is_forward
         self.update() # paintEvent 다시 호출
 
+    def paintEvent(self, event):
+            """수신된 내비게이션 데이터를 기반으로 위젯 UI를 그립니다."""
+            super().paintEvent(event)
+            painter = QPainter(self)
+            painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+
+            # 배경색 설정
+            painter.fillRect(self.rect(), QColor("#2E2E2E"))
+
+            total_width = self.width()
+            total_height = self.height()
+
+            # --- 1. 좌측 영역: 상태 정보 ---
+            left_area_width = 100
+            left_rect = QRect(0, 0, left_area_width, total_height)
+            
+            # 1-1. 상단: 현재 층
+            font_floor = QFont("맑은 고딕", 14, QFont.Weight.Bold)
+            painter.setFont(font_floor)
+            painter.setPen(Qt.GlobalColor.white)
+            floor_rect = QRect(left_rect.x(), 5, left_rect.width(), 30)
+            painter.drawText(floor_rect, Qt.AlignmentFlag.AlignCenter, f"{self.current_floor}층")
+
+            # 1-2. 중단: 현재 지형 이름
+            font_terrain = QFont("맑은 고딕", 8)
+            painter.setFont(font_terrain)
+            painter.setPen(QColor("#9E9E9E"))
+            terrain_rect = QRect(left_rect.x(), 30, left_rect.width(), 20)
+            painter.drawText(terrain_rect, Qt.AlignmentFlag.AlignCenter, self.current_terrain_name)
+
+            # 1-3. 하단: 방향 및 거리
+            font_dist = QFont("맑은 고딕", 10)
+            painter.setFont(font_dist)
+            painter.setPen(Qt.GlobalColor.white)
+            dist_text = f"{self.direction} {self.distance_px:.0f}px" if self.target_wp_id else "-"
+            dist_rect = QRect(left_rect.x(), 50, left_rect.width(), 25)
+            painter.drawText(dist_rect, Qt.AlignmentFlag.AlignCenter, dist_text)
+
+
+            # --- 2. 중앙 영역: 경로 및 진행 정보 ---
+            center_area_width = (total_width - left_area_width * 2.5) - 100
+            center_area_x = int((total_width - center_area_width) / 2)
+            center_rect = QRect(center_area_x, 0, int(center_area_width), total_height)
+
+            # 2-1. 상단: 진행 방향
+            font_direction = QFont("맑은 고딕", 9) # v10.1.6: 사용자 지정 스타일
+            painter.setFont(font_direction)
+            painter.setPen(Qt.GlobalColor.yellow) # v10.1.6: 사용자 지정 스타일
+            direction_text = f"{'정방향' if self.is_forward else '역방향'}" # v10.1.6: 사용자 지정 스타일
+            direction_rect = QRect(center_rect.x(), 5, center_rect.width(), 20)
+            painter.drawText(direction_rect, Qt.AlignmentFlag.AlignCenter, direction_text)
+            
+            # 2-2. 중앙: 경로 흐름
+            path_area_rect = QRect(center_rect.x(), 20, center_rect.width(), 35)
+            
+            indicator_prev, indicator_curr, indicator_next = "", "", ""
+            current_idx = -1
+            total_steps = len(self.full_path)
+
+            if self.target_wp_id and self.target_wp_id in self.full_path:
+                current_idx = self.full_path.index(self.target_wp_id)
+                circled_nums = [chr(0x2460 + i) for i in range(20)]
+
+                def get_indicator(index):
+                    if not self.full_path: return ""
+                    if index == 0: return "🚩"
+                    if index == len(self.full_path) - 1: return "🏁"
+                    return circled_nums[index] if 0 <= index < len(circled_nums) else str(index + 1)
+
+                indicator_curr = get_indicator(current_idx)
+                if current_idx > 0:
+                    indicator_prev = get_indicator(current_idx - 1)
+                if current_idx < total_steps - 1:
+                    indicator_next = get_indicator(current_idx + 1)
+            
+            # v10.1.6: 폰트 크기 +1px씩 증가
+            font_name_side = QFont("맑은 고딕", 11)
+            font_name_main = QFont("맑은 고딕", 13, QFont.Weight.Bold)
+            
+            # 현재 목표
+            painter.setFont(font_name_main)
+            main_indicator_text = f"{indicator_curr} " if indicator_curr else ""
+            main_name_text = self.target_waypoint_name
+            
+            fm = QFontMetrics(font_name_main)
+            main_indicator_width = fm.horizontalAdvance(main_indicator_text)
+            main_name_width = fm.horizontalAdvance(main_name_text)
+            main_total_width = main_indicator_width + main_name_width
+            
+            main_start_x = path_area_rect.x() + (path_area_rect.width() - main_total_width) / 2
+            
+            painter.setPen(Qt.GlobalColor.white)
+            painter.drawText(QRect(int(main_start_x), path_area_rect.y(), main_indicator_width, path_area_rect.height()), Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, main_indicator_text)
+            
+            painter.setPen(QColor("lime"))
+            painter.drawText(QRect(int(main_start_x + main_indicator_width), path_area_rect.y(), main_name_width, path_area_rect.height()), Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, main_name_text)
+
+
+            # 이전/다음 목표
+            painter.setFont(font_name_side)
+            painter.setPen(QColor("#9E9E9E"))
+            prev_text = f"{indicator_prev} {self.previous_waypoint_name}" if self.previous_waypoint_name else ""
+            painter.drawText(path_area_rect, Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, prev_text)
+            
+            next_text = f"{indicator_next} {self.next_waypoint_name}" if self.next_waypoint_name else ""
+            painter.drawText(path_area_rect, Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter, next_text)
+
+            # 2-3. 하단: 진행 막대
+            progress_text = ""
+            progress_ratio = 0.0
+            if self.full_path:
+                total_steps = len(self.full_path)
+                current_step = 0
+                if self.last_reached_wp_id and self.last_reached_wp_id in self.full_path:
+                    current_step = self.full_path.index(self.last_reached_wp_id) + 1
+                
+                if current_step > 0 or self.target_wp_id:
+                    progress_text = f"{current_step} / {total_steps}"
+                    if total_steps > 0:
+                        progress_ratio = current_step / total_steps
+
+            bar_height = 18
+            bar_y = 58
+            progress_bar_rect = QRect(center_rect.x(), bar_y, center_rect.width(), bar_height)
+
+            painter.setPen(Qt.GlobalColor.black)
+            painter.setBrush(QColor("#1C1C1C"))
+            painter.drawRoundedRect(progress_bar_rect, 5, 5)
+
+            if progress_ratio > 0:
+                fill_width = int(progress_bar_rect.width() * progress_ratio)
+                progress_fill_rect = QRect(progress_bar_rect.x(), progress_bar_rect.y(), fill_width, progress_bar_rect.height())
+                painter.setBrush(QColor("dodgerblue"))
+                painter.drawRoundedRect(progress_fill_rect, 5, 5)
+
+            if progress_text:
+                painter.setPen(Qt.GlobalColor.white)
+                painter.setFont(QFont("맑은 고딕", 8, QFont.Weight.Bold))
+                painter.drawText(progress_bar_rect, Qt.AlignmentFlag.AlignCenter, progress_text)
 
 # --- 위젯 클래스 ---
 class ZoomableView(QGraphicsView):
@@ -429,7 +590,7 @@ class KeyFeatureManagerDialog(QDialog):
         self.feature_list_widget.itemSelectionChanged.connect(self.show_feature_details)
         self.feature_list_widget.itemDoubleClicked.connect(self.edit_feature)
         
-        # --- 수정 시작: 버튼 레이아웃 변경 ---
+        # ---  버튼 레이아웃 변경 ---
         button_layout = QHBoxLayout()
         self.add_feature_btn = QPushButton("새 지형 추가")
         self.add_feature_btn.clicked.connect(self.add_new_feature)
@@ -441,7 +602,7 @@ class KeyFeatureManagerDialog(QDialog):
         
         button_layout.addWidget(self.add_feature_btn)
         # button_layout.addWidget(self.update_links_btn) # 삭제
-        # --- 수정 끝 ---
+        
         
         left_layout.addWidget(self.feature_list_widget)
         left_layout.addLayout(button_layout)
@@ -669,14 +830,14 @@ class KeyFeatureManagerDialog(QDialog):
         feature_data = self.key_features.get(feature_id)
         if not feature_data: return
 
-        # --- 수정 시작: pixmap 변수 할당 및 유효성 검사 ---
+        # ---  pixmap 변수 할당 및 유효성 검사 ---
         pixmap = self._create_context_thumbnail(feature_data)
         
         if pixmap and not pixmap.isNull():
             self.image_preview_label.setPixmap(pixmap.scaled(self.image_preview_label.size(), Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation))
         else:
             self.image_preview_label.setText("썸네일 이미지\n생성 실패")
-        # --- 수정 끝 ---
+        
 
         anchor_id = self.parent_map_tab.reference_anchor_id
         if feature_id == anchor_id:
@@ -847,7 +1008,7 @@ class KeyFeatureManagerDialog(QDialog):
             QApplication.processEvents() 
             self.parent_map_tab.update_general_log(f"핵심 지형 '{feature_id}'가 수정되었습니다.", "blue")
             
-            # --- 수정: 데이터 동기화 및 UI 갱신 ---
+            #  데이터 동기화 및 UI 갱신 ---
             # GUI 이벤트 큐를 처리하여 MapTab의 데이터 변경이 반영되도록 함
             QApplication.processEvents()
             
@@ -1196,7 +1357,7 @@ class CustomGraphicsView(QGraphicsView):
         super().mousePressEvent(event)
 
     def mouseMoveEvent(self, event):
-        # --- 수정: 휠 클릭 패닝 로직 추가 ---
+        #  휠 클릭 패닝 로직 추가 ---
         if self._is_panning:
             delta = event.pos() - self._last_pan_pos
             self.horizontalScrollBar().setValue(self.horizontalScrollBar().value() - delta.x())
@@ -1210,7 +1371,7 @@ class CustomGraphicsView(QGraphicsView):
         super().mouseMoveEvent(event)
 
     def mouseReleaseEvent(self, event):
-        # --- 수정: 휠 클릭 패닝 로직 추가 ---
+        #  휠 클릭 패닝 로직 추가 ---
         if event.button() == Qt.MouseButton.MiddleButton and self._is_panning:
             self._is_panning = False
             # 현재 모드에 맞는 커서로 복원
@@ -1239,7 +1400,7 @@ class DebugViewDialog(QDialog):
         layout = QVBoxLayout(self)
         layout.addWidget(self.image_label)
         
-        # --- 수정: 멤버 변수 다시 정의 ---
+        #  멤버 변수 다시 정의 ---
         self.base_pixmap = None
         self.debug_data = {}
 
@@ -1859,7 +2020,7 @@ class FullMinimapEditorDialog(QDialog):
                 
     def populate_scene(self):
             self.scene.clear()
-            # --- 수정: 씬 아이템을 참조하는 멤버 변수 초기화 ---
+            #  씬 아이템을 참조하는 멤버 변수 초기화 ---
             self.snap_indicator = None
             self.preview_waypoint_item = None # <-- 이 라인 추가
             self.lod_text_items = []
@@ -1988,7 +2149,7 @@ class FullMinimapEditorDialog(QDialog):
                     wp_order_map[wp_id] = f"{i+1}"
 
             for wp_data in self.geometry_data.get("waypoints", []):
-                # --- 수정: order_text 대신 wp_data['name']을 중앙 텍스트로 전달 ---
+                #  order_text 대신 wp_data['name']을 중앙 텍스트로 전달 ---
                 self._add_waypoint_rect(QPointF(wp_data['pos'][0], wp_data['pos'][1]), wp_data['id'], wp_data['name'], wp_data['name'])
                 
             # 5. 모든 층 번호 텍스트를 마지막에 그림
@@ -2052,7 +2213,7 @@ class FullMinimapEditorDialog(QDialog):
             item.setVisible(is_visible and base_visible)
 
     def on_scene_mouse_press(self, scene_pos, button):
-        # --- 수정: '기본' 모드에서 웨이포인트 클릭 시 이름 변경 기능 추가 ---
+        #  '기본' 모드에서 웨이포인트 클릭 시 이름 변경 기능 추가 ---
         if self.current_mode == "select" and button == Qt.MouseButton.LeftButton:
             # 클릭 위치의 아이템 가져오기 (View 좌표로 변환 필요)
             view_pos = self.view.mapFromScene(scene_pos)
@@ -2160,7 +2321,7 @@ class FullMinimapEditorDialog(QDialog):
                             "id": wp_id,
                             "name": wp_name,
                             "pos": [snap_pos.x(), snap_pos.y()],
-                            "floor": wp_floor, # --- 수정 (7): 자동 할당된 층 사용 ---
+                            "floor": wp_floor, # --- : 자동 할당된 층 사용 ---
                             "parent_line_id": parent_line_id
                         }
                         self.geometry_data["waypoints"].append(new_wp)
@@ -2297,12 +2458,12 @@ class FullMinimapEditorDialog(QDialog):
                     self.object_start_pos.x(), self.object_start_pos.y(), end_pos.x(), end_pos.y(),
                     QPen(QColor(255, 165, 0, 150), 2, Qt.PenStyle.DashLine)
                 )
-        # --- v10.0.0 수정 시작 ---
+        # --- v10.0.0  ---
         elif self.current_mode == "waypoint":
             terrain_info = self._get_closest_point_on_terrain(scene_pos)
             if terrain_info:
                 snap_pos, _ = terrain_info
-                # --- 수정: None 체크 강화 ---
+                #  None 체크 강화 ---
                 if self.preview_waypoint_item is None:
                     size = 12
                     self.preview_waypoint_item = self.scene.addRect(0, 0, size, size, QPen(QColor(0, 255, 0, 150), 2, Qt.PenStyle.DashLine))
@@ -2340,7 +2501,7 @@ class FullMinimapEditorDialog(QDialog):
             # 이름 텍스트는 툴팁으로 변경
             rect_item.setToolTip(name)
 
-            # --- 수정: 중앙 텍스트(order_text)에 폰트 크기 동적 조절 로직 추가 ---
+            #  중앙 텍스트(order_text)에 폰트 크기 동적 조절 로직 추가 ---
             text_item = QGraphicsTextItem(order_text)
             
             # --- 미니맵 편집기 웨이포인트 이름 폰트 크기 조정 ---
@@ -2364,7 +2525,7 @@ class FullMinimapEditorDialog(QDialog):
             # 텍스트도 마우스 이벤트를 무시하도록 설정
             text_item.setAcceptedMouseButtons(Qt.MouseButton.NoButton)
             
-            # --- 수정: 웨이포인트 아이템들을 최상위에 표시하기 위해 Z-value 설정 ---
+            #  웨이포인트 아이템들을 최상위에 표시하기 위해 Z-value 설정 ---
             rect_item.setZValue(20)
             text_item.setZValue(21)
             
@@ -2467,7 +2628,7 @@ class FullMinimapEditorDialog(QDialog):
     
     def _update_snap_indicator(self, snap_point):
         """스냅 가능한 위치에 표시기를 업데이트합니다."""
-        # --- 수정: 객체가 삭제되었는지 먼저 확인하여 RuntimeError 방지 ---
+        #  객체가 삭제되었는지 먼저 확인하여 RuntimeError 방지 ---
         if hasattr(self, 'snap_indicator') and self.snap_indicator and self.snap_indicator.scene() is None:
             self.snap_indicator = None
 
@@ -2593,7 +2754,7 @@ class FullMinimapEditorDialog(QDialog):
                 "id": obj_id,
                 "parent_line_id": self.current_object_parent_id,
                 "points": [[self.object_start_pos.x(), self.object_start_pos.y()], [final_end_pos.x(), final_end_pos.y()]],
-                "floor": getattr(self, 'current_object_floor', self.floor_spinbox.value()) # --- 수정 (7): 자동 할당된 층 사용 ---
+                "floor": getattr(self, 'current_object_floor', self.floor_spinbox.value()) # --- : 자동 할당된 층 사용 ---
             })
 
             # 이름 갱신 및 전체 씬 다시 그리기 ---
@@ -2622,7 +2783,7 @@ class FullMinimapEditorDialog(QDialog):
         """주어진 ID를 가진 수직 이동 오브젝트와 관련 이름표를 삭제하고 뷰를 갱신합니다."""
         if not obj_id_to_delete: return
 
-        # --- 수정 시작: 삭제 후 전체 뷰를 갱신하는 로직으로 변경 ---
+        # ---  삭제 후 전체 뷰를 갱신하는 로직으로 변경 ---
         # 1. 데이터에서 해당 오브젝트 삭제
         original_count = len(self.geometry_data.get("transition_objects", []))
         self.geometry_data["transition_objects"] = [
@@ -2720,7 +2881,7 @@ class RealtimeMinimapView(QLabel):
         self.setText("탐지를 시작하세요.")
 
         # 렌더링 상태 변수
-        self.zoom_level = 1.3 # 기본 실시간 미니맵 뷰 확대배율
+        self.zoom_level = 2.0 # 기본 실시간 미니맵 뷰 확대배율
         self.camera_center_global = QPointF(0, 0)
         self.active_features = []
         self.my_player_rects = []
@@ -2817,7 +2978,7 @@ class RealtimeMinimapView(QLabel):
 
         render_opts = self.parent_tab.render_options
         
-        # --- 수정 시작: 지형선 및 그룹 이름 렌더링 로직 전체 교체 ---
+        # ---  지형선 및 그룹 이름 렌더링 로직 전체 교체 ---
         if render_opts.get('terrain', True):
             painter.save()
             
@@ -2958,7 +3119,7 @@ class RealtimeMinimapView(QLabel):
                         painter.setPen(QPen(QColor("gray"), 2, Qt.PenStyle.DashLine))
                         self._draw_text_with_outline(painter, local_rect.toRect(), Qt.AlignmentFlag.AlignCenter, feature_id, font_name, QColor("#AAAAAA"), Qt.GlobalColor.black)
                     
-                    # --- 수정: 미감지 시에도 realtime_conf를 사용하도록 수정 ---
+                    #  미감지 시에도 realtime_conf를 사용하도록 수정 ---
                     conf_text = f"{realtime_conf:.2f}"
                     font_conf = QFont("맑은 고딕", 10)
                     
@@ -2989,7 +3150,7 @@ class RealtimeMinimapView(QLabel):
                 if not path_ids and not self.is_forward:
                     path_ids = list(reversed(route.get("forward_path", [])))
 
-                # --- 수정: 출발지/목적지 텍스트 처리 ---
+                #  출발지/목적지 텍스트 처리 ---
                 if path_ids:
                     # 먼저 모든 웨이포인트에 숫자 할당
                     for i, wp_id in enumerate(path_ids):
@@ -3036,7 +3197,7 @@ class RealtimeMinimapView(QLabel):
                     #  이름 폰트 크기 8pt로 변경 ---
                     font_name = QFont("맑은 고딕", 8)
                     
-                    # --- 수정: 텍스트 너비 계산에 여유 공간(패딩) 추가 ---
+                    #  텍스트 너비 계산에 여유 공간(패딩) 추가 ---
                     tm = QFontMetrics(font_name)
                     # boundingRect는 정수 기반 QRect를 반환합니다.
                     text_bounding_rect = tm.boundingRect(name_text)
@@ -3087,7 +3248,7 @@ class RealtimeMinimapView(QLabel):
                 local_top_left = global_to_local(rect.topLeft())
                 local_rect = QRectF(local_top_left, rect.size() * self.zoom_level)
                 painter.drawRect(local_rect)
-        # --- 수정 끝 ---
+        
         painter.restore()
         
         painter.save()
@@ -3098,7 +3259,7 @@ class RealtimeMinimapView(QLabel):
             painter.drawRect(local_rect)
         painter.restore()
 
-        # --- 수정 시작: 정확한 플레이어 발밑 위치 표시 ---
+        # ---  정확한 플레이어 발밑 위치 표시 ---
         if self.final_player_pos_global:
             local_player_pos = global_to_local(self.final_player_pos_global)
             
@@ -3495,47 +3656,7 @@ class MapTab(QWidget):
                         closest_floor = line_data.get('floor', 0.0)
             
             return closest_floor
-
-            """주어진 점프 링크 데이터와 라인 아이템을 기반으로 이름표를 생성하여 씬에 추가합니다."""
-            if 'dynamic_name' not in link_data or not line_item:
-                return
-
-            name = link_data['dynamic_name']
-            link_id = link_data['id']
-
-            # 텍스트 아이템 생성
-            text_item = QGraphicsTextItem(name)
-            font = QFont("맑은 고딕", 3, QFont.Weight.Bold)
-            text_item.setFont(font)
-            text_item.setDefaultTextColor(QColor("lime"))
-            text_item.setData(0, "jump_link_name")
-            text_item.setData(1, link_id)
-
-            # 배경 아이템 생성
-            text_rect = text_item.boundingRect()
-            padding_x, padding_y = -3, -3
-            bg_rect_geom = text_rect.adjusted(-padding_x, -padding_y, padding_x, padding_y)
-            line_center = line_item.boundingRect().center()
-            base_pos_x = line_center.x() - bg_rect_geom.width() / 2
-            base_pos_y = line_center.y() - bg_rect_geom.height() / 2 - 7
-
-            background_rect = RoundedRectItem(QRectF(0, 0, bg_rect_geom.width(), bg_rect_geom.height()), 3, 3)
-            background_rect.setBrush(QColor(0, 0, 0, 120))
-            background_rect.setPen(QPen(Qt.GlobalColor.transparent))
-            background_rect.setPos(base_pos_x, base_pos_y)
-            background_rect.setData(0, "jump_link_name_bg")
-            background_rect.setData(1, link_id)
-
-            text_item.setPos(base_pos_x + padding_x, base_pos_y + padding_y)
-            background_rect.setZValue(10)
-            text_item.setZValue(11)
-
-            # 씬에 추가 및 LOD 리스트에 등록
-            self.scene.addItem(background_rect)
-            self.scene.addItem(text_item)
-            self.lod_text_items.append(text_item)
-            self.lod_text_items.append(background_rect)
-
+        
     def update_detection_log(self, inliers, outliers):
         """정상치와 이상치 정보를 받아 탐지 상태 로그를 업데이트합니다."""
         log_html = "<b>활성 지형:</b> "
@@ -3793,7 +3914,7 @@ class MapTab(QWidget):
         geometry_file = os.path.join(profile_path, 'map_geometry.json')
 
         try:
-            # --- 수정: 저장 전 데이터 정화 ---
+            #  저장 전 데이터 정화 ---
             config_data = self._prepare_data_for_json({
                 'minimap_region': self.minimap_region,
                 'active_route_profile': self.active_route_profile_name,
@@ -3803,7 +3924,7 @@ class MapTab(QWidget):
             })
             key_features_data = self._prepare_data_for_json(self.key_features)
             geometry_data = self._prepare_data_for_json(self.geometry_data)
-            # --- 수정 끝 ---
+            
 
             with open(config_file, 'w', encoding='utf-8') as f: json.dump(config_data, f, indent=4, ensure_ascii=False)
             with open(features_file, 'w', encoding='utf-8') as f: json.dump(key_features_data, f, indent=4, ensure_ascii=False)
@@ -4280,58 +4401,58 @@ class MapTab(QWidget):
                 self.debug_dialog.close()
 
     def toggle_anchor_detection(self, checked):
-        if checked:
-            if not self.minimap_region: 
-                QMessageBox.warning(self, "오류", "먼저 '미니맵 범위 지정'을 해주세요.")
-                self.detect_anchor_btn.setChecked(False)
-                return
-            if not self.key_features:
-                QMessageBox.warning(self, "오류", "하나 이상의 '핵심 지형'을 등록해야 합니다.")
-                self.detect_anchor_btn.setChecked(False)
-                return
-            if not self.full_map_pixmap or self.full_map_pixmap.isNull():
-                QMessageBox.warning(self, "오류", "전체 맵 이미지를 생성할 수 없습니다. 편집기를 통해 맵 데이터를 확인해주세요.")
-                self.detect_anchor_btn.setChecked(False)
-                return
+            if checked:
+                if not self.minimap_region: 
+                    QMessageBox.warning(self, "오류", "먼저 '미니맵 범위 지정'을 해주세요.")
+                    self.detect_anchor_btn.setChecked(False)
+                    return
+                if not self.key_features:
+                    QMessageBox.warning(self, "오류", "하나 이상의 '핵심 지형'을 등록해야 합니다.")
+                    self.detect_anchor_btn.setChecked(False)
+                    return
+                if not self.full_map_pixmap or self.full_map_pixmap.isNull():
+                    QMessageBox.warning(self, "오류", "전체 맵 이미지를 생성할 수 없습니다. 편집기를 통해 맵 데이터를 확인해주세요.")
+                    self.detect_anchor_btn.setChecked(False)
+                    return
 
-            self.save_profile_data()
-            self.general_log_viewer.clear()
-            self.detection_log_viewer.clear()
-            self.update_general_log("탐지를 시작합니다...", "SaddleBrown")
-            
-            #내비게이션 상태 초기화 로직 추가
-            self.player_nav_state = 'on_terrain'
-            self.current_player_floor = None
-            self.last_terrain_line_id = None
-            self.target_waypoint_id = None
-            self.last_reached_wp_id = None
-            self.current_path_index = -1
-            self.is_forward = True
-            self.start_waypoint_found = False
-            
-            if self.debug_view_checkbox.isChecked():
-                if not self.debug_dialog:
-                    self.debug_dialog = DebugViewDialog(self)
-                self.debug_dialog.show()
+                self.save_profile_data()
+                self.general_log_viewer.clear()
+                self.detection_log_viewer.clear()
+                self.update_general_log("탐지를 시작합니다...", "SaddleBrown")
                 
-            self.detection_thread = AnchorDetectionThread(self.minimap_region, self.key_features)
-            self.detection_thread.detection_ready.connect(self.on_detection_ready)
-            # --- 수정: status_updated 시그널을 올바른 슬롯에 연결 ---
-            self.detection_thread.status_updated.connect(self.update_detection_log_message)
-            self.detection_thread.start()
-            self.detect_anchor_btn.setText("탐지 중단")
-        else:
-            if self.detection_thread and self.detection_thread.isRunning():
-                self.detection_thread.stop()
-                self.detection_thread.wait()
-            self.update_general_log("탐지를 중단합니다.", "black")
-            self.detect_anchor_btn.setText("탐지 시작")
-            # --- 수정: 올바른 슬롯 호출 ---
-            self.update_detection_log_message("탐지 중단됨", "black")
-            self.minimap_view_label.setText("탐지 중단됨")
-            self.detection_thread = None
-            if self.debug_dialog:
-                self.debug_dialog.close()
+                #내비게이션 상태 초기화 로직 추가
+                self.player_nav_state = 'on_terrain'
+                self.current_player_floor = None
+                self.last_terrain_line_id = None
+                self.target_waypoint_id = None
+                self.last_reached_wp_id = None # <--- 이 라인이 중요합니다
+                self.current_path_index = -1
+                self.is_forward = True
+                self.start_waypoint_found = False
+                
+                if self.debug_view_checkbox.isChecked():
+                    if not self.debug_dialog:
+                        self.debug_dialog = DebugViewDialog(self)
+                    self.debug_dialog.show()
+                    
+                self.detection_thread = AnchorDetectionThread(self.minimap_region, self.key_features)
+                self.detection_thread.detection_ready.connect(self.on_detection_ready)
+                # --- 수정: status_updated 시그널을 올바른 슬롯에 연결 ---
+                self.detection_thread.status_updated.connect(self.update_detection_log_message)
+                self.detection_thread.start()
+                self.detect_anchor_btn.setText("탐지 중단")
+            else:
+                if self.detection_thread and self.detection_thread.isRunning():
+                    self.detection_thread.stop()
+                    self.detection_thread.wait()
+                self.update_general_log("탐지를 중단합니다.", "black")
+                self.detect_anchor_btn.setText("탐지 시작")
+                # --- 수정: 올바른 슬롯 호출 ---
+                self.update_detection_log_message("탐지 중단됨", "black")
+                self.minimap_view_label.setText("탐지 중단됨")
+                self.detection_thread = None
+                if self.debug_dialog:
+                    self.debug_dialog.close()
 
     def on_detection_ready(self, frame_bgr, found_features, my_player_rects, other_player_rects):
         """
@@ -4358,7 +4479,7 @@ class MapTab(QWidget):
         source_points, dest_points, valid_features_map = [], [], {}
         feature_ids = []  # 추가: src/dst와 inliers 마스크를 동일한 순서로 매핑하기 위한 리스트 (중요)
 
-        # --- 수정: found_features -> reliable_features ---
+        #  found_features -> reliable_features ---
         for feature in reliable_features:
             feature_id = feature['id']
             if feature_id in self.global_positions:
@@ -4457,7 +4578,7 @@ class MapTab(QWidget):
             # 위치 계산 실패 시 디버그 뷰만 업데이트하고 종료
             if self.debug_dialog and self.debug_dialog.isVisible():
                 self.debug_dialog.update_debug_info(frame_bgr, {'all_features': found_features, 'inlier_ids': set(), 'player_pos_local': None})
-            # --- 수정: 로그 업데이트 추가 ---
+            #  로그 업데이트 추가 ---
             self.update_detection_log_from_features([], [])
             return
 
@@ -4565,7 +4686,7 @@ class MapTab(QWidget):
         
         self.global_pos_updated.emit(final_player_pos)
         
-        # --- 수정: found_features -> reliable_features ---
+        #  found_features -> reliable_features ---
         inlier_list = [f for f in reliable_features if f['id'] in inlier_ids]
         outlier_list = [f for f in reliable_features if f['id'] not in inlier_ids]
         
@@ -4585,7 +4706,7 @@ class MapTab(QWidget):
             bounding_rect = QRectF()
             all_items_rects = []
             
-            # --- 수정: 핵심 지형의 문맥 이미지를 기준으로 경계 계산 ---
+            #  핵심 지형의 문맥 이미지를 기준으로 경계 계산 ---
             for feature_id, feature_data in self.key_features.items():
                 context_pos_key = f"{feature_id}_context"
                 if context_pos_key in self.global_positions:
@@ -4598,7 +4719,7 @@ class MapTab(QWidget):
                                 all_items_rects.append(QRectF(context_origin, QSizeF(pixmap.size())))
                         except Exception as e:
                             print(f"문맥 이미지 로드 오류 (ID: {feature_id}): {e}")
-            # --- 수정 끝 ---
+            
             
             # 지형선, 오브젝트 등의 경계도 포함
             all_points = []
@@ -4629,7 +4750,7 @@ class MapTab(QWidget):
             painter.setRenderHint(QPainter.RenderHint.Antialiasing)
             painter.translate(-bounding_rect.topLeft())
 
-            # --- 수정: 핵심 지형의 문맥 이미지 그리기 ---
+            #  핵심 지형의 문맥 이미지 그리기 ---
             if self.render_options.get('background', True):
                 painter.setOpacity(0.7) # 투명도 조절
                 for feature_id, feature_data in self.key_features.items():
@@ -4644,7 +4765,7 @@ class MapTab(QWidget):
                                     painter.drawPixmap(context_origin, pixmap)
                             except Exception as e:
                                 print(f"문맥 이미지 그리기 오류 (ID: {feature_id}): {e}")
-            # --- 수정 끝 ---
+            
             
             painter.end()
             self.update_general_log(f"배경 지도 이미지 생성 완료. (크기: {self.full_map_pixmap.width()}x{self.full_map_pixmap.height()})", "green")
@@ -4742,152 +4863,210 @@ class MapTab(QWidget):
             return abs(start_pos.x() - target_pos.x())
 
     def _update_player_state_and_navigation(self, final_player_pos):
-            """플레이어의 현재 위치를 기반으로 층, 상태를 판단하고 다음 목표를 결정합니다."""
-            if final_player_pos is None:
-                return
+                """플레이어의 현재 위치를 기반으로 층, 상태를 판단하고 다음 목표를 결정합니다."""
+                current_terrain_name = "" # v10.1.5: 현재 지형 이름 저장을 위한 변수
 
-            # 1. 현재 층 및 상태 판단 로직
-            contact_terrain = None
-            min_y_dist = 5.0
-            player_x = final_player_pos.x()
-            player_y = final_player_pos.y()
-            for line_data in self.geometry_data.get("terrain_lines", []):
-                points = line_data.get("points", [])
-                if len(points) < 2: continue
-                
-                for i in range(len(points) - 1):
-                    p1 = points[i]
-                    p2 = points[i+1]
-                    min_lx, max_lx = min(p1[0], p2[0]), max(p1[0], p2[0])
+                if final_player_pos is None:
+                    # v10.1.5: 플레이어 위치가 없을 때 네비게이터 초기화 (확장된 인자 사용)
+                    self.navigator_display.update_data("N/A", "", "없음", "", "", "-", 0, [], None, None, self.is_forward)
+                    return
 
-                    if not (min_lx <= player_x <= max_lx):
-                        continue
-
-                    line_y = p1[1] + (p2[1] - p1[1]) * ((player_x - p1[0]) / (p2[0] - p1[0])) if (p2[0] - p1[0]) != 0 else p1[1]
-                    y_dist = abs(player_y - line_y)
-
-                    if y_dist < min_y_dist:
-                        min_y_dist = y_dist
-                        contact_terrain = line_data
-            
-            if contact_terrain:
-                self.player_nav_state = 'on_terrain'
-                self.current_player_floor = contact_terrain.get('floor')
-                self.last_terrain_line_id = contact_terrain.get('id')
-            else:
-                is_climbing = False
-                climbing_margin = 5
-                for obj_data in self.geometry_data.get("transition_objects", []):
-                    obj_x = obj_data.get("points", [[0,0]])[0][0]
-                    if abs(player_x - obj_x) < climbing_margin:
-                        is_climbing = True
-                        break
-                if is_climbing: self.player_nav_state = 'climbing'
-                else:
-                    delta_y = player_y - self.last_player_pos.y()
-                    if delta_y < -1: self.player_nav_state = 'jumping'
-                    elif delta_y > 1: self.player_nav_state = 'falling'
-
-            # 2. 현재 목표(Current Target) 결정 로직
-            active_route = self.route_profiles.get(self.active_route_profile_name)
-            if not active_route: return
-            all_waypoints_map = {wp['id']: wp for wp in self.geometry_data.get("waypoints", [])}
-            
-            # 2a. 시작점이 아직 찾아지지 않았다면, 지능형 시작점 탐색 실행
-            if not self.start_waypoint_found and self.current_player_floor is not None:
-                forward_path = active_route.get("forward_path", [])
-                backward_path = active_route.get("backward_path", [])
-                all_wp_ids_in_path = set(forward_path + backward_path)
-                
-                if not all_wp_ids_in_path: return
-                
-                # 1. 경로에 있는 모든 웨이포인트를 층별로 그룹화
-                wps_by_floor = defaultdict(list)
-                for wp_id in all_wp_ids_in_path:
-                    if wp_id in all_waypoints_map:
-                        wp_data = all_waypoints_map[wp_id]
-                        wps_by_floor[wp_data.get('floor')].append(wp_data)
-
-                if not wps_by_floor: return
-
-                # 2. 가장 가까운 층(들) 찾기
-                min_floor_diff = float('inf')
-                for floor in wps_by_floor.keys():
-                    diff = abs(self.current_player_floor - floor)
-                    if diff < min_floor_diff:
-                        min_floor_diff = diff
-                
-                # 3. 최우선 후보군 필터링 (가장 가까운 층에 있는 모든 웨이포인트)
-                final_candidate_wps = []
-                for floor, wps in wps_by_floor.items():
-                    if abs(self.current_player_floor - floor) == min_floor_diff:
-                        final_candidate_wps.extend(wps)
-
-                # 4. 최종 후보군 내에서 비용이 가장 낮은 웨이포인트 찾기
-                start_wp_candidate = None
-                if final_candidate_wps:
-                    all_objs = self.geometry_data.get("transition_objects", [])
-                    start_wp_candidate = min(final_candidate_wps, 
-                                            key=lambda wp: self._calculate_path_cost(final_player_pos, self.current_player_floor, wp, all_objs))
-
-                if start_wp_candidate:
-                    start_wp_id = start_wp_candidate['id']
+                # 1. 현재 층 및 상태 판단 로직
+                contact_terrain = None
+                min_y_dist = 5.0
+                player_x = final_player_pos.x()
+                player_y = final_player_pos.y()
+                for line_data in self.geometry_data.get("terrain_lines", []):
+                    points = line_data.get("points", [])
+                    if len(points) < 2: continue
                     
-                    # 진행 방향 결정
-                    if start_wp_id in forward_path:
-                        forward_index = forward_path.index(start_wp_id)
-                        forward_len = len(forward_path)
-                        dist_to_start = forward_index
-                        dist_to_end = forward_len - 1 - forward_index
+                    for i in range(len(points) - 1):
+                        p1 = points[i]
+                        p2 = points[i+1]
+                        min_lx, max_lx = min(p1[0], p2[0]), max(p1[0], p2[0])
+
+                        if not (min_lx <= player_x <= max_lx):
+                            continue
+
+                        line_y = p1[1] + (p2[1] - p1[1]) * ((player_x - p1[0]) / (p2[0] - p1[0])) if (p2[0] - p1[0]) != 0 else p1[1]
+                        y_dist = abs(player_y - line_y)
+
+                        if y_dist < min_y_dist:
+                            min_y_dist = y_dist
+                            contact_terrain = line_data
+                
+                if contact_terrain:
+                    self.player_nav_state = 'on_terrain'
+                    self.current_player_floor = contact_terrain.get('floor')
+                    self.last_terrain_line_id = contact_terrain.get('id')
+                    current_terrain_name = contact_terrain.get('dynamic_name', '') # v10.1.5: 지형 이름 저장
+                else:
+                    is_climbing = False
+                    climbing_margin = 5
+                    for obj_data in self.geometry_data.get("transition_objects", []):
+                        obj_x = obj_data.get("points", [[0,0]])[0][0]
+                        if abs(player_x - obj_x) < climbing_margin:
+                            is_climbing = True
+                            break
+                    if is_climbing: self.player_nav_state = 'climbing'
+                    else:
+                        delta_y = player_y - self.last_player_pos.y()
+                        if delta_y < -1: self.player_nav_state = 'jumping'
+                        elif delta_y > 1: self.player_nav_state = 'falling'
+
+                # 2. 현재 목표(Current Target) 결정 로직
+                active_route = self.route_profiles.get(self.active_route_profile_name)
+                if not active_route: return
+                all_waypoints_map = {wp['id']: wp for wp in self.geometry_data.get("waypoints", [])}
+                
+                # 2a. 시작점이 아직 찾아지지 않았다면, 지능형 시작점 탐색 실행
+                if not self.start_waypoint_found and self.current_player_floor is not None:
+                    forward_path = active_route.get("forward_path", [])
+                    backward_path = active_route.get("backward_path", [])
+                    all_wp_ids_in_path = set(forward_path + backward_path)
+                    
+                    if not all_wp_ids_in_path: return
+                    
+                    wps_by_floor = defaultdict(list)
+                    for wp_id in all_wp_ids_in_path:
+                        if wp_id in all_waypoints_map:
+                            wp_data = all_waypoints_map[wp_id]
+                            wps_by_floor[wp_data.get('floor')].append(wp_data)
+
+                    if not wps_by_floor: return
+
+                    min_floor_diff = float('inf')
+                    for floor in wps_by_floor.keys():
+                        diff = abs(self.current_player_floor - floor)
+                        if diff < min_floor_diff:
+                            min_floor_diff = diff
+                    
+                    final_candidate_wps = []
+                    for floor, wps in wps_by_floor.items():
+                        if abs(self.current_player_floor - floor) == min_floor_diff:
+                            final_candidate_wps.extend(wps)
+
+                    start_wp_candidate = None
+                    if final_candidate_wps:
+                        all_objs = self.geometry_data.get("transition_objects", [])
+                        start_wp_candidate = min(final_candidate_wps, 
+                                                key=lambda wp: self._calculate_path_cost(final_player_pos, self.current_player_floor, wp, all_objs))
+
+                    if start_wp_candidate:
+                        start_wp_id = start_wp_candidate['id']
                         
-                        if dist_to_start <= dist_to_end:
-                            self.is_forward = True
-                            self.current_path_index = forward_index
+                        if start_wp_id in forward_path:
+                            forward_index = forward_path.index(start_wp_id)
+                            forward_len = len(forward_path)
+                            dist_to_start = forward_index
+                            dist_to_end = forward_len - 1 - forward_index
+                            
+                            if dist_to_start <= dist_to_end:
+                                self.is_forward = True
+                                self.current_path_index = forward_index
+                            else:
+                                self.is_forward = False
+                                path_to_use = backward_path if backward_path else list(reversed(forward_path))
+                                if start_wp_id in path_to_use: self.current_path_index = path_to_use.index(start_wp_id)
+                                else: self.is_forward = True; self.current_path_index = forward_index
                         else:
                             self.is_forward = False
-                            path_to_use = backward_path if backward_path else list(reversed(forward_path))
+                            path_to_use = backward_path if backward_path else []
                             if start_wp_id in path_to_use: self.current_path_index = path_to_use.index(start_wp_id)
-                            else: self.is_forward = True; self.current_path_index = forward_index
-                    else:
-                        self.is_forward = False
-                        path_to_use = backward_path if backward_path else []
-                        if start_wp_id in path_to_use: self.current_path_index = path_to_use.index(start_wp_id)
-                    
-                    self.target_waypoint_id = start_wp_id
-                    self.start_waypoint_found = True
-                    self.update_general_log(f"가장 가까운 경로의 웨이포인트 '{start_wp_candidate['name']}'({start_wp_candidate['floor']}층)에서 내비게이션 시작.", "purple")
+                        
+                        self.target_waypoint_id = start_wp_id
+                        self.start_waypoint_found = True
+                        self.update_general_log(f"가장 가까운 경로의 웨이포인트 '{start_wp_candidate['name']}'({start_wp_candidate['floor']}층)에서 내비게이션 시작.", "purple")
 
-            # 2b. (시작점 찾은 후) 현재 목표에 도달했는지 확인
-            elif self.target_waypoint_id:
+                # 2b. (시작점 찾은 후) 현재 목표에 도달했는지 확인
+                elif self.target_waypoint_id:
+                    target_wp_data = all_waypoints_map.get(self.target_waypoint_id)
+                    if target_wp_data:
+                        target_pos = QPointF(target_wp_data['pos'][0], target_wp_data['pos'][1])
+                        
+                        floor_matches = (self.current_player_floor is not None and 
+                                        abs(self.current_player_floor - target_wp_data.get('floor', -1)) < 0.1)
+
+                        pos_is_close = (abs(final_player_pos.x() - target_pos.x()) < 10 and 
+                                        abs(final_player_pos.y() - target_pos.y()) < 20)
+                        
+                        if floor_matches and pos_is_close:
+                            self.last_reached_wp_id = self.target_waypoint_id
+                            
+                            current_path_list = active_route.get("forward_path" if self.is_forward else "backward_path", [])
+                            if not current_path_list and not self.is_forward:
+                                current_path_list = list(reversed(active_route.get("forward_path", [])))
+
+                            self.current_path_index += 1
+
+                            if self.current_path_index < len(current_path_list):
+                                self.target_waypoint_id = current_path_list[self.current_path_index]
+                            else:
+                                self.is_forward = not self.is_forward
+                                next_path_list = active_route.get("forward_path" if self.is_forward else "backward_path", [])
+                                if not next_path_list and not self.is_forward:
+                                    next_path_list = list(reversed(active_route.get("forward_path", [])))
+                                
+                                if next_path_list:
+                                    self.current_path_index = 0
+                                    self.target_waypoint_id = next_path_list[0]
+                                else:
+                                    self.target_waypoint_id = None
+                                    self.update_general_log("경로 완주. 순환할 경로가 없습니다.", "green")
+                
+                # 3. 내비게이션 정보 계산 및 NavigatorDisplay 업데이트
+                target_name = "없음"
+                prev_name = ""
+                next_name = ""
+                direction = "-"
+                distance = 0
+                full_path = []
+                
                 target_wp_data = all_waypoints_map.get(self.target_waypoint_id)
                 if target_wp_data:
+                    target_name = target_wp_data.get('name', '이름 없음')
                     target_pos = QPointF(target_wp_data['pos'][0], target_wp_data['pos'][1])
-                    if (abs(final_player_pos.x() - target_pos.x()) < 10 and abs(final_player_pos.y() - target_pos.y()) < 15):
-                        self.last_reached_wp_id = self.target_waypoint_id
+                    
+                    distance = abs(final_player_pos.x() - target_pos.x())
+                    
+                    if distance < 10:
+                        direction = "도착 근접"
+                    elif final_player_pos.x() < target_pos.x():
+                        direction = "우측"
+                    else:
+                        direction = "좌측"
+                    
+                    full_path = active_route.get("forward_path" if self.is_forward else "backward_path", [])
+                    if not full_path and not self.is_forward:
+                        full_path = list(reversed(active_route.get("forward_path", [])))
+
+                    if self.target_waypoint_id in full_path:
+                        current_idx = full_path.index(self.target_waypoint_id)
                         
-                        current_path_list = active_route.get("forward_path" if self.is_forward else "backward_path", [])
-                        if not current_path_list and self.is_forward is False:
-                            current_path_list = list(reversed(active_route.get("forward_path", [])))
+                        if current_idx > 0:
+                            prev_id = full_path[current_idx - 1]
+                            prev_name = all_waypoints_map.get(prev_id, {}).get('name', '')
+                        
+                        if current_idx < len(full_path) - 1:
+                            next_id = full_path[current_idx + 1]
+                            next_name = all_waypoints_map.get(next_id, {}).get('name', '')
 
-                        self.current_path_index += 1
+                self.navigator_display.update_data(
+                    floor=self.current_player_floor if self.current_player_floor is not None else "N/A",
+                    terrain_name=current_terrain_name, # v10.1.5: 지형 이름 전달
+                    target_name=target_name,
+                    prev_name=prev_name,
+                    next_name=next_name,
+                    direction=direction,
+                    distance=distance,
+                    full_path=full_path,
+                    last_reached_id=self.last_reached_wp_id,
+                    target_id=self.target_waypoint_id,
+                    is_forward=self.is_forward
+                )
 
-                        if self.current_path_index < len(current_path_list):
-                            self.target_waypoint_id = current_path_list[self.current_path_index]
-                        else:
-                            self.is_forward = not self.is_forward
-                            next_path_list = active_route.get("forward_path" if self.is_forward else "backward_path", [])
-                            if not next_path_list and self.is_forward is False:
-                                next_path_list = list(reversed(active_route.get("forward_path", [])))
-                            
-                            if next_path_list:
-                                self.current_path_index = 0
-                                self.target_waypoint_id = next_path_list[0]
-                            else:
-                                self.target_waypoint_id = None
-                                self.update_general_log("경로 완주. 순환할 경로가 없습니다.", "green")
-
-            # 3. 마무리
-            self.last_player_pos = final_player_pos
+                # 4. 마무리
+                self.last_player_pos = final_player_pos
 
     def update_general_log(self, message, color):
         self.general_log_viewer.append(f'<font color="{color}">{message}</font>')
@@ -5114,12 +5293,12 @@ class MapTab(QWidget):
                 pos2 = global_positions[id2]
                 
                 # 중심점 기준 오프셋 계산
-                # --- 수정: 리스트로 저장된 size를 QSize 객체로 변환 ---
+                #  리스트로 저장된 size를 QSize 객체로 변환 ---
                 size1_data = self.key_features[id1].get('size')
                 size2_data = self.key_features[id2].get('size')
                 size1 = QSize(size1_data[0], size1_data[1]) if isinstance(size1_data, list) and len(size1_data) == 2 else QSize(0,0)
                 size2 = QSize(size2_data[0], size2_data[1]) if isinstance(size2_data, list) and len(size2_data) == 2 else QSize(0,0)
-                # --- 수정 끝 ---
+                
                 center1 = pos1 + QPointF(size1.width()/2, size1.height()/2)
                 center2 = pos2 + QPointF(size2.width()/2, size2.height()/2)
 
