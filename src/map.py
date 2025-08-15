@@ -2426,31 +2426,52 @@ class FullMinimapEditorDialog(QDialog):
             self.view.viewport().update()
 
     def _get_closest_point_on_terrain(self, scene_pos):
-        """씬의 특정 위치에서 가장 가까운 지형선 위의 점과 해당 지형선의 ID를 찾습니다."""
-        min_dist = float('inf')
-        closest_point_info = None
+        """
+        씬의 특정 위치에서 가장 적합한 지형선 위의 점과 ID를 찾습니다. (x좌표 우선 탐색)
+        """
+        mouse_x, mouse_y = scene_pos.x(), scene_pos.y()
         
-        terrain_lines = [item for item in self.scene.items() if isinstance(item, QGraphicsLineItem) and item.data(0) == "terrain_line"]
-
-        for line_item in terrain_lines:
+        candidate_lines = []
+        
+        # 1. 마우스의 x좌표를 포함하는 모든 지형선을 후보로 수집
+        all_terrain_lines = [item for item in self.scene.items() if isinstance(item, QGraphicsLineItem) and item.data(0) == "terrain_line"]
+        
+        for line_item in all_terrain_lines:
             p1 = line_item.line().p1()
             p2 = line_item.line().p2()
             
-            dx, dy = p2.x() - p1.x(), p2.y() - p1.y()
-            if dx == 0 and dy == 0: continue
+            min_x, max_x = min(p1.x(), p2.x()), max(p1.x(), p2.x())
             
-            t = ((scene_pos.x() - p1.x()) * dx + (scene_pos.y() - p1.y()) * dy) / (dx**2 + dy**2)
-            t = max(0, min(1, t))
+            # x좌표가 지형선 범위 내에 있는지 확인 (약간의 여유 허용)
+            if min_x - 1 <= mouse_x <= max_x + 1:
+                # 해당 x좌표에서의 지형선 y좌표 계산
+                dx = p2.x() - p1.x()
+                if abs(dx) < 1e-6: # 수직선일 경우
+                    line_y_at_mouse_x = p1.y()
+                else: # 일반적인 경우
+                    slope = (p2.y() - p1.y()) / dx
+                    line_y_at_mouse_x = p1.y() + slope * (mouse_x - p1.x())
+                
+                # 마우스 y좌표와의 거리 계산
+                y_distance = abs(mouse_y - line_y_at_mouse_x)
+                
+                candidate_lines.append({
+                    "y_dist": y_distance,
+                    "point": QPointF(mouse_x, line_y_at_mouse_x),
+                    "id": line_item.data(1)
+                })
+
+        if not candidate_lines:
+            return None
             
-            point_on_line = QPointF(p1.x() + t * dx, p1.y() + t * dy)
-            dist = math.hypot(scene_pos.x() - point_on_line.x(), scene_pos.y() - point_on_line.y())
-            
-            if dist < 20:
-                min_dist = dist
-                closest_point_info = (point_on_line, line_item.data(1))
+        # 2. 후보들 중에서 마우스 y좌표와 가장 가까운 지형선을 최종 선택
+        closest_line = min(candidate_lines, key=lambda c: c["y_dist"])
         
-        if min_dist < 5: #지형 웨이포인트 스냅거리
-            return closest_point_info
+        # 3. 최종 선택된 지형선이 스냅 임계값 이내인지 확인
+        SNAP_THRESHOLD_Y = 15.0
+        if closest_line["y_dist"] <= SNAP_THRESHOLD_Y:
+            return (closest_line["point"], closest_line["id"])
+            
         return None
 
     def _finish_drawing_object(self, end_pos=None, cancel=False):
@@ -2895,12 +2916,20 @@ class RealtimeMinimapView(QLabel):
                 if name_text:
                     #  이름 폰트 크기 8pt로 변경 ---
                     font_name = QFont("맑은 고딕", 8)
-                    #  이름 위치를 사각형 바깥쪽 위로 조정 ---
+                    
+                    # --- 수정: 텍스트 너비 계산에 여유 공간(패딩) 추가 ---
                     tm = QFontMetrics(font_name)
-                    name_rect = tm.boundingRect(name_text)
-                    name_rect.moveBottomLeft(local_rect.topLeft().toPoint() + QPoint(0, -2))
-                    self._draw_text_with_outline(painter, name_rect, Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignBottom, name_text, font_name, Qt.GlobalColor.white, Qt.GlobalColor.black)
-
+                    # boundingRect는 정수 기반 QRect를 반환합니다.
+                    text_bounding_rect = tm.boundingRect(name_text)
+                    
+                    # 렌더링에 사용할 사각형의 너비를 약간 늘려줍니다.
+                    padding_x = 4 # 좌우 2px씩 총 4px의 여유 공간
+                    name_render_rect = text_bounding_rect.adjusted(0, 0, padding_x, 0)
+                    
+                    # 위치를 부동소수점 기반으로 정밀하게 계산
+                    new_bottom_left_f = local_rect.topLeft() + QPointF(0, -2)
+                    name_render_rect.moveBottomLeft(new_bottom_left_f.toPoint())
+                    self._draw_text_with_outline(painter, name_render_rect, Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignBottom, name_text, font_name, Qt.GlobalColor.white, Qt.GlobalColor.black)
                 # 3. "도착" 표시
                 if wp_data['id'] == self.last_reached_waypoint_id:
                     font_arrival = QFont("맑은 고딕", 8, QFont.Weight.Bold)
