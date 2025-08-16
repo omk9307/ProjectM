@@ -69,8 +69,8 @@ PLAYER_ICON_STD_HEIGHT = 11
 # --- 상태 판정 기준 ---
 ON_TERRAIN_Y_THRESHOLD = 3.0  # 지상 판정 y축 허용 오차 (px)
 JUMP_Y_MIN_THRESHOLD = 4.0    # 점프 상태 최소 y 오프셋 (px)
-JUMP_Y_MAX_THRESHOLD = 12.0   # 점프 상태 최대 y 오프셋 (px)
-CLIMB_Y_MIN_THRESHOLD = 13.0  # 등반 상태 최소 y 오프셋 (px)
+JUMP_Y_MAX_THRESHOLD = 17.0   # 점프 상태 최대 y 오프셋 (px)
+CLIMB_Y_MIN_THRESHOLD = 20.0  # 등반 상태 최소 y 오프셋 (px)
 FALL_Y_MIN_THRESHOLD = 4.0    # 낙하 상태 최소 y 오프셋 (px)
 
 # --- 도착 판정 기준 ---
@@ -3509,6 +3509,7 @@ class MapTab(QWidget):
             # --- 상태 머신 변수 ---
             self.player_state = 'idle' # 'idle', 'on_terrain', 'climbing', 'falling', 'jumping'
             self.navigation_action = 'path_failed' # 'move_to_target', 'prepare_to_climb', 등
+            self.last_on_terrain_y = 0.0 # 마지막으로 지상에 있었을 때의 y좌표
             
             self.player_nav_state = 'on_terrain'  # 'on_terrain', 'climbing', 'jumping', 'falling'
             self.current_player_floor = None
@@ -4991,8 +4992,7 @@ class MapTab(QWidget):
         return total_cost
     def _update_player_state_and_navigation(self, final_player_pos):
         """
-        v10.7.0: 플레이어의 현재 위치를 기반으로 층, 상태를 판단하고,
-        비용 기반 알고리즘을 통해 최적의 다음 목표(중간/최종)를 결정합니다.
+        v10.8.0: 플레이어의 현재 상태를 판정하고, 상태 머신에 따라 다음 행동을 결정합니다.
         """
         current_terrain_name = "" 
 
@@ -5001,14 +5001,12 @@ class MapTab(QWidget):
             self.navigator_display.update_data("N/A", "", "없음", "", "", "-", 0, [], None, None, self.is_forward, 'walk', "대기 중", "오류: 위치 없음")
             return
 
-        active_route = self.route_profiles.get(self.active_route_profile_name)
-        if not active_route: return
-        all_waypoints_map = {wp['id']: wp for wp in self.geometry_data.get("waypoints", [])}
-        if not all_waypoints_map: return
-
-        # --- 1. 플레이어 현재 상태 판단 (층, 지형 등) ---
+        # ==================== v10.8.0 수정 시작 (상태 판정 로직 최종 수정) ====================
+        # --- 1A. 플레이어 물리적 상태(player_state) 판정 ---
         contact_terrain = None
-        min_y_dist = 5.0
+        min_y_dist = ON_TERRAIN_Y_THRESHOLD
+        
+        # 가장 가까운 지형선 찾기 (기존 로직 유지)
         for line_data in self.geometry_data.get("terrain_lines", []):
             points = line_data.get("points", [])
             if len(points) < 2: continue
@@ -5024,14 +5022,55 @@ class MapTab(QWidget):
                     min_y_dist = abs(final_player_pos.y() - line_y)
                     contact_terrain = line_data
         
+        # 화면 좌표계(y값이 아래로 증가)를 고려하여 명시적인 변수 사용
+        # y_movement > 0  => 상승 (화면 위쪽으로 이동)
+        # y_movement < 0  => 하강 (화면 아래쪽으로 이동)
+        y_movement = self.last_player_pos.y() - final_player_pos.y()
+
+        # y_above_terrain > 0 => 마지막 지면보다 위에 있음 (화면 위쪽)
+        y_above_terrain = self.last_on_terrain_y - final_player_pos.y()
+
+        if contact_terrain:
+            self.last_on_terrain_y = final_player_pos.y()
+            self.current_player_floor = contact_terrain.get('floor')
+            current_terrain_name = contact_terrain.get('dynamic_name', '')
+            
+            if abs(final_player_pos.x() - self.last_player_pos.x()) < 0.1 and abs(y_movement) < 0.1:
+                self.player_state = 'idle'
+            else:
+                self.player_state = 'on_terrain'
+        else: # 공중 상태
+            is_near_ladder = False
+            for obj in self.geometry_data.get("transition_objects", []):
+                if abs(final_player_pos.x() - obj['points'][0][0]) < 5.0:
+                    is_near_ladder = True
+                    break
+
+            # 판정 순서: climbing -> jumping -> falling -> idle
+            if is_near_ladder and y_movement > 0: # 사다리 근처에서 상승 중이면 climbing
+                self.player_state = 'climbing'
+            elif y_above_terrain > JUMP_Y_MIN_THRESHOLD and y_above_terrain < JUMP_Y_MAX_THRESHOLD:
+                self.player_state = 'jumping'
+            elif y_above_terrain < -FALL_Y_MIN_THRESHOLD and y_movement < 0: # 지면보다 충분히 아래로 내려갔고, 하강 중이면 falling
+                self.player_state = 'falling'
+            else:
+                # 사다리에서 내려가는 경우도 falling으로 판정
+                if is_near_ladder and y_movement < 0:
+                    self.player_state = 'falling'
+                else:
+                    self.player_state = 'idle'
+
+        # --- 1B. 내비게이션 상태 갱신 (기존 로직) ---
         if contact_terrain:
             if self.intermediate_target_type == 'climb_arrived' and self.current_player_floor is not None and contact_terrain.get('floor', -1) > self.current_player_floor:
                 self.intermediate_target_type = 'walk'
-            self.player_nav_state = 'on_terrain'
-            self.current_player_floor = contact_terrain.get('floor')
             self.last_terrain_line_id = contact_terrain.get('id')
-            current_terrain_name = contact_terrain.get('dynamic_name', '')
-        # (점프/낙하 상태 판단 로직은 여기서는 생략, 도착 판정에서 중요)
+        # ==================== v10.8.0 수정 끝 ======================
+
+        active_route = self.route_profiles.get(self.active_route_profile_name)
+        if not active_route: return
+        all_waypoints_map = {wp['id']: wp for wp in self.geometry_data.get("waypoints", [])}
+        if not all_waypoints_map: return
 
         # --- 2. 최종 목표 웨이포인트(final_target_wp) 결정 ---
         if not self.start_waypoint_found and self.current_player_floor is not None:
