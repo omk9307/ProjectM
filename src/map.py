@@ -5127,7 +5127,38 @@ class MapTab(QWidget):
 
         else: # Case B: 다른 층
             # B-1: 후보군 수집
+            # 1. Jump 후보 수집
+            for link in self.geometry_data.get("jump_links", []):
+                start_terrain_id = self._get_terrain_id_from_vertex(link['start_vertex_pos'])
+                end_terrain_id = self._get_terrain_id_from_vertex(link['end_vertex_pos'])
+
+                start_terrain = next((line for line in self.geometry_data.get("terrain_lines", []) if line['id'] == start_terrain_id), None)
+                end_terrain = next((line for line in self.geometry_data.get("terrain_lines", []) if line['id'] == end_terrain_id), None)
+
+                if not (start_terrain and end_terrain): continue
+
+                floor1, floor2 = start_terrain.get('floor'), end_terrain.get('floor')
+
+                # 현재 층 -> 목표 층으로 가는 점프 링크인지 양방향으로 확인
+                if (abs(floor1 - self.current_player_floor) < 0.1 and abs(floor2 - target_floor) < 0.1) or \
+                   (abs(floor2 - self.current_player_floor) < 0.1 and abs(floor1 - target_floor) < 0.1):
+                    
+                    start_pos_link = QPointF(link['start_vertex_pos'][0], link['start_vertex_pos'][1])
+                    end_pos_link = QPointF(link['end_vertex_pos'][0], link['end_vertex_pos'][1])
+                    
+                    # 현재 층에 있는 꼭짓점이 진입점
+                    if abs(floor1 - self.current_player_floor) < 0.1:
+                        entry_point, exit_point = start_pos_link, end_pos_link
+                    else:
+                        entry_point, exit_point = end_pos_link, start_pos_link
+
+                    all_candidates.append({
+                        'type': 'jump', 'link': link,
+                        'entry_point': entry_point, 'exit_point': exit_point
+                    })
+
             if self.current_player_floor < target_floor: # 상승
+                # 2. Climb 후보 수집
                 for obj in self.geometry_data.get("transition_objects", []):
                     start_line = next((line for line in self.geometry_data.get("terrain_lines", []) if line['id'] == obj.get('start_line_id')), None)
                     end_line = next((line for line in self.geometry_data.get("terrain_lines", []) if line['id'] == obj.get('end_line_id')), None)
@@ -5141,23 +5172,19 @@ class MapTab(QWidget):
                         entry_point = QPointF(obj['points'][0][0], entry_y)
                         all_candidates.append({'type': 'climb', 'object': obj, 'entry_point': entry_point})
             
-            # (점프 링크를 이용한 층간 이동도 여기에 추가 가능)
-
             else: # 하강
-                # v10.3.0 낙하 지점 탐색 로직
-                fall_candidates = []
+                # 3. Fall 후보 수집 (v10.3.0 로직 재사용)
+                fall_candidates_points = []
                 current_terrain_group_lines = [line for line in self.geometry_data.get("terrain_lines", []) if line.get('dynamic_name') == current_terrain_name]
                 for line in current_terrain_group_lines:
                     points = line.get("points", [])
                     if points:
-                        fall_candidates.append({'type': 'edge', 'pos': QPointF(points[0][0], points[0][1])})
-                        fall_candidates.append({'type': 'edge', 'pos': QPointF(points[-1][0], points[-1][1])})
+                        fall_candidates_points.append(QPointF(points[0][0], points[0][1]))
+                        fall_candidates_points.append(QPointF(points[-1][0], points[-1][1]))
                 
-                # (발판 통과 낙하 로직은 복잡하므로 생략, 낭떠러지만 고려)
-                for cand in fall_candidates:
-                    all_candidates.append({'type': 'fall', 'entry_point': cand['pos']})
-
-
+                for point in fall_candidates_points:
+                    all_candidates.append({'type': 'fall', 'entry_point': point})
+                    
         # B-2: 비용 계산 및 최적 후보 선택
         if not all_candidates:
             self.guidance_text = "경로 탐색 불가"
