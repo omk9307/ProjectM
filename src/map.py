@@ -1472,6 +1472,39 @@ class FullMinimapEditorDialog(QDialog):
         self.jump_link_start_pos = None
         self.preview_jump_link_item = None
         self.feature_color_map = self._create_feature_color_map()
+        
+        # ==================== v10.6.0 ====================
+        # 그리기 상태 변수
+        self.current_mode = "select" # "select", "terrain", "object", "waypoint", "jump"
+        
+        # 지형 그리기 상태
+        self.is_drawing_line = False
+        self.current_line_points = []
+        self.preview_line_item = None
+        
+        # 층 이동 오브젝트 그리기 상태
+        self.is_drawing_object = False
+        self.object_start_info = None # {'pos': QPointF, 'line_id': str}
+        self.preview_object_item = None
+
+        # 웨이포인트/점프 그리기 상태
+        self.preview_waypoint_item = None
+        self.is_drawing_jump_link = False
+        self.jump_link_start_pos = None
+        self.preview_jump_link_item = None
+
+        # 공통 그리기 상태
+        self.snap_indicator = None
+        self.snap_radius = 15 # v10.6.0: 10 -> 15로 변경 및 스냅 반경 상수화
+        self.is_y_locked = False
+        self.locked_position = None
+        self.y_indicator_line = None
+        self.is_x_locked = False
+        self.x_indicator_line = None # v10.6.0: x_indicator_line 추가
+        self._initial_fit_done = False
+        
+        self.feature_color_map = self._create_feature_color_map()
+
         self.initUI()
         self.populate_scene()
         self._update_visibility()
@@ -2200,7 +2233,9 @@ class FullMinimapEditorDialog(QDialog):
                     
         elif self.current_mode == "object":
             if button == Qt.MouseButton.LeftButton:
+                # --- 2단계 생성 로직 ---
                 if not self.is_drawing_object:
+                    # 1. 첫 번째 클릭: 시작 지형선 찾기
                     start_info = None
                     if self.is_x_locked and self.locked_position:
                         start_info = self._get_closest_point_on_terrain_vertical(
@@ -2212,20 +2247,54 @@ class FullMinimapEditorDialog(QDialog):
                     if start_info:
                         start_pos, parent_line_id = start_info
                         self.is_drawing_object = True
-                        self.object_start_pos = start_pos
-                        self.current_object_parent_id = parent_line_id
-                        parent_line = next((line for line in self.geometry_data["terrain_lines"] if line["id"] == parent_line_id), None)
-                        if parent_line:
-                            self.current_object_floor = parent_line.get("floor", self.floor_spinbox.value())
-                        else:
-                            self.current_object_floor = self.floor_spinbox.value()
+                        self.object_start_info = {'pos': start_pos, 'line_id': parent_line_id}
+                
                 else:
-                    self._finish_drawing_object(scene_pos)
-            
+                    # 2. 두 번째 클릭: 종료 지형선 찾기 및 오브젝트 생성
+                    end_info = self._get_closest_point_on_terrain(scene_pos)
+
+                    if not end_info:
+                        self._finish_drawing_object(cancel=True)
+                        return
+
+                    end_pos, end_line_id = end_info
+                    start_line_id = self.object_start_info['line_id']
+
+                    # 유효성 검사
+                    if end_line_id == start_line_id:
+                        print("오류: 같은 지형선에 연결할 수 없습니다.")
+                        self._finish_drawing_object(cancel=True)
+                        return
+
+                    start_line_data = next((line for line in self.geometry_data["terrain_lines"] if line["id"] == start_line_id), None)
+                    end_line_data = next((line for line in self.geometry_data["terrain_lines"] if line["id"] == end_line_id), None)
+
+                    if not start_line_data or not end_line_data or start_line_data.get('floor') == end_line_data.get('floor'):
+                        print("오류: 서로 다른 층의 지형선에만 연결할 수 있습니다.")
+                        self._finish_drawing_object(cancel=True)
+                        return
+                    
+                    # 데이터 생성 및 추가
+                    obj_id = f"obj-{uuid.uuid4()}"
+                    
+                    # x좌표는 시작점 기준으로 통일
+                    final_start_pos = self.object_start_info['pos']
+                    final_end_pos = QPointF(final_start_pos.x(), end_pos.y())
+
+                    new_obj = {
+                        "id": obj_id,
+                        "start_line_id": start_line_id,
+                        "end_line_id": end_line_id,
+                        "points": [[final_start_pos.x(), final_start_pos.y()], [final_end_pos.x(), final_end_pos.y()]]
+                    }
+                    self.geometry_data["transition_objects"].append(new_obj)
+                    self._finish_drawing_object(cancel=False)
+
             elif button == Qt.MouseButton.RightButton:
                 if self.is_drawing_object:
                     self._finish_drawing_object(cancel=True)
                 else:
+                    # 기존 삭제 로직 유지
                     items_at_pos = self.view.items(self.view.mapFromScene(scene_pos))
                     for item in items_at_pos:
                         if item.data(0) == "transition_object":
@@ -2379,15 +2448,19 @@ class FullMinimapEditorDialog(QDialog):
                     QPen(QColor(255, 255, 0, 150), 2, Qt.PenStyle.DashLine)
                 )
         elif self.current_mode == "object":
-            if self.is_drawing_object:
-                if self.preview_object_item and self.preview_object_item in self.scene.items():
+            if self.is_drawing_object and self.object_start_info:
+                # RuntimeError 방지
+                if self.preview_object_item and self.preview_object_item.scene():
                     self.scene.removeItem(self.preview_object_item)
                 
-                end_pos = QPointF(self.object_start_pos.x(), scene_pos.y())
+                start_pos = self.object_start_info['pos']
+                end_pos = QPointF(start_pos.x(), scene_pos.y()) # 수직선 유지
+                
                 self.preview_object_item = self.scene.addLine(
-                    self.object_start_pos.x(), self.object_start_pos.y(), end_pos.x(), end_pos.y(),
+                    start_pos.x(), start_pos.y(), end_pos.x(), end_pos.y(),
                     QPen(QColor(255, 165, 0, 150), 2, Qt.PenStyle.DashLine)
                 )
+                self.preview_object_item.setZValue(150) # 다른 요소 위에 보이도록
         # --- v10.0.0  ---
         elif self.current_mode == "waypoint":
             terrain_info = self._get_closest_point_on_terrain(scene_pos)
@@ -2586,7 +2659,6 @@ class FullMinimapEditorDialog(QDialog):
             line_to_delete_data = next((line for line in self.geometry_data.get("terrain_lines", []) if line.get("id") == line_id_to_delete), None)
             if not line_to_delete_data: return
             
-            # 이름이 없다면 먼저 부여
             if 'dynamic_name' not in line_to_delete_data:
                 self._assign_dynamic_names()
             target_group_name = line_to_delete_data.get('dynamic_name')
@@ -2608,11 +2680,13 @@ class FullMinimapEditorDialog(QDialog):
                    tuple(jump.get("end_vertex_pos")) not in vertices_in_group
             ]
 
-            # 2b. 종속된 층 이동 오브젝트 삭제
+            # ==================== v10.6.0 수정 시작 ====================
+            # 2b. 종속된 층 이동 오브젝트 삭제 (start_line_id 또는 end_line_id 기준)
             self.geometry_data["transition_objects"] = [
                 obj for obj in self.geometry_data.get("transition_objects", [])
-                if obj.get("parent_line_id") not in ids_in_group
+                if obj.get("start_line_id") not in ids_in_group and obj.get("end_line_id") not in ids_in_group
             ]
+            # ==================== v10.6.0 수정 끝 ======================
             
             # 2c. 지형 그룹 자체 삭제
             self.geometry_data["terrain_lines"] = [
@@ -2623,7 +2697,6 @@ class FullMinimapEditorDialog(QDialog):
             # --- 단계 3: UI 전체 갱신 ---
             self.populate_scene()
             self.view.viewport().update()
-
     def _get_closest_point_on_terrain(self, scene_pos):
         """
         씬의 특정 위치에서 가장 적합한 지형선 위의 점과 ID를 찾습니다. (x좌표 우선 탐색)
@@ -2673,23 +2746,22 @@ class FullMinimapEditorDialog(QDialog):
             
         return None
 
-    def _finish_drawing_object(self, end_pos=None, cancel=False):
-        """현재 그리던 오브젝트 그리기를 완료/취소합니다."""
-        if not cancel and end_pos:
-            final_end_pos = QPointF(self.object_start_pos.x(), end_pos.y())
-            obj_id = f"obj-{uuid.uuid4()}"
-            self._add_object_line(self.object_start_pos, final_end_pos, obj_id)
-            
-            self.geometry_data["transition_objects"].append({
-                "id": obj_id,
-                "parent_line_id": self.current_object_parent_id,
-                "points": [[self.object_start_pos.x(), self.object_start_pos.y()], [final_end_pos.x(), final_end_pos.y()]],
-                "floor": getattr(self, 'current_object_floor', self.floor_spinbox.value()) # --- : 자동 할당된 층 사용 ---
-            })
-
-            # 이름 갱신 및 전체 씬 다시 그리기 ---
+    def _finish_drawing_object(self, cancel=False):
+        """현재 그리던 오브젝트 그리기를 완료/취소하고 상태를 초기화합니다."""
+        # 1. 미리보기 아이템 안전하게 제거
+        if self.preview_object_item and self.preview_object_item.scene():
+            self.scene.removeItem(self.preview_object_item)
+        
+        # 2. 상태 변수 초기화 (성공/취소 공통)
+        self.is_drawing_object = False
+        self.object_start_info = None
+        self.preview_object_item = None
+        
+        # 3. 성공 시에만 데이터 갱신 및 UI 다시 그리기
+        if not cancel:
             self._assign_dynamic_names()
-            self.populate_scene() # populate_scene이 모든 것을 다시 그려주므로 가장 확실함
+            self.populate_scene()
+            self.view.viewport().update()
 
         if self.preview_object_item and self.preview_object_item in self.scene.items():
             self.scene.removeItem(self.preview_object_item)
@@ -3837,7 +3909,21 @@ class MapTab(QWidget):
             if 'threshold' not in feature_data: feature_data['threshold'] = 0.85; features_updated = True
             if 'context_image_base64' not in feature_data: feature_data['context_image_base64'] = ""; features_updated = True
             if 'rect_in_context' not in feature_data: feature_data['rect_in_context'] = []; features_updated = True
-            
+        # v10.6.0 마이그레이션: 층 이동 오브젝트 구조 변경
+        if 'transition_objects' in geometry:
+            old_objects = [obj for obj in geometry['transition_objects'] if 'parent_line_id' in obj]
+            if old_objects:
+                reply = QMessageBox.information(self, "데이터 구조 업데이트",
+                                                "구버전 '층 이동 오브젝트' 데이터가 발견되었습니다.\n"
+                                                "새로운 시스템에서는 두 지형을 직접 연결하는 방식으로 변경되어 기존 데이터와 호환되지 않습니다.\n\n"
+                                                "확인 버튼을 누르면 기존 층 이동 오브젝트 데이터가 모두 삭제됩니다.\n"
+                                                "삭제 후 '미니맵 지형 편집기'에서 새로 생성해주세요.",
+                                                QMessageBox.StandardButton.Ok)
+                
+                # 'parent_line_id'가 없는, 즉 새로운 구조의 오브젝트만 남김
+                geometry['transition_objects'] = [obj for obj in geometry['transition_objects'] if 'parent_line_id' not in obj]
+                geometry_updated = True
+                self.update_general_log("v10.6.0 마이그레이션: 구버전 층 이동 오브젝트 데이터를 삭제했습니다.", "purple")   
         return config_updated, features_updated, geometry_updated
 
     def save_profile_data(self):
@@ -5404,20 +5490,37 @@ class MapTab(QWidget):
         # --- 2. 층 이동 오브젝트 이름 부여 ---
         transition_objects = self.geometry_data.get("transition_objects", [])
         if transition_objects:
-            # 부모 지형 그룹 이름별로 오브젝트 그룹화
-            objs_by_parent_group = defaultdict(list)
-            for obj in transition_objects:
-                parent_id = obj.get('parent_line_id')
-                if parent_id and parent_id in line_id_to_group_name:
-                    parent_group_name = line_id_to_group_name[parent_id]
-                    objs_by_parent_group[parent_group_name].append(obj)
+            # 먼저 모든 지형선 ID와 층/동적이름을 매핑
+            line_info_map = {
+                line['id']: {'floor': line.get('floor', 0), 'name': line.get('dynamic_name', '')}
+                for line in terrain_lines
+            }
 
-            for parent_name, objs in objs_by_parent_group.items():
-                # x축 기준으로 정렬하여 이름 부여
+            # {아래층그룹_위층그룹: [오브젝트1, 오브젝트2]} 형식으로 그룹화
+            objs_by_connection = defaultdict(list)
+            for obj in transition_objects:
+                start_line_id = obj.get('start_line_id')
+                end_line_id = obj.get('end_line_id')
+
+                if start_line_id in line_info_map and end_line_id in line_info_map:
+                    start_info = line_info_map[start_line_id]
+                    end_info = line_info_map[end_line_id]
+
+                    # 층 번호를 기준으로 아래/위 결정
+                    if start_info['floor'] < end_info['floor']:
+                        lower_name, upper_name = start_info['name'], end_info['name']
+                    else:
+                        lower_name, upper_name = end_info['name'], start_info['name']
+                    
+                    connection_key = f"{lower_name}_{upper_name}"
+                    objs_by_connection[connection_key].append(obj)
+
+            # 각 연결 그룹 내에서 x축 기준으로 정렬하여 이름 부여
+            for connection_key, objs in objs_by_connection.items():
                 sorted_objs = sorted(objs, key=lambda o: o['points'][0][0])
                 for i, obj in enumerate(sorted_objs):
-                    obj['dynamic_name'] = f"{parent_name}_{i + 1}"
-
+                    obj['dynamic_name'] = f"{connection_key}_{i + 1}"
+                    
         # --- 3. 지형 점프 연결 이름 부여 (v10.0.1 로직 개편 및 안정성 강화) ---
         jump_links = self.geometry_data.get("jump_links", [])
         if jump_links:
