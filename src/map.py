@@ -22,7 +22,7 @@ from PyQt6.QtWidgets import (
     QApplication, QWidget, QLabel, QVBoxLayout, QHBoxLayout, QPushButton, QTextEdit,
     QMessageBox, QSpinBox, QDialog, QDialogButtonBox, QListWidget,
     QInputDialog, QListWidgetItem, QDoubleSpinBox, QAbstractItemView,
-    QLineEdit, QRadioButton, QButtonGroup, QGroupBox, QComboBox,
+    QLineEdit, QRadioButton, QButtonGroup, QGroupBox, QComboBox, QFormLayout,
 
     QGraphicsView, QGraphicsScene, QGraphicsPixmapItem, QCheckBox, QGraphicsRectItem,
     QGraphicsLineItem, QGraphicsTextItem, QGraphicsEllipseItem, QTabWidget
@@ -2915,442 +2915,28 @@ class FullMinimapEditorDialog(QDialog):
         super().accept()
 
 # --- v9.0.0: 실시간 뷰를 위한 커스텀 위젯 ---
-class RealtimeMinimapView(QLabel):
-    """
-    전체 맵을 기반으로 실시간 카메라 뷰를 렌더링하고, 휠 줌과 마우스 드래그를 지원하는 위젯.
-    """
-    def __init__(self, parent_tab):
-        super().__init__(parent_tab)
-        self.parent_tab = parent_tab
-        self.setMinimumSize(300, 300)
-        self.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.setStyleSheet("background-color: black; color: white;")
-        self.setText("탐지를 시작하세요.")
 
-        # 렌더링 상태 변수
-        self.zoom_level = 2.0 # 기본 실시간 미니맵 뷰 확대배율
-        self.camera_center_global = QPointF(0, 0)
-        self.active_features = []
-        self.my_player_rects = []
-        self.other_player_rects = []
-        self.final_player_pos_global = None
-        
-        # v10.0.0: 네비게이션 렌더링 데이터
-        self.target_waypoint_id = None
-        self.last_reached_waypoint_id = None
-        #진행 방향 플래그 추가 ---
-        self.is_forward = True
-        # 패닝(드래그) 상태 변수
-        self.is_panning = False
-        self.last_pan_pos = QPoint()
-    
-    def wheelEvent(self, event):
-        """마우스 휠 스크롤로 줌 레벨을 조절합니다."""
-        if event.angleDelta().y() > 0:
-            self.zoom_level *= 1.25
-        else:
-            self.zoom_level /= 1.25
-        self.zoom_level = max(0.1, min(self.zoom_level, 10.0))
-        self.update()
 
-    def mousePressEvent(self, event):
-        if event.button() == Qt.MouseButton.LeftButton:
-            self.is_panning = True
-            self.last_pan_pos = event.pos()
-            self.setCursor(Qt.CursorShape.ClosedHandCursor)
-        super().mousePressEvent(event)
-
-    def mouseMoveEvent(self, event):
-        if self.is_panning:
-            delta = event.pos() - self.last_pan_pos
-            self.last_pan_pos = event.pos()
-            # 줌 레벨을 고려하여 이동량 보정
-            self.camera_center_global -= QPointF(delta) / self.zoom_level
-            self.update()
-        super().mouseMoveEvent(event)
-
-    def mouseReleaseEvent(self, event):
-        if event.button() == Qt.MouseButton.LeftButton:
-            self.is_panning = False
-            self.setCursor(Qt.CursorShape.ArrowCursor)
-        super().mouseReleaseEvent(event)
-
-    def update_view_data(self, camera_center, active_features, my_players, other_players, target_wp_id, reached_wp_id, final_player_pos, is_forward):
-        """MapTab으로부터 렌더링에 필요한 최신 데이터를 받습니다."""
-        self.camera_center_global = camera_center
-        self.active_features = active_features
-        self.my_player_rects = my_players
-        self.other_player_rects = other_players
-        self.target_waypoint_id = target_wp_id
-        self.last_reached_waypoint_id = reached_wp_id
-        self.final_player_pos_global = final_player_pos
-        self.is_forward = is_forward
-        self.update()
-
-    def paintEvent(self, event):
-        """
-        배경 지도 위에 보기 옵션에 따라 모든 요소를 동적으로 렌더링합니다.
-        """
-        super().paintEvent(event)
-        painter = QPainter(self)
-        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        
-        map_bg = self.parent_tab.full_map_pixmap
-        bounding_rect = self.parent_tab.full_map_bounding_rect
-
-        if not map_bg or map_bg.isNull() or bounding_rect.isNull():
-            painter.setPen(Qt.GlobalColor.white)
-            painter.drawText(self.rect(), Qt.AlignmentFlag.AlignCenter, self.text())
-            return
-
-        view_w, view_h = self.width(), self.height()
-        source_w = view_w / self.zoom_level
-        source_h = view_h / self.zoom_level
-        
-        source_rect = QRectF(
-            self.camera_center_global.x() - source_w / 2,
-            self.camera_center_global.y() - source_h / 2,
-            source_w,
-            source_h
-        )
-        
-        image_source_rect = source_rect.translated(-bounding_rect.topLeft())
-        
-        target_rect = QRectF(self.rect())
-        painter.drawPixmap(target_rect, map_bg, image_source_rect)
-
-        def global_to_local(global_pos):
-            relative_pos = global_pos - source_rect.topLeft()
-            return relative_pos * self.zoom_level
-
-        render_opts = self.parent_tab.render_options
-        
-        # ---  지형선 및 그룹 이름 렌더링 로직 전체 교체 ---
-        if render_opts.get('terrain', True):
-            painter.save()
-            
-            # 1. 지형 그룹화 로직 (FullMinimapEditorDialog에서 가져옴)
-            from collections import defaultdict, deque
-            terrain_lines = self.parent_tab.geometry_data.get("terrain_lines", [])
-            if terrain_lines:
-                adj = defaultdict(list)
-                lines_by_id = {line['id']: line for line in terrain_lines}
-                
-                point_to_lines = defaultdict(list)
-                for line in terrain_lines:
-                    for p in line['points']:
-                        point_to_lines[tuple(p)].append(line['id'])
-                
-                for p, ids in point_to_lines.items():
-                    for i in range(len(ids)):
-                        for j in range(i + 1, len(ids)):
-                            adj[ids[i]].append(ids[j])
-                            adj[ids[j]].append(ids[i])
-
-                visited = set()
-                all_groups = []
-                for line_id in lines_by_id:
-                    if line_id not in visited:
-                        current_group = []
-                        q = deque([line_id])
-                        visited.add(line_id)
-                        while q:
-                            current_id = q.popleft()
-                            current_group.append(lines_by_id[current_id])
-                            for neighbor_id in adj[current_id]:
-                                if neighbor_id not in visited:
-                                    visited.add(neighbor_id)
-                                    q.append(neighbor_id)
-                        all_groups.append(current_group)
-                
-                # 2. 층별 그룹 정렬 및 동적 이름 부여
-                groups_by_floor = defaultdict(list)
-                for group in all_groups:
-                    if group:
-                        floor = group[0].get('floor', 0)
-                        groups_by_floor[floor].append(group)
-                
-                dynamic_group_names = {} # key: 첫번째 line_id, value: "n층_A"
-                for floor, groups in groups_by_floor.items():
-                    # 각 그룹의 중심 x좌표 계산하여 정렬
-                    sorted_groups = sorted(groups, key=lambda g: sum(p[0] for line in g for p in line['points']) / sum(len(line['points']) for line in g if line.get('points')))
-                    for i, group in enumerate(sorted_groups):
-                        group_name = f"{floor}층_{chr(ord('A') + i)}"
-                        if group:
-                            first_line_id = group[0]['id']
-                            dynamic_group_names[first_line_id] = group_name
-
-                # 3. 그룹별로 지형선 및 이름 그리기
-                for group in all_groups:
-                    if not group: continue
-                    
-                    pen = QPen(Qt.GlobalColor.magenta, 2)
-                    painter.setPen(pen)
-                    
-                    group_polygon_global = QPolygonF()
-                    for line_data in group:
-                        points_global = [QPointF(p[0], p[1]) for p in line_data.get("points", [])]
-                        if len(points_global) >= 2:
-                            points_local = [global_to_local(p) for p in points_global]
-                            painter.drawPolyline(QPolygonF(points_local))
-                            group_polygon_global += QPolygonF(points_global)
-
-                    # 그룹의 동적 이름 표시
-                    first_line_id = group[0]['id']
-                    group_name_text = dynamic_group_names.get(first_line_id, f"{group[0].get('floor', 'N/A')}층")
-                    
-                    group_rect_global = group_polygon_global.boundingRect()
-                    font = QFont("맑은 고딕", 10, QFont.Weight.Bold) #실시간 미니맵 뷰 지형층 이름 폰트 크기
-                    
-                    # 이름 위치 계산 (글로벌 좌표 기준)
-                    text_pos_global = QPointF(group_rect_global.center().x(), group_rect_global.bottom() + 4)
-                    
-                    # 로컬 좌표로 변환하여 그리기
-                    text_pos_local = global_to_local(text_pos_global)
-                    
-                    # 텍스트가 화면 밖으로 나가는 것 방지 (간단한 클리핑)
-                    if self.rect().contains(text_pos_local.toPoint()):
-                        tm = QFontMetrics(font)
-                        text_rect_local = tm.boundingRect(group_name_text)
-                        text_rect_local.moveCenter(text_pos_local.toPoint())
-                        self._draw_text_with_outline(painter, text_rect_local, Qt.AlignmentFlag.AlignCenter, group_name_text, font, Qt.GlobalColor.white, Qt.GlobalColor.black)
-
-            painter.restore()
-
-        if render_opts.get('objects', True):
-            painter.save()
-            painter.setPen(QPen(QColor(255, 165, 0), 3))
-            for obj_data in self.parent_tab.geometry_data.get("transition_objects", []):
-                points = [global_to_local(QPointF(p[0], p[1])) for p in obj_data.get("points", [])]
-                if len(points) == 2:
-                    painter.drawLine(points[0], points[1])
-            painter.restore()
-        
-        if render_opts.get('jump_links', True):
-            painter.save()
-            pen = QPen(QColor(0, 255, 0, 200), 2, Qt.PenStyle.DashLine)
-            painter.setPen(pen)
-            for jump_data in self.parent_tab.geometry_data.get("jump_links", []):
-                p1 = global_to_local(QPointF(jump_data['start_vertex_pos'][0], jump_data['start_vertex_pos'][1]))
-                p2 = global_to_local(QPointF(jump_data['end_vertex_pos'][0], jump_data['end_vertex_pos'][1]))
-                painter.drawLine(p1, p2)
-            painter.restore()
-
-        #핵심 지형 렌더링 (텍스트 스타일 변경) ---
-        if render_opts.get('features', True):
-            painter.save()
-            realtime_conf_map = {f['id']: f['conf'] for f in self.active_features}
-
-            for feature_id, feature_data in self.parent_tab.key_features.items():
-                if feature_id in self.parent_tab.global_positions:
-                    global_pos = self.parent_tab.global_positions[feature_id]
-                    img_data = base64.b64decode(feature_data['image_base64'])
-                    pixmap = QPixmap(); pixmap.loadFromData(img_data)
-                    if pixmap.isNull(): continue
-
-                    global_rect = QRectF(global_pos, QSizeF(pixmap.size()))
-                    local_top_left = global_to_local(global_rect.topLeft())
-                    local_rect = QRectF(local_top_left, global_rect.size() * self.zoom_level)
-                    painter.setBrush(Qt.BrushStyle.NoBrush)
-                    
-                    realtime_conf = realtime_conf_map.get(feature_id, 0.0)
-                    threshold = feature_data.get('threshold', 0.85)
-                    is_detected = realtime_conf >= threshold
-
-                    font_name = QFont("맑은 고딕", 9, QFont.Weight.Bold) # 실시간 뷰의 핵심 지형 이름 폰트 크기
-                    
-                    if is_detected:
-                        painter.setPen(QPen(QColor(0, 180, 255), 2, Qt.PenStyle.SolidLine))
-                        self._draw_text_with_outline(painter, local_rect.toRect(), Qt.AlignmentFlag.AlignCenter, feature_id, font_name, Qt.GlobalColor.white, Qt.GlobalColor.black)
-                    else:
-                        painter.setPen(QPen(QColor("gray"), 2, Qt.PenStyle.DashLine))
-                        self._draw_text_with_outline(painter, local_rect.toRect(), Qt.AlignmentFlag.AlignCenter, feature_id, font_name, QColor("#AAAAAA"), Qt.GlobalColor.black)
-                    
-                    #  미감지 시에도 realtime_conf를 사용하도록 수정 ---
-                    conf_text = f"{realtime_conf:.2f}"
-                    font_conf = QFont("맑은 고딕", 10)
-                    
-                    tm_conf = QFontMetrics(font_conf)
-                    conf_rect = tm_conf.boundingRect(conf_text)
-                    conf_rect.moveCenter(local_rect.center().toPoint())
-                    conf_rect.moveTop(int(local_rect.top()) - conf_rect.height() - 2)
-                    
-                    color = Qt.GlobalColor.yellow if is_detected else QColor("#AAAAAA")
-                    self._draw_text_with_outline(painter, conf_rect, Qt.AlignmentFlag.AlignCenter, conf_text, font_conf, color, Qt.GlobalColor.black)
-                    
-                    painter.drawRect(local_rect)
-            painter.restore()
-
-            
-        # 웨이포인트 (줌 레벨 연동 크기) ---
-        if render_opts.get('waypoints', True):
-            painter.save()
-            WAYPOINT_SIZE = 12.0 # 전역 좌표계 기준 크기
-            
-            # 웨이포인트 순서 맵 생성 (현재 방향에 맞는 순서 맵만 생성)
-            wp_order_map = {}
-            if self.parent_tab.active_route_profile_name:
-                route = self.parent_tab.route_profiles.get(self.parent_tab.active_route_profile_name, {})
-                path_key = "forward_path" if self.is_forward else "backward_path"
-                path_ids = route.get(path_key, [])
-                
-                if not path_ids and not self.is_forward:
-                    path_ids = list(reversed(route.get("forward_path", [])))
-
-                #  출발지/목적지 텍스트 처리 ---
-                if path_ids:
-                    # 먼저 모든 웨이포인트에 숫자 할당
-                    for i, wp_id in enumerate(path_ids):
-                        wp_order_map[wp_id] = f"{i+1}"
-                    
-                    # 시작점과 끝점 텍스트 덮어쓰기
-                    if len(path_ids) > 1:
-                        wp_order_map[path_ids[0]] = "출발지"
-                        wp_order_map[path_ids[-1]] = "목적지"
-                    elif len(path_ids) == 1:
-                        # 경로에 하나만 있을 경우 목적지로 표시
-                        wp_order_map[path_ids[0]] = "목적지"
-                    
-            for wp_data in self.parent_tab.geometry_data.get("waypoints", []):
-                global_pos = QPointF(wp_data['pos'][0], wp_data['pos'][1])
-                local_pos = global_to_local(global_pos)
-                
-                # 줌 레벨에 따라 크기 변경 ---
-                scaled_size = WAYPOINT_SIZE * self.zoom_level
-                local_rect = QRectF(local_pos.x() - scaled_size/2, local_pos.y() - scaled_size, scaled_size, scaled_size)
-
-                if wp_data['id'] == self.target_waypoint_id:
-                    # 목표 웨이포인트는 빨간색으로 강조
-                    painter.setPen(QPen(Qt.GlobalColor.red, 2))
-                    painter.setBrush(QBrush(QColor(255, 0, 0, 80)))
-                else:
-                    # 일반 웨이포인트는 초록색
-                    painter.setPen(QPen(QColor(0, 255, 0), 2))
-                    painter.setBrush(QBrush(QColor(0, 255, 0, 80)))
-                
-                painter.drawRect(local_rect)
-                
-                #  순서와 이름 렌더링 로직 변경 ---
-                # 1. 중앙에 순서 표시
-                order_text = wp_order_map.get(wp_data['id'], "")
-                if order_text:
-                    font_order = QFont("맑은 고딕", 10, QFont.Weight.Bold) # 실시간 미니맵 뷰 순서 폰트 크기
-                    text_color = Qt.GlobalColor.white #목표 웨이포인트의 폰트 색상을 항상 흰색으로 ---
-                    self._draw_text_with_outline(painter, local_rect.toRect(), Qt.AlignmentFlag.AlignCenter, order_text, font_order, text_color, Qt.GlobalColor.black)
-
-                # 2. 바깥쪽 좌측 상단에 이름 표시
-                name_text = wp_data.get('name', '')
-                if name_text:
-                    #  이름 폰트 크기 8pt로 변경 ---
-                    font_name = QFont("맑은 고딕", 8)
-                    
-                    #  텍스트 너비 계산에 여유 공간(패딩) 추가 ---
-                    tm = QFontMetrics(font_name)
-                    # boundingRect는 정수 기반 QRect를 반환합니다.
-                    text_bounding_rect = tm.boundingRect(name_text)
-                    
-                    # 렌더링에 사용할 사각형의 너비를 약간 늘려줍니다.
-                    padding_x = 4 # 좌우 2px씩 총 4px의 여유 공간
-                    name_render_rect = text_bounding_rect.adjusted(0, 0, padding_x, 0)
-                    
-                    # 위치를 부동소수점 기반으로 정밀하게 계산
-                    new_bottom_left_f = local_rect.topLeft() + QPointF(0, -2)
-                    name_render_rect.moveBottomLeft(new_bottom_left_f.toPoint())
-                    self._draw_text_with_outline(painter, name_render_rect, Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignBottom, name_text, font_name, Qt.GlobalColor.white, Qt.GlobalColor.black)
-                # 3. "도착" 표시
-                if wp_data['id'] == self.last_reached_waypoint_id:
-                    font_arrival = QFont("맑은 고딕", 8, QFont.Weight.Bold)
-                    arrival_rect = QRectF(local_rect.x(), local_rect.y(), local_rect.width(), local_rect.height() / 2).toRect()
-                    # y축으로 1px 정도 살짝 내려서 중앙에 더 가깝게 보이도록 조정
-                    arrival_rect.translate(0, -4)
-                    
-                    self._draw_text_with_outline(painter, arrival_rect, Qt.AlignmentFlag.AlignCenter, "도착", font_arrival, Qt.GlobalColor.yellow, Qt.GlobalColor.black)
-
-            painter.restore()
-
-        # 내 캐릭터, 다른 유저 
-        painter.save()
-        painter.setPen(QPen(Qt.GlobalColor.yellow, 2)); painter.setBrush(Qt.BrushStyle.NoBrush)
-        if self.final_player_pos_global and self.my_player_rects:
-            # 첫 번째 탐지된 사각형을 기준으로 위치 보정
-            # (보통 my_player_rects에는 하나만 들어있음)
-            base_rect = self.my_player_rects[0]
-            
-            # 1. 전달받은 사각형(base_rect)의 글로벌 아랫변 중앙 좌표 계산
-            rect_bottom_center_global = base_rect.center() + QPointF(0, base_rect.height() / 2)
-            
-            # 2. 이 좌표와 실제 발밑 좌표(final_player_pos_global)의 차이(오프셋) 계산
-            offset = self.final_player_pos_global - rect_bottom_center_global
-            
-            # 3. 모든 my_player_rects에 동일한 오프셋을 적용하여 그리기
-            for rect in self.my_player_rects:
-                corrected_rect_global = rect.translated(offset)
-                
-                local_top_left = global_to_local(corrected_rect_global.topLeft())
-                local_rect = QRectF(local_top_left, corrected_rect_global.size() * self.zoom_level)
-                painter.drawRect(local_rect)
-        else:
-            # fallback: final_player_pos_global이 없는 경우 기존 방식대로 그림
-            for rect in self.my_player_rects:
-                local_top_left = global_to_local(rect.topLeft())
-                local_rect = QRectF(local_top_left, rect.size() * self.zoom_level)
-                painter.drawRect(local_rect)
-        
-        painter.restore()
-        
-        painter.save()
-        painter.setPen(QPen(Qt.GlobalColor.red, 2)); painter.setBrush(Qt.BrushStyle.NoBrush)
-        for rect in self.other_player_rects:
-            local_top_left = global_to_local(rect.topLeft())
-            local_rect = QRectF(local_top_left, rect.size() * self.zoom_level)
-            painter.drawRect(local_rect)
-        painter.restore()
-
-        # ---  정확한 플레이어 발밑 위치 표시 ---
-        if self.final_player_pos_global:
-            local_player_pos = global_to_local(self.final_player_pos_global)
-            
-            painter.save()
-            # 십자선 그리기
-            pen = QPen(QColor(255, 255, 0, 200), 1.5)
-            painter.setPen(pen)
-            painter.drawLine(local_player_pos + QPointF(-5, 0), local_player_pos + QPointF(5, 0))
-            painter.drawLine(local_player_pos + QPointF(0, -5), local_player_pos + QPointF(0, 5))
-            
-            # 중앙 원 그리기
-            painter.setBrush(QBrush(Qt.GlobalColor.yellow))
-            painter.drawEllipse(local_player_pos, 2, 2)
-            painter.restore()
-
-        
-    def _draw_text_with_outline(self, painter, rect, flags, text, font, text_color, outline_color):
-        """지정한 사각형 영역에 테두리가 있는 텍스트를 그립니다."""
-        painter.save()
-        painter.setFont(font)
-        
-        # 테두리 그리기
-        painter.setPen(outline_color)
-        painter.drawText(rect.translated(1, 1), flags, text)
-        painter.drawText(rect.translated(-1, -1), flags, text)
-        painter.drawText(rect.translated(1, -1), flags, text)
-        painter.drawText(rect.translated(-1, 1), flags, text)
-        
-        # 원본 텍스트 그리기
-        painter.setPen(text_color)
-        painter.drawText(rect, flags, text)
-        painter.restore()
 
 class StateCalibrationDialog(QDialog):
-    """플레이어 상태 판정에 사용되는 픽셀 단위 임계값을 설정하는 다이얼로그."""
+    """플레이어 상태 판정에 사용되는 픽셀 단위 임계값을 자동으로 측정하고 설정하는 다이얼로그."""
+    FLAT_TERRAIN_SLOPE_THRESHOLD = 0.1 # 평탄도 기준 (기울기 0.1 미만)
+
     def __init__(self, minimap_region, current_values, parent=None):
         super().__init__(parent)
-        self.setWindowTitle("상태 판정 값 설정 (캘리브레이션)")
-        self.setMinimumSize(600, 400)
+        self.setWindowTitle("상태 판정 값 자동 측정 (캘리브레이션)")
+        self.setMinimumSize(600, 500)
         
         self.minimap_region = minimap_region
         self.current_values = current_values
+        
+        # 측정 관련 변수
         self.is_measuring = False
-        self.measure_start_pos = None
+        self.last_received_state = 'idle'
+        self.is_tracking_this_jump = False
+        self.current_jump_start_y = 0.0
+        self.max_jump_offset = 0.0
+        self.y_change_samples = []
 
         self.initUI()
         self.load_values()
@@ -3358,34 +2944,52 @@ class StateCalibrationDialog(QDialog):
     def initUI(self):
         main_layout = QHBoxLayout(self)
         
-        # 좌측: 실시간 뷰 및 측정
         left_layout = QVBoxLayout()
-        self.live_view_label = QLabel("측정을 시작하려면 버튼을 누르세요.")
+        self.live_view_label = QLabel("탐지가 실행 중이어야 합니다.")
         self.live_view_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.live_view_label.setStyleSheet("background-color: black; color: white;")
         self.live_view_label.setMinimumSize(300, 300)
         
-        measure_layout = QHBoxLayout()
-        self.measure_height_btn = QPushButton("점프 높이 측정")
-        self.measure_height_btn.clicked.connect(self.start_measure_height)
-        measure_layout.addWidget(self.measure_height_btn)
+        measure_group = QGroupBox("자동 측정")
+        measure_layout = QVBoxLayout()
+
+        instructions_label = QLabel(
+            "<b>측정 방법:</b><br>"
+            "1. '자동 측정 시작' 버튼을 누르세요.<br>"
+            "2. 게임으로 돌아가 <b>평평한 지형</b>에서<br>"
+            "   <b>점프</b>와 <b>낙하</b>를 여러 번 반복하세요.<br>"
+            "3. 시스템이 유효한 움직임만 샘플링합니다.<br>"
+            "4. '자동 측정 중단'을 누르면 추천값이<br>"
+            "   자동으로 입력됩니다."
+        )
+        instructions_label.setWordWrap(True)
+
+        self.measure_btn = QPushButton("자동 측정 시작")
+        self.measure_btn.setCheckable(True)
+        self.measure_btn.clicked.connect(self.toggle_measurement)
+        
+        self.measured_jump_label = QLabel("최대 점프 높이: 0.0 px")
+        self.measured_y_change_label = QLabel("Y좌표 변화량 (95%): 0.0 px/f")
+        
+        measure_layout.addWidget(instructions_label)
+        measure_layout.addSpacing(10)
+        measure_layout.addWidget(self.measure_btn)
+        measure_layout.addWidget(self.measured_jump_label)
+        measure_layout.addWidget(self.measured_y_change_label)
+        measure_group.setLayout(measure_layout)
         
         left_layout.addWidget(self.live_view_label, 1)
-        left_layout.addLayout(measure_layout)
+        left_layout.addWidget(measure_group)
         
-        # 우측: 설정 값 입력
         right_layout = QVBoxLayout()
         form_group = QGroupBox("판정 기준값 (단위: px)")
         form_layout = QFormLayout()
 
         self.spin_boxes = {}
         labels = {
-            'on_terrain_y': "지상 판정 Y 오차",
-            'jump_y_min': "점프 상태 최소 Y",
-            'jump_y_max': "점프 상태 최대 Y",
-            'climb_y_min': "등반 상태 최소 Y",
-            'fall_y_min': "낙하 상태 최소 Y",
-            'y_change_threshold': "Y좌표 변화량 임계값",
+            'on_terrain_y': "지상 판정 Y 오차", 'jump_y_min': "점프 상태 최소 Y",
+            'jump_y_max': "점프 상태 최대 Y", 'climb_y_min': "등반 상태 최소 Y",
+            'fall_y_min': "낙하 상태 최소 Y", 'y_change_threshold': "Y좌표 변화량 임계값",
             'climb_x_threshold': "등반 판정 X 오차"
         }
 
@@ -3401,7 +3005,6 @@ class StateCalibrationDialog(QDialog):
         right_layout.addWidget(form_group)
         right_layout.addStretch(1)
 
-        # 하단 버튼
         buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Save | QDialogButtonBox.StandardButton.Cancel)
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
@@ -3411,24 +3014,199 @@ class StateCalibrationDialog(QDialog):
         main_layout.addLayout(right_layout)
 
     def load_values(self):
-        """현재 설정된 값을 스핀박스에 로드합니다."""
         for key, spin_box in self.spin_boxes.items():
             if key in self.current_values:
                 spin_box.setValue(self.current_values[key])
 
     def get_values(self):
-        """스핀박스에 입력된 값들을 딕셔너리로 반환합니다."""
         new_values = {}
         for key, spin_box in self.spin_boxes.items():
             new_values[key] = spin_box.value()
         return new_values
 
-    def start_measure_height(self):
-        # 이 기능은 추후 구체화될 예정입니다.
-        QMessageBox.information(self, "알림", 
-            "이 기능은 아직 구현되지 않았습니다.\n"
-            "직접 점프 최고 높이를 측정하여 '점프 상태 최대 Y'에 입력해주세요.")
+    def toggle_measurement(self, checked):
+        self.is_measuring = checked
+        if checked:
+            self.measure_btn.setText("자동 측정 중단")
+            self.live_view_label.setText("측정 중...\n\n평평한 지형에서\n점프와 낙하를 반복하세요.")
+            self.max_jump_offset = 0.0
+            self.y_change_samples = []
+            self.measured_jump_label.setText("최대 점프 높이: 0.0 px")
+            self.measured_y_change_label.setText("Y좌표 변화량 (95%): 0.0 px/f")
+        else:
+            self.measure_btn.setText("자동 측정 시작")
+            self.live_view_label.setText("측정이 중단되었습니다.")
+            
+            # 측정된 값을 기반으로 추천값 설정
+            self.spin_boxes['jump_y_max'].setValue(round(self.max_jump_offset * 0.95, 1))
+            self.spin_boxes['jump_y_min'].setValue(round(self.max_jump_offset * 0.3, 1))
+            
+            if self.y_change_samples:
+                # 상위 95퍼센타일 값 계산
+                percentile_index = int(len(self.y_change_samples) * 0.95)
+                y_change_95th = sorted(self.y_change_samples)[percentile_index]
+                # 임계값은 95퍼센타일 값의 50%로 설정
+                threshold = y_change_95th * 0.5
+                self.spin_boxes['y_change_threshold'].setValue(round(threshold, 1))
 
+            QMessageBox.information(self, "측정 완료", "측정된 값을 바탕으로 추천값을 설정했습니다.")
+
+    def on_data_received(self, data):
+        current_state = data['player_state']
+        
+        if self.is_measuring:
+            # 1. 점프 시작 순간 포착 및 평탄도 검사
+            if self.last_received_state == 'on_terrain' and current_state in ['jumping', 'in_air']:
+                if abs(data['terrain_slope']) < self.FLAT_TERRAIN_SLOPE_THRESHOLD:
+                    self.is_tracking_this_jump = True
+                    self.current_jump_start_y = data['last_terrain_y']
+                else:
+                    self.is_tracking_this_jump = False
+
+            # 2. 유효한 점프 추적 중일 때만 최대 높이 갱신
+            if self.is_tracking_this_jump and current_state in ['jumping', 'in_air']:
+                y_offset = self.current_jump_start_y - data['y_pos']
+                if y_offset > self.max_jump_offset:
+                    self.max_jump_offset = y_offset
+                    self.measured_jump_label.setText(f"최대 점프 높이: {self.max_jump_offset:.1f} px")
+
+            # 3. 착지하면 점프 추적 종료
+            if current_state == 'on_terrain':
+                self.is_tracking_this_jump = False
+
+            # 4. Y좌표 변화량 샘플 수집 (점프 또는 낙하 시)
+            if current_state in ['jumping', 'falling']:
+                self.y_change_samples.append(abs(data['y_change']))
+                # 실시간 95퍼센타일 값 업데이트 (샘플이 충분히 쌓였을 때)
+                if len(self.y_change_samples) > 20:
+                    percentile_index = int(len(self.y_change_samples) * 0.95)
+                    y_change_95th = sorted(self.y_change_samples)[percentile_index]
+                    self.measured_y_change_label.setText(f"Y좌표 변화량 (95%): {y_change_95th:.1f} px/f")
+        
+        self.last_received_state = current_state
+
+
+    """플레이어 상태 판정에 사용되는 픽셀 단위 임계값을 자동으로 측정하고 설정하는 다이얼로그."""
+    def __init__(self, minimap_region, current_values, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("상태 판정 값 자동 측정 (캘리브레이션)")
+        self.setMinimumSize(600, 450)
+        
+        self.minimap_region = minimap_region
+        self.current_values = current_values
+        
+        # 측정 관련 변수
+        self.is_measuring = False
+        self.max_jump_offset = 0.0
+        self.max_y_change = 0.0
+
+        self.initUI()
+        self.load_values()
+
+    def initUI(self):
+        main_layout = QHBoxLayout(self)
+        
+        # 좌측: 실시간 뷰 및 측정
+        left_layout = QVBoxLayout()
+        self.live_view_label = QLabel("탐지가 실행 중이어야 합니다.")
+        self.live_view_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.live_view_label.setStyleSheet("background-color: black; color: white;")
+        self.live_view_label.setMinimumSize(300, 300)
+        
+        measure_group = QGroupBox("자동 측정")
+        measure_layout = QVBoxLayout()
+        self.measure_btn = QPushButton("자동 측정 시작")
+        self.measure_btn.setCheckable(True)
+        self.measure_btn.clicked.connect(self.toggle_measurement)
+        
+        self.measured_jump_label = QLabel("최대 점프 높이: 0.0 px")
+        self.measured_y_change_label = QLabel("최대 Y좌표 변화량: 0.0 px")
+        
+        measure_layout.addWidget(self.measure_btn)
+        measure_layout.addWidget(self.measured_jump_label)
+        measure_layout.addWidget(self.measured_y_change_label)
+        measure_group.setLayout(measure_layout)
+        
+        left_layout.addWidget(self.live_view_label, 1)
+        left_layout.addWidget(measure_group)
+        
+        # 우측: 설정 값 입력
+        right_layout = QVBoxLayout()
+        form_group = QGroupBox("판정 기준값 (단위: px)")
+        form_layout = QFormLayout()
+
+        self.spin_boxes = {}
+        labels = {
+            'on_terrain_y': "지상 판정 Y 오차", 'jump_y_min': "점프 상태 최소 Y",
+            'jump_y_max': "점프 상태 최대 Y", 'climb_y_min': "등반 상태 최소 Y",
+            'fall_y_min': "낙하 상태 최소 Y", 'y_change_threshold': "Y좌표 변화량 임계값",
+            'climb_x_threshold': "등반 판정 X 오차"
+        }
+
+        for key, label in labels.items():
+            spin_box = QDoubleSpinBox()
+            spin_box.setRange(0, 200)
+            spin_box.setDecimals(1)
+            spin_box.setSingleStep(0.5)
+            self.spin_boxes[key] = spin_box
+            form_layout.addRow(label, spin_box)
+            
+        form_group.setLayout(form_layout)
+        right_layout.addWidget(form_group)
+        right_layout.addStretch(1)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Save | QDialogButtonBox.StandardButton.Cancel)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        right_layout.addWidget(buttons)
+        
+        main_layout.addLayout(left_layout, 1)
+        main_layout.addLayout(right_layout)
+
+    def load_values(self):
+        for key, spin_box in self.spin_boxes.items():
+            if key in self.current_values:
+                spin_box.setValue(self.current_values[key])
+
+    def get_values(self):
+        new_values = {}
+        for key, spin_box in self.spin_boxes.items():
+            new_values[key] = spin_box.value()
+        return new_values
+
+    def toggle_measurement(self, checked):
+        self.is_measuring = checked
+        if checked:
+            self.measure_btn.setText("자동 측정 중단")
+            self.max_jump_offset = 0.0
+            self.max_y_change = 0.0
+            self.measured_jump_label.setText("최대 점프 높이: 0.0 px")
+            self.measured_y_change_label.setText("최대 Y좌표 변화량: 0.0 px")
+        else:
+            self.measure_btn.setText("자동 측정 시작")
+            # 측정된 값을 기반으로 추천값 설정
+            self.spin_boxes['jump_y_max'].setValue(round(self.max_jump_offset * 0.95, 1))
+            self.spin_boxes['jump_y_min'].setValue(round(self.max_jump_offset * 0.3, 1))
+            self.spin_boxes['y_change_threshold'].setValue(round(self.max_y_change * 0.5, 1))
+            QMessageBox.information(self, "측정 완료", "측정된 값을 바탕으로 추천값을 설정했습니다.")
+
+    def on_data_received(self, data):
+        """MapTab으로부터 실시간 데이터를 받아 값을 분석합니다."""
+        if not self.is_measuring:
+            return
+            
+        # 점프 높이 측정
+        if data['player_state'] in ['jumping', 'in_air']:
+            y_offset = data['last_terrain_y'] - data['y_pos']
+            if y_offset > self.max_jump_offset:
+                self.max_jump_offset = y_offset
+                self.measured_jump_label.setText(f"최대 점프 높이: {self.max_jump_offset:.1f} px")
+
+        # Y좌표 변화량 측정 (점프 또는 낙하 시)
+        y_change = abs(data['y_change'])
+        if y_change > self.max_y_change:
+            self.max_y_change = y_change
+            self.measured_y_change_label.setText(f"최대 Y좌표 변화량: {self.max_y_change:.1f} px/f")
 # ==================== v10.8.0 추가 끝 ======================
 
 # --- v9.0.0: 핵심 지형 탐지에만 집중하도록 단순화된 스레드 ---
@@ -3575,7 +3353,8 @@ class AnchorDetectionThread(QThread):
 
 class MapTab(QWidget):
     global_pos_updated = pyqtSignal(QPointF)
-
+    calibration_data_ready = pyqtSignal(dict)
+    
     def __init__(self):
             super().__init__()
             self.active_profile_name = None
@@ -3587,6 +3366,7 @@ class MapTab(QWidget):
             self.detection_thread = None
             self.debug_dialog = None
             self.editor_dialog = None 
+            self.calibration_dialog = None
             self.global_positions = {}
             
             self.full_map_pixmap = None
@@ -4516,15 +4296,20 @@ class MapTab(QWidget):
             QMessageBox.warning(self, "오류", "먼저 '미니맵 범위 지정'을 해주세요.")
             return
 
-        # StateCalibrationDialog는 아직 정의되지 않았으므로 임시로 메시지 박스를 띄웁니다.
-        # 추후 이 부분을 실제 다이얼로그 호출로 변경할 것입니다.
-        dialog = StateCalibrationDialog(self.minimap_region, self.calibration_values, self)
-        if dialog.exec():
-            self.calibration_values = dialog.get_values()
+        # ==================== v10.8.0 수정 시작 ====================
+        self.calibration_dialog = StateCalibrationDialog(self.minimap_region, self.calibration_values, self)
+        # MapTab의 실시간 데이터를 다이얼로그의 슬롯으로 연결
+        self.calibration_data_ready.connect(self.calibration_dialog.on_data_received)
+        
+        if self.calibration_dialog.exec():
+            self.calibration_values = self.calibration_dialog.get_values()
             self.save_profile_data()
             self.update_general_log("상태 판정 값이 업데이트되었습니다.", "blue")
-    # ==================== v10.8.0 추가 끝 ======================
-    
+            
+        # 다이얼로그가 닫히면 연결 해제 및 참조 제거
+        self.calibration_data_ready.disconnect(self.calibration_dialog.on_data_received)
+        self.calibration_dialog = None
+        # ==================== v10.8.0 수정 끝 ======================
     
     def populate_waypoint_list(self):
         """v10.0.0: 새로운 경로 구조에 맞게 웨이포인트 목록을 채웁니다."""
@@ -4668,7 +4453,10 @@ class MapTab(QWidget):
         """
         탐지 스레드로부터 받은 정보를 처리하고, RANSAC을 이용해 플레이어의 전역 좌표를 강건하게 추정합니다.
         """
-        
+        if not self.minimap_region:
+            self.update_detection_log_message("오류: 미니맵 범위가 설정되지 않았습니다.", "red")
+            return
+
         if not my_player_rects:
             self.update_detection_log_message("플레이어 아이콘 탐지 실패", "red")
             # 디버그 뷰에도 현재 상태 전송 (플레이어 위치 없음)
@@ -4893,6 +4681,51 @@ class MapTab(QWidget):
             final_player_pos=final_player_pos,
             is_forward=self.is_forward
         )
+        # ==================== v10.8.0 수정 시작 (NameError 수정) ====================
+        # 캘리브레이션 다이얼로그가 열려 있으면 실시간 데이터 전송
+        if self.calibration_dialog and self.calibration_dialog.isVisible():
+            y_change = final_player_pos.y() - self.last_player_pos.y()
+            
+            # --- on_detection_ready 내에서 contact_terrain을 직접 계산 ---
+            contact_terrain_for_calib = None
+            min_y_dist_for_calib = float('inf')
+            for line_data in self.geometry_data.get("terrain_lines", []):
+                points = line_data.get("points", [])
+                if len(points) < 2: continue
+                for i in range(len(points) - 1):
+                    p1, p2 = points[i], points[i+1]
+                    min_lx, max_lx = min(p1[0], p2[0]), max(p1[0], p2[0])
+                    if not (min_lx <= final_player_pos.x() <= max_lx): continue
+                    line_y = p1[1] + (p2[1] - p1[1]) * ((final_player_pos.x() - p1[0]) / (p2[0] - p1[0])) if (p2[0] - p1[0]) != 0 else p1[1]
+                    if abs(final_player_pos.y() - line_y) < min_y_dist_for_calib:
+                        min_y_dist_for_calib = abs(final_player_pos.y() - line_y)
+                        contact_terrain_for_calib = line_data
+            
+            slope = 0.0
+            if contact_terrain_for_calib:
+                points = contact_terrain_for_calib.get("points", [])
+                for i in range(len(points) - 1):
+                    p1 = points[i]
+                    p2 = points[i+1]
+                    if min(p1[0], p2[0]) <= final_player_pos.x() <= max(p1[0], p2[0]):
+                        dx = p2[0] - p1[0]
+                        if abs(dx) < 1e-6:
+                            slope = 999.0
+                        else:
+                            dy = p2[1] - p1[1]
+                            slope = dy / dx
+                        break
+            
+            calib_data = {
+                'player_state': self.player_state,
+                'y_pos': final_player_pos.y(),
+                'last_terrain_y': self.last_on_terrain_y,
+                'y_change': y_change,
+                'terrain_slope': slope
+            }
+            self.calibration_data_ready.emit(calib_data)
+        # ==================== v10.8.0 수정 끝 ======================
+
         
         self.global_pos_updated.emit(final_player_pos)
         
