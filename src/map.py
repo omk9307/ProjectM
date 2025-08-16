@@ -1,77 +1,7 @@
 # map.py
 # 2025년 08月 15日 16:30 (KST)
 # 기능: v10.1.3 - 내비게이션 도착 판정 로직 개선 (Phase 2)
-# 설명:
-# - [로직 개선] 웨이포인트 도착 판정 조건에 '플레이어와 목표의 층(Floor) 일치' 여부를 추가하여 안정성 대폭 향상.
-#           - [MapTab] 이제 플레이어가 목표와 같은 층의 지형선 위에 서 있을 때만 도착으로 인정하여, 점프 등으로 인한 오작동을 방지.
-# - [UI/UX 개선] NavigatorDisplay 위젯의 디자인을 최종 개선하여 가독성 및 공간 효율성 최적화.
-#           - [NavigatorDisplay] 순서 표시기(🚩, ① 등)를 웨이포인트 이름 앞으로 이동시켜 한 줄로 표시.
-#           - [NavigatorDisplay] 상단 중앙에 현재 진행 방향([정방향]/[역방향])을 표시하는 기능 추가.
-#           - [NavigatorDisplay] 중앙 정보 영역의 폭을 줄여 전체적인 레이아웃 균형 조정.
-# - v10.1.1 - 내비게이션 UI 디자인 개선 (Phase 2)
-# - [UI/UX 개선] NavigatorDisplay 위젯의 UI 레이아웃을 전면 개편하여 시인성 및 정보 전달력 강화.
-#           - [NavigatorDisplay] 이전/현재/다음 목표를 중앙에 집중 배치하고, 각 목표 위에 순서 표시기(①, ②, 출발지 등)를 추가.
-#           - [NavigatorDisplay] 진행 막대를 중앙으로 이동시키고, 진행률 텍스트(예: "2 / 5")를 막대 내부에 표시하도록 변경.
-#           - [NavigatorDisplay] 전체적인 위젯 요소의 배치와 간격을 조정하여 균형감 있는 디자인으로 개선.
-# - [기능 구현] 플레이어의 실시간 위치와 목표 웨이포인트 간의 방향/거리를 계산하여 NavigatorDisplay 위젯에 시각화하는 기능 추가.
-# - v10.0.2: [UI/UX 개선] 편집기 및 실시간 뷰의 가독성과 사용성을 개선.
-#           - [편집기 UI] 모든 편집 모드에서 휠 줌 및 휠 클릭 패닝이 가능하도록 개선.
-#           - [편집기 UI] '기본' 모드에서 웨이포인트 좌클릭 시 이름을 변경하는 기능 추가 및 관련 드래그 버그 수정.
-#           - [편집기 UI] 웨이포인트 추가 시 이름이 UI에 즉시 반영되도록 수정 및 관련 RuntimeError 해결.
-#           - [편집기 UI] 웨이포인트 스냅 로직을 개선하여 좁은 지형에서도 스냅이 잘 되도록 수정.
-#           - [편집기 UI] 웨이포인트가 다른 요소에 가려지지 않도록 최상위에 표시 (Z-value 조정).
-#           - [편집기 데이터] 지형 층 정보 변경 시, 종속된 웨이포인트의 층 정보도 함께 갱신되도록 수정.
-#           - [편집기 데이터] 웨이포인트 삭제 시, 모든 경로 프로필에서도 해당 웨이포인트 ID가 함께 삭제되도록 수정.
-#           - [실시간 뷰 UI] 웨이포인트 경로의 시작점과 끝점을 '출발지'/'목적지'로 표시하고, 목표 웨이포인트의 텍스트 색상을 흰색으로 변경.
-#           - [실시간 뷰 UI] '도착' 알림 텍스트의 위치를 조정.
-# - v10.0.1: [기능개선 및 버그수정] 지능형 내비게이션 시스템 1단계 안정화.
-#           - [기능개선] 지형 점프 연결(jump_link)이 다른 층 사이에서도 연결 가능하도록 역할을 확장.
-#           - [기능개선] 점프 링크의 동적 이름을 '시작층_종료층A/B/C...' 형식으로 변경하여 직관성 향상.
-#           - [버그수정] 지형 삭제 시, 종속된 층 이동 오브젝트와 연결된 점프 링크가 UI에 즉시 함께 삭제되도록 수정.
-#           - [버그수정] 점프 링크 추가/삭제 시 UI가 즉시 갱신되지 않던 문제와 관련 크래시 현상을 완전히 해결.
-# - v10.0.0 (1단계): [구조개편] 층(Floor) 개념, 지형 점프, 경로 분리 등 내비게이션 시스템을 위한 데이터 구조와 UI를 대규모로 확장.
-#           - [데이터 구조] 지형선(terrain_lines)에 'floor' 필드 추가.
-#           - [데이터 구조] 'waypoints', 'jump_links'를 map_geometry.json에 독립적으로 저장.
-#           - [데이터 구조] 경로 프로필의 웨이포인트 목록을 'forward_path'와 'backward_path'로 분리.
-#           - [편집기 UI] FullMinimapEditorDialog에 '층 관리', '웨이포인트 추가', '지형 점프 연결' 모드 및 관련 UI 추가.
-#           - [메인 UI] MapTab의 웨이포인트 관리 패널을 정방향/역방향 탭 구조로 변경.
-#           - [메인 UI] 실시간 네비게이션 정보를 표시할 NavigatorDisplay 위젯 추가.
-# - v9.0.0: [시스템개편] 전체 미니맵을 기반으로 실시간 뷰를 렌더링하는 방식으로 시스템을 전면 개편.
-#           - [탐지 단순화] AnchorDetectionThread의 역할을 핵심 지형 탐지에만 집중하도록 변경하고, 복잡한 웨이포인트 보정 및 경로 안내 로직 제거.
-#           - [전체 맵 렌더링] 프로필 로드 시, 모든 지형/오브젝트 정보를 포함하는 단일 '전체 맵' 이미지를 미리 생성.
-#           - [카메라 뷰] 실시간 탐지된 핵심 지형의 로컬/전역 좌표를 이용해 플레이어의 전역 좌표를 계산하고, 전체 맵 위에서 해당 위치를 중심으로 하는 '카메라 뷰'를 실시간으로 렌더링.
-#           - [UI/UX 개선] 실시간 미니맵 뷰에 마우스 휠 확대/축소 기능 추가 및 현재 위치 계산의 기준이 되는 활성 지형 시각화 기능 추가.
-# - v8.0.2: [버그수정] QPoint와 QPointF 간의 TypeError를 해결하고 전체적인 코드 안정성을 강화.
-#           - [수정] update_minimap_view에서 offset 계산 시 QPointF()로 타입을 명시적으로 변환하여 TypeError 해결.
-#           - [개선] _calculate_global_positions, populate_scene, on_player_pos_updated 등
-#             좌표계를 다루는 여러 메서드의 예외 처리 및 로직을 개선하여 안정성 향상.
-# - v8.0.0: [기능구현] 실시간 미니맵 뷰에 지형 데이터가 정확한 위치에 그려지도록 좌표 변환 로직 구현.
-#           - [구조변경] 전역 좌표계 계산 로직(_calculate_global_positions)을 MapTab으로 이동.
-#           - [좌표변환] 실시간으로 탐지된 기준 지형의 로컬/전역 좌표를 이용해 Offset을 계산하고,
-#             이를 통해 지형/오브젝트의 전역 좌표를 실시간 뷰의 로컬 좌표로 변환하여 렌더링.
-# - v7.9.7: [기능개선] 실시간 미니맵 뷰에 표시되는 모든 요소가 보기 옵션에 따라 제어되도록 수정.
-# - v7.9.6: [기능구현] 모든 보기 옵션의 상태가 맵 프로필에 저장되고 복원되도록 기능 확장.
-# - v7.9.5: [기능구현] 편집기의 '보기 옵션' 상태가 저장되지 않던 문제를 해결.
-# - v7.9.4: [버그수정] 불완전한 try 구문으로 인한 SyntaxError 해결.
-# - v7.9.3: [버그수정] 반복적인 SyntaxError 해결을 위해 MapTab 클래스 전체 코드 교체.
-# - v7.8.1: [기능개선] 편집기 UX 개선 (초기 배율 최적화, '기본' 모드 휠 줌 변경 등).
-# - v7.8.0: [기능구현] '기본' 모드 및 '뷰 모드 전환' 기능 구현, 불필요한 UI 제거.
-# - v7.7.1: [기능개선] 'X축 고정' 기능을 층 이동 오브젝트 생성 시에도 적용하고, '높이 고정'을 'Y축 고정'으로 명칭 변경.
-# - v7.6.0: [기능구현] '높이 고정' 기능 추가.
-# - v7.5.5: [버그수정] 지형/오브젝트 삭제 시 화면이 즉시 갱신되지 않는 문제 해결.
-# - v7.5.2: [기능개선] 오브젝트 데이터에 부모 지형선 ID를 저장하고, 지형선 삭제 시 연쇄 삭제되도록 개선.
-# - v7.5.1: [기능개선] 여러 편집 모드에서 우클릭 삭제가 가능하도록 편의성 향상.
-# - v7.5.0: [기능구현] 수직 이동 오브젝트(사다리/밧줄) 그리기 기능 추가.
-# - v7.4.2: [기능개선] 보기 옵션에 지형선 및 층 이동 오브젝트 가시성 제어 체크박스 추가.
-# - v7.4.1: [버그수정] 지형 입력 도구 스냅 기능 개선 및 미완성 라인 생성 버그 수정.
-# - v7.3.0: [기능구현] '지형선' 그리기 기능 추가.
-# - v7.2.0: [기능개선] 편집기 사용성 및 가독성 향상 (필터링, 휠 줌, 가시성 제어, 색상 구분).
-# - v7.1.0: [기능구현] 맵 스티칭 및 시각화 기능 구현.
-# - v7.0.0: [기능추가] '전체 미니맵 편집기' 기능 개발 시작 (기반 프레임워크 구축).
-# - v6.0.0: [기능고도화] 핵심 지형 관리 시스템 대폭 개선.
-# - v5.0.0: [기능추가] '경로 프로필' 시스템 도입.
-# - v4.0.0: [구조개편] '맵 프로필' 시스템 도입.
-# - v3.6.0: 핵심 지형 관리 기능 강화 및 시각화/로깅 개선.
+# 설명: Readme와 업데이트 내역은 map_update_log.txt 참조
 
 import sys
 import os
@@ -4876,7 +4806,6 @@ class MapTab(QWidget):
                     return
 
                 if self.intermediate_target_type in ['climb_arrived', 'fall_arrived'] and self.intermediate_target_pos:
-                    # v10.3.3: 낭떠러지 여부에 따라 다른 도착 범위 적용
                     threshold = EDGE_ARRIVAL_X_THRESHOLD if "낭떠러지" in self.guidance_text else INTERMEDIATE_ARRIVAL_X_THRESHOLD
                     is_out_of_range = abs(final_player_pos.x() - self.intermediate_target_pos.x()) > threshold
                     if is_out_of_range:
@@ -4996,7 +4925,6 @@ class MapTab(QWidget):
                         self.update_general_log(f"가장 가까운 경로의 웨이포인트 '{start_wp_candidate['name']}'({start_wp_candidate['floor']}층)에서 내비게이션 시작.", "purple")
 
                 elif self.target_waypoint_id:
-                    # ==================== v10.3.3 수정 시작 ======================
                     if self.intermediate_target_type in ['climb', 'fall'] and self.intermediate_target_pos:
                         threshold = EDGE_ARRIVAL_X_THRESHOLD if "낭떠러지" in self.guidance_text else INTERMEDIATE_ARRIVAL_X_THRESHOLD
                         is_arrived_at_intermediate = abs(final_player_pos.x() - self.intermediate_target_pos.x()) < threshold
@@ -5004,15 +4932,12 @@ class MapTab(QWidget):
                         if is_arrived_at_intermediate:
                             if self.intermediate_target_type == 'climb':
                                 self.intermediate_target_type = 'climb_arrived'
-                                self.guidance_text = f"층 변경 [{self.current_player_floor}층→{self.current_player_floor + 1}층]"
+                                next_floor = self.current_player_floor + 1 # 임시 계산, 더 정확한 계산 필요
+                                self.guidance_text = f"층 변경 [{self.current_player_floor}층→{next_floor}층]"
                             elif self.intermediate_target_type == 'fall':
                                 self.intermediate_target_type = 'fall_arrived'
-                                # 정확한 다음 층 계산
-                                next_floor_down = self.current_player_floor - 1 # 최소 한 층 아래
-                                target_wp_floor = all_waypoints_map.get(self.target_waypoint_id, {}).get('floor', next_floor_down)
-                                # 발판 통과가 가능한 가장 가까운 아래 층 찾기 (임시 로직, 추후 개선)
-                                self.guidance_text = f"층 변경 [{self.current_player_floor}층→{next_floor_down}층]"
-                    # ==================== v10.3.3 수정 끝 ======================
+                                next_floor = self.current_player_floor - 1 # 임시 계산
+                                self.guidance_text = f"층 변경 [{self.current_player_floor}층→{next_floor}층]"
                     
                     target_wp_data = all_waypoints_map.get(self.target_waypoint_id)
                     if target_wp_data:
@@ -5057,87 +4982,86 @@ class MapTab(QWidget):
                         self.intermediate_target_pos = QPointF(target_wp_data['pos'][0], target_wp_data['pos'][1])
                         self.guidance_text = target_wp_data.get('name', '이름 없음')
                     
-                    elif self.current_player_floor < target_wp_floor:
-                        next_floor_to_reach = self.current_player_floor + 1
-                        candidate_objects = [
-                            obj for obj in self.geometry_data.get("transition_objects", [])
-                            if abs(obj.get('floor', -1) - next_floor_to_reach) < 0.1
-                        ]
-                        if candidate_objects:
-                            best_object = min(candidate_objects, key=lambda obj: abs(final_player_pos.x() - obj['points'][0][0]))
-                            self.intermediate_target_type = 'climb'
-                            p1_y = best_object['points'][0][1]
-                            p2_y = best_object['points'][1][1]
-                            bottom_y = max(p1_y, p2_y)
-                            self.intermediate_target_pos = QPointF(best_object['points'][0][0], bottom_y)
-                            self.guidance_text = best_object.get('dynamic_name', '사다리로 이동')
-                        else: 
-                            self.intermediate_target_type = 'walk'
-                            self.intermediate_target_pos = QPointF(target_wp_data['pos'][0], target_wp_data['pos'][1])
-                            self.guidance_text = target_wp_data.get('name', '이름 없음')
-                    
-                    else: 
-                        self.intermediate_target_type = 'fall'
-                        candidates = []
+                    # ==================== v10.4.0: 경로 기반 목표 층 결정 로직 ====================
+                    else:
+                        full_path = active_route.get("forward_path" if self.is_forward else "backward_path", [])
+                        if not full_path and not self.is_forward:
+                            full_path = list(reversed(active_route.get("forward_path", [])))
                         
-                        current_terrain_group = [
-                            line for line in self.geometry_data.get("terrain_lines", [])
-                            if line.get('dynamic_name') == current_terrain_name
-                        ]
-                        for line in current_terrain_group:
-                            points = line.get("points", [])
-                            if points:
-                                candidates.append({'type': 'edge', 'pos': QPointF(points[0][0], points[0][1])})
-                                candidates.append({'type': 'edge', 'pos': QPointF(points[-1][0], points[-1][1])})
+                        # a. 경로상의 미래 층 목록 수집
+                        future_wp_ids = full_path[self.current_path_index:]
+                        future_floors = [all_waypoints_map.get(wp_id, {}).get('floor') for wp_id in future_wp_ids]
+                        future_floors = [f for f in future_floors if f is not None]
 
-                        target_x = target_wp_data['pos'][0]
-                        
-                        if contact_terrain:
-                            current_y_on_terrain = -1
-                            points = contact_terrain.get("points", [])
-                            for i in range(len(points) - 1):
-                                p1, p2 = points[i], points[i+1]
-                                if min(p1[0], p2[0]) <= target_x <= max(p1[0], p2[0]):
-                                    current_y_on_terrain = p1[1] + (p2[1] - p1[1]) * ((target_x - p1[0]) / (p2[0] - p1[0])) if (p2[0] - p1[0]) != 0 else p1[1]
-                                    break
+                        if self.current_player_floor < target_wp_floor: # 상승
+                            # b. 다음 목표 층 필터링 (현재보다 높고 가장 가까운)
+                            higher_floors = sorted([f for f in future_floors if f > self.current_player_floor])
+                            next_floor_to_reach = higher_floors[0] if higher_floors else None
                             
-                            if current_y_on_terrain != -1:
-                                terrains_below = [
-                                    line for line in self.geometry_data.get("terrain_lines", [])
-                                    if line.get('floor', float('inf')) < self.current_player_floor and
-                                    any(min(p1[0], p2[0]) <= target_x <= max(p1[0], p2[0]) for p1, p2 in zip(line.get("points", []), line.get("points", [])[1:]))
-                                ]
-                                if terrains_below:
-                                    closest_terrain_below = max(terrains_below, key=lambda t: t.get('floor'))
-                                    candidates.append({'type': 'platform', 'pos': QPointF(target_x, current_y_on_terrain)})
+                            if next_floor_to_reach is not None:
+                                candidate_objects = [obj for obj in self.geometry_data.get("transition_objects", []) if abs(obj.get('floor', -1) - next_floor_to_reach) < 0.1]
+                                if candidate_objects:
+                                    best_object = min(candidate_objects, key=lambda obj: abs(final_player_pos.x() - obj['points'][0][0]))
+                                    self.intermediate_target_type = 'climb'
+                                    p1_y, p2_y = best_object['points'][0][1], best_object['points'][1][1]
+                                    bottom_y = max(p1_y, p2_y)
+                                    self.intermediate_target_pos = QPointF(best_object['points'][0][0], bottom_y)
+                                    self.guidance_text = best_object.get('dynamic_name', '사다리로 이동')
+                                else: # 안내할 사다리가 없으면 일단 직진
+                                    self.intermediate_target_type = 'walk'
+                                    self.intermediate_target_pos = QPointF(target_wp_data['pos'][0], target_wp_data['pos'][1])
+                                    self.guidance_text = target_wp_data.get('name', '이름 없음')
+                            
+                        else: # 하강
+                            # b. 다음 목표 층 필터링 (현재보다 낮고 가장 가까운)
+                            lower_floors = sorted([f for f in future_floors if f < self.current_player_floor], reverse=True)
+                            next_floor_to_reach = lower_floors[0] if lower_floors else None
 
-                        if candidates:
-                            target_pos_final = QPointF(target_wp_data['pos'][0], target_wp_data['pos'][1])
-                            for cand in candidates:
-                                cost_to_cand = abs(final_player_pos.x() - cand['pos'].x())
-                                cost_after_cand = abs(cand['pos'].x() - target_pos_final.x())
-                                cand['cost'] = cost_to_cand + cost_after_cand
-                            
-                            best_candidate = min(candidates, key=lambda c: c['cost'])
-                            self.intermediate_target_pos = best_candidate['pos']
-                            self.guidance_text = "낭떠러지로 이동" if best_candidate['type'] == 'edge' else "아래 점프"
-                        else:
-                            self.intermediate_target_pos = QPointF(target_wp_data['pos'][0], target_wp_data['pos'][1])
-                            self.guidance_text = "낙하 지점으로 이동"
+                            if next_floor_to_reach is not None:
+                                self.intermediate_target_type = 'fall'
+                                candidates = []
+                                # ... (최적 낙하 지점 탐색 로직은 이전과 동일) ...
+                                current_terrain_group = [line for line in self.geometry_data.get("terrain_lines", []) if line.get('dynamic_name') == current_terrain_name]
+                                for line in current_terrain_group:
+                                    points = line.get("points", [])
+                                    if points:
+                                        candidates.append({'type': 'edge', 'pos': QPointF(points[0][0], points[0][1])})
+                                        candidates.append({'type': 'edge', 'pos': QPointF(points[-1][0], points[-1][1])})
+                                target_x = target_wp_data['pos'][0]
+                                if contact_terrain:
+                                    current_y_on_terrain = -1
+                                    points = contact_terrain.get("points", [])
+                                    for i in range(len(points) - 1):
+                                        p1, p2 = points[i], points[i+1]
+                                        if min(p1[0], p2[0]) <= target_x <= max(p1[0], p2[0]):
+                                            current_y_on_terrain = p1[1] + (p2[1] - p1[1]) * ((target_x - p1[0]) / (p2[0] - p1[0])) if (p2[0] - p1[0]) != 0 else p1[1]
+                                            break
+                                    if current_y_on_terrain != -1:
+                                        terrains_below = [line for line in self.geometry_data.get("terrain_lines", []) if line.get('floor', float('inf')) < self.current_player_floor and any(min(p1[0], p2[0]) <= target_x <= max(p1[0], p2[0]) for p1, p2 in zip(line.get("points", []), line.get("points", [])[1:]))]
+                                        if terrains_below:
+                                            candidates.append({'type': 'platform', 'pos': QPointF(target_x, current_y_on_terrain)})
+                                if candidates:
+                                    target_pos_final = QPointF(target_wp_data['pos'][0], target_wp_data['pos'][1])
+                                    for cand in candidates:
+                                        cost_to_cand = abs(final_player_pos.x() - cand['pos'].x())
+                                        cost_after_cand = abs(cand['pos'].x() - target_pos_final.x())
+                                        cand['cost'] = cost_to_cand + cost_after_cand
+                                    best_candidate = min(candidates, key=lambda c: c['cost'])
+                                    self.intermediate_target_pos = best_candidate['pos']
+                                    self.guidance_text = "낭떠러지로 이동" if best_candidate['type'] == 'edge' else "아래 점프"
+                                else:
+                                    self.intermediate_target_pos = QPointF(target_wp_data['pos'][0], target_wp_data['pos'][1])
+                                    self.guidance_text = "낙하 지점으로 이동"
+                    # ==================== v10.4.0 로직 끝 ======================
 
                 # 4. 최종 방향/거리 계산 및 NavigatorDisplay 업데이트
-                prev_name = ""
-                next_name = ""
-                direction = "-"
-                distance = 0
-                
+                prev_name, next_name, direction, distance = "", "", "-", 0
                 full_path = active_route.get("forward_path" if self.is_forward else "backward_path", [])
                 if not full_path and not self.is_forward:
                     full_path = list(reversed(active_route.get("forward_path", [])))
 
                 if self.intermediate_target_pos and self.intermediate_target_type not in ['climb_arrived', 'fall_arrived']:
                     distance = abs(final_player_pos.x() - self.intermediate_target_pos.x())
-                    # v10.3.3: 낭떠러지 여부에 따라 다른 도착 범위 적용
                     threshold = EDGE_ARRIVAL_X_THRESHOLD if "낭떠러지" in self.guidance_text else INTERMEDIATE_ARRIVAL_X_THRESHOLD
                     if distance < threshold:
                         direction = "도착 근접"
@@ -5175,7 +5099,7 @@ class MapTab(QWidget):
                 
                 # 5. 마무리
                 self.last_player_pos = final_player_pos
-        
+
     def update_general_log(self, message, color):
         self.general_log_viewer.append(f'<font color="{color}">{message}</font>')
         self.general_log_viewer.verticalScrollBar().setValue(self.general_log_viewer.verticalScrollBar().maximum())
