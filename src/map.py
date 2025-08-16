@@ -65,8 +65,18 @@ MAX_ICON_WIDTH = 20
 MAX_ICON_HEIGHT = 20
 PLAYER_ICON_STD_WIDTH = 11
 PLAYER_ICON_STD_HEIGHT = 11
-INTERMEDIATE_ARRIVAL_X_THRESHOLD = 8 # v10.2.5: 중간 목표 도착 판정을 위한 x축 허용 오차 (픽셀)
-EDGE_ARRIVAL_X_THRESHOLD = 2 # v10.3.3: 낭떠러지 지점 도착 판정을 위한 더 엄격한 x축 허용 오차
+
+# --- 상태 판정 기준 ---
+ON_TERRAIN_Y_THRESHOLD = 3.0  # 지상 판정 y축 허용 오차 (px)
+JUMP_Y_MIN_THRESHOLD = 4.0    # 점프 상태 최소 y 오프셋 (px)
+JUMP_Y_MAX_THRESHOLD = 12.0   # 점프 상태 최대 y 오프셋 (px)
+CLIMB_Y_MIN_THRESHOLD = 13.0  # 등반 상태 최소 y 오프셋 (px)
+FALL_Y_MIN_THRESHOLD = 4.0    # 낙하 상태 최소 y 오프셋 (px)
+
+# --- 도착 판정 기준 ---
+WAYPOINT_ARRIVAL_X_THRESHOLD = 8.0 # 웨이포인트 도착 x축 허용 오차 (px)
+LADDER_ARRIVAL_X_THRESHOLD = 8.0   # 사다리 도착 x축 허용 오차 (px)
+JUMP_LINK_ARRIVAL_X_THRESHOLD = 4.0 # 점프 링크/낭떠러지 도착 x축 허용 오차 (px)
 
 # --- v10.0.0: 네비게이터 위젯 클래스 ---
 class NavigatorDisplay(QWidget):
@@ -79,7 +89,9 @@ class NavigatorDisplay(QWidget):
         # 데이터 초기화
         self.current_floor = "N/A"
         self.current_terrain_name = ""
-        self.guidance_text = "없음"
+        self.target_name = "없음" 
+        self.player_state_text = "대기 중"
+        self.nav_action_text = "경로 없음"
         self.previous_waypoint_name = ""
         self.next_waypoint_name = ""
         self.direction = "-"
@@ -90,11 +102,15 @@ class NavigatorDisplay(QWidget):
         self.is_forward = True
         self.intermediate_target_type = 'walk'
 
-    def update_data(self, floor, terrain_name, guidance, prev_name, next_name, direction, distance, full_path, last_reached_id, target_id, is_forward, intermediate_type):
+    def update_data(self, floor, terrain_name, target_name, prev_name, next_name, 
+                    direction, distance, full_path, last_reached_id, target_id, 
+                    is_forward, intermediate_type, player_state, nav_action):
         """MapTab으로부터 최신 내비게이션 정보를 받아와 뷰를 갱신합니다."""
         self.current_floor = str(floor)
         self.current_terrain_name = terrain_name
-        self.guidance_text = guidance
+        self.target_name = target_name
+        self.player_state_text = player_state
+        self.nav_action_text = nav_action
         self.previous_waypoint_name = prev_name
         self.next_waypoint_name = next_name
         self.direction = direction
@@ -142,8 +158,8 @@ class NavigatorDisplay(QWidget):
 
 
             # --- 2. 중앙 영역: 경로 및 진행 정보 ---
-            center_area_width = (total_width - left_area_width * 2.5) - 100
-            center_area_x = int((total_width - center_area_width) / 2)
+            center_area_width = (total_width - left_area_width * 2) - 100 # 우측 영역을 위해 폭 조정
+            center_area_x = left_area_width + 20
             center_rect = QRect(center_area_x, 0, int(center_area_width), total_height)
 
             font_dist_top = QFont("맑은 고딕", 11)
@@ -178,23 +194,26 @@ class NavigatorDisplay(QWidget):
             font_name_side = QFont("맑은 고딕", 11)
             
             # v10.3.3: 긴 텍스트를 위한 동적 폰트 크기 조절
-            if len(self.guidance_text) > 10:
+            if len(self.target_name) > 10:
                 font_name_main = QFont("맑은 고딕", 11, QFont.Weight.Bold)
             else:
                 font_name_main = QFont("맑은 고딕", 13, QFont.Weight.Bold)
             
-            main_guidance_text = self.guidance_text
+            main_target_text = self.target_name
             if self.intermediate_target_type == 'climb':
-                main_guidance_text = f"🔺 {self.guidance_text}"
+                main_target_text = f"🔺 {self.target_name}"
             elif self.intermediate_target_type == 'fall':
-                main_guidance_text = f"🔻 {self.guidance_text}"
+                main_target_text = f"🔻 {self.target_name}"
+            elif self.intermediate_target_type == 'jump':
+                main_target_text = f"🤸 {self.target_name}"
             elif self.intermediate_target_type == 'walk':
-                main_guidance_text = f"{indicator_curr} {self.guidance_text}" if indicator_curr else self.guidance_text
+                main_target_text = f"{indicator_curr} {self.target_name}" if indicator_curr else self.target_name
 
             painter.setFont(font_name_main)
             painter.setPen(QColor("lime"))
-            painter.drawText(path_area_rect, Qt.AlignmentFlag.AlignCenter, main_guidance_text)
+            painter.drawText(path_area_rect, Qt.AlignmentFlag.AlignCenter, main_target_text)
 
+            font_name_side = QFont("맑은 고딕", 11)
             painter.setFont(font_name_side)
             painter.setPen(QColor("#9E9E9E"))
             prev_text = f"{indicator_prev} {self.previous_waypoint_name}" if self.previous_waypoint_name else ""
@@ -235,6 +254,32 @@ class NavigatorDisplay(QWidget):
                 painter.setPen(Qt.GlobalColor.white)
                 painter.setFont(QFont("맑은 고딕", 8, QFont.Weight.Bold))
                 painter.drawText(progress_bar_rect, Qt.AlignmentFlag.AlignCenter, progress_text)
+
+            # --- 3. 우측 영역: 상태 및 행동 안내 ---
+            right_area_x = center_rect.right() + 20
+            right_rect = QRect(right_area_x, 0, total_width - right_area_x, total_height)
+
+            # 3-1. 현재 상태
+            painter.setFont(QFont("맑은 고딕", 8))
+            painter.setPen(QColor("#9E9E9E"))
+            state_title_rect = QRect(right_rect.x(), 5, right_rect.width(), 15)
+            painter.drawText(state_title_rect, Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, "현재 상태")
+            
+            painter.setFont(QFont("맑은 고딕", 11, QFont.Weight.Bold))
+            painter.setPen(Qt.GlobalColor.white)
+            state_text_rect = QRect(right_rect.x(), 20, right_rect.width(), 25)
+            painter.drawText(state_text_rect, Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, self.player_state_text)
+
+            # 3-2. 필요 행동
+            painter.setFont(QFont("맑은 고딕", 8))
+            painter.setPen(QColor("#9E9E9E"))
+            action_title_rect = QRect(right_rect.x(), 45, right_rect.width(), 15)
+            painter.drawText(action_title_rect, Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, "필요 행동")
+
+            painter.setFont(QFont("맑은 고딕", 11, QFont.Weight.Bold))
+            painter.setPen(QColor("yellow"))
+            action_text_rect = QRect(right_rect.x(), 55, right_rect.width(), 25)
+            painter.drawText(action_text_rect, Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, self.nav_action_text)
 
 # --- 위젯 클래스 ---
 class ZoomableView(QGraphicsView):
@@ -3461,6 +3506,10 @@ class MapTab(QWidget):
             self.reference_anchor_id = None
             self.smoothed_player_pos = None
             
+            # --- 상태 머신 변수 ---
+            self.player_state = 'idle' # 'idle', 'on_terrain', 'climbing', 'falling', 'jumping'
+            self.navigation_action = 'path_failed' # 'move_to_target', 'prepare_to_climb', 등
+            
             self.player_nav_state = 'on_terrain'  # 'on_terrain', 'climbing', 'jumping', 'falling'
             self.current_player_floor = None
             self.last_terrain_line_id = None
@@ -4940,7 +4989,6 @@ class MapTab(QWidget):
             return float('inf')
 
         return total_cost
-
     def _update_player_state_and_navigation(self, final_player_pos):
         """
         v10.7.0: 플레이어의 현재 위치를 기반으로 층, 상태를 판단하고,
@@ -4950,7 +4998,7 @@ class MapTab(QWidget):
 
         # --- 0. 초기화 및 유효성 검사 ---
         if final_player_pos is None:
-            self.navigator_display.update_data("N/A", "", "없음", "", "", "-", 0, [], None, None, self.is_forward, 'walk')
+            self.navigator_display.update_data("N/A", "", "없음", "", "", "-", 0, [], None, None, self.is_forward, 'walk', "대기 중", "오류: 위치 없음")
             return
 
         active_route = self.route_profiles.get(self.active_route_profile_name)
@@ -5076,7 +5124,7 @@ class MapTab(QWidget):
 
         final_target_wp = all_waypoints_map.get(self.target_waypoint_id)
         if not final_target_wp or self.current_player_floor is None:
-            self.navigator_display.update_data(str(self.current_player_floor) if self.current_player_floor is not None else "N/A", current_terrain_name, "경로 없음", "", "", "-", 0, [], None, None, self.is_forward, 'walk')
+            self.navigator_display.update_data(str(self.current_player_floor) if self.current_player_floor is not None else "N/A", current_terrain_name, "경로 없음", "", "", "-", 0, [], None, None, self.is_forward, 'walk', self.player_state, "경로 없음")
             return
 
         # --- 3. 최적 중간 목표 탐색 (Decision Engine) ---
@@ -5217,7 +5265,11 @@ class MapTab(QWidget):
 
         if self.intermediate_target_pos:
             distance = abs(final_player_pos.x() - self.intermediate_target_pos.x())
-            threshold = EDGE_ARRIVAL_X_THRESHOLD if "낭떠러지" in self.guidance_text else INTERMEDIATE_ARRIVAL_X_THRESHOLD
+            threshold = WAYPOINT_ARRIVAL_X_THRESHOLD # 기본값
+            if self.intermediate_target_type == 'climb':
+                threshold = LADDER_ARRIVAL_X_THRESHOLD
+            elif self.intermediate_target_type in ['jump', 'fall']:
+                threshold = JUMP_LINK_ARRIVAL_X_THRESHOLD
             if distance < threshold:
                 direction = "도착 근접"
             elif final_player_pos.x() < self.intermediate_target_pos.x():
@@ -5237,10 +5289,33 @@ class MapTab(QWidget):
                 next_id = full_path[current_idx + 1]
                 next_name = all_waypoints_map.get(next_id, {}).get('name', '')
 
+        # ==================== v10.8.0 수정 시작 (데이터 전달 체계 개편) ====================
+        # 상태와 행동을 한글 텍스트로 변환
+        state_text_map = {
+            'idle': '정지', 'on_terrain': '걷기', 'climbing': '오르기',
+            'falling': '낙하 중', 'jumping': '점프 중', 'in_air': '공중'
+        }
+        action_text_map = {
+            'move_to_target': '다음 목표로 이동',
+            'prepare_to_climb': '↑ 키를 눌러 오르세요',
+            'prepare_to_fall': '아래로 점프하세요',
+            'prepare_to_jump': '점프하세요',
+            'climb_in_progress': '오르는 중...',
+            'jump_in_progress': '점프 중...',
+            'fall_in_progress': '낙하 중...',
+            'path_complete': '경로 완주',
+            'path_failed': '경로 탐색 불가'
+        }
+        player_state_text = state_text_map.get(self.player_state, '알 수 없음')
+        nav_action_text = action_text_map.get(self.navigation_action, '대기 중')
+
+        # 최종 목표 이름 또는 중간 목표 이름 설정
+        target_display_name = self.guidance_text # 기본값은 기존 guidance_text
+
         self.navigator_display.update_data(
             floor=self.current_player_floor if self.current_player_floor is not None else "N/A",
             terrain_name=current_terrain_name,
-            guidance=self.guidance_text,
+            target_name=target_display_name,
             prev_name=prev_name,
             next_name=next_name,
             direction=direction,
@@ -5249,8 +5324,11 @@ class MapTab(QWidget):
             last_reached_id=self.last_reached_wp_id,
             target_id=self.target_waypoint_id,
             is_forward=self.is_forward,
-            intermediate_type=self.intermediate_target_type
+            intermediate_type=self.intermediate_target_type,
+            player_state=player_state_text,
+            nav_action=nav_action_text
         )
+        # ==================== v10.8.0 수정 끝 ======================
         
         # --- 5. 마무리 ---
         self.last_player_pos = final_player_pos
