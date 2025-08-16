@@ -136,7 +136,7 @@ MAX_ICON_HEIGHT = 20
 PLAYER_ICON_STD_WIDTH = 11
 PLAYER_ICON_STD_HEIGHT = 11
 INTERMEDIATE_ARRIVAL_X_THRESHOLD = 8 # v10.2.5: 중간 목표 도착 판정을 위한 x축 허용 오차 (픽셀)
-EDGE_ARRIVAL_X_THRESHOLD = 4 # v10.3.3: 낭떠러지 지점 도착 판정을 위한 더 엄격한 x축 허용 오차
+EDGE_ARRIVAL_X_THRESHOLD = 2 # v10.3.3: 낭떠러지 지점 도착 판정을 위한 더 엄격한 x축 허용 오차
 
 # --- v10.0.0: 네비게이터 위젯 클래스 ---
 class NavigatorDisplay(QWidget):
@@ -1859,28 +1859,32 @@ class FullMinimapEditorDialog(QDialog):
             self.y_indicator_line.setVisible(True)
             
     def update_locked_position(self, global_pos):
-            self.locked_position = global_pos
-            y_pos = global_pos.y()
-            x_pos = global_pos.x()
-            
-            if not self.y_indicator_line:
-                pen = QPen(QColor(255, 0, 0, 150), 1, Qt.PenStyle.DashLine)
-                self.y_indicator_line = self.scene.addLine(0, 0, 1, 1, pen)
-                self.y_indicator_line.setZValue(200)
-            
-            scene_rect = self.scene.sceneRect()
-            if not scene_rect.isValid(): return
-            
-            self.y_indicator_line.setLine(scene_rect.left(), y_pos, scene_rect.right(), y_pos)
-            
-            if not hasattr(self, 'x_indicator_line'):
-                pen = QPen(QColor(255, 0, 0, 150), 1, Qt.PenStyle.DashLine)
-                self.x_indicator_line = self.scene.addLine(0, 0, 1, 1, pen)
-                self.x_indicator_line.setZValue(200)
-            self.x_indicator_line.setLine(x_pos, scene_rect.top(), x_pos, scene_rect.bottom())
+                self.locked_position = global_pos
+                y_pos = global_pos.y()
+                x_pos = global_pos.x()
+                
+                # v10.3.4: 라인 아이템이 존재하지 않으면 새로 생성
+                if not self.y_indicator_line:
+                    pen = QPen(QColor(255, 0, 0, 150), 1, Qt.PenStyle.DashLine)
+                    self.y_indicator_line = self.scene.addLine(0, 0, 1, 1, pen)
+                    self.y_indicator_line.setZValue(200)
 
-            self.y_indicator_line.setVisible(self.is_y_locked)
-            self.x_indicator_line.setVisible(self.is_x_locked)
+                if not self.x_indicator_line:
+                    pen = QPen(QColor(255, 0, 0, 150), 1, Qt.PenStyle.DashLine)
+                    self.x_indicator_line = self.scene.addLine(0, 0, 1, 1, pen)
+                    self.x_indicator_line.setZValue(200)
+
+                scene_rect = self.scene.sceneRect()
+                if not scene_rect.isValid(): return
+                
+                # v10.3.4: 라인 아이템이 유효한지(씬에 속해 있는지) 확인 후 접근
+                if self.y_indicator_line and self.y_indicator_line.scene():
+                    self.y_indicator_line.setLine(scene_rect.left(), y_pos, scene_rect.right(), y_pos)
+                    self.y_indicator_line.setVisible(self.is_y_locked)
+
+                if self.x_indicator_line and self.x_indicator_line.scene():
+                    self.x_indicator_line.setLine(x_pos, scene_rect.top(), x_pos, scene_rect.bottom())
+                    self.x_indicator_line.setVisible(self.is_x_locked)
         
     def _create_feature_color_map(self):
         """핵심 지형 ID별로 고유한 색상을 할당합니다."""
@@ -2011,63 +2015,101 @@ class FullMinimapEditorDialog(QDialog):
                             del jump['temp_floor_key']
             except Exception as e:
                 print(f"Error assigning dynamic names to jump links: {e}")
-                
+
     def populate_scene(self):
-            self.scene.clear()
-            #  씬 아이템을 참조하는 멤버 변수 초기화 ---
-            self.snap_indicator = None
-            self.preview_waypoint_item = None # <-- 이 라인 추가
-            self.lod_text_items = []
-            
-            # 1. 배경 이미지 설정
-            if self.parent_map_tab.full_map_pixmap and not self.parent_map_tab.full_map_pixmap.isNull():
-                background_item = self.scene.addPixmap(self.parent_map_tab.full_map_pixmap)
-                background_item.setPos(self.parent_map_tab.full_map_bounding_rect.topLeft())
-                background_item.setZValue(-100)
-                background_item.setData(0, "background")
-            else:
-                text_item = self.scene.addText("배경 맵을 생성할 수 없습니다.\n핵심 지형을 1개 이상 등록하고, 문맥 이미지가 있는지 확인해주세요.")
-                text_item.setDefaultTextColor(Qt.GlobalColor.white)
-                return
+                self.scene.clear()
+                # --- v10.3.4 수정: 씬 아이템을 참조하는 멤버 변수 초기화 ---
+                self.snap_indicator = None
+                self.preview_waypoint_item = None
+                self.lod_text_items = []
+                self.y_indicator_line = None
+                self.x_indicator_line = None
+                
+                # 1. 배경 이미지 설정
+                if self.parent_map_tab.full_map_pixmap and not self.parent_map_tab.full_map_pixmap.isNull():
+                    background_item = self.scene.addPixmap(self.parent_map_tab.full_map_pixmap)
+                    background_item.setPos(self.parent_map_tab.full_map_bounding_rect.topLeft())
+                    background_item.setZValue(-100)
+                    background_item.setData(0, "background")
+                else:
+                    text_item = self.scene.addText("배경 맵을 생성할 수 없습니다.\n핵심 지형을 1개 이상 등록하고, 문맥 이미지가 있는지 확인해주세요.")
+                    text_item.setDefaultTextColor(Qt.GlobalColor.white)
+                    return
 
-            # 2. 핵심 지형 그리기
-            if self.global_positions:
-                for item_id, pos in self.global_positions.items():
-                    if item_id in self.key_features:
-                        feature_data = self.key_features[item_id]
-                        img_data = base64.b64decode(feature_data['image_base64'])
-                        pixmap = QPixmap(); pixmap.loadFromData(img_data)
-                        rect_item = self.scene.addRect(0, 0, pixmap.width(), pixmap.height(), QPen(QColor(0, 255, 255)), QBrush(QColor(0, 255, 255, 80)))
-                        rect_item.setPos(pos)
-                        rect_item.setData(0, "feature")
-                        text_item = self.scene.addText(item_id)
-                        text_item.setFont(QFont("맑은 고딕", 5)) #미니맵 지형 편집기 핵심지형 폰트 크기
-                        text_item.setDefaultTextColor(Qt.GlobalColor.white)
-                        text_rect = text_item.boundingRect()
-                        text_item.setPos(pos + QPointF((pixmap.width() - text_rect.width()) / 2, (pixmap.height() - text_rect.height()) / 2))
-                        text_item.setData(0, "feature")
+                # 2. 핵심 지형 그리기
+                if self.global_positions:
+                    for item_id, pos in self.global_positions.items():
+                        if item_id in self.key_features:
+                            feature_data = self.key_features[item_id]
+                            img_data = base64.b64decode(feature_data['image_base64'])
+                            pixmap = QPixmap(); pixmap.loadFromData(img_data)
+                            rect_item = self.scene.addRect(0, 0, pixmap.width(), pixmap.height(), QPen(QColor(0, 255, 255)), QBrush(QColor(0, 255, 255, 80)))
+                            rect_item.setPos(pos)
+                            rect_item.setData(0, "feature")
+                            text_item = self.scene.addText(item_id)
+                            text_item.setFont(QFont("맑은 고딕", 5)) #미니맵 지형 편집기 핵심지형 폰트 크기
+                            text_item.setDefaultTextColor(Qt.GlobalColor.white)
+                            text_rect = text_item.boundingRect()
+                            text_item.setPos(pos + QPointF((pixmap.width() - text_rect.width()) / 2, (pixmap.height() - text_rect.height()) / 2))
+                            text_item.setData(0, "feature")
 
-            # 3. 모든 지오메트리 그리기 (층 번호 텍스트 제외)
-            for line_data in self.geometry_data.get("terrain_lines", []):
-                points = line_data.get("points", [])
-                if len(points) >= 2:
-                    for i in range(len(points) - 1):
-                        p1 = QPointF(points[i][0], points[i][1])
-                        p2 = QPointF(points[i+1][0], points[i+1][1])
-                        self._add_terrain_line_segment(p1, p2, line_data['id'])
-                    for p in points:
-                        self._add_vertex_indicator(QPointF(p[0], p[1]), line_data['id'])
-            
-            for obj_data in self.geometry_data.get("transition_objects", []):
-                points = obj_data.get("points", [])
-                if len(points) == 2:
-                    line_item = self._add_object_line(QPointF(points[0][0], points[0][1]), QPointF(points[1][0], points[1][1]), obj_data['id'])
-                    if 'dynamic_name' in obj_data:
-                        name = obj_data['dynamic_name']
-                        font = QFont("맑은 고딕", 3, QFont.Weight.Bold)
+                # 3. 모든 지오메트리 그리기 (층 번호 텍스트 제외)
+                for line_data in self.geometry_data.get("terrain_lines", []):
+                    points = line_data.get("points", [])
+                    if len(points) >= 2:
+                        for i in range(len(points) - 1):
+                            p1 = QPointF(points[i][0], points[i][1])
+                            p2 = QPointF(points[i+1][0], points[i+1][1])
+                            self._add_terrain_line_segment(p1, p2, line_data['id'])
+                        for p in points:
+                            self._add_vertex_indicator(QPointF(p[0], p[1]), line_data['id'])
+                
+                for obj_data in self.geometry_data.get("transition_objects", []):
+                    points = obj_data.get("points", [])
+                    if len(points) == 2:
+                        line_item = self._add_object_line(QPointF(points[0][0], points[0][1]), QPointF(points[1][0], points[1][1]), obj_data['id'])
+                        if 'dynamic_name' in obj_data:
+                            name = obj_data['dynamic_name']
+                            font = QFont("맑은 고딕", 3, QFont.Weight.Bold)
+                            text_item = QGraphicsTextItem(name)
+                            text_item.setFont(font)
+                            text_item.setDefaultTextColor(QColor("orange"))
+                            
+                            text_rect = text_item.boundingRect()
+                            padding_x = -3
+                            padding_y = -3
+                            bg_rect_geom = text_rect.adjusted(-padding_x, -padding_y, padding_x, padding_y)
+
+                            line_center = line_item.boundingRect().center()
+                            
+                            base_pos_x = line_center.x() - bg_rect_geom.width() / 2
+                            base_pos_y = line_center.y() - bg_rect_geom.height() / 2
+                            
+                            background_rect = RoundedRectItem(QRectF(0, 0, bg_rect_geom.width(), bg_rect_geom.height()), 3, 3)
+                            background_rect.setBrush(QColor(0, 0, 0, 120))
+                            background_rect.setPen(QPen(Qt.GlobalColor.transparent))
+                            background_rect.setPos(base_pos_x, base_pos_y)
+                            background_rect.setData(0, "transition_object_name_bg")
+                            
+                            text_item.setPos(base_pos_x + padding_x, base_pos_y + padding_y)
+                            background_rect.setZValue(10)
+                            text_item.setZValue(11)
+                            
+                            self.scene.addItem(background_rect)
+                            self.scene.addItem(text_item)
+                            
+                            self.lod_text_items.append(text_item)
+                            self.lod_text_items.append(background_rect)
+                
+                for jump_data in self.geometry_data.get("jump_links", []):
+                    line_item = self._add_jump_link_line(QPointF(jump_data['start_vertex_pos'][0], jump_data['start_vertex_pos'][1]), QPointF(jump_data['end_vertex_pos'][0], jump_data['end_vertex_pos'][1]), jump_data['id'])
+                    if 'dynamic_name' in jump_data:
+                        name = jump_data['dynamic_name']
+                        
                         text_item = QGraphicsTextItem(name)
+                        font = QFont("맑은 고딕", 3, QFont.Weight.Bold)
                         text_item.setFont(font)
-                        text_item.setDefaultTextColor(QColor("orange"))
+                        text_item.setDefaultTextColor(QColor("lime"))
                         
                         text_rect = text_item.boundingRect()
                         padding_x = -3
@@ -2075,17 +2117,17 @@ class FullMinimapEditorDialog(QDialog):
                         bg_rect_geom = text_rect.adjusted(-padding_x, -padding_y, padding_x, padding_y)
 
                         line_center = line_item.boundingRect().center()
-                        
                         base_pos_x = line_center.x() - bg_rect_geom.width() / 2
-                        base_pos_y = line_center.y() - bg_rect_geom.height() / 2
+                        base_pos_y = line_center.y() - bg_rect_geom.height() / 2 - 7
                         
                         background_rect = RoundedRectItem(QRectF(0, 0, bg_rect_geom.width(), bg_rect_geom.height()), 3, 3)
                         background_rect.setBrush(QColor(0, 0, 0, 120))
                         background_rect.setPen(QPen(Qt.GlobalColor.transparent))
                         background_rect.setPos(base_pos_x, base_pos_y)
-                        background_rect.setData(0, "transition_object_name_bg")
+                        background_rect.setData(0, "jump_link_name_bg")
                         
                         text_item.setPos(base_pos_x + padding_x, base_pos_y + padding_y)
+                        
                         background_rect.setZValue(10)
                         text_item.setZValue(11)
                         
@@ -2094,63 +2136,27 @@ class FullMinimapEditorDialog(QDialog):
                         
                         self.lod_text_items.append(text_item)
                         self.lod_text_items.append(background_rect)
-            
-            for jump_data in self.geometry_data.get("jump_links", []):
-                line_item = self._add_jump_link_line(QPointF(jump_data['start_vertex_pos'][0], jump_data['start_vertex_pos'][1]), QPointF(jump_data['end_vertex_pos'][0], jump_data['end_vertex_pos'][1]), jump_data['id'])
-                if 'dynamic_name' in jump_data:
-                    name = jump_data['dynamic_name']
-                    
-                    text_item = QGraphicsTextItem(name)
-                    font = QFont("맑은 고딕", 3, QFont.Weight.Bold)
-                    text_item.setFont(font)
-                    text_item.setDefaultTextColor(QColor("lime"))
-                    
-                    text_rect = text_item.boundingRect()
-                    padding_x = -3
-                    padding_y = -3
-                    bg_rect_geom = text_rect.adjusted(-padding_x, -padding_y, padding_x, padding_y)
-
-                    line_center = line_item.boundingRect().center()
-                    base_pos_x = line_center.x() - bg_rect_geom.width() / 2
-                    base_pos_y = line_center.y() - bg_rect_geom.height() / 2 - 7
-                    
-                    background_rect = RoundedRectItem(QRectF(0, 0, bg_rect_geom.width(), bg_rect_geom.height()), 3, 3)
-                    background_rect.setBrush(QColor(0, 0, 0, 120))
-                    background_rect.setPen(QPen(Qt.GlobalColor.transparent))
-                    background_rect.setPos(base_pos_x, base_pos_y)
-                    background_rect.setData(0, "jump_link_name_bg")
-                    
-                    text_item.setPos(base_pos_x + padding_x, base_pos_y + padding_y)
-                    
-                    background_rect.setZValue(10)
-                    text_item.setZValue(11)
-                    
-                    self.scene.addItem(background_rect)
-                    self.scene.addItem(text_item)
-                    
-                    self.lod_text_items.append(text_item)
-                    self.lod_text_items.append(background_rect)
-                        
-            # 4. 웨이포인트 순서 계산 및 그리기
-            wp_order_map = {}
-            route = self.route_profiles.get(self.active_route_profile, {})
-            for i, wp_id in enumerate(route.get("forward_path", [])):
-                wp_order_map[wp_id] = f"{i+1}"
-            for i, wp_id in enumerate(route.get("backward_path", [])):
-                if wp_id in wp_order_map:
-                    wp_order_map[wp_id] = f"{wp_order_map[wp_id]}/{i+1}"
-                else:
+                            
+                # 4. 웨이포인트 순서 계산 및 그리기
+                wp_order_map = {}
+                route = self.route_profiles.get(self.active_route_profile, {})
+                for i, wp_id in enumerate(route.get("forward_path", [])):
                     wp_order_map[wp_id] = f"{i+1}"
+                for i, wp_id in enumerate(route.get("backward_path", [])):
+                    if wp_id in wp_order_map:
+                        wp_order_map[wp_id] = f"{wp_order_map[wp_id]}/{i+1}"
+                    else:
+                        wp_order_map[wp_id] = f"{i+1}"
 
-            for wp_data in self.geometry_data.get("waypoints", []):
-                #  order_text 대신 wp_data['name']을 중앙 텍스트로 전달 ---
-                self._add_waypoint_rect(QPointF(wp_data['pos'][0], wp_data['pos'][1]), wp_data['id'], wp_data['name'], wp_data['name'])
-                
-            # 5. 모든 층 번호 텍스트를 마지막에 그림
-            self._update_all_floor_texts()
+                for wp_data in self.geometry_data.get("waypoints", []):
+                    self._add_waypoint_rect(QPointF(wp_data['pos'][0], wp_data['pos'][1]), wp_data['id'], wp_data['name'], wp_data['name'])
+                    
+                # 5. 모든 층 번호 텍스트를 마지막에 그림
+                self._update_all_floor_texts()
 
-            # 초기 LOD 상태 설정
-            self._update_lod_visibility()
+                # v10.3.5: 보기 옵션 및 LOD 상태를 항상 마지막에 다시 적용
+                self._update_visibility()
+                self._update_lod_visibility()
 
     def _update_visibility(self):
         """UI 컨트롤 상태에 따라 QGraphicsScene의 아이템 가시성을 업데이트합니다."""
