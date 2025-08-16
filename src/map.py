@@ -3340,6 +3340,97 @@ class RealtimeMinimapView(QLabel):
         painter.drawText(rect, flags, text)
         painter.restore()
 
+class StateCalibrationDialog(QDialog):
+    """플레이어 상태 판정에 사용되는 픽셀 단위 임계값을 설정하는 다이얼로그."""
+    def __init__(self, minimap_region, current_values, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("상태 판정 값 설정 (캘리브레이션)")
+        self.setMinimumSize(600, 400)
+        
+        self.minimap_region = minimap_region
+        self.current_values = current_values
+        self.is_measuring = False
+        self.measure_start_pos = None
+
+        self.initUI()
+        self.load_values()
+
+    def initUI(self):
+        main_layout = QHBoxLayout(self)
+        
+        # 좌측: 실시간 뷰 및 측정
+        left_layout = QVBoxLayout()
+        self.live_view_label = QLabel("측정을 시작하려면 버튼을 누르세요.")
+        self.live_view_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.live_view_label.setStyleSheet("background-color: black; color: white;")
+        self.live_view_label.setMinimumSize(300, 300)
+        
+        measure_layout = QHBoxLayout()
+        self.measure_height_btn = QPushButton("점프 높이 측정")
+        self.measure_height_btn.clicked.connect(self.start_measure_height)
+        measure_layout.addWidget(self.measure_height_btn)
+        
+        left_layout.addWidget(self.live_view_label, 1)
+        left_layout.addLayout(measure_layout)
+        
+        # 우측: 설정 값 입력
+        right_layout = QVBoxLayout()
+        form_group = QGroupBox("판정 기준값 (단위: px)")
+        form_layout = QFormLayout()
+
+        self.spin_boxes = {}
+        labels = {
+            'on_terrain_y': "지상 판정 Y 오차",
+            'jump_y_min': "점프 상태 최소 Y",
+            'jump_y_max': "점프 상태 최대 Y",
+            'climb_y_min': "등반 상태 최소 Y",
+            'fall_y_min': "낙하 상태 최소 Y",
+            'y_change_threshold': "Y좌표 변화량 임계값",
+            'climb_x_threshold': "등반 판정 X 오차"
+        }
+
+        for key, label in labels.items():
+            spin_box = QDoubleSpinBox()
+            spin_box.setRange(0, 200)
+            spin_box.setDecimals(1)
+            spin_box.setSingleStep(0.5)
+            self.spin_boxes[key] = spin_box
+            form_layout.addRow(label, spin_box)
+            
+        form_group.setLayout(form_layout)
+        right_layout.addWidget(form_group)
+        right_layout.addStretch(1)
+
+        # 하단 버튼
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Save | QDialogButtonBox.StandardButton.Cancel)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        right_layout.addWidget(buttons)
+        
+        main_layout.addLayout(left_layout, 1)
+        main_layout.addLayout(right_layout)
+
+    def load_values(self):
+        """현재 설정된 값을 스핀박스에 로드합니다."""
+        for key, spin_box in self.spin_boxes.items():
+            if key in self.current_values:
+                spin_box.setValue(self.current_values[key])
+
+    def get_values(self):
+        """스핀박스에 입력된 값들을 딕셔너리로 반환합니다."""
+        new_values = {}
+        for key, spin_box in self.spin_boxes.items():
+            new_values[key] = spin_box.value()
+        return new_values
+
+    def start_measure_height(self):
+        # 이 기능은 추후 구체화될 예정입니다.
+        QMessageBox.information(self, "알림", 
+            "이 기능은 아직 구현되지 않았습니다.\n"
+            "직접 점프 최고 높이를 측정하여 '점프 상태 최대 Y'에 입력해주세요.")
+
+# ==================== v10.8.0 추가 끝 ======================
+
 # --- v9.0.0: 핵심 지형 탐지에만 집중하도록 단순화된 스레드 ---
 class AnchorDetectionThread(QThread):
     """
@@ -3506,9 +3597,27 @@ class MapTab(QWidget):
             self.reference_anchor_id = None
             self.smoothed_player_pos = None
             
+            # ==================== v10.8.0 수정 시작 ====================
+            # --- 상태 머신 변수 ---
+            self.player_state = 'idle' 
+            self.navigation_action = 'path_failed'
+            
+            # --- 캘리브레이션 값 (기본값) ---
+            self.calibration_values = {
+                'on_terrain_y': 3.0,
+                'jump_y_min': 4.0,
+                'jump_y_max': 12.0,
+                'climb_y_min': 13.0,
+                'fall_y_min': 4.0,
+                'y_change_threshold': 1.5,
+                'climb_x_threshold': 5.0
+            }
+            # ==================== v10.8.0 수정 끝 ======================
+            
             # --- 상태 머신 변수 ---
             self.player_state = 'idle' # 'idle', 'on_terrain', 'climbing', 'falling', 'jumping'
             self.navigation_action = 'path_failed' # 'move_to_target', 'prepare_to_climb', 등
+
             self.last_on_terrain_y = 0.0 # 마지막으로 지상에 있었을 때의 y좌표
             
             self.player_nav_state = 'on_terrain'  # 'on_terrain', 'climbing', 'jumping', 'falling'
@@ -3585,9 +3694,19 @@ class MapTab(QWidget):
 
         # 3. 미니맵 설정
         self.minimap_groupbox = QGroupBox("3. 미니맵 설정")
-        minimap_layout = QVBoxLayout(); self.set_area_btn = QPushButton("미니맵 범위 지정"); self.set_area_btn.clicked.connect(self.set_minimap_area)
-        minimap_layout.addWidget(self.set_area_btn); self.minimap_groupbox.setLayout(minimap_layout); left_layout.addWidget(self.minimap_groupbox)
-
+        # ==================== v10.8.0 수정 시작 ====================
+        minimap_layout = QHBoxLayout() # QVBoxLayout -> QHBoxLayout
+        self.set_area_btn = QPushButton("미니맵 범위 지정")
+        self.set_area_btn.clicked.connect(self.set_minimap_area)
+        
+        self.calibrate_state_btn = QPushButton("상태 판정 값 설정")
+        self.calibrate_state_btn.clicked.connect(self.open_state_calibration_dialog)
+        
+        minimap_layout.addWidget(self.set_area_btn)
+        minimap_layout.addWidget(self.calibrate_state_btn)
+        # ==================== v10.8.0 수정 끝 ======================
+        self.minimap_groupbox.setLayout(minimap_layout)
+        left_layout.addWidget(self.minimap_groupbox)
         # 4. 웨이포인트 경로 관리 (v10.0.0 개편)
         self.wp_groupbox = QGroupBox("4. 웨이포인트 경로 관리")
         wp_main_layout = QVBoxLayout()
@@ -3826,7 +3945,10 @@ class MapTab(QWidget):
                     config = json.load(f)
 
             self.reference_anchor_id = config.get('reference_anchor_id')
-
+            # ==================== v10.8.0 수정 시작 ====================
+            # 캘리브레이션 값 로드 (없으면 기본값 사용)
+            self.calibration_values.update(config.get('calibration_values', {}))
+            # ==================== v10.8.0 수정 끝 ======================
             saved_options = config.get('render_options', {})
             self.render_options = {
                 'background': True, 'features': True, 'waypoints': True,
@@ -3991,7 +4113,8 @@ class MapTab(QWidget):
                 'active_route_profile': self.active_route_profile_name,
                 'route_profiles': self.route_profiles,
                 'render_options': self.render_options,
-                'reference_anchor_id': self.reference_anchor_id
+                'reference_anchor_id': self.reference_anchor_id,
+                'calibration_values': self.calibration_values
             })
             key_features_data = self._prepare_data_for_json(self.key_features)
             geometry_data = self._prepare_data_for_json(self.geometry_data)
@@ -4386,7 +4509,23 @@ class MapTab(QWidget):
             self.save_profile_data()
         else:
             self.update_general_log("미니맵 범위 지정이 취소되었습니다.", "black")
+    # ==================== v10.8.0 추가 시작 ====================
+    def open_state_calibration_dialog(self):
+        """상태 판정 값 캘리브레이션 다이얼로그를 엽니다."""
+        if not self.minimap_region:
+            QMessageBox.warning(self, "오류", "먼저 '미니맵 범위 지정'을 해주세요.")
+            return
 
+        # StateCalibrationDialog는 아직 정의되지 않았으므로 임시로 메시지 박스를 띄웁니다.
+        # 추후 이 부분을 실제 다이얼로그 호출로 변경할 것입니다.
+        dialog = StateCalibrationDialog(self.minimap_region, self.calibration_values, self)
+        if dialog.exec():
+            self.calibration_values = dialog.get_values()
+            self.save_profile_data()
+            self.update_general_log("상태 판정 값이 업데이트되었습니다.", "blue")
+    # ==================== v10.8.0 추가 끝 ======================
+    
+    
     def populate_waypoint_list(self):
         """v10.0.0: 새로운 경로 구조에 맞게 웨이포인트 목록을 채웁니다."""
         self.forward_wp_list.clear()
@@ -4992,7 +5131,8 @@ class MapTab(QWidget):
         return total_cost
     def _update_player_state_and_navigation(self, final_player_pos):
         """
-        v10.8.0: 플레이어의 현재 상태를 판정하고, 상태 머신에 따라 다음 행동을 결정합니다.
+        v10.8.0: 플레이어의 현재 위치를 기반으로 층, 상태를 판단하고,
+        비용 기반 알고리즘을 통해 최적의 다음 목표(중간/최종)를 결정합니다.
         """
         current_terrain_name = "" 
 
@@ -5001,12 +5141,17 @@ class MapTab(QWidget):
             self.navigator_display.update_data("N/A", "", "없음", "", "", "-", 0, [], None, None, self.is_forward, 'walk', "대기 중", "오류: 위치 없음")
             return
 
-        # ==================== v10.8.0 수정 시작 (상태 판정 로직 최종 수정) ====================
-        # --- 1A. 플레이어 물리적 상태(player_state) 판정 ---
+        active_route = self.route_profiles.get(self.active_route_profile_name)
+        if not active_route: return
+        all_waypoints_map = {wp['id']: wp for wp in self.geometry_data.get("waypoints", [])}
+        if not all_waypoints_map: return
+
+        # ==================== v10.8.0 수정 시작 (상태 판정 로직) ====================
+        # --- 1. 플레이어 현재 상태 판단 (층, 지형, 물리 상태) ---
+        # 1-1. 지형 접촉 판단
         contact_terrain = None
-        min_y_dist = ON_TERRAIN_Y_THRESHOLD
+        min_y_dist_to_terrain = float('inf')
         
-        # 가장 가까운 지형선 찾기 (기존 로직 유지)
         for line_data in self.geometry_data.get("terrain_lines", []):
             points = line_data.get("points", [])
             if len(points) < 2: continue
@@ -5018,59 +5163,48 @@ class MapTab(QWidget):
                 if not (min_lx <= final_player_pos.x() <= max_lx): continue
 
                 line_y = p1[1] + (p2[1] - p1[1]) * ((final_player_pos.x() - p1[0]) / (p2[0] - p1[0])) if (p2[0] - p1[0]) != 0 else p1[1]
-                if abs(final_player_pos.y() - line_y) < min_y_dist:
-                    min_y_dist = abs(final_player_pos.y() - line_y)
+                if abs(final_player_pos.y() - line_y) < min_y_dist_to_terrain:
+                    min_y_dist_to_terrain = abs(final_player_pos.y() - line_y)
                     contact_terrain = line_data
-        
-        # 화면 좌표계(y값이 아래로 증가)를 고려하여 명시적인 변수 사용
-        # y_movement > 0  => 상승 (화면 위쪽으로 이동)
-        # y_movement < 0  => 하강 (화면 아래쪽으로 이동)
-        y_movement = self.last_player_pos.y() - final_player_pos.y()
 
-        # y_above_terrain > 0 => 마지막 지면보다 위에 있음 (화면 위쪽)
-        y_above_terrain = self.last_on_terrain_y - final_player_pos.y()
+        # 1-2. 물리 상태(player_state) 결정
+        y_change = final_player_pos.y() - self.last_player_pos.y()
+        cv = self.calibration_values # 편의를 위한 짧은 변수명
 
-        if contact_terrain:
+        is_on_terrain = contact_terrain and min_y_dist_to_terrain < cv['on_terrain_y']
+
+        if is_on_terrain:
             self.last_on_terrain_y = final_player_pos.y()
             self.current_player_floor = contact_terrain.get('floor')
+            self.last_terrain_line_id = contact_terrain.get('id')
             current_terrain_name = contact_terrain.get('dynamic_name', '')
             
-            if abs(final_player_pos.x() - self.last_player_pos.x()) < 0.1 and abs(y_movement) < 0.1:
+            if abs(final_player_pos.x() - self.last_player_pos.x()) < 0.1 and abs(y_change) < 0.1:
                 self.player_state = 'idle'
             else:
                 self.player_state = 'on_terrain'
         else: # 공중 상태
-            is_near_ladder = False
+            y_offset_from_ground = final_player_pos.y() - self.last_on_terrain_y
+            
+            is_climbing = False
             for obj in self.geometry_data.get("transition_objects", []):
-                if abs(final_player_pos.x() - obj['points'][0][0]) < 5.0:
-                    is_near_ladder = True
+                obj_x = obj['points'][0][0]
+                if abs(final_player_pos.x() - obj_x) < cv['climb_x_threshold']:
+                    is_climbing = True
                     break
-
-            # 판정 순서: climbing -> jumping -> falling -> idle
-            if is_near_ladder and y_movement > 0: # 사다리 근처에서 상승 중이면 climbing
-                self.player_state = 'climbing'
-            elif y_above_terrain > JUMP_Y_MIN_THRESHOLD and y_above_terrain < JUMP_Y_MAX_THRESHOLD:
+            
+            if is_climbing and y_offset_from_ground < -cv['climb_y_min']:
+                if y_change < -cv['y_change_threshold']:
+                    self.player_state = 'climbing'
+                else:
+                    self.player_state = 'in_air'
+            elif cv['jump_y_min'] < -y_offset_from_ground <= cv['jump_y_max']:
                 self.player_state = 'jumping'
-            elif y_above_terrain < -FALL_Y_MIN_THRESHOLD and y_movement < 0: # 지면보다 충분히 아래로 내려갔고, 하강 중이면 falling
+            elif y_offset_from_ground > cv['fall_y_min'] and y_change > cv['y_change_threshold']:
                 self.player_state = 'falling'
             else:
-                # 사다리에서 내려가는 경우도 falling으로 판정
-                if is_near_ladder and y_movement < 0:
-                    self.player_state = 'falling'
-                else:
-                    self.player_state = 'idle'
-
-        # --- 1B. 내비게이션 상태 갱신 (기존 로직) ---
-        if contact_terrain:
-            if self.intermediate_target_type == 'climb_arrived' and self.current_player_floor is not None and contact_terrain.get('floor', -1) > self.current_player_floor:
-                self.intermediate_target_type = 'walk'
-            self.last_terrain_line_id = contact_terrain.get('id')
+                self.player_state = 'in_air'
         # ==================== v10.8.0 수정 끝 ======================
-
-        active_route = self.route_profiles.get(self.active_route_profile_name)
-        if not active_route: return
-        all_waypoints_map = {wp['id']: wp for wp in self.geometry_data.get("waypoints", [])}
-        if not all_waypoints_map: return
 
         # --- 2. 최종 목표 웨이포인트(final_target_wp) 결정 ---
         if not self.start_waypoint_found and self.current_player_floor is not None:
@@ -5110,18 +5244,16 @@ class MapTab(QWidget):
                 
                 if start_wp_id in forward_path:
                     forward_index = forward_path.index(start_wp_id)
-                    forward_len = len(forward_path)
-                    dist_to_start = forward_index
-                    dist_to_end = forward_len - 1 - forward_index
-                    
-                    if dist_to_start <= dist_to_end:
-                        self.is_forward = True
-                        self.current_path_index = forward_index
-                    else:
-                        self.is_forward = False
-                        path_to_use = backward_path if backward_path else list(reversed(forward_path))
-                        if start_wp_id in path_to_use: self.current_path_index = path_to_use.index(start_wp_id)
-                        else: self.is_forward = True; self.current_path_index = forward_index
+                    if len(forward_path) > 0:
+                        dist_to_end = len(forward_path) - 1 - forward_index
+                        if forward_index <= dist_to_end:
+                            self.is_forward = True
+                            self.current_path_index = forward_index
+                        else:
+                            self.is_forward = False
+                            path_to_use = backward_path if backward_path else list(reversed(forward_path))
+                            if start_wp_id in path_to_use: self.current_path_index = path_to_use.index(start_wp_id)
+                            else: self.is_forward = True; self.current_path_index = forward_index
                 else:
                     self.is_forward = False
                     path_to_use = backward_path if backward_path else []
@@ -5131,12 +5263,11 @@ class MapTab(QWidget):
                 self.start_waypoint_found = True
                 self.update_general_log(f"가장 가까운 경로의 웨이포인트 '{start_wp_candidate['name']}'({start_wp_candidate['floor']}층)에서 내비게이션 시작.", "purple")
         
-        # 도착 판정
         target_wp_data = all_waypoints_map.get(self.target_waypoint_id)
         if target_wp_data:
             target_pos = QPointF(target_wp_data['pos'][0], target_wp_data['pos'][1])
             floor_matches = (self.current_player_floor is not None and abs(self.current_player_floor - target_wp_data.get('floor', -1)) < 0.1)
-            pos_is_close = (abs(final_player_pos.x() - target_pos.x()) < 10)
+            pos_is_close = (abs(final_player_pos.x() - target_pos.x()) < WAYPOINT_ARRIVAL_X_THRESHOLD)
 
             if floor_matches and pos_is_close:
                 self.last_reached_wp_id = self.target_waypoint_id
@@ -5170,20 +5301,18 @@ class MapTab(QWidget):
         all_candidates = []
         target_floor = final_target_wp.get('floor')
 
-        if abs(self.current_player_floor - target_floor) < 0.1: # Case A: 동일 층
+        if abs(self.current_player_floor - target_floor) < 0.1:
             current_terrain_group = contact_terrain.get('dynamic_name') if contact_terrain else None
             target_terrain_id = final_target_wp.get('parent_line_id')
             target_terrain_data = next((line for line in self.geometry_data.get("terrain_lines", []) if line['id'] == target_terrain_id), None)
             target_terrain_group = target_terrain_data.get('dynamic_name') if target_terrain_data else None
 
             if current_terrain_group and target_terrain_group and current_terrain_group == target_terrain_group:
-                # A-1: 지형 그룹이 같으면 바로 걸어감
                 all_candidates.append({
                     'type': 'walk',
                     'entry_point': QPointF(final_target_wp['pos'][0], final_target_wp['pos'][1])
                 })
             else:
-                # A-2: 지형 그룹이 다르면 점프 링크 탐색
                 for link in self.geometry_data.get("jump_links", []):
                     start_link_terrain_id = self._get_terrain_id_from_vertex(link['start_vertex_pos'])
                     end_link_terrain_id = self._get_terrain_id_from_vertex(link['end_vertex_pos'])
@@ -5211,10 +5340,7 @@ class MapTab(QWidget):
                             'type': 'jump', 'link': link,
                             'entry_point': entry_point, 'exit_point': exit_point
                         })
-
-        else: # Case B: 다른 층
-            # B-1: 후보군 수집
-            # 1. Jump 후보 수집
+        else:
             for link in self.geometry_data.get("jump_links", []):
                 start_terrain_id = self._get_terrain_id_from_vertex(link['start_vertex_pos'])
                 end_terrain_id = self._get_terrain_id_from_vertex(link['end_vertex_pos'])
@@ -5226,14 +5352,12 @@ class MapTab(QWidget):
 
                 floor1, floor2 = start_terrain.get('floor'), end_terrain.get('floor')
 
-                # 현재 층 -> 목표 층으로 가는 점프 링크인지 양방향으로 확인
                 if (abs(floor1 - self.current_player_floor) < 0.1 and abs(floor2 - target_floor) < 0.1) or \
                    (abs(floor2 - self.current_player_floor) < 0.1 and abs(floor1 - target_floor) < 0.1):
                     
                     start_pos_link = QPointF(link['start_vertex_pos'][0], link['start_vertex_pos'][1])
                     end_pos_link = QPointF(link['end_vertex_pos'][0], link['end_vertex_pos'][1])
                     
-                    # 현재 층에 있는 꼭짓점이 진입점
                     if abs(floor1 - self.current_player_floor) < 0.1:
                         entry_point, exit_point = start_pos_link, end_pos_link
                     else:
@@ -5244,8 +5368,7 @@ class MapTab(QWidget):
                         'entry_point': entry_point, 'exit_point': exit_point
                     })
 
-            if self.current_player_floor < target_floor: # 상승
-                # 2. Climb 후보 수집
+            if self.current_player_floor < target_floor:
                 for obj in self.geometry_data.get("transition_objects", []):
                     start_line = next((line for line in self.geometry_data.get("terrain_lines", []) if line['id'] == obj.get('start_line_id')), None)
                     end_line = next((line for line in self.geometry_data.get("terrain_lines", []) if line['id'] == obj.get('end_line_id')), None)
@@ -5258,9 +5381,7 @@ class MapTab(QWidget):
                         entry_y = max(obj['points'][0][1], obj['points'][1][1])
                         entry_point = QPointF(obj['points'][0][0], entry_y)
                         all_candidates.append({'type': 'climb', 'object': obj, 'entry_point': entry_point})
-            
-            else: # 하강
-                # 3. Fall 후보 수집 (v10.3.0 로직 재사용)
+            else:
                 fall_candidates_points = []
                 current_terrain_group_lines = [line for line in self.geometry_data.get("terrain_lines", []) if line.get('dynamic_name') == current_terrain_name]
                 for line in current_terrain_group_lines:
@@ -5271,19 +5392,17 @@ class MapTab(QWidget):
                 
                 for point in fall_candidates_points:
                     all_candidates.append({'type': 'fall', 'entry_point': point})
-                    
-        # B-2: 비용 계산 및 최적 후보 선택
+
         if not all_candidates:
             self.guidance_text = "경로 탐색 불가"
             self.intermediate_target_pos = None
-            self.intermediate_target_type = 'walk' # 기본값
+            self.intermediate_target_type = 'walk'
         else:
             for cand in all_candidates:
                 cand['cost'] = self._calculate_total_cost(final_player_pos, final_target_wp, cand)
             
             best_candidate = min(all_candidates, key=lambda c: c.get('cost', float('inf')))
 
-            # B-3: 중간 목표 설정
             self.intermediate_target_type = best_candidate['type']
             self.intermediate_target_pos = best_candidate['entry_point']
             
@@ -5304,11 +5423,12 @@ class MapTab(QWidget):
 
         if self.intermediate_target_pos:
             distance = abs(final_player_pos.x() - self.intermediate_target_pos.x())
-            threshold = WAYPOINT_ARRIVAL_X_THRESHOLD # 기본값
+            threshold = WAYPOINT_ARRIVAL_X_THRESHOLD
             if self.intermediate_target_type == 'climb':
                 threshold = LADDER_ARRIVAL_X_THRESHOLD
             elif self.intermediate_target_type in ['jump', 'fall']:
                 threshold = JUMP_LINK_ARRIVAL_X_THRESHOLD
+            
             if distance < threshold:
                 direction = "도착 근접"
             elif final_player_pos.x() < self.intermediate_target_pos.x():
@@ -5323,13 +5443,12 @@ class MapTab(QWidget):
                 prev_name = all_waypoints_map.get(prev_id, {}).get('name', '')
             
             if self.intermediate_target_type != 'walk':
-                next_name = target_wp_data.get('name', '')
+                if target_wp_data:
+                    next_name = target_wp_data.get('name', '')
             elif current_idx < len(full_path) - 1:
                 next_id = full_path[current_idx + 1]
                 next_name = all_waypoints_map.get(next_id, {}).get('name', '')
 
-        # ==================== v10.8.0 수정 시작 (데이터 전달 체계 개편) ====================
-        # 상태와 행동을 한글 텍스트로 변환
         state_text_map = {
             'idle': '정지', 'on_terrain': '걷기', 'climbing': '오르기',
             'falling': '낙하 중', 'jumping': '점프 중', 'in_air': '공중'
@@ -5348,8 +5467,7 @@ class MapTab(QWidget):
         player_state_text = state_text_map.get(self.player_state, '알 수 없음')
         nav_action_text = action_text_map.get(self.navigation_action, '대기 중')
 
-        # 최종 목표 이름 또는 중간 목표 이름 설정
-        target_display_name = self.guidance_text # 기본값은 기존 guidance_text
+        target_display_name = self.guidance_text
 
         self.navigator_display.update_data(
             floor=self.current_player_floor if self.current_player_floor is not None else "N/A",
@@ -5367,11 +5485,9 @@ class MapTab(QWidget):
             player_state=player_state_text,
             nav_action=nav_action_text
         )
-        # ==================== v10.8.0 수정 끝 ======================
         
         # --- 5. 마무리 ---
         self.last_player_pos = final_player_pos
-
     def _get_terrain_id_from_vertex(self, vertex_pos):
         """주어진 꼭짓점(vertex) 좌표에 연결된 지형선 ID를 반환합니다."""
         # 성능을 위해 미리 계산된 맵을 사용하는 것이 좋지만, 여기서는 직접 탐색
