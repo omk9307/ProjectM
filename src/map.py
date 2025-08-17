@@ -3751,8 +3751,8 @@ class StateConfigDialog(QDialog):
         add_spinbox(form_layout, "jump_y_min_threshold", "점프 최소 Y오프셋(px):", 1.0, 30.0, 0.1)
         add_spinbox(form_layout, "jump_y_max_threshold", "점프 최대 Y오프셋(px):", 1.0, 30.0, 0.1)
         add_spinbox(form_layout, "fall_y_min_threshold", "낙하 최소 Y오프셋(px):", 1.0, 30.0, 0.1)
-        add_spinbox(form_layout, "climb_x_movement_threshold", "등반 최대 X이동(px/f):", 0.1, 10.0, 0.1)
-        add_spinbox(form_layout, "fall_on_ladder_x_movement_threshold", "사다리 낙하 최대 X이동(px/f):", 0.1, 10.0, 0.1)
+        add_spinbox(form_layout, "climb_x_movement_threshold", "등반 최대 X이동(px/f):", 0.01, 1.0, 0.01)
+        add_spinbox(form_layout, "fall_on_ladder_x_movement_threshold", "사다리 낙하 최대 X이동(px/f):", 0.01, 1.0, 0.01)
         add_spinbox(form_layout, "ladder_x_grab_threshold", "사다리 X오차(px):", 0.5, 10.0, 0.1)
         add_spinbox(form_layout, "move_deadzone", "이동 감지 최소값(px):", 0.0, 2.0, 0.1, decimals=1)
         add_spinbox(form_layout, "max_jump_duration", "최대 점프 시간(초):", 0.5, 5.0, 0.1)
@@ -5541,16 +5541,21 @@ class MapTab(QWidget):
             
             # 위에서 상태가 즉시 결정되지 않은 경우에만 기존 로직 수행
             if new_state == previous_state:
+                # [v11.3.12] 점프 중 climbing 전환을 위한 추가 조건
+                # 점프 중이 아닐 때, 또는 점프 중이더라도 최대 점프 높이를 넘었을 때만 climbing 전환을 허용
+                climb_condition_for_jump = not self.in_jump or (self.in_jump and y_above_terrain > self.cfg_jump_y_max_threshold)
+
                 # [v11.3.10] is_climbing_now 계산 로직 수정
                 # 조건 1: 사다리를 타고 정상적으로 올라가는 경우
-                is_climbing_on_ladder = is_near_ladder and y_movement > 0 and x_movement_abs < self.cfg_climb_x_movement_threshold
+                is_climbing_on_ladder = is_near_ladder and y_movement > 0 and x_movement_abs < self.cfg_climb_x_movement_threshold and climb_condition_for_jump
                 # 조건 2: 일반 점프 범위를 초과하여 '상승'하는 경우 (안전장치)
                 is_climbing_high_jump = y_movement > 0 and y_above_terrain > self.cfg_jump_y_max_threshold
                 is_climbing_now = is_climbing_on_ladder or is_climbing_high_jump
                 
                 is_jumping_now = (previous_state == 'on_terrain' and y_movement > self.cfg_move_deadzone)
                 
-                is_falling_now = (y_above_terrain < -self.cfg_fall_y_min_threshold and y_movement < 0) or \
+                # [v11.3.11] 일반 낙하 조건에 '사다리 근처가 아닐 때' 조건 추가
+                is_falling_now = (y_above_terrain < -self.cfg_fall_y_min_threshold and y_movement < 0 and not is_near_ladder) or \
                                  (is_near_ladder and y_movement < 0 and x_movement_abs < self.cfg_fall_on_ladder_x_movement_threshold and not self.in_jump)
 
                 self.climbing_candidate_frames = self.climbing_candidate_frames + 1 if is_climbing_now else 0
