@@ -3748,7 +3748,7 @@ class StateConfigDialog(QDialog):
         add_spinbox(form_layout, "falling_state_frame_threshold", "낙하 판정 프레임:", 1, 100, 1, is_double=False)
         add_spinbox(form_layout, "jumping_state_frame_threshold", "점프 판정 프레임:", 1, 100, 1, is_double=False)
         add_spinbox(form_layout, "on_terrain_y_threshold", "지상 판정 Y오차(px):", 1.0, 30.0, 0.1)
-        add_spinbox(form_layout, "jump_y_min_threshold", "점프 최소 Y오프셋(px):", 1.0, 30.0, 0.1)
+        add_spinbox(form_layout, "jump_y_min_threshold", "점프 최소 Y오프셋(px):", 0.01, 30.0, 0.01)
         add_spinbox(form_layout, "jump_y_max_threshold", "점프 최대 Y오프셋(px):", 1.0, 30.0, 0.1)
         add_spinbox(form_layout, "fall_y_min_threshold", "낙하 최소 Y오프셋(px):", 1.0, 30.0, 0.1)
         add_spinbox(form_layout, "climb_x_movement_threshold", "등반 최대 X이동(px/f):", 0.01, 5.0, 0.01)
@@ -5490,7 +5490,7 @@ class MapTab(QWidget):
     def _update_player_state_and_navigation(self, final_player_pos):
         """
         v10.8.0: 플레이어의 현재 상태를 판정하고, 상태 머신에 따라 다음 행동을 결정합니다.
-        [v11.3.13] '의도된 사다리 타기 점프' 판정 로직 추가
+        [v11.3.16] 디버그 로그 최적화: climbing/falling 변경 시에만 로그 출력
         """
         current_terrain_name = "" 
 
@@ -5498,8 +5498,6 @@ class MapTab(QWidget):
             self.navigator_display.update_data("N/A", "", "없음", "", "", "-", 0, [], None, None, self.is_forward, 'walk', "대기 중", "오류: 위치 없음")
             return
 
-        # ==================== v10.9.5 수정 시작 (UnboundLocalError 해결) ====================
-        # --- 1A. 플레이어 물리적 상태(player_state) 판정 ---
         previous_state = self.player_state
         
         contact_terrain = self._get_contact_terrain(final_player_pos)
@@ -5510,21 +5508,25 @@ class MapTab(QWidget):
         x_movement_abs = abs(x_movement)
         y_movement_abs = abs(y_movement)
         
-        # [v11.3.13] 매 프레임 X축 이동량 기록
         self.x_movement_history.append(x_movement)
 
         if x_movement_abs > self.cfg_move_deadzone or y_movement_abs > self.cfg_move_deadzone:
             self.last_movement_time = time.time()
 
         new_state = previous_state
+        
+        # [v11.3.16] 로그 정보를 담을 리스트
+        debug_log_lines = []
+        debug_log_lines.append(f"\n[STATE_DEBUG] Frame Start: prev_state='{previous_state}', in_jump={self.in_jump}")
+        debug_log_lines.append(f"[STATE_DEBUG] Pos: y_move={y_movement:.2f}, y_above={y_above_terrain:.2f}, x_move_abs={x_movement_abs:.2f}")
 
-        # [v11.1.0] 상수 대신 멤버 변수 사용
         if (time.time() - self.last_movement_time) >= self.cfg_idle_time_threshold:
             new_state = 'idle'
             self.in_jump = False
             self.climbing_candidate_frames = 0
             self.falling_candidate_frames = 0
             self.jumping_candidate_frames = 0
+            debug_log_lines.append(f"[STATE_DEBUG] -> Condition MET: IDLE (time threshold)")
         elif contact_terrain:
             new_state = 'on_terrain'
             self.last_on_terrain_y = final_player_pos.y()
@@ -5532,53 +5534,50 @@ class MapTab(QWidget):
             self.climbing_candidate_frames = 0
             self.falling_candidate_frames = 0
             self.jumping_candidate_frames = 0
+            debug_log_lines.append(f"[STATE_DEBUG] -> Condition MET: ON_TERRAIN")
         else: # 공중 상태
+            debug_log_lines.append(f"[STATE_DEBUG] -> Condition: In Air")
             is_near_ladder, nearest_ladder_x = self._check_near_ladder(final_player_pos, self.geometry_data.get("transition_objects", []), self.cfg_ladder_x_grab_threshold, return_x=True)
             
-            # [v11.3.14] 최우선 순위: '의도된 사다리 타기 점프' 판정 로직 보강
             if self.in_jump and is_near_ladder:
                 approaching_ladder = False
-                # 최근 움직임이 충분히 쌓였을 때만 분석
                 if len(self.x_movement_history) == self.x_movement_history.maxlen:
                     towards_ladder_count = 0
                     reference_x = final_player_pos.x() - x_movement 
-                    
                     for move in self.x_movement_history:
-                        # [v11.3.14] 의미있는 수준의 이동일 때만 카운트
                         if abs(move) > self.cfg_climb_x_movement_threshold:
                             if (nearest_ladder_x > reference_x and move > 0) or \
                                (nearest_ladder_x < reference_x and move < 0):
                                 towards_ladder_count += 1
                         reference_x += move 
-                    
                     if towards_ladder_count >= 3:
                         approaching_ladder = True
 
-                # [v11.3.14] 최소 높이 조건 추가
                 if approaching_ladder and x_movement_abs < self.cfg_climb_x_movement_threshold and y_above_terrain > self.cfg_jump_y_min_threshold:
                     new_state = 'climbing'
                     self.in_jump = False
                     self.climbing_candidate_frames = 0
                     self.jumping_candidate_frames = 0
                     self.falling_candidate_frames = 0
-            
-            # [v11.3.9] climbing <-> falling 즉시 전환 로직 (두 번째 우선순위)
+                    debug_log_lines.append(f"[STATE_DEBUG] -> Priority Condition MET: Intentional Ladder Grab (Jump)")
+
             if new_state == previous_state: 
                 if previous_state == 'climbing' and y_movement < 0 and is_near_ladder:
                     new_state = 'falling'
                     self.climbing_candidate_frames = 0
+                    debug_log_lines.append(f"[STATE_DEBUG] -> Priority Condition MET: Climbing to Falling")
                 elif previous_state == 'falling' and y_movement > 0 and is_near_ladder and x_movement_abs < self.cfg_climb_x_movement_threshold:
                     new_state = 'climbing'
                     self.falling_candidate_frames = 0
+                    debug_log_lines.append(f"[STATE_DEBUG] -> Priority Condition MET: Falling to Climbing")
             
-            # 위에서 상태가 즉시 결정되지 않은 경우에만 프레임 기반 판정 로직 수행
             if new_state == previous_state:
                 climb_condition_for_jump = not self.in_jump or (self.in_jump and y_above_terrain > self.cfg_jump_y_max_threshold)
                 is_climbing_on_ladder = is_near_ladder and y_movement > 0 and x_movement_abs < self.cfg_climb_x_movement_threshold and climb_condition_for_jump
                 is_climbing_high_jump = y_movement > 0 and y_above_terrain > self.cfg_jump_y_max_threshold
                 is_climbing_now = is_climbing_on_ladder or is_climbing_high_jump
                 
-                is_jumping_now = (previous_state == 'on_terrain' and y_movement > self.cfg_move_deadzone)
+                is_jumping_now = (previous_state in ['on_terrain', 'idle'] and y_movement > self.cfg_move_deadzone)
                 
                 is_falling_now = (y_above_terrain < -self.cfg_fall_y_min_threshold and y_movement < 0 and not is_near_ladder) or \
                                  (is_near_ladder and y_movement < 0 and x_movement_abs < self.cfg_fall_on_ladder_x_movement_threshold and not self.in_jump)
@@ -5586,39 +5585,54 @@ class MapTab(QWidget):
                 self.climbing_candidate_frames = self.climbing_candidate_frames + 1 if is_climbing_now else 0
                 self.jumping_candidate_frames = self.jumping_candidate_frames + 1 if is_jumping_now else 0
                 self.falling_candidate_frames = self.falling_candidate_frames + 1 if is_falling_now else 0
+                debug_log_lines.append(f"[STATE_DEBUG] Candidates: climb_now={is_climbing_now}({self.climbing_candidate_frames}), jump_now={is_jumping_now}({self.jumping_candidate_frames}), fall_now={is_falling_now}({self.falling_candidate_frames})")
 
                 if self.in_jump:
+                    debug_log_lines.append(f"[STATE_DEBUG] Path: In Jump")
                     if self.climbing_candidate_frames >= self.cfg_climbing_state_frame_threshold:
                         new_state = 'climbing'
                         self.in_jump = False
+                        debug_log_lines.append(f"[STATE_DEBUG] -> Condition MET: Climbing (from jump)")
                     elif self.falling_candidate_frames >= self.cfg_falling_state_frame_threshold:
                         new_state = 'falling'
                         self.in_jump = False
+                        debug_log_lines.append(f"[STATE_DEBUG] -> Condition MET: Falling (from jump)")
                     else:
                         new_state = 'jumping'
                 else:
+                    debug_log_lines.append(f"[STATE_DEBUG] Path: Not In Jump")
                     if self.jumping_candidate_frames >= self.cfg_jumping_state_frame_threshold:
                         new_state = 'jumping'
                         self.in_jump = True
                         self.jump_start_time = time.time()
+                        debug_log_lines.append(f"[STATE_DEBUG] -> Condition MET: Jumping (start)")
                     elif self.climbing_candidate_frames >= self.cfg_climbing_state_frame_threshold:
                         new_state = 'climbing'
+                        debug_log_lines.append(f"[STATE_DEBUG] -> Condition MET: Climbing (start)")
                     elif self.falling_candidate_frames >= self.cfg_falling_state_frame_threshold:
                         new_state = 'falling'
+                        debug_log_lines.append(f"[STATE_DEBUG] -> Condition MET: Falling (start)")
                     else:
                         new_state = previous_state
+                        debug_log_lines.append(f"[STATE_DEBUG] -> Condition MET: No change, fallback to previous state")
         
         if self.in_jump and (time.time() - self.jump_start_time) > self.cfg_max_jump_duration:
             self.in_jump = False
             if new_state == 'jumping':
                 new_state = 'falling'
+                debug_log_lines.append(f"[STATE_DEBUG] -> Condition MET: Max Jump Duration Exceeded")
+
+        if new_state != previous_state:
+            # [v11.3.16] climbing 또는 falling으로 변경될 때만 로그를 출력
+            if new_state in ['climbing', 'falling']:
+                debug_log_lines.append(f"[STATE_DEBUG] ### State Changed: '{previous_state}' -> '{new_state}' ###")
+                print("\n".join(debug_log_lines))
 
         self.player_state = new_state
         
         if new_state != previous_state:
             self.last_state_change_time = time.time()
 
-        # 1B. 층/지형 이름 정보 갱신
         if contact_terrain:
             self.current_player_floor = contact_terrain.get('floor')
             current_terrain_name = contact_terrain.get('dynamic_name', '')
