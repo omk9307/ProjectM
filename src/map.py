@@ -3847,6 +3847,7 @@ class MapTab(QWidget):
             self.last_movement_time = 0.0
             self.player_state = 'on_terrain' # 초기값
             self.in_jump = False
+            self.x_movement_history = deque(maxlen=5) # [v11.3.13] X축 이동 방향 추적을 위한 deque 추가
             self.jump_lock = False # (의사코드에는 있지만, jumping 판정 로직에 통합되어 실제 변수로는 불필요)
             self.jump_start_time = 0.0
             self.navigation_action = 'path_failed' # 누락되었던 변수 추가
@@ -5489,10 +5490,10 @@ class MapTab(QWidget):
     def _update_player_state_and_navigation(self, final_player_pos):
         """
         v10.8.0: 플레이어의 현재 상태를 판정하고, 상태 머신에 따라 다음 행동을 결정합니다.
+        [v11.3.13] '의도된 사다리 타기 점프' 판정 로직 추가
         """
         current_terrain_name = "" 
 
-        # --- 0. 초기화 및 유효성 검사 ---
         if final_player_pos is None:
             self.navigator_display.update_data("N/A", "", "없음", "", "", "-", 0, [], None, None, self.is_forward, 'walk', "대기 중", "오류: 위치 없음")
             return
@@ -5503,12 +5504,15 @@ class MapTab(QWidget):
         
         contact_terrain = self._get_contact_terrain(final_player_pos)
         
+        x_movement = final_player_pos.x() - self.last_player_pos.x()
         y_movement = self.last_player_pos.y() - final_player_pos.y()
         y_above_terrain = self.last_on_terrain_y - final_player_pos.y()
-        x_movement_abs = abs(final_player_pos.x() - self.last_player_pos.x())
-        y_movement_abs = abs(final_player_pos.y() - self.last_player_pos.y())
+        x_movement_abs = abs(x_movement)
+        y_movement_abs = abs(y_movement)
+        
+        # [v11.3.13] 매 프레임 X축 이동량 기록
+        self.x_movement_history.append(x_movement)
 
-        # [v11.1.0] 상수 대신 멤버 변수 사용
         if x_movement_abs > self.cfg_move_deadzone or y_movement_abs > self.cfg_move_deadzone:
             self.last_movement_time = time.time()
 
@@ -5529,32 +5533,50 @@ class MapTab(QWidget):
             self.falling_candidate_frames = 0
             self.jumping_candidate_frames = 0
         else: # 공중 상태
-            is_near_ladder = self._check_near_ladder(final_player_pos, self.geometry_data.get("transition_objects", []), self.cfg_ladder_x_grab_threshold)
+            is_near_ladder, nearest_ladder_x = self._check_near_ladder(final_player_pos, self.geometry_data.get("transition_objects", []), self.cfg_ladder_x_grab_threshold, return_x=True)
             
-            # [v11.3.9] climbing <-> falling 즉시 전환 로직 (우선순위 높음)
-            if previous_state == 'climbing' and y_movement < 0 and is_near_ladder:
-                new_state = 'falling'
-                self.climbing_candidate_frames = 0 # 카운터 초기화
-            elif previous_state == 'falling' and y_movement > 0 and is_near_ladder and x_movement_abs < self.cfg_climb_x_movement_threshold:
-                new_state = 'climbing'
-                self.falling_candidate_frames = 0 # 카운터 초기화
-            
-            # 위에서 상태가 즉시 결정되지 않은 경우에만 기존 로직 수행
-            if new_state == previous_state:
-                # [v11.3.12] 점프 중 climbing 전환을 위한 추가 조건
-                # 점프 중이 아닐 때, 또는 점프 중이더라도 최대 점프 높이를 넘었을 때만 climbing 전환을 허용
-                climb_condition_for_jump = not self.in_jump or (self.in_jump and y_above_terrain > self.cfg_jump_y_max_threshold)
+            # [v11.3.13] 최우선 순위: '의도된 사다리 타기 점프' 판정
+            if self.in_jump and is_near_ladder:
+                approaching_ladder = False
+                if len(self.x_movement_history) == self.x_movement_history.maxlen:
+                    towards_ladder_count = 0
+                    # 마지막 위치는 현재 위치이므로, 그 이전 위치를 기준으로 방향 계산
+                    reference_x = final_player_pos.x() - x_movement 
+                    for move in self.x_movement_history:
+                        if (nearest_ladder_x > reference_x and move > 0) or \
+                           (nearest_ladder_x < reference_x and move < 0):
+                            towards_ladder_count += 1
+                        reference_x += move # 다음 프레임 위치 추정
+                    
+                    if towards_ladder_count >= 3: # 최근 5프레임 중 3프레임 이상 사다리 방향으로 이동
+                        approaching_ladder = True
 
-                # [v11.3.10] is_climbing_now 계산 로직 수정
-                # 조건 1: 사다리를 타고 정상적으로 올라가는 경우
+                if approaching_ladder and x_movement_abs < self.cfg_climb_x_movement_threshold:
+                    new_state = 'climbing'
+                    self.in_jump = False
+                    # 즉시 전환이므로 모든 관련 카운터 초기화
+                    self.climbing_candidate_frames = 0
+                    self.jumping_candidate_frames = 0
+                    self.falling_candidate_frames = 0
+            
+            # [v11.3.9] climbing <-> falling 즉시 전환 로직 (두 번째 우선순위)
+            if new_state == previous_state: # 위에서 상태가 결정되지 않았을 경우
+                if previous_state == 'climbing' and y_movement < 0 and is_near_ladder:
+                    new_state = 'falling'
+                    self.climbing_candidate_frames = 0
+                elif previous_state == 'falling' and y_movement > 0 and is_near_ladder and x_movement_abs < self.cfg_climb_x_movement_threshold:
+                    new_state = 'climbing'
+                    self.falling_candidate_frames = 0
+            
+            # 위에서 상태가 즉시 결정되지 않은 경우에만 프레임 기반 판정 로직 수행
+            if new_state == previous_state:
+                climb_condition_for_jump = not self.in_jump or (self.in_jump and y_above_terrain > self.cfg_jump_y_max_threshold)
                 is_climbing_on_ladder = is_near_ladder and y_movement > 0 and x_movement_abs < self.cfg_climb_x_movement_threshold and climb_condition_for_jump
-                # 조건 2: 일반 점프 범위를 초과하여 '상승'하는 경우 (안전장치)
                 is_climbing_high_jump = y_movement > 0 and y_above_terrain > self.cfg_jump_y_max_threshold
                 is_climbing_now = is_climbing_on_ladder or is_climbing_high_jump
                 
                 is_jumping_now = (previous_state == 'on_terrain' and y_movement > self.cfg_move_deadzone)
                 
-                # [v11.3.11] 일반 낙하 조건에 '사다리 근처가 아닐 때' 조건 추가
                 is_falling_now = (y_above_terrain < -self.cfg_fall_y_min_threshold and y_movement < 0 and not is_near_ladder) or \
                                  (is_near_ladder and y_movement < 0 and x_movement_abs < self.cfg_fall_on_ladder_x_movement_threshold and not self.in_jump)
 
@@ -5583,7 +5605,6 @@ class MapTab(QWidget):
                     else:
                         new_state = previous_state
         
-        # [v11.1.0] 상수 대신 멤버 변수 사용
         if self.in_jump and (time.time() - self.jump_start_time) > self.cfg_max_jump_duration:
             self.in_jump = False
             if new_state == 'jumping':
@@ -5591,6 +5612,9 @@ class MapTab(QWidget):
 
         self.player_state = new_state
         
+        if new_state != previous_state:
+            self.last_state_change_time = time.time()
+
         # 1B. 층/지형 이름 정보 갱신
         if contact_terrain:
             self.current_player_floor = contact_terrain.get('floor')
@@ -5912,22 +5936,37 @@ class MapTab(QWidget):
                     return line['id']
         return None
 
-    def _check_near_ladder(self, pos, transition_objects, x_tol):
-        """주어진 위치가 사다리 근처인지 확인합니다."""
+    def _check_near_ladder(self, pos, transition_objects, x_tol, return_x=False):
+        """
+        주어진 위치가 사다리 근처인지 확인합니다.
+        [v11.3.13] 가장 가까운 사다리의 X좌표를 선택적으로 반환하는 기능 추가
+        """
+        min_dist_sq = float('inf')
+        nearest_ladder_x = None
+        is_near = False
+
         for obj in transition_objects:
             points = obj.get("points")
             if not points or len(points) < 2:
                 continue
             
-            # 사다리는 수직이므로 x좌표는 동일
             ladder_x = points[0][0]
-            if abs(pos.x() - ladder_x) <= x_tol:
-                # y축 범위도 확인하여 더 정확하게 판정
+            dist_x = abs(pos.x() - ladder_x)
+
+            if dist_x <= x_tol:
                 min_y = min(points[0][1], points[1][1])
                 max_y = max(points[0][1], points[1][1])
                 if pos.y() >= min_y and pos.y() <= max_y:
-                    return True
-        return False
+                    is_near = True
+                    # 가장 가까운 사다리를 찾기 위해 거리 제곱 비교
+                    if dist_x**2 < min_dist_sq:
+                        min_dist_sq = dist_x**2
+                        nearest_ladder_x = ladder_x
+        
+        if return_x:
+            return is_near, nearest_ladder_x
+        else:
+            return is_near
 
     def _is_on_terrain(self, pos):
         """주어진 위치가 지형선 위에 있는지 확인합니다."""
