@@ -1,7 +1,6 @@
 # map.py
-# 2025년 08月 15日 16:30 (KST)
-# 기능: v10.1.3 - 내비게이션 도착 판정 로직 개선 (Phase 2)
-# 설명: Readme와 업데이트 내역은 map_update_log.txt 참조
+# 2025년 08月 22日 10:00 (KST)
+# 기능: v11.0.0 - 성능 개편: 캡처/탐지 스레드 분리 및 연산 최적화
 
 import sys
 import os
@@ -16,7 +15,8 @@ import math
 import shutil
 import copy
 import traceback
-from collections import defaultdict, deque 
+from collections import defaultdict, deque
+import threading # <<< [v11.0.0] 추가
 
 from PyQt6.QtWidgets import (
     QApplication, QWidget, QLabel, QVBoxLayout, QHBoxLayout, QPushButton, QTextEdit,
@@ -39,6 +39,26 @@ except ImportError:
             QMessageBox.critical(self, "오류", "Learning.py 모듈을 찾을 수 없어\n화면 영역 지정 기능을 사용할 수 없습니다.")
         def exec(self): return 0
         def get_roi(self): return QRect(0, 0, 100, 100)
+
+# === [v11.0.0] 런타임 의존성 체크 (추가) ===
+try:
+    if not hasattr(cv2, "matchTemplate"):
+        raise AttributeError("matchTemplate not found")
+except AttributeError:
+    raise RuntimeError("OpenCV 빌드에 matchTemplate이 없습니다. opencv-python 설치를 확인해주세요.")
+except Exception as e:
+    raise RuntimeError(f"필수 라이브러리(cv2, mss, numpy 등) 초기화 실패: {e}")
+
+
+# === [v11.0.0] MapConfig: 중앙화된 설정 (추가) ===
+MapConfig = {
+    "downscale": 0.7,                # 탐지용 다운스케일 비율 (0.3~1.0)
+    "target_fps": 30,                # 캡처 스레드 목표 FPS
+    "detection_threshold_default": 0.85,
+    "loop_time_fallback_ms": 120,    # 루프 시간이 이 값을 넘으면 폴백 적용
+    "use_new_capture": True,         # Feature flag — 변경 시 레거시 모드로 자동 복귀 가능
+}
+
 
 # --- v4.0.0 경로 구조 변경 ---
 SRC_ROOT = os.path.dirname(os.path.abspath(__file__))
@@ -3349,147 +3369,193 @@ class RealtimeMinimapView(QLabel):
         painter.drawText(rect, flags, text)
         painter.restore()
 
-# --- v9.0.0: 핵심 지형 탐지에만 집중하도록 단순화된 스레드 ---
-class AnchorDetectionThread(QThread):
-    """
-    지정된 미니맵 영역을 계속 스캔하여, 등록된 핵심 지형과 플레이어 아이콘을
-    찾아 그 위치 정보를 메인 스레드로 전달하는 역할만 수행합니다.
-    """
-    detection_ready = pyqtSignal(np.ndarray, list, list, list)
-    status_updated = pyqtSignal(str, str)
+# === [v11.0.0] 캡처 전담 스레드 (신규 클래스) ===
+class MinimapCaptureThread(QThread):
+    """지정된 영역을 목표 FPS에 맞춰 캡처하고 최신 프레임을 공유하는 스레드."""
+    frame_ready = pyqtSignal(object)  # UI 등에 최신 프레임을 알리기 위한 시그널
 
-    def __init__(self, minimap_region, all_key_features):
+    def __init__(self, minimap_region, target_fps=None):
         super().__init__()
-        self.is_running = True
         self.minimap_region = minimap_region
-        self.all_key_features = all_key_features
-        
-        self.feature_templates = {}
-        for feature_id, feature_data in self.all_key_features.items():
-            try:
-                img_data = base64.b64decode(feature_data['image_base64'])
-                np_arr = np.frombuffer(img_data, np.uint8)
-                template = cv2.imdecode(np_arr, cv2.IMREAD_COLOR)
-                if template is not None:
-                    self.feature_templates[feature_id] = {
-                        "template_gray": cv2.cvtColor(template, cv2.COLOR_BGR2GRAY),
-                        "threshold": feature_data.get('threshold', 0.85),
-                        "size": QSize(template.shape[1], template.shape[0])
-                    }
-            except Exception as e:
-                print(f"Error preparing template for {feature_id}: {e}")
+        self.target_fps = target_fps or MapConfig["target_fps"]
+        self.is_running = False
+        self.latest_frame = None
+        self._lock = threading.Lock()
 
     def run(self):
+        self.is_running = True
         with mss.mss() as sct:
+            interval = 1.0 / max(1, self.target_fps)
             while self.is_running:
+                start_t = time.time()
                 try:
-                    # 1. 화면 캡처 및 플레이어 아이콘 탐지
                     sct_img = sct.grab(self.minimap_region)
-                    curr_frame_bgr = cv2.cvtColor(np.array(sct_img), cv2.COLOR_BGRA2BGR)
-                    
-                    my_player_rects = self.find_player_icon(curr_frame_bgr)
-                    other_player_rects = self.find_other_player_icons(curr_frame_bgr)
+                    frame_bgr = cv2.cvtColor(np.array(sct_img), cv2.COLOR_BGRA2BGR)
 
-                    # 2. 핵심 지형 탐지 (모든 결과 보고 방식으로 수정)
-                    curr_frame_gray = cv2.cvtColor(curr_frame_bgr, cv2.COLOR_BGR2GRAY)
-                    all_detected_features = []
-                    
-                    for feature_id, template_data in self.feature_templates.items():
-                        template_gray = template_data["template_gray"]
-                        
-                        res = cv2.matchTemplate(curr_frame_gray, template_gray, cv2.TM_CCOEFF_NORMED)
-                        min_val, max_val, min_loc, max_loc = cv2.minMaxLoc(res)
+                    # 락은 최소 시간만 점유하여 latest_frame을 교체
+                    with self._lock:
+                        self.latest_frame = frame_bgr
 
-                        top_left = QPointF(max_loc[0], max_loc[1])
-                        size = template_data["size"]
-                        all_detected_features.append({
-                            'id': feature_id,
-                            'local_pos': top_left,
-                            'conf': max_val,
-                            'size': size
-                        })
-                    
-                    # 3. 탐지 결과 전송
-                    self.detection_ready.emit(curr_frame_bgr, all_detected_features, my_player_rects, other_player_rects)
-
-                    # 4. 상태 메시지 전송 (MapTab에서 로그를 생성하므로 여기서는 보내지 않음)
-                    # 이 부분은 MapTab.on_detection_ready에서 직접 로그를 생성하므로 주석 처리하거나 제거합니다.
-                    # 만약 스레드 자체에서 간단한 상태를 계속 보내고 싶다면 이 부분을 유지할 수 있으나,
-                    # 현재 구조에서는 on_detection_ready에서 처리하는 것이 더 정확합니다.
-                    # 따라서 이 부분의 status_updated 호출은 제거합니다.
+                    # UI 표시 등이 필요하면 시그널을 통해 알림 (성능 민감 시 비활성 가능)
+                    try:
+                        self.frame_ready.emit(frame_bgr)
+                    except Exception:
+                        # 시그널 연결 문제는 무시하고 계속 진행 (호환성 보호)
+                        pass
 
                 except Exception as e:
-                    self.status_updated.emit(f"탐지 스레드 오류: {e}", "red")
-                
-                self.msleep(100) # 10 FPS
+                    print(f"[MinimapCaptureThread] 캡처 오류: {e}")
+                    traceback.print_exc()
 
-    def find_player_icon(self, frame_bgr):
-        hsv = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2HSV)
-        mask = cv2.inRange(hsv, PLAYER_ICON_LOWER, PLAYER_ICON_UPPER)
-        
-        # 연결 요소 분석 + 크기 필터링 + 표준 크기 정규화 ---
-        output = cv2.connectedComponentsWithStats(mask, 8, cv2.CV_32S)
-        num_labels = output[0]
-        stats = output[2]
-        
-        valid_rects = []
-        for i in range(1, num_labels):
-            x = stats[i, cv2.CC_STAT_LEFT]
-            y = stats[i, cv2.CC_STAT_TOP]
-            w = stats[i, cv2.CC_STAT_WIDTH]
-            h = stats[i, cv2.CC_STAT_HEIGHT]
-            
-            # 1. 크기 필터링: 9 <= 크기 < 14 범위에 있는지 확인
-            if (MIN_ICON_WIDTH <= w < MAX_ICON_WIDTH and
-                MIN_ICON_HEIGHT <= h < MAX_ICON_HEIGHT):
-                
-                # 2. 표준 크기로 정규화
-                center_x = x + w / 2
-                center_y = y + h / 2
-                
-                new_x = int(center_x - PLAYER_ICON_STD_WIDTH / 2)
-                new_y = int(center_y - PLAYER_ICON_STD_HEIGHT / 2)
-                
-                valid_rects.append(QRect(new_x, new_y, PLAYER_ICON_STD_WIDTH, PLAYER_ICON_STD_HEIGHT))
-                
-        return valid_rects
-
-
-    def find_other_player_icons(self, frame_bgr):
-        hsv = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2HSV)
-        mask1 = cv2.inRange(hsv, OTHER_PLAYER_ICON_LOWER1, OTHER_PLAYER_ICON_UPPER1)
-        mask2 = cv2.inRange(hsv, OTHER_PLAYER_ICON_LOWER2, OTHER_PLAYER_ICON_UPPER2)
-        mask = cv2.bitwise_or(mask1, mask2)
-        
-        #연결 요소 분석 + 크기 필터링 + 표준 크기 정규화 ---
-        output = cv2.connectedComponentsWithStats(mask, 8, cv2.CV_32S)
-        num_labels = output[0]
-        stats = output[2]
-        
-        valid_rects = []
-        for i in range(1, num_labels):
-            x = stats[i, cv2.CC_STAT_LEFT]
-            y = stats[i, cv2.CC_STAT_TOP]
-            w = stats[i, cv2.CC_STAT_WIDTH]
-            h = stats[i, cv2.CC_STAT_HEIGHT]
-            
-            # 1. 크기 필터링: 9 <= 크기 < 14 범위에 있는지 확인
-            if (MIN_ICON_WIDTH <= w < MAX_ICON_WIDTH and
-                MIN_ICON_HEIGHT <= h < MAX_ICON_HEIGHT):
-                
-                # 2. 표준 크기로 정규화
-                center_x = x + w / 2
-                center_y = y + h / 2
-                
-                new_x = int(center_x - PLAYER_ICON_STD_WIDTH / 2)
-                new_y = int(center_y - PLAYER_ICON_STD_HEIGHT / 2)
-                
-                valid_rects.append(QRect(new_x, new_y, PLAYER_ICON_STD_WIDTH, PLAYER_ICON_STD_HEIGHT))
-                
-        return valid_rects
+                # 프레임률 제한
+                elapsed = time.time() - start_t
+                sleep_time = interval - elapsed
+                if sleep_time > 0:
+                    time.sleep(sleep_time)
 
     def stop(self):
         self.is_running = False
+        try:
+            self.quit()
+            self.wait(2000)
+        except Exception as e:
+            print(f"[MinimapCaptureThread] 정지 대기 실패: {e}")
+
+
+# === [v11.0.1] 안전한 프레임 읽기 헬퍼 (누락된 함수 추가) ===
+def safe_read_latest_frame(capture_thread):
+    """
+    capture_thread.latest_frame을 안전하게 읽어 복사본을 반환.
+    락을 짧게 점유하도록 설계되어 있음.
+    """
+    if not capture_thread:
+        return None
+    try:
+        with capture_thread._lock:
+            src = capture_thread.latest_frame
+            if src is None:
+                return None
+            return src.copy()
+    except Exception:
+        return None
+    
+# [v11.0.0] 개편: 캡처 로직 분리 및 탐지 연산 최적화
+class AnchorDetectionThread(QThread):
+    """
+    캡처 스레드로부터 프레임을 받아, 등록된 핵심 지형의 위치만 탐지하여 전달하는 역할.
+    """
+    # 기존과 호환되는 시그널 시그니처 유지 (호출부 변경 위험 방지)
+    detection_ready = pyqtSignal(object, list, list, list)
+    status_updated = pyqtSignal(str, str)
+
+    def __init__(self, all_key_features, capture_thread=None):
+        super().__init__()
+        self.capture_thread = capture_thread
+        self.all_key_features = all_key_features or {}
+        self.is_running = False
+        self.feature_templates = {}
+        self._downscale = MapConfig["downscale"]
+
+        # 템플릿 전처리
+        for fid, fdata in self.all_key_features.items():
+            try:
+                img_data = base64.b64decode(fdata['image_base64'])
+                np_arr = np.frombuffer(img_data, np.uint8)
+                template = cv2.imdecode(np_arr, cv2.IMREAD_COLOR)
+                if template is None: continue
+
+                tpl_gray = cv2.cvtColor(template, cv2.COLOR_BGR2GRAY)
+                tpl_small = cv2.resize(tpl_gray, (0, 0), fx=self._downscale, fy=self._downscale, interpolation=cv2.INTER_AREA)
+
+                self.feature_templates[fid] = {
+                    "template_gray_small": tpl_small,
+                    "threshold": fdata.get('threshold', MapConfig["detection_threshold_default"]),
+                    "size": QSize(template.shape[1], template.shape[0]),
+                }
+            except Exception as e:
+                print(f"[AnchorDetectionThread] 템플릿 전처리 실패 ({fid}): {e}")
+                traceback.print_exc()
+
+        # 마지막 검출 위치 저장 (ROI 검색에 사용)
+        self.last_positions = {k: None for k in self.feature_templates.keys()}
+
+    def run(self):
+        self.is_running = True
+        while self.is_running:
+            loop_start = time.perf_counter()
+            try:
+                # 안전하게 최신 프레임 읽기 (락 최소점유)
+                frame_bgr = safe_read_latest_frame(self.capture_thread) # <<< [v11.0.1] 'self.' 제거
+                if frame_bgr is None:
+                    time.sleep(0.005)
+                    continue
+
+                # 처리용 저해상도 프레임 생성 (연산량 감소)
+                frame_gray = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2GRAY)
+                frame_gray_small = cv2.resize(frame_gray, (0, 0), fx=self._downscale, fy=self._downscale, interpolation=cv2.INTER_AREA)
+
+                all_detected_features = []
+                for fid, tpl_data in self.feature_templates.items():
+                    tpl_small = tpl_data["template_gray_small"]
+                    t_h, t_w = tpl_small.shape
+                    search_result = None
+
+                    # 1) ROI 우선 검색
+                    last_pos = self.last_positions.get(fid)
+                    if last_pos is not None:
+                        lx = int(last_pos.x() * self._downscale)
+                        ly = int(last_pos.y() * self._downscale)
+                        radius = max(int(max(t_w, t_h) * 1.5), 30)
+                        x1, y1 = max(0, lx - radius), max(0, ly - radius)
+                        x2, y2 = min(frame_gray_small.shape[1], lx + radius), min(frame_gray_small.shape[0], ly + radius)
+                        roi = frame_gray_small[y1:y2, x1:x2]
+
+                        if roi.shape[0] >= t_h and roi.shape[1] >= t_w:
+                            res = cv2.matchTemplate(roi, tpl_small, cv2.TM_CCOEFF_NORMED)
+                            _, max_val, _, max_loc = cv2.minMaxLoc(res)
+                            if max_val >= tpl_data["threshold"]:
+                                found_x = (x1 + max_loc[0]) / self._downscale
+                                found_y = (y1 + max_loc[1]) / self._downscale
+                                search_result = {'id': fid, 'local_pos': QPointF(found_x, found_y), 'conf': max_val, 'size': tpl_data['size']}
+
+                    # 2) ROI에서 못 찾으면 전체(저해상도) 검색
+                    if search_result is None:
+                        res = cv2.matchTemplate(frame_gray_small, tpl_small, cv2.TM_CCOEFF_NORMED)
+                        _, max_val, _, max_loc = cv2.minMaxLoc(res)
+                        if max_val >= tpl_data["threshold"]:
+                            found_x = max_loc[0] / self._downscale
+                            found_y = max_loc[1] / self._downscale
+                            search_result = {'id': fid, 'local_pos': QPointF(found_x, found_y), 'conf': max_val, 'size': tpl_data['size']}
+                    
+                    if search_result:
+                        all_detected_features.append(search_result)
+                        # ROI 검색을 위해 TopLeft 좌표 저장
+                        self.last_positions[fid] = search_result['local_pos']
+
+                # 기존 시그널 시그니처를 유지하여 호환성 보장 (플레이어 정보는 빈 리스트로 전달)
+                self.detection_ready.emit(frame_bgr, all_detected_features, [], [])
+
+                # 루프 시간 측정 및 폴백 적용
+                loop_time_ms = (time.perf_counter() - loop_start) * 1000.0
+                if loop_time_ms > MapConfig["loop_time_fallback_ms"]:
+                    old_scale = self._downscale
+                    self._downscale = max(0.3, old_scale * 0.95)
+                    MapConfig["downscale"] = self._downscale # 전역 설정도 갱신
+                    print(f"[AnchorDetectionThread] 느린 루프 감지 ({loop_time_ms:.1f}ms), 다운스케일 조정: {old_scale:.2f} -> {self._downscale:.2f}")
+
+            except Exception as e:
+                # 루프 전체가 죽지 않도록 모든 예외를 잡아 로깅 후 계속
+                print(f"[AnchorDetectionThread] 예기치 않은 오류: {e}")
+                traceback.print_exc()
+                time.sleep(0.02)
+
+    def stop(self):
+        self.is_running = False
+        try:
+            self.quit()
+            self.wait(2000)
+        except Exception as e:
+            print(f"[AnchorDetectionThread] 정지 대기 실패: {e}")
 
 class MapTab(QWidget):
     global_pos_updated = pyqtSignal(QPointF)
@@ -3503,6 +3569,7 @@ class MapTab(QWidget):
             self.active_route_profile_name = None
             self.route_profiles = {}
             self.detection_thread = None
+            self.capture_thread = None # <<< [v11.0.0] 추가
             self.debug_dialog = None
             self.editor_dialog = None 
             self.global_positions = {}
@@ -4490,9 +4557,68 @@ class MapTab(QWidget):
             if self.debug_dialog:
                 self.debug_dialog.close()
 
+    # [v11.0.0] AnchorDetectionThread에서 책임 이동된 메서드들
+    def find_player_icon(self, frame_bgr):
+        hsv = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2HSV)
+        mask = cv2.inRange(hsv, PLAYER_ICON_LOWER, PLAYER_ICON_UPPER)
+        
+        output = cv2.connectedComponentsWithStats(mask, 8, cv2.CV_32S)
+        num_labels = output[0]
+        stats = output[2]
+        
+        valid_rects = []
+        for i in range(1, num_labels):
+            x = stats[i, cv2.CC_STAT_LEFT]
+            y = stats[i, cv2.CC_STAT_TOP]
+            w = stats[i, cv2.CC_STAT_WIDTH]
+            h = stats[i, cv2.CC_STAT_HEIGHT]
+            
+            if (MIN_ICON_WIDTH <= w < MAX_ICON_WIDTH and
+                MIN_ICON_HEIGHT <= h < MAX_ICON_HEIGHT):
+                
+                center_x = x + w / 2
+                center_y = y + h / 2
+                
+                new_x = int(center_x - PLAYER_ICON_STD_WIDTH / 2)
+                new_y = int(center_y - PLAYER_ICON_STD_HEIGHT / 2)
+                
+                valid_rects.append(QRect(new_x, new_y, PLAYER_ICON_STD_WIDTH, PLAYER_ICON_STD_HEIGHT))
+                
+        return valid_rects
+
+    def find_other_player_icons(self, frame_bgr):
+        hsv = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2HSV)
+        mask1 = cv2.inRange(hsv, OTHER_PLAYER_ICON_LOWER1, OTHER_PLAYER_ICON_UPPER1)
+        mask2 = cv2.inRange(hsv, OTHER_PLAYER_ICON_LOWER2, OTHER_PLAYER_ICON_UPPER2)
+        mask = cv2.bitwise_or(mask1, mask2)
+        
+        output = cv2.connectedComponentsWithStats(mask, 8, cv2.CV_32S)
+        num_labels = output[0]
+        stats = output[2]
+        
+        valid_rects = []
+        for i in range(1, num_labels):
+            x = stats[i, cv2.CC_STAT_LEFT]
+            y = stats[i, cv2.CC_STAT_TOP]
+            w = stats[i, cv2.CC_STAT_WIDTH]
+            h = stats[i, cv2.CC_STAT_HEIGHT]
+            
+            if (MIN_ICON_WIDTH <= w < MAX_ICON_WIDTH and
+                MIN_ICON_HEIGHT <= h < MAX_ICON_HEIGHT):
+                
+                center_x = x + w / 2
+                center_y = y + h / 2
+                
+                new_x = int(center_x - PLAYER_ICON_STD_WIDTH / 2)
+                new_y = int(center_y - PLAYER_ICON_STD_HEIGHT / 2)
+                
+                valid_rects.append(QRect(new_x, new_y, PLAYER_ICON_STD_WIDTH, PLAYER_ICON_STD_HEIGHT))
+                
+        return valid_rects
+
     def toggle_anchor_detection(self, checked):
             if checked:
-                if not self.minimap_region: 
+                if not self.minimap_region:
                     QMessageBox.warning(self, "오류", "먼저 '미니맵 범위 지정'을 해주세요.")
                     self.detect_anchor_btn.setChecked(False)
                     return
@@ -4509,67 +4635,76 @@ class MapTab(QWidget):
                 self.general_log_viewer.clear()
                 self.detection_log_viewer.clear()
                 self.update_general_log("탐지를 시작합니다...", "SaddleBrown")
-                
-                #내비게이션 상태 초기화 로직 추가
+
+                #내비게이션 상태 초기화
                 self.player_nav_state = 'on_terrain'
                 self.current_player_floor = None
                 self.last_terrain_line_id = None
                 self.target_waypoint_id = None
-                self.last_reached_wp_id = None # <--- 이 라인이 중요합니다
+                self.last_reached_wp_id = None
                 self.current_path_index = -1
                 self.is_forward = True
                 self.start_waypoint_found = False
-                
+
                 if self.debug_view_checkbox.isChecked():
                     if not self.debug_dialog:
                         self.debug_dialog = DebugViewDialog(self)
                     self.debug_dialog.show()
-                    
-                self.detection_thread = AnchorDetectionThread(self.minimap_region, self.key_features)
+
+                # [v11.0.0] 캡처 및 탐지 스레드 분리 실행
+                self.capture_thread = MinimapCaptureThread(self.minimap_region)
+                self.capture_thread.start()
+
+                # [v11.0.1] 생성자 인자 순서 수정
+                self.detection_thread = AnchorDetectionThread(self.key_features, capture_thread=self.capture_thread)
                 self.detection_thread.detection_ready.connect(self.on_detection_ready)
-                # --- 수정: status_updated 시그널을 올바른 슬롯에 연결 ---
                 self.detection_thread.status_updated.connect(self.update_detection_log_message)
                 self.detection_thread.start()
+
                 self.detect_anchor_btn.setText("탐지 중단")
             else:
+                # [v11.0.0] 두 스레드 모두 안전하게 중지
                 if self.detection_thread and self.detection_thread.isRunning():
                     self.detection_thread.stop()
                     self.detection_thread.wait()
+                if self.capture_thread and self.capture_thread.isRunning():
+                    self.capture_thread.stop()
+                    self.capture_thread.wait()
+
                 self.update_general_log("탐지를 중단합니다.", "black")
                 self.detect_anchor_btn.setText("탐지 시작")
-                # --- 수정: 올바른 슬롯 호출 ---
                 self.update_detection_log_message("탐지 중단됨", "black")
                 self.minimap_view_label.setText("탐지 중단됨")
+
                 self.detection_thread = None
+                self.capture_thread = None
+
                 if self.debug_dialog:
                     self.debug_dialog.close()
 
-    def on_detection_ready(self, frame_bgr, found_features, my_player_rects, other_player_rects):
+    def on_detection_ready(self, frame_bgr, found_features, my_player_rects_ignored, other_player_rects_ignored):
         """
         탐지 스레드로부터 받은 정보를 처리하고, RANSAC을 이용해 플레이어의 전역 좌표를 강건하게 추정합니다.
+        [v11.0.0] 이 메서드에서 직접 플레이어 아이콘을 탐지합니다.
         """
-        
+        # [v11.0.0] 플레이어 아이콘 탐지 책임을 이 메서드로 이동
+        my_player_rects = self.find_player_icon(frame_bgr)
+        other_player_rects = self.find_other_player_icons(frame_bgr)
+
         if not my_player_rects:
             self.update_detection_log_message("플레이어 아이콘 탐지 실패", "red")
-            # 디버그 뷰에도 현재 상태 전송 (플레이어 위치 없음)
             if self.debug_dialog and self.debug_dialog.isVisible():
                 self.debug_dialog.update_debug_info(frame_bgr, {'all_features': found_features, 'inlier_ids': set(), 'player_pos_local': None})
             return
 
-        # --- 핵심 수정: 신뢰도 기반 사전 필터링 ---
-        # RANSAC에 입력하기 전에, 각 지형의 개별 threshold를 통과한 지형들만 후보로 삼는다.
         reliable_features = []
         for f in found_features:
             if f['id'] in self.key_features and f['conf'] >= self.key_features[f['id']].get('threshold', 0.85):
                 reliable_features.append(f)
-        
-        # --- 이하 모든 로직은 'found_features' 대신 'reliable_features'를 사용합니다. ---
 
-        # 1. 데이터 준비: RANSAC에 사용할 (로컬 좌표, 전역 좌표) 쌍 생성
         source_points, dest_points, valid_features_map = [], [], {}
-        feature_ids = []  # 추가: src/dst와 inliers 마스크를 동일한 순서로 매핑하기 위한 리스트 (중요)
+        feature_ids = []
 
-        #  found_features -> reliable_features ---
         for feature in reliable_features:
             feature_id = feature['id']
             if feature_id in self.global_positions:
@@ -4577,8 +4712,7 @@ class MapTab(QWidget):
                 size = feature['size']
                 local_pos = QPointF(feature['local_pos'])
                 global_pos = self.global_positions[feature_id]
-                
-                # 중심점 좌표 사용
+
                 src_cx = local_pos.x() + size.width()/2
                 src_cy = local_pos.y() + size.height()/2
                 dst_cx = global_pos.x() + size.width()/2
@@ -4587,19 +4721,16 @@ class MapTab(QWidget):
                 dest_points.append([dst_cx, dst_cy])
                 feature_ids.append(feature_id)
 
-        # 플레이어의 로컬 기준점 계산 (발밑 중앙)
         player_anchor_local = QPointF(self.minimap_region['width'] / 2.0, self.minimap_region['height'] / 2.0)
         if my_player_rects:
             player_rect = my_player_rects[0]
             player_anchor_local = QPointF(player_rect.center().x(), float(player_rect.y() + player_rect.height()) + PLAYER_Y_OFFSET)
 
         avg_player_global_pos = None
-        inlier_ids = set() # 정상치로 판별된 지형 ID 저장용
-        transform_matrix = None # 변환 행렬 초기화
+        inlier_ids = set()
+        transform_matrix = None
 
-        # 2. RANSAC 또는 Fallback 로직으로 위치 추정
         if len(source_points) < 3:
-            # Fallback: 탐지된 지형이 3개 미만일 경우, 가중 평균으로 계산
             if valid_features_map:
                 total_confidence = sum(f['conf'] for f in valid_features_map.values())
                 if total_confidence > 0:
@@ -4608,21 +4739,19 @@ class MapTab(QWidget):
                     for feature in valid_features_map.values():
                         feature_center_local = QPointF(feature['local_pos']) + QPointF(feature['size'].width()/2, feature['size'].height()/2)
                         feature_center_global = self.global_positions[feature['id']] + QPointF(feature['size'].width()/2, feature['size'].height()/2)
-                        
+
                         offset = player_anchor_local - feature_center_local
                         player_global_pos = feature_center_global + offset
-                        
+
                         weighted_player_x_sum += player_global_pos.x() * feature['conf']
                         weighted_player_y_sum += player_global_pos.y() * feature['conf']
-                    
+
                     avg_player_global_pos = QPointF(weighted_player_x_sum / total_confidence, weighted_player_y_sum / total_confidence)
-                inlier_ids = set(valid_features_map.keys()) # Fallback 시에는 모두 정상치로 간주
+                inlier_ids = set(valid_features_map.keys())
         else:
-            # RANSAC: 3개 이상 지형 탐지 시
             src_pts = np.float32(source_points)
             dst_pts = np.float32(dest_points)
-            
-            # 아핀 변환과 정상치를 찾음
+
             ransac_thresh = getattr(self, 'ransac_reproj_threshold', 3.0)
             max_iters = getattr(self, 'ransac_max_iters', 2000)
             transform_matrix, inliers = cv2.estimateAffinePartial2D(
@@ -4631,7 +4760,7 @@ class MapTab(QWidget):
                 ransacReprojThreshold=ransac_thresh,
                 maxIters=max_iters
             )
-             
+
             if inliers is None:
                 transform_matrix = None
             else:
@@ -4665,14 +4794,11 @@ class MapTab(QWidget):
                             avg_player_global_pos = QPointF(weighted_player_x_sum / total_confidence, weighted_player_y_sum / total_confidence)
 
         if avg_player_global_pos is None:
-            # 위치 계산 실패 시 디버그 뷰만 업데이트하고 종료
             if self.debug_dialog and self.debug_dialog.isVisible():
                 self.debug_dialog.update_debug_info(frame_bgr, {'all_features': found_features, 'inlier_ids': set(), 'player_pos_local': None})
-            #  로그 업데이트 추가 ---
             self.update_detection_log_from_features([], [])
             return
 
-        # 3. EMA 필터링으로 위치 스무딩
         min_alpha = getattr(self, 'min_alpha', 0.05)
         max_alpha = getattr(self, 'max_alpha', 0.5)
         inlier_count = max(1, len(inlier_ids))
@@ -4690,14 +4816,11 @@ class MapTab(QWidget):
             new_x = (avg_player_global_pos.x() * alpha) + (self.smoothed_player_pos.x() * (1 - alpha))
             new_y = (avg_player_global_pos.y() * alpha) + (self.smoothed_player_pos.y() * (1 - alpha))
             self.smoothed_player_pos = QPointF(new_x, new_y)
-        
-        final_player_pos = self.smoothed_player_pos # 최종 플레이어의 전역 좌표
 
-        # 상태 업데이트 메서드 호출 추가
+        final_player_pos = self.smoothed_player_pos
+
         self._update_player_state_and_navigation(final_player_pos)
 
-
-        # 4. 디버그 뷰 업데이트
         if self.debug_dialog and self.debug_dialog.isVisible():
             debug_data = {
                 'all_features': found_features,
@@ -4708,7 +4831,6 @@ class MapTab(QWidget):
             }
             self.debug_dialog.update_debug_info(frame_bgr, debug_data)
 
-        # 5. 메인 뷰 렌더링 데이터 준비 및 업데이트
         my_player_global_rects = []
         other_player_global_rects = []
         if transform_matrix is not None:
@@ -4776,12 +4898,10 @@ class MapTab(QWidget):
         
         self.global_pos_updated.emit(final_player_pos)
         
-        #  found_features -> reliable_features ---
         inlier_list = [f for f in reliable_features if f['id'] in inlier_ids]
         outlier_list = [f for f in reliable_features if f['id'] not in inlier_ids]
         
         self.update_detection_log_from_features(inlier_list, outlier_list)
-
         
     def _generate_full_map_pixmap(self):
             """
