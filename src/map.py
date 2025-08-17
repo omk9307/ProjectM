@@ -88,18 +88,18 @@ PLAYER_ICON_STD_WIDTH = 11
 PLAYER_ICON_STD_HEIGHT = 11
 
 # ==================== v10.9.0 상태 판정 시스템 상수 ====================
-# [v11.3.1] 사용자 피드백 기반 기본값 조정
-IDLE_TIME_THRESHOLD = 0.8      # 정지 상태로 판정되기까지의 시간 (초)
+# [v11.4.0] 사용자 피드백 기반 기본값 대규모 조정 및 신규 상수 추가
+IDLE_TIME_THRESHOLD = 0.8       # 정지 상태로 판정되기까지의 시간 (초)
 CLIMBING_STATE_FRAME_THRESHOLD = 2 # climbing 상태로 변경되기까지 필요한 연속 프레임
 FALLING_STATE_FRAME_THRESHOLD = 10  # falling 상태로 변경되기까지 필요한 연속 프레임
 JUMPING_STATE_FRAME_THRESHOLD = 1  # jumping 상태로 변경되기까지 필요한 연속 프레임
 ON_TERRAIN_Y_THRESHOLD = 3.0    # 지상 판정 y축 허용 오차 (px)
-JUMP_Y_MIN_THRESHOLD = 1.0     # 점프 상태로 인식될 최소 y 오프셋 (px)
+JUMP_Y_MIN_THRESHOLD = 1.0      # 점프 상태로 인식될 최소 y 오프셋 (px)
 JUMP_Y_MAX_THRESHOLD = 10.5     # 점프 상태로 인식될 최대 y 오프셋 (px)
 FALL_Y_MIN_THRESHOLD = 4.0      # 낙하 상태로 인식될 최소 y 오프셋 (px)
 CLIMB_X_MOVEMENT_THRESHOLD = 1.0 # 등반 상태로 판정될 최대 수평 이동량 (px/frame)
-FALL_ON_LADDER_X_MOVEMENT_THRESHOLD = 1.0 # [v11.3.1] 사다리 낙하 판정 최대 수평 이동량
-CLIMB_BREAK_Y_THRESHOLD = 1.0   # (미사용)
+FALL_ON_LADDER_X_MOVEMENT_THRESHOLD = 1.0
+Y_MOVEMENT_DEADZONE = 0.5       # 상승/하강으로 인식될 최소 y 이동량 (px/frame)
 LADDER_X_GRAB_THRESHOLD = 8.0   # 사다리 근접으로 판정될 x축 허용 오차 (px)
 MOVE_DEADZONE = 0.2             # 움직임으로 인식되지 않을 최소 이동 거리 (px)
 MAX_JUMP_DURATION = 3.0         # 점프 상태가 강제로 해제되기까지의 최대 시간 (초)
@@ -3718,18 +3718,19 @@ class AnchorDetectionThread(QThread):
 class StateConfigDialog(QDialog):
     def __init__(self, current_config, parent=None):
         super().__init__(parent)
-        self.setWindowTitle("상태 판정 미세 조정")
-        self.setMinimumWidth(400)
+        self.setWindowTitle("판정 설정") # [v11.4.0] 이름 변경
+        self.setMinimumWidth(450) # 너비 확장
         
-        self.config = current_config.copy() # 현재 설정을 복사하여 사용
+        self.config = current_config.copy()
         
         main_layout = QVBoxLayout(self)
         form_layout = QVBoxLayout()
 
-        # 각 설정 항목을 위한 스핀박스 추가
         def add_spinbox(layout, key, label_text, min_val, max_val, step, is_double=True, decimals=2):
             h_layout = QHBoxLayout()
-            h_layout.addWidget(QLabel(label_text))
+            label = QLabel(label_text)
+            label.setMinimumWidth(200) # 레이블 너비 고정
+            h_layout.addWidget(label)
             if is_double:
                 spinbox = QDoubleSpinBox()
                 spinbox.setDecimals(decimals)
@@ -3738,28 +3739,41 @@ class StateConfigDialog(QDialog):
             spinbox.setRange(min_val, max_val)
             spinbox.setSingleStep(step)
             spinbox.setValue(self.config.get(key, 0))
-            spinbox.setObjectName(key) # 나중에 값을 읽어오기 위해 객체 이름 설정
+            spinbox.setObjectName(key)
             h_layout.addWidget(spinbox)
             layout.addLayout(h_layout)
             return spinbox
 
+        # [v11.4.0] 사용자 요청에 따라 스핀박스 범위 및 신규 항목 추가
         add_spinbox(form_layout, "idle_time_threshold", "정지 판정 시간(초):", 0.1, 5.0, 0.1)
+        add_spinbox(form_layout, "max_jump_duration", "최대 점프 시간(초):", 0.1, 5.0, 0.1)
         add_spinbox(form_layout, "climbing_state_frame_threshold", "등반 판정 프레임:", 1, 100, 1, is_double=False)
         add_spinbox(form_layout, "falling_state_frame_threshold", "낙하 판정 프레임:", 1, 100, 1, is_double=False)
         add_spinbox(form_layout, "jumping_state_frame_threshold", "점프 판정 프레임:", 1, 100, 1, is_double=False)
+        
+        form_layout.addSpacing(10)
+
         add_spinbox(form_layout, "on_terrain_y_threshold", "지상 판정 Y오차(px):", 1.0, 30.0, 0.1)
         add_spinbox(form_layout, "jump_y_min_threshold", "점프 최소 Y오프셋(px):", 0.01, 30.0, 0.01)
         add_spinbox(form_layout, "jump_y_max_threshold", "점프 최대 Y오프셋(px):", 1.0, 30.0, 0.1)
         add_spinbox(form_layout, "fall_y_min_threshold", "낙하 최소 Y오프셋(px):", 1.0, 30.0, 0.1)
+        
+        form_layout.addSpacing(10)
+
+        add_spinbox(form_layout, "move_deadzone", "X/Y 이동 감지 최소값(px):", 0.0, 5.0, 0.01, decimals=2)
+        add_spinbox(form_layout, "y_movement_deadzone", "상승/하강 감지 Y최소값(px/f):", 0.01, 5.0, 0.01, decimals=2)
         add_spinbox(form_layout, "climb_x_movement_threshold", "등반 최대 X이동(px/f):", 0.01, 5.0, 0.01)
         add_spinbox(form_layout, "fall_on_ladder_x_movement_threshold", "사다리 낙하 최대 X이동(px/f):", 0.01, 5.0, 0.01)
-        add_spinbox(form_layout, "ladder_x_grab_threshold", "사다리 X오차(px):", 0.5, 10.0, 0.1)
-        add_spinbox(form_layout, "move_deadzone", "이동 감지 최소값(px):", 0.0, 5.0, 0.01, decimals=1)
-        add_spinbox(form_layout, "max_jump_duration", "최대 점프 시간(초):", 0.1, 5.0, 0.1)
+        add_spinbox(form_layout, "ladder_x_grab_threshold", "사다리 근접 X오차(px):", 0.5, 20.0, 0.1)
         
+        form_layout.addSpacing(10)
+        
+        add_spinbox(form_layout, "waypoint_arrival_x_threshold", "웨이포인트 도착 X오차(px):", 0.0, 20.0, 0.1)
+        add_spinbox(form_layout, "ladder_arrival_x_threshold", "사다리 도착 X오차(px):", 0.0, 20.0, 0.1)
+        add_spinbox(form_layout, "jump_link_arrival_x_threshold", "점프/낭떠러지 도착 X오차(px):", 0.0, 20.0, 0.1)
+
         main_layout.addLayout(form_layout)
         
-        # 버튼 추가
         button_box = QDialogButtonBox()
         save_btn = button_box.addButton("저장", QDialogButtonBox.ButtonRole.AcceptRole)
         cancel_btn = button_box.addButton("취소", QDialogButtonBox.ButtonRole.RejectRole)
@@ -3772,7 +3786,6 @@ class StateConfigDialog(QDialog):
         main_layout.addWidget(button_box)
 
     def get_updated_config(self):
-        # UI의 현재 값들을 읽어 딕셔너리로 반환
         updated_config = {}
         for spinbox in self.findChildren(QSpinBox) + self.findChildren(QDoubleSpinBox):
             key = spinbox.objectName()
@@ -3780,7 +3793,6 @@ class StateConfigDialog(QDialog):
         return updated_config
 
     def restore_defaults(self):
-        # 파일 상단의 기본 상수 값으로 UI를 리셋
         defaults = {
             "idle_time_threshold": IDLE_TIME_THRESHOLD,
             "climbing_state_frame_threshold": CLIMBING_STATE_FRAME_THRESHOLD,
@@ -3795,12 +3807,15 @@ class StateConfigDialog(QDialog):
             "ladder_x_grab_threshold": LADDER_X_GRAB_THRESHOLD,
             "move_deadzone": MOVE_DEADZONE,
             "max_jump_duration": MAX_JUMP_DURATION,
+            "y_movement_deadzone": Y_MOVEMENT_DEADZONE,
+            "waypoint_arrival_x_threshold": WAYPOINT_ARRIVAL_X_THRESHOLD,
+            "ladder_arrival_x_threshold": LADDER_ARRIVAL_X_THRESHOLD,
+            "jump_link_arrival_x_threshold": JUMP_LINK_ARRIVAL_X_THRESHOLD,
         }
         for spinbox in self.findChildren(QSpinBox) + self.findChildren(QDoubleSpinBox):
             key = spinbox.objectName()
             if key in defaults:
                 spinbox.setValue(defaults[key])
-
 
 class MapTab(QWidget):
     global_pos_updated = pyqtSignal(QPointF)
@@ -3841,6 +3856,10 @@ class MapTab(QWidget):
             self.cfg_ladder_x_grab_threshold = None
             self.cfg_move_deadzone = None
             self.cfg_max_jump_duration = None
+            self.cfg_y_movement_deadzone = None
+            self.cfg_waypoint_arrival_x_threshold = None
+            self.cfg_ladder_arrival_x_threshold = None
+            self.cfg_jump_link_arrival_x_threshold = None
 
             # ==================== v10.9.0 수정 시작 ====================
             # --- 상태 판정 시스템 변수 ---
@@ -3999,11 +4018,16 @@ class MapTab(QWidget):
         detect_layout.addStretch(1) # 중앙 공간
         
         # 우측: 버튼들
-        self.state_config_btn = QPushButton("상태판정 설정")
+        self.state_config_btn = QPushButton("판정 설정")
         self.state_config_btn.clicked.connect(self._open_state_config_dialog)
         
         self.detect_anchor_btn = QPushButton("탐지 시작")
         self.detect_anchor_btn.setCheckable(True)
+        # [v11.4.0] 버튼 크기 키우기
+        font = self.detect_anchor_btn.font()
+        font.setPointSize(font.pointSize() + 2)
+        self.detect_anchor_btn.setFont(font)
+        self.detect_anchor_btn.setStyleSheet("padding: 5px;")
         self.detect_anchor_btn.clicked.connect(self.toggle_anchor_detection)
         
         detect_layout.addWidget(self.state_config_btn)
@@ -4193,6 +4217,10 @@ class MapTab(QWidget):
             self.cfg_ladder_x_grab_threshold = LADDER_X_GRAB_THRESHOLD
             self.cfg_move_deadzone = MOVE_DEADZONE
             self.cfg_max_jump_duration = MAX_JUMP_DURATION
+            self.cfg_y_movement_deadzone = Y_MOVEMENT_DEADZONE
+            self.cfg_waypoint_arrival_x_threshold = WAYPOINT_ARRIVAL_X_THRESHOLD
+            self.cfg_ladder_arrival_x_threshold = LADDER_ARRIVAL_X_THRESHOLD
+            self.cfg_jump_link_arrival_x_threshold = JUMP_LINK_ARRIVAL_X_THRESHOLD
 
             config = {}
             if os.path.exists(config_file):
@@ -4217,6 +4245,11 @@ class MapTab(QWidget):
                 self.cfg_ladder_x_grab_threshold = state_config.get("ladder_x_grab_threshold", self.cfg_ladder_x_grab_threshold)
                 self.cfg_move_deadzone = state_config.get("move_deadzone", self.cfg_move_deadzone)
                 self.cfg_max_jump_duration = state_config.get("max_jump_duration", self.cfg_max_jump_duration)
+                self.cfg_y_movement_deadzone = state_config.get("y_movement_deadzone", self.cfg_y_movement_deadzone)
+                self.cfg_waypoint_arrival_x_threshold = state_config.get("waypoint_arrival_x_threshold", self.cfg_waypoint_arrival_x_threshold)
+                self.cfg_ladder_arrival_x_threshold = state_config.get("ladder_arrival_x_threshold", self.cfg_ladder_arrival_x_threshold)
+                self.cfg_jump_link_arrival_x_threshold = state_config.get("jump_link_arrival_x_threshold", self.cfg_jump_link_arrival_x_threshold)
+
                 self.update_general_log("저장된 상태 판정 설정을 로드했습니다.", "gray")
 
             saved_options = config.get('render_options', {})
@@ -4386,6 +4419,10 @@ class MapTab(QWidget):
                 "ladder_x_grab_threshold": self.cfg_ladder_x_grab_threshold,
                 "move_deadzone": self.cfg_move_deadzone,
                 "max_jump_duration": self.cfg_max_jump_duration,
+                "y_movement_deadzone": self.cfg_y_movement_deadzone,
+                "waypoint_arrival_x_threshold": self.cfg_waypoint_arrival_x_threshold,
+                "ladder_arrival_x_threshold": self.cfg_ladder_arrival_x_threshold,
+                "jump_link_arrival_x_threshold": self.cfg_jump_link_arrival_x_threshold,
             }
 
             config_data = self._prepare_data_for_json({
@@ -5016,6 +5053,10 @@ class MapTab(QWidget):
             "ladder_x_grab_threshold": self.cfg_ladder_x_grab_threshold,
             "move_deadzone": self.cfg_move_deadzone,
             "max_jump_duration": self.cfg_max_jump_duration,
+            "y_movement_deadzone": self.cfg_y_movement_deadzone,
+            "waypoint_arrival_x_threshold": self.cfg_waypoint_arrival_x_threshold,
+            "ladder_arrival_x_threshold": self.cfg_ladder_arrival_x_threshold,
+            "jump_link_arrival_x_threshold": self.cfg_jump_link_arrival_x_threshold,
         }
         
         dialog = StateConfigDialog(current_config, self)
@@ -5036,6 +5077,10 @@ class MapTab(QWidget):
             self.cfg_ladder_x_grab_threshold = updated_config.get("ladder_x_grab_threshold", self.cfg_ladder_x_grab_threshold)
             self.cfg_move_deadzone = updated_config.get("move_deadzone", self.cfg_move_deadzone)
             self.cfg_max_jump_duration = updated_config.get("max_jump_duration", self.cfg_max_jump_duration)
+            self.cfg_y_movement_deadzone = updated_config.get("y_movement_deadzone", self.cfg_y_movement_deadzone)
+            self.cfg_waypoint_arrival_x_threshold = updated_config.get("waypoint_arrival_x_threshold", self.cfg_waypoint_arrival_x_threshold)
+            self.cfg_ladder_arrival_x_threshold = updated_config.get("ladder_arrival_x_threshold", self.cfg_ladder_arrival_x_threshold)
+            self.cfg_jump_link_arrival_x_threshold = updated_config.get("jump_link_arrival_x_threshold", self.cfg_jump_link_arrival_x_threshold)
             
             self.update_general_log("상태 판정 설정이 업데이트되었습니다.", "blue")
             self.save_profile_data() # 변경사항을 즉시 파일에 저장
@@ -5490,7 +5535,7 @@ class MapTab(QWidget):
     def _update_player_state_and_navigation(self, final_player_pos):
         """
         v10.8.0: 플레이어의 현재 상태를 판정하고, 상태 머신에 따라 다음 행동을 결정합니다.
-        [v11.3.16] 디버그 로그 최적화: climbing/falling 변경 시에만 로그 출력
+        [v11.3.13] '의도된 사다리 타기 점프' 판정 로직 추가
         """
         current_terrain_name = "" 
 
@@ -5498,6 +5543,8 @@ class MapTab(QWidget):
             self.navigator_display.update_data("N/A", "", "없음", "", "", "-", 0, [], None, None, self.is_forward, 'walk', "대기 중", "오류: 위치 없음")
             return
 
+        # ==================== v10.9.5 수정 시작 (UnboundLocalError 해결) ====================
+        # --- 1A. 플레이어 물리적 상태(player_state) 판정 ---
         previous_state = self.player_state
         
         contact_terrain = self._get_contact_terrain(final_player_pos)
@@ -5508,25 +5555,21 @@ class MapTab(QWidget):
         x_movement_abs = abs(x_movement)
         y_movement_abs = abs(y_movement)
         
+        # [v11.3.13] 매 프레임 X축 이동량 기록
         self.x_movement_history.append(x_movement)
 
         if x_movement_abs > self.cfg_move_deadzone or y_movement_abs > self.cfg_move_deadzone:
             self.last_movement_time = time.time()
 
         new_state = previous_state
-        
-        # [v11.3.16] 로그 정보를 담을 리스트
-        debug_log_lines = []
-        debug_log_lines.append(f"\n[STATE_DEBUG] Frame Start: prev_state='{previous_state}', in_jump={self.in_jump}")
-        debug_log_lines.append(f"[STATE_DEBUG] Pos: y_move={y_movement:.2f}, y_above={y_above_terrain:.2f}, x_move_abs={x_movement_abs:.2f}")
 
+        # [v11.1.0] 상수 대신 멤버 변수 사용
         if (time.time() - self.last_movement_time) >= self.cfg_idle_time_threshold:
             new_state = 'idle'
             self.in_jump = False
             self.climbing_candidate_frames = 0
             self.falling_candidate_frames = 0
             self.jumping_candidate_frames = 0
-            debug_log_lines.append(f"[STATE_DEBUG] -> Condition MET: IDLE (time threshold)")
         elif contact_terrain:
             new_state = 'on_terrain'
             self.last_on_terrain_y = final_player_pos.y()
@@ -5534,17 +5577,18 @@ class MapTab(QWidget):
             self.climbing_candidate_frames = 0
             self.falling_candidate_frames = 0
             self.jumping_candidate_frames = 0
-            debug_log_lines.append(f"[STATE_DEBUG] -> Condition MET: ON_TERRAIN")
         else: # 공중 상태
-            debug_log_lines.append(f"[STATE_DEBUG] -> Condition: In Air")
             is_near_ladder, nearest_ladder_x = self._check_near_ladder(final_player_pos, self.geometry_data.get("transition_objects", []), self.cfg_ladder_x_grab_threshold, return_x=True)
             
+            # [v11.3.14] 최우선 순위: '의도된 사다리 타기 점프' 판정 로직 보강
             if self.in_jump and is_near_ladder:
                 approaching_ladder = False
+                # 최근 움직임이 충분히 쌓였을 때만 분석
                 if len(self.x_movement_history) == self.x_movement_history.maxlen:
                     towards_ladder_count = 0
                     reference_x = final_player_pos.x() - x_movement 
                     for move in self.x_movement_history:
+                         # [v11.4.0] '의도된 사다리 타기' 판정 시 move_deadzone 사용
                         if abs(move) > self.cfg_move_deadzone:
                             if (nearest_ladder_x > reference_x and move > 0) or \
                                (nearest_ladder_x < reference_x and move < 0):
@@ -5552,34 +5596,32 @@ class MapTab(QWidget):
                         reference_x += move 
                     if towards_ladder_count >= 3:
                         approaching_ladder = True
-                # [v11.3.18] 디버그 로그 추가
-                debug_log_lines.append(f"[STATE_DEBUG] Intentional Grab Check: approaching={approaching_ladder}, towards_count={towards_ladder_count}")
 
+                # [v11.3.14] 최소 높이 조건 추가
                 if approaching_ladder and x_movement_abs < self.cfg_climb_x_movement_threshold and y_above_terrain > self.cfg_jump_y_min_threshold:
                     new_state = 'climbing'
                     self.in_jump = False
                     self.climbing_candidate_frames = 0
                     self.jumping_candidate_frames = 0
                     self.falling_candidate_frames = 0
-                    debug_log_lines.append(f"[STATE_DEBUG] -> Priority Condition MET: Intentional Ladder Grab (Jump)")
-
+            
+            # [v11.3.9] climbing <-> falling 즉시 전환 로직 (두 번째 우선순위)
             if new_state == previous_state: 
                 if previous_state == 'climbing' and y_movement < 0 and is_near_ladder:
                     new_state = 'falling'
                     self.climbing_candidate_frames = 0
-                    debug_log_lines.append(f"[STATE_DEBUG] -> Priority Condition MET: Climbing to Falling")
-                elif previous_state == 'falling' and y_movement > 0 and is_near_ladder and x_movement_abs < self.cfg_climb_x_movement_threshold:
+                elif previous_state == 'falling' and y_movement > self.cfg_y_movement_deadzone and is_near_ladder and x_movement_abs < self.cfg_climb_x_movement_threshold:
                     new_state = 'climbing'
                     self.falling_candidate_frames = 0
-                    debug_log_lines.append(f"[STATE_DEBUG] -> Priority Condition MET: Falling to Climbing")
             
+            # 위에서 상태가 즉시 결정되지 않은 경우에만 프레임 기반 판정 로직 수행
             if new_state == previous_state:
                 climb_condition_for_jump = not self.in_jump or (self.in_jump and y_above_terrain > self.cfg_jump_y_max_threshold)
                 is_climbing_on_ladder = is_near_ladder and y_movement > 0 and x_movement_abs < self.cfg_climb_x_movement_threshold and climb_condition_for_jump
                 is_climbing_high_jump = y_movement > 0 and y_above_terrain > self.cfg_jump_y_max_threshold
                 is_climbing_now = is_climbing_on_ladder or is_climbing_high_jump
                 
-                is_jumping_now = (previous_state in ['on_terrain', 'idle'] and y_movement > self.cfg_move_deadzone)
+                is_jumping_now = (previous_state == 'on_terrain' and y_movement > self.cfg_move_deadzone)
                 
                 is_falling_now = (y_above_terrain < -self.cfg_fall_y_min_threshold and y_movement < 0 and not is_near_ladder) or \
                                  (is_near_ladder and y_movement < 0 and x_movement_abs < self.cfg_fall_on_ladder_x_movement_threshold and not self.in_jump)
@@ -5587,54 +5629,39 @@ class MapTab(QWidget):
                 self.climbing_candidate_frames = self.climbing_candidate_frames + 1 if is_climbing_now else 0
                 self.jumping_candidate_frames = self.jumping_candidate_frames + 1 if is_jumping_now else 0
                 self.falling_candidate_frames = self.falling_candidate_frames + 1 if is_falling_now else 0
-                debug_log_lines.append(f"[STATE_DEBUG] Candidates: climb_now={is_climbing_now}({self.climbing_candidate_frames}), jump_now={is_jumping_now}({self.jumping_candidate_frames}), fall_now={is_falling_now}({self.falling_candidate_frames})")
 
                 if self.in_jump:
-                    debug_log_lines.append(f"[STATE_DEBUG] Path: In Jump")
                     if self.climbing_candidate_frames >= self.cfg_climbing_state_frame_threshold:
                         new_state = 'climbing'
                         self.in_jump = False
-                        debug_log_lines.append(f"[STATE_DEBUG] -> Condition MET: Climbing (from jump)")
                     elif self.falling_candidate_frames >= self.cfg_falling_state_frame_threshold:
                         new_state = 'falling'
                         self.in_jump = False
-                        debug_log_lines.append(f"[STATE_DEBUG] -> Condition MET: Falling (from jump)")
                     else:
                         new_state = 'jumping'
                 else:
-                    debug_log_lines.append(f"[STATE_DEBUG] Path: Not In Jump")
                     if self.jumping_candidate_frames >= self.cfg_jumping_state_frame_threshold:
                         new_state = 'jumping'
                         self.in_jump = True
                         self.jump_start_time = time.time()
-                        debug_log_lines.append(f"[STATE_DEBUG] -> Condition MET: Jumping (start)")
                     elif self.climbing_candidate_frames >= self.cfg_climbing_state_frame_threshold:
                         new_state = 'climbing'
-                        debug_log_lines.append(f"[STATE_DEBUG] -> Condition MET: Climbing (start)")
                     elif self.falling_candidate_frames >= self.cfg_falling_state_frame_threshold:
                         new_state = 'falling'
-                        debug_log_lines.append(f"[STATE_DEBUG] -> Condition MET: Falling (start)")
                     else:
                         new_state = previous_state
-                        debug_log_lines.append(f"[STATE_DEBUG] -> Condition MET: No change, fallback to previous state")
         
         if self.in_jump and (time.time() - self.jump_start_time) > self.cfg_max_jump_duration:
             self.in_jump = False
             if new_state == 'jumping':
                 new_state = 'falling'
-                debug_log_lines.append(f"[STATE_DEBUG] -> Condition MET: Max Jump Duration Exceeded")
-
-        if new_state != previous_state:
-            # [v11.3.16] climbing 또는 falling으로 변경될 때만 로그를 출력
-            if new_state in ['climbing', 'falling']:
-                debug_log_lines.append(f"[STATE_DEBUG] ### State Changed: '{previous_state}' -> '{new_state}' ###")
-                print("\n".join(debug_log_lines))
 
         self.player_state = new_state
         
         if new_state != previous_state:
             self.last_state_change_time = time.time()
 
+        # 1B. 층/지형 이름 정보 갱신
         if contact_terrain:
             self.current_player_floor = contact_terrain.get('floor')
             current_terrain_name = contact_terrain.get('dynamic_name', '')
