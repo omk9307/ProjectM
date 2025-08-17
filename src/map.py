@@ -25,9 +25,10 @@ from PyQt6.QtWidgets import (
     QLineEdit, QRadioButton, QButtonGroup, QGroupBox, QComboBox,
 
     QGraphicsView, QGraphicsScene, QGraphicsPixmapItem, QCheckBox, QGraphicsRectItem,
-    QGraphicsLineItem, QGraphicsTextItem, QGraphicsEllipseItem, QTabWidget
+    QGraphicsLineItem, QGraphicsTextItem, QGraphicsEllipseItem, QTabWidget,
+    QGraphicsSimpleTextItem
 )
-from PyQt6.QtGui import QPixmap, QImage, QPainter, QPen, QColor, QBrush, QFont, QCursor, QIcon, QPolygonF, QFontMetrics
+from PyQt6.QtGui import QPixmap, QImage, QPainter, QPen, QColor, QBrush, QFont, QCursor, QIcon, QPolygonF, QFontMetrics, QFontMetricsF
 from PyQt6.QtCore import Qt, QThread, pyqtSignal, QRect, QPoint, QRectF, QPointF, QSize, QSizeF
 
 try:
@@ -1524,6 +1525,10 @@ class FullMinimapEditorDialog(QDialog):
         self.lod_threshold = 2.5  # 이름이 보이기 시작하는 줌 LOD 배율 (1.0 = 100%)
         self.lod_text_items = []  # LOD 적용 대상 텍스트 아이템 리스트
         
+        # [v11.1.0] 좌표 텍스트를 위한 LOD 시스템 확장 (배율 조정)
+        self.lod_coord_threshold = 6.0 # 좌표 텍스트가 보이기 시작하는 줌 배율
+        self.lod_coord_items = [] # 좌표 텍스트 아이템 리스트
+
         # 그리기 상태 변수
         self.current_mode = "select" # "select", "terrain", "object", "waypoint", "jump"
         self.is_drawing_line = False
@@ -1538,7 +1543,9 @@ class FullMinimapEditorDialog(QDialog):
         self.is_y_locked = False
         self.locked_position = None # (x, y) 좌표를 저장할 QPointF
         self.y_indicator_line = None
+        self.lock_coord_text_item = None
         self.is_x_locked = False
+        self.x_indicator_line = None
         self._initial_fit_done = False
         # v10.0.0: 새로운 미리보기 아이템들
         self.preview_waypoint_item = None
@@ -1894,35 +1901,68 @@ class FullMinimapEditorDialog(QDialog):
             self.y_indicator_line.setVisible(False)
         elif checked and self.y_indicator_line and self.locked_position is not None:
             self.y_indicator_line.setVisible(True)
-            
+
     def update_locked_position(self, global_pos):
-                self.locked_position = global_pos
-                y_pos = global_pos.y()
-                x_pos = global_pos.x()
-                
-                # v10.3.4: 라인 아이템이 존재하지 않으면 새로 생성
-                if not self.y_indicator_line:
-                    pen = QPen(QColor(255, 0, 0, 150), 1, Qt.PenStyle.DashLine)
-                    self.y_indicator_line = self.scene.addLine(0, 0, 1, 1, pen)
-                    self.y_indicator_line.setZValue(200)
-
-                if not self.x_indicator_line:
-                    pen = QPen(QColor(255, 0, 0, 150), 1, Qt.PenStyle.DashLine)
-                    self.x_indicator_line = self.scene.addLine(0, 0, 1, 1, pen)
-                    self.x_indicator_line.setZValue(200)
-
-                scene_rect = self.scene.sceneRect()
-                if not scene_rect.isValid(): return
-                
-                # v10.3.4: 라인 아이템이 유효한지(씬에 속해 있는지) 확인 후 접근
-                if self.y_indicator_line and self.y_indicator_line.scene():
-                    self.y_indicator_line.setLine(scene_rect.left(), y_pos, scene_rect.right(), y_pos)
-                    self.y_indicator_line.setVisible(self.is_y_locked)
-
-                if self.x_indicator_line and self.x_indicator_line.scene():
-                    self.x_indicator_line.setLine(x_pos, scene_rect.top(), x_pos, scene_rect.bottom())
-                    self.x_indicator_line.setVisible(self.is_x_locked)
+        self.locked_position = global_pos
+        y_pos = global_pos.y()
+        x_pos = global_pos.x()
         
+        pen = QPen(QColor(255, 0, 0, 150), 1, Qt.PenStyle.DashLine)
+        # [v11.2.4] 폰트 크기 2로 통일
+        coord_font = QFont("맑은 고딕", 2, QFont.Weight.Bold)
+        
+        # Y축 고정선
+        if not self.y_indicator_line:
+            self.y_indicator_line = self.scene.addLine(0, 0, 1, 1, pen)
+            self.y_indicator_line.setZValue(200)
+
+        # X축 고정선
+        if not self.x_indicator_line:
+            self.x_indicator_line = self.scene.addLine(0, 0, 1, 1, pen)
+            self.x_indicator_line.setZValue(200)
+
+        scene_rect = self.scene.sceneRect()
+        if not scene_rect.isValid(): return
+        
+        # Y축 고정선 업데이트
+        if self.y_indicator_line and self.y_indicator_line.scene():
+            self.y_indicator_line.setLine(scene_rect.left(), y_pos, scene_rect.right(), y_pos)
+            self.y_indicator_line.setVisible(self.is_y_locked)
+            
+        # X축 고정선 업데이트
+        if self.x_indicator_line and self.x_indicator_line.scene():
+            self.x_indicator_line.setLine(x_pos, scene_rect.top(), x_pos, scene_rect.bottom())
+            self.x_indicator_line.setVisible(self.is_x_locked)
+
+        # [v11.2.4] X/Y축 고정 좌표 텍스트 (QGraphicsSimpleTextItem으로 변경)
+        if not self.lock_coord_text_item:
+            # QGraphicsSimpleTextItem은 더 가볍고 안정적임
+            self.lock_coord_text_item = QGraphicsSimpleTextItem()
+            self.lock_coord_text_item.setFont(coord_font)
+            self.lock_coord_text_item.setBrush(QColor("red"))
+            self.lock_coord_text_item.setZValue(201)
+            self.scene.addItem(self.lock_coord_text_item)
+            self.lod_coord_items.append(self.lock_coord_text_item)
+
+        # 텍스트 내용 동적 생성
+        text_parts = []
+        if self.is_x_locked:
+            text_parts.append(f"X: {x_pos:.1f}")
+        if self.is_y_locked:
+            text_parts.append(f"Y: {y_pos:.1f}")
+        
+        full_text = "  ".join(text_parts)
+        self.lock_coord_text_item.setText(full_text)
+        
+        # 위치 업데이트 (교차점 우측 하단)
+        self.lock_coord_text_item.setPos(x_pos + 5, y_pos + 5)
+        
+        # 가시성 업데이트 (둘 중 하나라도 켜져 있으면 보이도록)
+        self.lock_coord_text_item.setVisible(self.is_x_locked or self.is_y_locked)
+        
+        # LOD 업데이트 강제 호출
+        self._update_lod_visibility()
+
     def _create_feature_color_map(self):
         """핵심 지형 ID별로 고유한 색상을 할당합니다."""
         color_map = {}
@@ -2053,6 +2093,45 @@ class FullMinimapEditorDialog(QDialog):
             except Exception as e:
                 print(f"Error assigning dynamic names to jump links: {e}")
 
+    # [v11.2.0] 좌표 텍스트와 배경을 생성하는 헬퍼 메서드
+    def _create_coord_text_item(self, text, color, font):
+        """
+        좌표 텍스트와 텍스트에 딱 맞는 모서리 둥근 반투명 배경 아이템을 각각 생성하여
+        튜플 (background_item, text_item) 형태로 반환합니다.
+        [v11.2.8] 텍스트/배경 분리 반환 및 패딩 조정
+        """
+        if font is None:
+            fixed_font = QFont("맑은 고딕", 2)
+        else:
+            fixed_font = font
+
+        text_item = QGraphicsTextItem(text)
+        text_item.setFont(fixed_font)
+        text_item.setDefaultTextColor(color)
+
+        fm = QFontMetricsF(fixed_font)
+        text_rect = fm.boundingRect(text)
+
+        # [v11.2.8] 패딩 조정 (좌우 1px, 상하 0px)
+        pad_x = 1
+        pad_y = 0
+
+        bg_width = text_rect.width() + pad_x * 2
+        bg_height = text_rect.height() + pad_y * 2
+        bg_rect_geom = QRectF(0, 0, bg_width, bg_height)
+
+        background_item = RoundedRectItem(bg_rect_geom, 4, 4)
+        background_item.setBrush(QColor(0, 0, 0, 170))
+        background_item.setPen(QPen(Qt.GlobalColor.transparent))
+
+        background_item.setData(0, "coord_text_bg")
+        text_item.setData(0, "coord_text")
+        background_item.setZValue(11)
+        text_item.setZValue(12)
+
+        # [v11.2.8] 두 아이템을 독립적으로 반환
+        return background_item, text_item
+    
     def populate_scene(self):
                 self.scene.clear()
                 # --- v10.3.4 수정: 씬 아이템을 참조하는 멤버 변수 초기화 ---
@@ -2061,6 +2140,11 @@ class FullMinimapEditorDialog(QDialog):
                 self.lod_text_items = []
                 self.y_indicator_line = None
                 self.x_indicator_line = None
+                
+                # [v11.1.0] 좌표 텍스트 아이템 리스트 초기화
+                self.lod_coord_items = []
+                self.x_lock_text_item = None
+                self.y_lock_text_item = None
                 
                 # 1. 배경 이미지 설정
                 if self.parent_map_tab.full_map_pixmap and not self.parent_map_tab.full_map_pixmap.isNull():
@@ -2100,11 +2184,70 @@ class FullMinimapEditorDialog(QDialog):
                             self._add_terrain_line_segment(p1, p2, line_data['id'])
                         for p in points:
                             self._add_vertex_indicator(QPointF(p[0], p[1]), line_data['id'])
-                
+
+                        # [v11.2.8] 지형선 양 끝 꼭짓점 좌표 텍스트 (위치 계산 수정)
+                        p_start = QPointF(points[0][0], points[0][1])
+                        p_end = QPointF(points[-1][0], points[-1][1])
+
+                        left_point = p_start if p_start.x() <= p_end.x() else p_end
+                        right_point = p_end if p_start.x() <= p_end.x() else p_start
+
+                        # 좌측 꼭짓점 좌표
+                        left_text_str = f"({left_point.x():.1f}, {left_point.y():.1f})"
+                        bg_item, text_item = self._create_coord_text_item(left_text_str, QColor("magenta"), None)
+                        bg_rect = bg_item.boundingRect()
+                        text_rect = text_item.boundingRect()
+                        bg_item.setPos(left_point.x() - bg_rect.width() / 2, left_point.y() + 1)
+                        text_item.setPos(bg_item.x() + (bg_rect.width() - text_rect.width()) / 2, bg_item.y() + (bg_rect.height() - text_rect.height()) / 2)
+                        self.scene.addItem(bg_item)
+                        self.scene.addItem(text_item)
+                        self.lod_coord_items.extend([bg_item, text_item])
+                        
+                        # 우측 꼭짓점 좌표
+                        if left_point != right_point:
+                            right_text_str = f"({right_point.x():.1f}, {right_point.y():.1f})"
+                            bg_item, text_item = self._create_coord_text_item(right_text_str, QColor("magenta"), None)
+                            bg_rect = bg_item.boundingRect()
+                            text_rect = text_item.boundingRect()
+                            bg_item.setPos(right_point.x() - bg_rect.width() / 2, right_point.y() - bg_rect.height() - 1)
+                            text_item.setPos(bg_item.x() + (bg_rect.width() - text_rect.width()) / 2, bg_item.y() + (bg_rect.height() - text_rect.height()) / 2)
+                            self.scene.addItem(bg_item)
+                            self.scene.addItem(text_item)
+                            self.lod_coord_items.extend([bg_item, text_item])
+
                 for obj_data in self.geometry_data.get("transition_objects", []):
                     points = obj_data.get("points", [])
                     if len(points) == 2:
-                        line_item = self._add_object_line(QPointF(points[0][0], points[0][1]), QPointF(points[1][0], points[1][1]), obj_data['id'])
+                        p1_pos = QPointF(points[0][0], points[0][1])
+                        p2_pos = QPointF(points[1][0], points[1][1])
+                        line_item = self._add_object_line(p1_pos, p2_pos, obj_data['id'])
+                        
+                        # [v11.2.8] 층 이동 오브젝트 좌표 텍스트 (위치 계산 수정)
+                        upper_point = p1_pos if p1_pos.y() < p2_pos.y() else p2_pos
+                        lower_point = p2_pos if p1_pos.y() < p2_pos.y() else p1_pos
+
+                        # 위쪽 꼭짓점 좌표
+                        upper_text_str = f"({upper_point.x():.1f}, {upper_point.y():.1f})"
+                        bg_item, text_item = self._create_coord_text_item(upper_text_str, QColor("orange"), None)
+                        bg_rect = bg_item.boundingRect()
+                        text_rect = text_item.boundingRect()
+                        bg_item.setPos(upper_point.x() - bg_rect.width() / 2, upper_point.y())
+                        text_item.setPos(bg_item.x() + (bg_rect.width() - text_rect.width()) / 2, bg_item.y() + (bg_rect.height() - text_rect.height()) / 2)
+                        self.scene.addItem(bg_item)
+                        self.scene.addItem(text_item)
+                        self.lod_coord_items.extend([bg_item, text_item])
+
+                        # 아래쪽 꼭짓점 좌표
+                        lower_text_str = f"({lower_point.x():.1f}, {lower_point.y():.1f})"
+                        bg_item, text_item = self._create_coord_text_item(lower_text_str, QColor("orange"), None)
+                        bg_rect = bg_item.boundingRect()
+                        text_rect = text_item.boundingRect()
+                        bg_item.setPos(lower_point.x() - bg_rect.width() / 2, lower_point.y() - bg_rect.height())
+                        text_item.setPos(bg_item.x() + (bg_rect.width() - text_rect.width()) / 2, bg_item.y() + (bg_rect.height() - text_rect.height()) / 2)
+                        self.scene.addItem(bg_item)
+                        self.scene.addItem(text_item)
+                        self.lod_coord_items.extend([bg_item, text_item])
+
                         if 'dynamic_name' in obj_data:
                             name = obj_data['dynamic_name']
                             font = QFont("맑은 고딕", 3, QFont.Weight.Bold)
@@ -2227,28 +2370,34 @@ class FullMinimapEditorDialog(QDialog):
 
     def _update_lod_visibility(self):
         """현재 줌 레벨에 따라 LOD 아이템들의 가시성을 조절합니다."""
-        # 뷰의 현재 스케일(줌 배율) 확인. x축 스케일만 봐도 무방.
         current_zoom = self.view.transform().m11()
         
-        is_visible = current_zoom >= self.lod_threshold
-        
+        # 이름표(지형, 오브젝트 등) 가시성 제어
+        is_name_visible = current_zoom >= self.lod_threshold
         for item in self.lod_text_items:
-            # 보기 옵션 체크박스도 함께 고려
             item_type = item.data(0)
             base_visible = True
             if item_type in ["transition_object_name", "transition_object_name_bg"]:
                 base_visible = self.chk_show_objects.isChecked()
             elif item_type in ["jump_link_name", "jump_link_name_bg"]:
                 base_visible = self.chk_show_jump_links.isChecked()
-            # 지형 이름표(floor_text) 가시성 제어 추가 ---
             elif item_type in ["floor_text", "floor_text_bg"]:
                 base_visible = self.chk_show_terrain.isChecked()
-            # 웨이포인트 텍스트 가시성 제어 추가 ---
             elif item_type == "waypoint_lod_text":
                 base_visible = self.chk_show_waypoints.isChecked()
 
-            item.setVisible(is_visible and base_visible)
+            item.setVisible(is_name_visible and base_visible)
 
+        # [v11.1.0] 좌표 텍스트 가시성 제어
+        is_coord_visible = current_zoom >= self.lod_coord_threshold
+        for item in self.lod_coord_items:
+            # X/Y축 고정 좌표 텍스트는 체크박스 상태도 함께 확인
+            if item is self.x_lock_text_item:
+                item.setVisible(is_coord_visible and self.is_x_locked)
+            elif item is self.y_lock_text_item:
+                item.setVisible(is_coord_visible and self.is_y_locked)
+            else: # 일반 좌표 텍스트
+                item.setVisible(is_coord_visible)
     def on_scene_mouse_press(self, scene_pos, button):
         #  '기본' 모드에서 웨이포인트 클릭 시 이름 변경 기능 추가 ---
         if self.current_mode == "select" and button == Qt.MouseButton.LeftButton:
@@ -3582,6 +3731,20 @@ class MapTab(QWidget):
             self.reference_anchor_id = None
             self.smoothed_player_pos = None
             
+            # [v11.1.0] 상태 판정 상수들을 멤버 변수로 초기화
+            self.cfg_idle_time_threshold = IDLE_TIME_THRESHOLD
+            self.cfg_climbing_state_frame_threshold = CLIMBING_STATE_FRAME_THRESHOLD
+            self.cfg_falling_state_frame_threshold = FALLING_STATE_FRAME_THRESHOLD
+            self.cfg_jumping_state_frame_threshold = JUMPING_STATE_FRAME_THRESHOLD
+            self.cfg_on_terrain_y_threshold = ON_TERRAIN_Y_THRESHOLD
+            self.cfg_jump_y_min_threshold = JUMP_Y_MIN_THRESHOLD
+            self.cfg_jump_y_max_threshold = JUMP_Y_MAX_THRESHOLD
+            self.cfg_fall_y_min_threshold = FALL_Y_MIN_THRESHOLD
+            self.cfg_climb_x_movement_threshold = CLIMB_X_MOVEMENT_THRESHOLD
+            self.cfg_ladder_x_grab_threshold = LADDER_X_GRAB_THRESHOLD
+            self.cfg_move_deadzone = MOVE_DEADZONE
+            self.cfg_max_jump_duration = MAX_JUMP_DURATION
+
             # ==================== v10.9.0 수정 시작 ====================
             # --- 상태 판정 시스템 변수 ---
             self.last_movement_time = 0.0
@@ -3739,6 +3902,60 @@ class MapTab(QWidget):
         detect_layout.addWidget(self.debug_view_checkbox)
         detect_groupbox.setLayout(detect_layout)
         left_layout.addWidget(detect_groupbox)
+        left_layout.addStretch(1)
+
+        # [v11.1.0] 8. 상태 판정 미세 조정 그룹박스 추가 (접기 기능 수정)
+        self.state_config_groupbox = QGroupBox("8. 상태 판정 미세 조정")
+        self.state_config_groupbox.setCheckable(True)
+        
+        # 그룹박스 내의 모든 위젯을 담을 컨테이너 위젯 생성
+        state_config_container = QWidget()
+        state_config_layout = QVBoxLayout(state_config_container)
+        state_config_layout.setContentsMargins(0, 5, 0, 0) # 내부 여백 조절
+
+        # 각 설정 항목을 위한 스핀박스 추가
+        def add_spinbox(layout, label_text, min_val, max_val, step, value, is_double=True, decimals=2):
+            h_layout = QHBoxLayout()
+            h_layout.addWidget(QLabel(label_text))
+            if is_double:
+                spinbox = QDoubleSpinBox()
+                spinbox.setDecimals(decimals)
+            else:
+                spinbox = QSpinBox()
+            spinbox.setRange(min_val, max_val)
+            spinbox.setSingleStep(step)
+            spinbox.setValue(value)
+            spinbox.valueChanged.connect(self._on_state_config_changed)
+            h_layout.addWidget(spinbox)
+            layout.addLayout(h_layout)
+            return spinbox
+
+        self.sb_idle_time = add_spinbox(state_config_layout, "정지 판정 시간(초):", 0.5, 5.0, 0.1, self.cfg_idle_time_threshold)
+        self.sb_climb_frames = add_spinbox(state_config_layout, "등반 판정 프레임:", 1, 10, 1, self.cfg_climbing_state_frame_threshold, is_double=False)
+        self.sb_fall_frames = add_spinbox(state_config_layout, "낙하 판정 프레임:", 1, 10, 1, self.cfg_falling_state_frame_threshold, is_double=False)
+        self.sb_jump_frames = add_spinbox(state_config_layout, "점프 판정 프레임:", 1, 10, 1, self.cfg_jumping_state_frame_threshold, is_double=False)
+        self.sb_on_terrain_y = add_spinbox(state_config_layout, "지상 판정 Y오차(px):", 1.0, 10.0, 0.1, self.cfg_on_terrain_y_threshold)
+        self.sb_jump_y_min = add_spinbox(state_config_layout, "점프 최소 Y오프셋(px):", 1.0, 10.0, 0.1, self.cfg_jump_y_min_threshold)
+        self.sb_jump_y_max = add_spinbox(state_config_layout, "점프 최대 Y오프셋(px):", 1.0, 15.0, 0.1, self.cfg_jump_y_max_threshold)
+        self.sb_fall_y_min = add_spinbox(state_config_layout, "낙하 최소 Y오프셋(px):", 1.0, 10.0, 0.1, self.cfg_fall_y_min_threshold)
+        self.sb_climb_x_move = add_spinbox(state_config_layout, "등반 최대 X이동(px/f):", 0.1, 5.0, 0.1, self.cfg_climb_x_movement_threshold)
+        self.sb_ladder_x_grab = add_spinbox(state_config_layout, "사다리 X오차(px):", 0.5, 10.0, 0.1, self.cfg_ladder_x_grab_threshold)
+        self.sb_move_deadzone = add_spinbox(state_config_layout, "이동 감지 최소값(px):", 0.0, 2.0, 0.1, self.cfg_move_deadzone, decimals=1)
+        self.sb_max_jump_duration = add_spinbox(state_config_layout, "최대 점프 시간(초):", 0.5, 5.0, 0.1, self.cfg_max_jump_duration)
+
+        # 그룹박스의 메인 레이아웃 설정 및 컨테이너 추가
+        groupbox_main_layout = QVBoxLayout(self.state_config_groupbox)
+        groupbox_main_layout.addWidget(state_config_container)
+        
+        # 시그널-슬롯 연결: 체크박스 상태가 변경되면 컨테이너의 가시성을 토글
+        self.state_config_groupbox.toggled.connect(state_config_container.setVisible)
+        
+        # 초기 상태를 접힌 상태로 설정
+        self.state_config_groupbox.setChecked(False)
+        state_config_container.setVisible(False)
+        
+        left_layout.addWidget(self.state_config_groupbox)
+        
         left_layout.addStretch(1)
         
         # 로그 뷰어
@@ -4682,6 +4899,26 @@ class MapTab(QWidget):
                 if self.debug_dialog:
                     self.debug_dialog.close()
 
+    # [v11.1.0] 상태 판정 설정 변경 시 호출되는 슬롯
+    def _on_state_config_changed(self):
+        """상태 판정 UI의 값이 변경되면, 멤버 변수를 업데이트합니다."""
+        self.cfg_idle_time_threshold = self.sb_idle_time.value()
+        self.cfg_climbing_state_frame_threshold = self.sb_climb_frames.value()
+        self.cfg_falling_state_frame_threshold = self.sb_fall_frames.value()
+        self.cfg_jumping_state_frame_threshold = self.sb_jump_frames.value()
+        self.cfg_on_terrain_y_threshold = self.sb_on_terrain_y.value()
+        self.cfg_jump_y_min_threshold = self.sb_jump_y_min.value()
+        self.cfg_jump_y_max_threshold = self.sb_jump_y_max.value()
+        self.cfg_fall_y_min_threshold = self.sb_fall_y_min.value()
+        self.cfg_climb_x_movement_threshold = self.sb_climb_x_move.value()
+        self.cfg_ladder_x_grab_threshold = self.sb_ladder_x_grab.value()
+        self.cfg_move_deadzone = self.sb_move_deadzone.value()
+        self.cfg_max_jump_duration = self.sb_max_jump_duration.value()
+        
+        # 변경 로그 출력 (디버깅용)
+        # print(f"상태 판정 설정 업데이트: Idle Time = {self.cfg_idle_time_threshold}")
+
+
     def on_detection_ready(self, frame_bgr, found_features, my_player_rects_ignored, other_player_rects_ignored):
         """
         탐지 스레드로부터 받은 정보를 처리하고, RANSAC을 이용해 플레이어의 전역 좌표를 강건하게 추정합니다.
@@ -5144,7 +5381,6 @@ class MapTab(QWidget):
         # --- 1A. 플레이어 물리적 상태(player_state) 판정 ---
         previous_state = self.player_state
         
-        # contact_terrain을 메서드 초반에 항상 먼저 계산
         contact_terrain = self._get_contact_terrain(final_player_pos)
         
         y_movement = self.last_player_pos.y() - final_player_pos.y()
@@ -5152,18 +5388,20 @@ class MapTab(QWidget):
         x_movement_abs = abs(final_player_pos.x() - self.last_player_pos.x())
         y_movement_abs = abs(final_player_pos.y() - self.last_player_pos.y())
 
-        if x_movement_abs > MOVE_DEADZONE or y_movement_abs > MOVE_DEADZONE:
+        # [v11.1.0] 상수 대신 멤버 변수 사용
+        if x_movement_abs > self.cfg_move_deadzone or y_movement_abs > self.cfg_move_deadzone:
             self.last_movement_time = time.time()
 
         new_state = previous_state
 
-        if (time.time() - self.last_movement_time) >= IDLE_TIME_THRESHOLD:
+        # [v11.1.0] 상수 대신 멤버 변수 사용
+        if (time.time() - self.last_movement_time) >= self.cfg_idle_time_threshold:
             new_state = 'idle'
             self.in_jump = False
             self.climbing_candidate_frames = 0
             self.falling_candidate_frames = 0
             self.jumping_candidate_frames = 0
-        elif contact_terrain: # _is_on_terrain 대신 직접 사용
+        elif contact_terrain:
             new_state = 'on_terrain'
             self.last_on_terrain_y = final_player_pos.y()
             self.in_jump = False
@@ -5171,36 +5409,37 @@ class MapTab(QWidget):
             self.falling_candidate_frames = 0
             self.jumping_candidate_frames = 0
         else: # 공중 상태
-            is_near_ladder = self._check_near_ladder(final_player_pos, self.geometry_data.get("transition_objects", []), LADDER_X_GRAB_THRESHOLD)
+            # [v11.1.0] 상수 대신 멤버 변수 사용
+            is_near_ladder = self._check_near_ladder(final_player_pos, self.geometry_data.get("transition_objects", []), self.cfg_ladder_x_grab_threshold)
             
-            is_climbing_now = (is_near_ladder and y_movement > 0 and x_movement_abs < CLIMB_X_MOVEMENT_THRESHOLD and y_above_terrain > JUMP_Y_MIN_THRESHOLD) or \
-                              (y_above_terrain > JUMP_Y_MAX_THRESHOLD)
+            is_climbing_now = (is_near_ladder and y_movement > 0 and x_movement_abs < self.cfg_climb_x_movement_threshold and y_above_terrain > self.cfg_jump_y_min_threshold) or \
+                              (y_above_terrain > self.cfg_jump_y_max_threshold)
             
-            is_jumping_now = (previous_state == 'on_terrain' and y_movement > MOVE_DEADZONE)
+            is_jumping_now = (previous_state == 'on_terrain' and y_movement > self.cfg_move_deadzone)
             
-            is_falling_now = (y_above_terrain < -FALL_Y_MIN_THRESHOLD and y_movement < 0) or (is_near_ladder and y_movement < 0)
+            is_falling_now = (y_above_terrain < -self.cfg_fall_y_min_threshold and y_movement < 0) or (is_near_ladder and y_movement < 0)
 
             self.climbing_candidate_frames = self.climbing_candidate_frames + 1 if is_climbing_now else 0
             self.jumping_candidate_frames = self.jumping_candidate_frames + 1 if is_jumping_now else 0
             self.falling_candidate_frames = self.falling_candidate_frames + 1 if is_falling_now else 0
 
             if self.in_jump:
-                if self.climbing_candidate_frames >= CLIMBING_STATE_FRAME_THRESHOLD:
+                if self.climbing_candidate_frames >= self.cfg_climbing_state_frame_threshold:
                     new_state = 'climbing'
                     self.in_jump = False
-                elif self.falling_candidate_frames >= FALLING_STATE_FRAME_THRESHOLD:
+                elif self.falling_candidate_frames >= self.cfg_falling_state_frame_threshold:
                     new_state = 'falling'
                     self.in_jump = False
                 else:
                     new_state = 'jumping'
             else:
-                if self.jumping_candidate_frames >= JUMPING_STATE_FRAME_THRESHOLD:
+                if self.jumping_candidate_frames >= self.cfg_jumping_state_frame_threshold:
                     new_state = 'jumping'
                     self.in_jump = True
                     self.jump_start_time = time.time()
-                elif self.climbing_candidate_frames >= CLIMBING_STATE_FRAME_THRESHOLD:
+                elif self.climbing_candidate_frames >= self.cfg_climbing_state_frame_threshold:
                     new_state = 'climbing'
-                elif self.falling_candidate_frames >= FALLING_STATE_FRAME_THRESHOLD:
+                elif self.falling_candidate_frames >= self.cfg_falling_state_frame_threshold:
                     new_state = 'falling'
                 else:
                     if previous_state in ['climbing', 'falling', 'jumping']:
@@ -5208,7 +5447,8 @@ class MapTab(QWidget):
                     else:
                         new_state = 'falling'
         
-        if self.in_jump and (time.time() - self.jump_start_time) > MAX_JUMP_DURATION:
+        # [v11.1.0] 상수 대신 멤버 변수 사용
+        if self.in_jump and (time.time() - self.jump_start_time) > self.cfg_max_jump_duration:
             self.in_jump = False
             if new_state == 'jumping':
                 new_state = 'falling'
@@ -5558,7 +5798,10 @@ class MapTab(QWidget):
         return self._get_contact_terrain(pos) is not None
 
     def _get_contact_terrain(self, pos):
-        """주어진 위치에서 접촉하고 있는 지형선 데이터를 반환합니다."""
+        """
+        주어진 위치에서 접촉하고 있는 지형선 데이터를 반환합니다.
+        [v11.1.0] UI에서 조정한 설정값을 사용하도록 수정
+        """
         for line_data in self.geometry_data.get("terrain_lines", []):
             points = line_data.get("points", [])
             if len(points) < 2: continue
@@ -5569,7 +5812,8 @@ class MapTab(QWidget):
                 if not (min_lx <= pos.x() <= max_lx): continue
 
                 line_y = p1[1] + (p2[1] - p1[1]) * ((pos.x() - p1[0]) / (p2[0] - p1[0])) if (p2[0] - p1[0]) != 0 else p1[1]
-                if abs(pos.y() - line_y) < ON_TERRAIN_Y_THRESHOLD:
+                # [v11.1.0] 상수 대신 멤버 변수 사용
+                if abs(pos.y() - line_y) < self.cfg_on_terrain_y_threshold:
                     return line_data
         return None
 
