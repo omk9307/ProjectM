@@ -66,14 +66,21 @@ MAX_ICON_HEIGHT = 20
 PLAYER_ICON_STD_WIDTH = 11
 PLAYER_ICON_STD_HEIGHT = 11
 
-# --- 상태 판정 기준 ---
-IDLE_TIME_THRESHOLD = 1.5     # 정지 상태로 판정하기까지의 시간 (초)
-LADDER_X_GRAB_THRESHOLD = 2.0 # 점프 중 사다리로 전이될 x축 허용 오차 (px)
-ON_TERRAIN_Y_THRESHOLD = 3.0  # 지상 판정 y축 허용 오차 (px)
-JUMP_Y_MIN_THRESHOLD = 3.5    # 점프 상태 최소 y 오프셋 (px)
-JUMP_Y_MAX_THRESHOLD = 6.0    # 점프 상태 최대 y 오프셋 (px)
-CLIMB_Y_MIN_THRESHOLD = 7.0  # 등반 상태 최소 y 오프셋 (px)
-FALL_Y_MIN_THRESHOLD = 4.0    # 낙하 상태 최소 y 오프셋 (px)
+# ==================== v10.9.0 상태 판정 시스템 상수 ====================
+IDLE_TIME_THRESHOLD = 1.5       # 정지 상태로 판정되기까지의 시간 (초)
+CLIMBING_STATE_FRAME_THRESHOLD = 3 # climbing 상태로 변경되기까지 필요한 연속 프레임
+FALLING_STATE_FRAME_THRESHOLD = 3  # falling 상태로 변경되기까지 필요한 연속 프레임
+JUMPING_STATE_FRAME_THRESHOLD = 1  # jumping 상태로 변경되기까지 필요한 연속 프레임
+ON_TERRAIN_Y_THRESHOLD = 3.0    # 지상 판정 y축 허용 오차 (px)
+JUMP_Y_MIN_THRESHOLD = 3.5      # 점프 상태로 인식될 최소 y 오프셋 (px)
+JUMP_Y_MAX_THRESHOLD = 6.0      # 점프 상태로 인식될 최대 y 오프셋 (px)
+FALL_Y_MIN_THRESHOLD = 4.0      # 낙하 상태로 인식될 최소 y 오프셋 (px)
+CLIMB_X_MOVEMENT_THRESHOLD = 0.5 # 등반 상태로 판정될 최대 수평 이동량 (px/frame)
+CLIMB_BREAK_Y_THRESHOLD = 1.0   # (미사용)
+LADDER_X_GRAB_THRESHOLD = 2.0   # 사다리 근접으로 판정될 x축 허용 오차 (px)
+MOVE_DEADZONE = 0.2             # 움직임으로 인식되지 않을 최소 이동 거리 (px)
+MAX_JUMP_DURATION = 1.8         # 점프 상태가 강제로 해제되기까지의 최대 시간 (초)
+# =================================================================
 
 # --- 도착 판정 기준 ---
 WAYPOINT_ARRIVAL_X_THRESHOLD = 8.0 # 웨이포인트 도착 x축 허용 오차 (px)
@@ -3508,11 +3515,20 @@ class MapTab(QWidget):
             self.reference_anchor_id = None
             self.smoothed_player_pos = None
             
-            # --- 상태 머신 변수 ---
-            self.player_state = 'idle' # 'idle', 'on_terrain', 'climbing', 'falling', 'jumping'
-            self.navigation_action = 'path_failed' # 'move_to_target', 'prepare_to_climb', 등
+            # ==================== v10.9.0 수정 시작 ====================
+            # --- 상태 판정 시스템 변수 ---
+            self.last_movement_time = 0.0
+            self.player_state = 'on_terrain' # 초기값
+            self.in_jump = False
+            self.jump_lock = False # (의사코드에는 있지만, jumping 판정 로직에 통합되어 실제 변수로는 불필요)
+            self.jump_start_time = 0.0
+            self.navigation_action = 'path_failed' # 누락되었던 변수 추가
+            self.jumping_candidate_frames = 0
+            self.climbing_candidate_frames = 0
+            self.falling_candidate_frames = 0
+            # ==================== v10.9.0 수정 끝 ======================
+            
             self.last_on_terrain_y = 0.0 # 마지막으로 지상에 있었을 때의 y좌표
-            self.last_movement_time = 0.0 # 마지막으로 움직임이 감지된 시간
             
             self.player_nav_state = 'on_terrain'  # 'on_terrain', 'climbing', 'jumping', 'falling'
             self.current_player_floor = None
@@ -5004,84 +5020,87 @@ class MapTab(QWidget):
             self.navigator_display.update_data("N/A", "", "없음", "", "", "-", 0, [], None, None, self.is_forward, 'walk', "대기 중", "오류: 위치 없음")
             return
 
-        # ==================== v10.8.5 수정 시작 (점프 상태 '락' 메커니즘 구현) ====================
+        # ==================== v10.9.5 수정 시작 (UnboundLocalError 해결) ====================
         # --- 1A. 플레이어 물리적 상태(player_state) 판정 ---
-        contact_terrain = None
-        min_y_dist = ON_TERRAIN_Y_THRESHOLD
+        previous_state = self.player_state
         
-        for line_data in self.geometry_data.get("terrain_lines", []):
-            points = line_data.get("points", [])
-            if len(points) < 2: continue
-            for i in range(len(points) - 1):
-                p1, p2 = points[i], points[i+1]; min_lx, max_lx = min(p1[0], p2[0]), max(p1[0], p2[0])
-                if not (min_lx <= final_player_pos.x() <= max_lx): continue
-                line_y = p1[1] + (p2[1] - p1[1]) * ((final_player_pos.x() - p1[0]) / (p2[0] - p1[0])) if (p2[0] - p1[0]) != 0 else p1[1]
-                if abs(final_player_pos.y() - line_y) < min_y_dist:
-                    min_y_dist = abs(final_player_pos.y() - line_y); contact_terrain = line_data
+        # contact_terrain을 메서드 초반에 항상 먼저 계산
+        contact_terrain = self._get_contact_terrain(final_player_pos)
         
         y_movement = self.last_player_pos.y() - final_player_pos.y()
-        x_movement = abs(final_player_pos.x() - self.last_player_pos.x())
+        y_above_terrain = self.last_on_terrain_y - final_player_pos.y()
+        x_movement_abs = abs(final_player_pos.x() - self.last_player_pos.x())
+        y_movement_abs = abs(final_player_pos.y() - self.last_player_pos.y())
 
-        if x_movement > 0.1 or abs(y_movement) > 0.1:
+        if x_movement_abs > MOVE_DEADZONE or y_movement_abs > MOVE_DEADZONE:
             self.last_movement_time = time.time()
-        
-        # --- 상태 판정 로직 시작 ---
-        new_state = self.player_state
-        
-        # '점프 락' 활성화 조건: 이전 상태가 점프이고, 현재 땅에 닿지 않았을 때
-        is_jump_lock_active = (self.player_state == 'jumping' and not contact_terrain)
-        
-        # '점프 락' 해제 조건: 사다리에 1px 이내로 근접했을 때
-        can_unlock_jump = False
-        if is_jump_lock_active:
-            for obj in self.geometry_data.get("transition_objects", []):
-                if abs(final_player_pos.x() - obj['points'][0][0]) < LADDER_X_GRAB_THRESHOLD:
-                    can_unlock_jump = True
-                    break
-        
-        # 점프 락이 활성화되어 있고, 해제할 수 없다면 상태를 강제로 유지
-        if is_jump_lock_active and not can_unlock_jump:
-            new_state = 'jumping'
-        else:
-            # 일반 상태 판정 (락이 비활성화되거나, 해제되었을 때)
-            if contact_terrain:
-                self.last_on_terrain_y = final_player_pos.y()
-                self.current_player_floor = contact_terrain.get('floor')
-                current_terrain_name = contact_terrain.get('dynamic_name', '')
-                
-                if time.time() - self.last_movement_time > IDLE_TIME_THRESHOLD:
-                    new_state = 'idle'
-                else:
-                    new_state = 'on_terrain'
-            else: # 공중 상태
-                y_above_terrain = self.last_on_terrain_y - final_player_pos.y()
-                
-                is_near_ladder = False
-                for obj in self.geometry_data.get("transition_objects", []):
-                    if abs(final_player_pos.x() - obj['points'][0][0]) < 5.0:
-                        is_near_ladder = True
-                        break
-                
-                if is_near_ladder and y_movement > 0 and y_above_terrain > CLIMB_Y_MIN_THRESHOLD:
+
+        new_state = previous_state
+
+        if (time.time() - self.last_movement_time) >= IDLE_TIME_THRESHOLD:
+            new_state = 'idle'
+            self.in_jump = False
+            self.climbing_candidate_frames = 0
+            self.falling_candidate_frames = 0
+            self.jumping_candidate_frames = 0
+        elif contact_terrain: # _is_on_terrain 대신 직접 사용
+            new_state = 'on_terrain'
+            self.last_on_terrain_y = final_player_pos.y()
+            self.in_jump = False
+            self.climbing_candidate_frames = 0
+            self.falling_candidate_frames = 0
+            self.jumping_candidate_frames = 0
+        else: # 공중 상태
+            is_near_ladder = self._check_near_ladder(final_player_pos, self.geometry_data.get("transition_objects", []), LADDER_X_GRAB_THRESHOLD)
+            
+            is_climbing_now = (is_near_ladder and y_movement > 0 and x_movement_abs < CLIMB_X_MOVEMENT_THRESHOLD and y_above_terrain > JUMP_Y_MIN_THRESHOLD) or \
+                              (y_above_terrain > JUMP_Y_MAX_THRESHOLD)
+            
+            is_jumping_now = (previous_state == 'on_terrain' and y_movement > MOVE_DEADZONE)
+            
+            is_falling_now = (y_above_terrain < -FALL_Y_MIN_THRESHOLD and y_movement < 0) or (is_near_ladder and y_movement < 0)
+
+            self.climbing_candidate_frames = self.climbing_candidate_frames + 1 if is_climbing_now else 0
+            self.jumping_candidate_frames = self.jumping_candidate_frames + 1 if is_jumping_now else 0
+            self.falling_candidate_frames = self.falling_candidate_frames + 1 if is_falling_now else 0
+
+            if self.in_jump:
+                if self.climbing_candidate_frames >= CLIMBING_STATE_FRAME_THRESHOLD:
                     new_state = 'climbing'
-                elif y_above_terrain > JUMP_Y_MIN_THRESHOLD and y_above_terrain < JUMP_Y_MAX_THRESHOLD:
+                    self.in_jump = False
+                elif self.falling_candidate_frames >= FALLING_STATE_FRAME_THRESHOLD:
+                    new_state = 'falling'
+                    self.in_jump = False
+                else:
                     new_state = 'jumping'
-                elif y_above_terrain < -FALL_Y_MIN_THRESHOLD and y_movement < 0:
+            else:
+                if self.jumping_candidate_frames >= JUMPING_STATE_FRAME_THRESHOLD:
+                    new_state = 'jumping'
+                    self.in_jump = True
+                    self.jump_start_time = time.time()
+                elif self.climbing_candidate_frames >= CLIMBING_STATE_FRAME_THRESHOLD:
+                    new_state = 'climbing'
+                elif self.falling_candidate_frames >= FALLING_STATE_FRAME_THRESHOLD:
                     new_state = 'falling'
                 else:
-                    if is_near_ladder and y_movement < 0:
-                        new_state = 'falling'
+                    if previous_state in ['climbing', 'falling', 'jumping']:
+                        new_state = previous_state
                     else:
-                        new_state = 'idle'
+                        new_state = 'falling'
+        
+        if self.in_jump and (time.time() - self.jump_start_time) > MAX_JUMP_DURATION:
+            self.in_jump = False
+            if new_state == 'jumping':
+                new_state = 'falling'
 
         self.player_state = new_state
-
-        # --- 1B. 내비게이션 상태 갱신 (기존 로직) ---
+        
+        # 1B. 층/지형 이름 정보 갱신
         if contact_terrain:
-            if self.intermediate_target_type == 'climb_arrived' and self.current_player_floor is not None and contact_terrain.get('floor', -1) > self.current_player_floor:
-                self.intermediate_target_type = 'walk'
+            self.current_player_floor = contact_terrain.get('floor')
+            current_terrain_name = contact_terrain.get('dynamic_name', '')
             self.last_terrain_line_id = contact_terrain.get('id')
-        # ==================== v10.8.5 수정 끝 ======================
+        # ==================== v10.9.4 수정 끝 ======================
         active_route = self.route_profiles.get(self.active_route_profile_name)
         if not active_route: return
         all_waypoints_map = {wp['id']: wp for wp in self.geometry_data.get("waypoints", [])}
@@ -5185,7 +5204,7 @@ class MapTab(QWidget):
         all_candidates = []
         target_floor = final_target_wp.get('floor')
 
-        if abs(self.current_player_floor - target_floor) < 0.1: # Case A: 동일 층
+        if abs(self.current_player_floor - target_floor) < 0.1:# 이 라인에서 더 이상 UnboundLocalError가 발생하지 않음
             current_terrain_group = contact_terrain.get('dynamic_name') if contact_terrain else None
             target_terrain_id = final_target_wp.get('parent_line_id')
             target_terrain_data = next((line for line in self.geometry_data.get("terrain_lines", []) if line['id'] == target_terrain_id), None)
@@ -5395,6 +5414,43 @@ class MapTab(QWidget):
                 # 부동소수점 비교를 위해 작은 허용 오차(epsilon) 사용
                 if abs(point[0] - vertex_pos[0]) < 1e-6 and abs(point[1] - vertex_pos[1]) < 1e-6:
                     return line['id']
+        return None
+
+    def _check_near_ladder(self, pos, transition_objects, x_tol):
+        """주어진 위치가 사다리 근처인지 확인합니다."""
+        for obj in transition_objects:
+            points = obj.get("points")
+            if not points or len(points) < 2:
+                continue
+            
+            # 사다리는 수직이므로 x좌표는 동일
+            ladder_x = points[0][0]
+            if abs(pos.x() - ladder_x) <= x_tol:
+                # y축 범위도 확인하여 더 정확하게 판정
+                min_y = min(points[0][1], points[1][1])
+                max_y = max(points[0][1], points[1][1])
+                if pos.y() >= min_y and pos.y() <= max_y:
+                    return True
+        return False
+
+    def _is_on_terrain(self, pos):
+        """주어진 위치가 지형선 위에 있는지 확인합니다."""
+        return self._get_contact_terrain(pos) is not None
+
+    def _get_contact_terrain(self, pos):
+        """주어진 위치에서 접촉하고 있는 지형선 데이터를 반환합니다."""
+        for line_data in self.geometry_data.get("terrain_lines", []):
+            points = line_data.get("points", [])
+            if len(points) < 2: continue
+            for i in range(len(points) - 1):
+                p1, p2 = points[i], points[i+1]
+                min_lx, max_lx = min(p1[0], p2[0]), max(p1[0], p2[0])
+
+                if not (min_lx <= pos.x() <= max_lx): continue
+
+                line_y = p1[1] + (p2[1] - p1[1]) * ((pos.x() - p1[0]) / (p2[0] - p1[0])) if (p2[0] - p1[0]) != 0 else p1[1]
+                if abs(pos.y() - line_y) < ON_TERRAIN_Y_THRESHOLD:
+                    return line_data
         return None
 
     def update_general_log(self, message, color):
