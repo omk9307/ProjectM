@@ -54,7 +54,7 @@ except Exception as e:
 # === [v11.0.0] MapConfig: 중앙화된 설정 (추가) ===
 MapConfig = {
     "downscale": 0.7,                # 탐지용 다운스케일 비율 (0.3~1.0)
-    "target_fps": 30,                # 캡처 스레드 목표 FPS
+    "target_fps": 20,                # 캡처 스레드 목표 FPS
     "detection_threshold_default": 0.85,
     "loop_time_fallback_ms": 120,    # 루프 시간이 이 값을 넘으면 폴백 적용
     "use_new_capture": True,         # Feature flag — 변경 시 레거시 모드로 자동 복귀 가능
@@ -88,15 +88,17 @@ PLAYER_ICON_STD_WIDTH = 11
 PLAYER_ICON_STD_HEIGHT = 11
 
 # ==================== v10.9.0 상태 판정 시스템 상수 ====================
-IDLE_TIME_THRESHOLD = 1.5       # 정지 상태로 판정되기까지의 시간 (초)
-CLIMBING_STATE_FRAME_THRESHOLD = 3 # climbing 상태로 변경되기까지 필요한 연속 프레임
-FALLING_STATE_FRAME_THRESHOLD = 3  # falling 상태로 변경되기까지 필요한 연속 프레임
+# [v11.3.1] 사용자 피드백 기반 기본값 조정
+IDLE_TIME_THRESHOLD = 1.0        # 정지 상태로 판정되기까지의 시간 (초)
+CLIMBING_STATE_FRAME_THRESHOLD = 27 # climbing 상태로 변경되기까지 필요한 연속 프레임
+FALLING_STATE_FRAME_THRESHOLD = 30  # falling 상태로 변경되기까지 필요한 연속 프레임
 JUMPING_STATE_FRAME_THRESHOLD = 1  # jumping 상태로 변경되기까지 필요한 연속 프레임
 ON_TERRAIN_Y_THRESHOLD = 3.0    # 지상 판정 y축 허용 오차 (px)
 JUMP_Y_MIN_THRESHOLD = 3.5      # 점프 상태로 인식될 최소 y 오프셋 (px)
-JUMP_Y_MAX_THRESHOLD = 6.0      # 점프 상태로 인식될 최대 y 오프셋 (px)
+JUMP_Y_MAX_THRESHOLD = 10.0      # 점프 상태로 인식될 최대 y 오프셋 (px)
 FALL_Y_MIN_THRESHOLD = 4.0      # 낙하 상태로 인식될 최소 y 오프셋 (px)
 CLIMB_X_MOVEMENT_THRESHOLD = 0.5 # 등반 상태로 판정될 최대 수평 이동량 (px/frame)
+FALL_ON_LADDER_X_MOVEMENT_THRESHOLD = 1.0 # [v11.3.1] 사다리 낙하 판정 최대 수평 이동량
 CLIMB_BREAK_Y_THRESHOLD = 1.0   # (미사용)
 LADDER_X_GRAB_THRESHOLD = 2.0   # 사다리 근접으로 판정될 x축 허용 오차 (px)
 MOVE_DEADZONE = 0.2             # 움직임으로 인식되지 않을 최소 이동 거리 (px)
@@ -2135,6 +2137,7 @@ class FullMinimapEditorDialog(QDialog):
     def populate_scene(self):
                 self.scene.clear()
                 # --- v10.3.4 수정: 씬 아이템을 참조하는 멤버 변수 초기화 ---
+                # [v11.3.2 BUGFIX] RuntimeError 방지를 위해 초기화 강화
                 self.snap_indicator = None
                 self.preview_waypoint_item = None
                 self.lod_text_items = []
@@ -2143,8 +2146,8 @@ class FullMinimapEditorDialog(QDialog):
                 
                 # [v11.1.0] 좌표 텍스트 아이템 리스트 초기화
                 self.lod_coord_items = []
-                self.x_lock_text_item = None
-                self.y_lock_text_item = None
+                # [v11.3.2] lock_coord_text_item 초기화를 명시적으로 수행
+                self.lock_coord_text_item = None
                 
                 # 1. 배경 이미지 설정
                 if self.parent_map_tab.full_map_pixmap and not self.parent_map_tab.full_map_pixmap.isNull():
@@ -2369,7 +2372,10 @@ class FullMinimapEditorDialog(QDialog):
                 item.setVisible(show_jump_links)
 
     def _update_lod_visibility(self):
-        """현재 줌 레벨에 따라 LOD 아이템들의 가시성을 조절합니다."""
+        """
+        현재 줌 레벨에 따라 LOD 아이템들의 가시성을 조절합니다.
+        [v11.3.3 BUGFIX] AttributeError 해결: 통합된 lock_coord_text_item 참조
+        """
         current_zoom = self.view.transform().m11()
         
         # 이름표(지형, 오브젝트 등) 가시성 제어
@@ -2388,16 +2394,18 @@ class FullMinimapEditorDialog(QDialog):
 
             item.setVisible(is_name_visible and base_visible)
 
-        # [v11.1.0] 좌표 텍스트 가시성 제어
+        # 좌표 텍스트 가시성 제어
         is_coord_visible = current_zoom >= self.lod_coord_threshold
         for item in self.lod_coord_items:
-            # X/Y축 고정 좌표 텍스트는 체크박스 상태도 함께 확인
-            if item is self.x_lock_text_item:
-                item.setVisible(is_coord_visible and self.is_x_locked)
-            elif item is self.y_lock_text_item:
-                item.setVisible(is_coord_visible and self.is_y_locked)
-            else: # 일반 좌표 텍스트
+            # [v11.3.3] 통합된 lock_coord_text_item의 가시성 제어
+            if item is self.lock_coord_text_item:
+                # 줌 레벨이 맞고, X 또는 Y축 고정 중 하나라도 켜져 있으면 보이도록 함
+                is_lock_active = self.is_x_locked or self.is_y_locked
+                item.setVisible(is_coord_visible and is_lock_active)
+            else: # 일반 좌표 텍스트 (지형선, 오브젝트)
+                # coord_text_group, coord_text_bg, coord_text 모두 처리
                 item.setVisible(is_coord_visible)
+                
     def on_scene_mouse_press(self, scene_pos, button):
         #  '기본' 모드에서 웨이포인트 클릭 시 이름 변경 기능 추가 ---
         if self.current_mode == "select" and button == Qt.MouseButton.LeftButton:
@@ -3706,6 +3714,94 @@ class AnchorDetectionThread(QThread):
         except Exception as e:
             print(f"[AnchorDetectionThread] 정지 대기 실패: {e}")
 
+# [v11.3.0] 상태 판정 설정을 위한 팝업 다이얼로그 클래스
+class StateConfigDialog(QDialog):
+    def __init__(self, current_config, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("상태 판정 미세 조정")
+        self.setMinimumWidth(400)
+        
+        self.config = current_config.copy() # 현재 설정을 복사하여 사용
+        
+        main_layout = QVBoxLayout(self)
+        form_layout = QVBoxLayout()
+
+        # 각 설정 항목을 위한 스핀박스 추가
+        def add_spinbox(layout, key, label_text, min_val, max_val, step, is_double=True, decimals=2):
+            h_layout = QHBoxLayout()
+            h_layout.addWidget(QLabel(label_text))
+            if is_double:
+                spinbox = QDoubleSpinBox()
+                spinbox.setDecimals(decimals)
+            else:
+                spinbox = QSpinBox()
+            spinbox.setRange(min_val, max_val)
+            spinbox.setSingleStep(step)
+            spinbox.setValue(self.config.get(key, 0))
+            spinbox.setObjectName(key) # 나중에 값을 읽어오기 위해 객체 이름 설정
+            h_layout.addWidget(spinbox)
+            layout.addLayout(h_layout)
+            return spinbox
+
+        add_spinbox(form_layout, "idle_time_threshold", "정지 판정 시간(초):", 0.5, 5.0, 0.1)
+        add_spinbox(form_layout, "climbing_state_frame_threshold", "등반 판정 프레임:", 1, 100, 1, is_double=False)
+        add_spinbox(form_layout, "falling_state_frame_threshold", "낙하 판정 프레임:", 1, 100, 1, is_double=False)
+        add_spinbox(form_layout, "jumping_state_frame_threshold", "점프 판정 프레임:", 1, 100, 1, is_double=False)
+        add_spinbox(form_layout, "on_terrain_y_threshold", "지상 판정 Y오차(px):", 1.0, 30.0, 0.1)
+        add_spinbox(form_layout, "jump_y_min_threshold", "점프 최소 Y오프셋(px):", 1.0, 30.0, 0.1)
+        add_spinbox(form_layout, "jump_y_max_threshold", "점프 최대 Y오프셋(px):", 1.0, 30.0, 0.1)
+        add_spinbox(form_layout, "fall_y_min_threshold", "낙하 최소 Y오프셋(px):", 1.0, 30.0, 0.1)
+        add_spinbox(form_layout, "climb_x_movement_threshold", "등반 최대 X이동(px/f):", 0.1, 10.0, 0.1)
+        add_spinbox(form_layout, "fall_on_ladder_x_movement_threshold", "사다리 낙하 최대 X이동(px/f):", 0.1, 10.0, 0.1)
+        add_spinbox(form_layout, "ladder_x_grab_threshold", "사다리 X오차(px):", 0.5, 10.0, 0.1)
+        add_spinbox(form_layout, "move_deadzone", "이동 감지 최소값(px):", 0.0, 2.0, 0.1, decimals=1)
+        add_spinbox(form_layout, "max_jump_duration", "최대 점프 시간(초):", 0.5, 5.0, 0.1)
+        
+        main_layout.addLayout(form_layout)
+        
+        # 버튼 추가
+        button_box = QDialogButtonBox()
+        save_btn = button_box.addButton("저장", QDialogButtonBox.ButtonRole.AcceptRole)
+        cancel_btn = button_box.addButton("취소", QDialogButtonBox.ButtonRole.RejectRole)
+        default_btn = button_box.addButton("기본값 복원", QDialogButtonBox.ButtonRole.ResetRole)
+        
+        save_btn.clicked.connect(self.accept)
+        cancel_btn.clicked.connect(self.reject)
+        default_btn.clicked.connect(self.restore_defaults)
+        
+        main_layout.addWidget(button_box)
+
+    def get_updated_config(self):
+        # UI의 현재 값들을 읽어 딕셔너리로 반환
+        updated_config = {}
+        for spinbox in self.findChildren(QSpinBox) + self.findChildren(QDoubleSpinBox):
+            key = spinbox.objectName()
+            updated_config[key] = spinbox.value()
+        return updated_config
+
+    def restore_defaults(self):
+        # 파일 상단의 기본 상수 값으로 UI를 리셋
+        defaults = {
+            "idle_time_threshold": IDLE_TIME_THRESHOLD,
+            "climbing_state_frame_threshold": CLIMBING_STATE_FRAME_THRESHOLD,
+            "falling_state_frame_threshold": FALLING_STATE_FRAME_THRESHOLD,
+            "jumping_state_frame_threshold": JUMPING_STATE_FRAME_THRESHOLD,
+            "on_terrain_y_threshold": ON_TERRAIN_Y_THRESHOLD,
+            "jump_y_min_threshold": JUMP_Y_MIN_THRESHOLD,
+            "jump_y_max_threshold": JUMP_Y_MAX_THRESHOLD,
+            "fall_y_min_threshold": FALL_Y_MIN_THRESHOLD,
+            "climb_x_movement_threshold": CLIMB_X_MOVEMENT_THRESHOLD,
+            "fall_on_ladder_x_movement_threshold": FALL_ON_LADDER_X_MOVEMENT_THRESHOLD,
+            "ladder_x_grab_threshold": LADDER_X_GRAB_THRESHOLD,
+            "move_deadzone": MOVE_DEADZONE,
+            "max_jump_duration": MAX_JUMP_DURATION,
+        }
+        for spinbox in self.findChildren(QSpinBox) + self.findChildren(QDoubleSpinBox):
+            key = spinbox.objectName()
+            if key in defaults:
+                spinbox.setValue(defaults[key])
+
+
 class MapTab(QWidget):
     global_pos_updated = pyqtSignal(QPointF)
 
@@ -3718,7 +3814,7 @@ class MapTab(QWidget):
             self.active_route_profile_name = None
             self.route_profiles = {}
             self.detection_thread = None
-            self.capture_thread = None # <<< [v11.0.0] 추가
+            self.capture_thread = None
             self.debug_dialog = None
             self.editor_dialog = None 
             self.global_positions = {}
@@ -3731,19 +3827,20 @@ class MapTab(QWidget):
             self.reference_anchor_id = None
             self.smoothed_player_pos = None
             
-            # [v11.1.0] 상태 판정 상수들을 멤버 변수로 초기화
-            self.cfg_idle_time_threshold = IDLE_TIME_THRESHOLD
-            self.cfg_climbing_state_frame_threshold = CLIMBING_STATE_FRAME_THRESHOLD
-            self.cfg_falling_state_frame_threshold = FALLING_STATE_FRAME_THRESHOLD
-            self.cfg_jumping_state_frame_threshold = JUMPING_STATE_FRAME_THRESHOLD
-            self.cfg_on_terrain_y_threshold = ON_TERRAIN_Y_THRESHOLD
-            self.cfg_jump_y_min_threshold = JUMP_Y_MIN_THRESHOLD
-            self.cfg_jump_y_max_threshold = JUMP_Y_MAX_THRESHOLD
-            self.cfg_fall_y_min_threshold = FALL_Y_MIN_THRESHOLD
-            self.cfg_climb_x_movement_threshold = CLIMB_X_MOVEMENT_THRESHOLD
-            self.cfg_ladder_x_grab_threshold = LADDER_X_GRAB_THRESHOLD
-            self.cfg_move_deadzone = MOVE_DEADZONE
-            self.cfg_max_jump_duration = MAX_JUMP_DURATION
+            # [v11.3.7] 설정 변수 선언만 하고 값 할당은 load_profile_data로 위임
+            self.cfg_idle_time_threshold = None
+            self.cfg_climbing_state_frame_threshold = None
+            self.cfg_falling_state_frame_threshold = None
+            self.cfg_jumping_state_frame_threshold = None
+            self.cfg_on_terrain_y_threshold = None
+            self.cfg_jump_y_min_threshold = None
+            self.cfg_jump_y_max_threshold = None
+            self.cfg_fall_y_min_threshold = None
+            self.cfg_climb_x_movement_threshold = None
+            self.cfg_fall_on_ladder_x_movement_threshold = None
+            self.cfg_ladder_x_grab_threshold = None
+            self.cfg_move_deadzone = None
+            self.cfg_max_jump_duration = None
 
             # ==================== v10.9.0 수정 시작 ====================
             # --- 상태 판정 시스템 변수 ---
@@ -3888,74 +3985,32 @@ class MapTab(QWidget):
         self.editor_groupbox.setLayout(editor_layout)
         left_layout.addWidget(self.editor_groupbox)
         
-        # 7. 탐지 제어 (기존과 동일)
+        # 7. 탐지 제어
+        # [v11.3.5] UI 순서 및 텍스트 변경
         detect_groupbox = QGroupBox("7. 탐지 제어")
-        detect_layout = QVBoxLayout()
+        detect_layout = QHBoxLayout()
+
+        # 좌측: 디버그 뷰 체크박스
+        self.debug_view_checkbox = QCheckBox("디버그 뷰")
+        self.debug_view_checkbox.toggled.connect(self.toggle_debug_view)
+        detect_layout.addWidget(self.debug_view_checkbox)
+        
+        detect_layout.addStretch(1) # 중앙 공간
+        
+        # 우측: 버튼들
+        self.state_config_btn = QPushButton("상태판정 설정")
+        self.state_config_btn.clicked.connect(self._open_state_config_dialog)
+        
         self.detect_anchor_btn = QPushButton("탐지 시작")
         self.detect_anchor_btn.setCheckable(True)
         self.detect_anchor_btn.clicked.connect(self.toggle_anchor_detection)
-        # 디버그 뷰 체크박스 추가
-        self.debug_view_checkbox = QCheckBox("디버그 뷰 표시")
-        self.debug_view_checkbox.toggled.connect(self.toggle_debug_view)
+        
+        detect_layout.addWidget(self.state_config_btn)
         detect_layout.addWidget(self.detect_anchor_btn)
-        #  체크박스를 레이아웃에 추가 ---
-        detect_layout.addWidget(self.debug_view_checkbox)
+        
         detect_groupbox.setLayout(detect_layout)
         left_layout.addWidget(detect_groupbox)
-        left_layout.addStretch(1)
 
-        # [v11.1.0] 8. 상태 판정 미세 조정 그룹박스 추가 (접기 기능 수정)
-        self.state_config_groupbox = QGroupBox("8. 상태 판정 미세 조정")
-        self.state_config_groupbox.setCheckable(True)
-        
-        # 그룹박스 내의 모든 위젯을 담을 컨테이너 위젯 생성
-        state_config_container = QWidget()
-        state_config_layout = QVBoxLayout(state_config_container)
-        state_config_layout.setContentsMargins(0, 5, 0, 0) # 내부 여백 조절
-
-        # 각 설정 항목을 위한 스핀박스 추가
-        def add_spinbox(layout, label_text, min_val, max_val, step, value, is_double=True, decimals=2):
-            h_layout = QHBoxLayout()
-            h_layout.addWidget(QLabel(label_text))
-            if is_double:
-                spinbox = QDoubleSpinBox()
-                spinbox.setDecimals(decimals)
-            else:
-                spinbox = QSpinBox()
-            spinbox.setRange(min_val, max_val)
-            spinbox.setSingleStep(step)
-            spinbox.setValue(value)
-            spinbox.valueChanged.connect(self._on_state_config_changed)
-            h_layout.addWidget(spinbox)
-            layout.addLayout(h_layout)
-            return spinbox
-
-        self.sb_idle_time = add_spinbox(state_config_layout, "정지 판정 시간(초):", 0.5, 5.0, 0.1, self.cfg_idle_time_threshold)
-        self.sb_climb_frames = add_spinbox(state_config_layout, "등반 판정 프레임:", 1, 10, 1, self.cfg_climbing_state_frame_threshold, is_double=False)
-        self.sb_fall_frames = add_spinbox(state_config_layout, "낙하 판정 프레임:", 1, 10, 1, self.cfg_falling_state_frame_threshold, is_double=False)
-        self.sb_jump_frames = add_spinbox(state_config_layout, "점프 판정 프레임:", 1, 10, 1, self.cfg_jumping_state_frame_threshold, is_double=False)
-        self.sb_on_terrain_y = add_spinbox(state_config_layout, "지상 판정 Y오차(px):", 1.0, 10.0, 0.1, self.cfg_on_terrain_y_threshold)
-        self.sb_jump_y_min = add_spinbox(state_config_layout, "점프 최소 Y오프셋(px):", 1.0, 10.0, 0.1, self.cfg_jump_y_min_threshold)
-        self.sb_jump_y_max = add_spinbox(state_config_layout, "점프 최대 Y오프셋(px):", 1.0, 15.0, 0.1, self.cfg_jump_y_max_threshold)
-        self.sb_fall_y_min = add_spinbox(state_config_layout, "낙하 최소 Y오프셋(px):", 1.0, 10.0, 0.1, self.cfg_fall_y_min_threshold)
-        self.sb_climb_x_move = add_spinbox(state_config_layout, "등반 최대 X이동(px/f):", 0.1, 5.0, 0.1, self.cfg_climb_x_movement_threshold)
-        self.sb_ladder_x_grab = add_spinbox(state_config_layout, "사다리 X오차(px):", 0.5, 10.0, 0.1, self.cfg_ladder_x_grab_threshold)
-        self.sb_move_deadzone = add_spinbox(state_config_layout, "이동 감지 최소값(px):", 0.0, 2.0, 0.1, self.cfg_move_deadzone, decimals=1)
-        self.sb_max_jump_duration = add_spinbox(state_config_layout, "최대 점프 시간(초):", 0.5, 5.0, 0.1, self.cfg_max_jump_duration)
-
-        # 그룹박스의 메인 레이아웃 설정 및 컨테이너 추가
-        groupbox_main_layout = QVBoxLayout(self.state_config_groupbox)
-        groupbox_main_layout.addWidget(state_config_container)
-        
-        # 시그널-슬롯 연결: 체크박스 상태가 변경되면 컨테이너의 가시성을 토글
-        self.state_config_groupbox.toggled.connect(state_config_container.setVisible)
-        
-        # 초기 상태를 접힌 상태로 설정
-        self.state_config_groupbox.setChecked(False)
-        state_config_container.setVisible(False)
-        
-        left_layout.addWidget(self.state_config_groupbox)
-        
         left_layout.addStretch(1)
         
         # 로그 뷰어
@@ -4122,6 +4177,21 @@ class MapTab(QWidget):
             self.route_profiles, self.active_route_profile_name = {}, None
             self.geometry_data = {}
             self.reference_anchor_id = None
+            
+            # [v11.3.7] 설정 로드 로직 변경: 여기서 기본값으로 먼저 초기화
+            self.cfg_idle_time_threshold = IDLE_TIME_THRESHOLD
+            self.cfg_climbing_state_frame_threshold = CLIMBING_STATE_FRAME_THRESHOLD
+            self.cfg_falling_state_frame_threshold = FALLING_STATE_FRAME_THRESHOLD
+            self.cfg_jumping_state_frame_threshold = JUMPING_STATE_FRAME_THRESHOLD
+            self.cfg_on_terrain_y_threshold = ON_TERRAIN_Y_THRESHOLD
+            self.cfg_jump_y_min_threshold = JUMP_Y_MIN_THRESHOLD
+            self.cfg_jump_y_max_threshold = JUMP_Y_MAX_THRESHOLD
+            self.cfg_fall_y_min_threshold = FALL_Y_MIN_THRESHOLD
+            self.cfg_climb_x_movement_threshold = CLIMB_X_MOVEMENT_THRESHOLD
+            self.cfg_fall_on_ladder_x_movement_threshold = FALL_ON_LADDER_X_MOVEMENT_THRESHOLD
+            self.cfg_ladder_x_grab_threshold = LADDER_X_GRAB_THRESHOLD
+            self.cfg_move_deadzone = MOVE_DEADZONE
+            self.cfg_max_jump_duration = MAX_JUMP_DURATION
 
             config = {}
             if os.path.exists(config_file):
@@ -4129,6 +4199,24 @@ class MapTab(QWidget):
                     config = json.load(f)
 
             self.reference_anchor_id = config.get('reference_anchor_id')
+
+            # 저장된 상태 판정 설정이 있으면 기본값을 덮어쓰기
+            state_config = config.get('state_machine_config', {})
+            if state_config:
+                self.cfg_idle_time_threshold = state_config.get("idle_time_threshold", self.cfg_idle_time_threshold)
+                self.cfg_climbing_state_frame_threshold = state_config.get("climbing_state_frame_threshold", self.cfg_climbing_state_frame_threshold)
+                self.cfg_falling_state_frame_threshold = state_config.get("falling_state_frame_threshold", self.cfg_falling_state_frame_threshold)
+                self.cfg_jumping_state_frame_threshold = state_config.get("jumping_state_frame_threshold", self.cfg_jumping_state_frame_threshold)
+                self.cfg_on_terrain_y_threshold = state_config.get("on_terrain_y_threshold", self.cfg_on_terrain_y_threshold)
+                self.cfg_jump_y_min_threshold = state_config.get("jump_y_min_threshold", self.cfg_jump_y_min_threshold)
+                self.cfg_jump_y_max_threshold = state_config.get("jump_y_max_threshold", self.cfg_jump_y_max_threshold)
+                self.cfg_fall_y_min_threshold = state_config.get("fall_y_min_threshold", self.cfg_fall_y_min_threshold)
+                self.cfg_climb_x_movement_threshold = state_config.get("climb_x_movement_threshold", self.cfg_climb_x_movement_threshold)
+                self.cfg_fall_on_ladder_x_movement_threshold = state_config.get("fall_on_ladder_x_movement_threshold", self.cfg_fall_on_ladder_x_movement_threshold)
+                self.cfg_ladder_x_grab_threshold = state_config.get("ladder_x_grab_threshold", self.cfg_ladder_x_grab_threshold)
+                self.cfg_move_deadzone = state_config.get("move_deadzone", self.cfg_move_deadzone)
+                self.cfg_max_jump_duration = state_config.get("max_jump_duration", self.cfg_max_jump_duration)
+                self.update_general_log("저장된 상태 판정 설정을 로드했습니다.", "gray")
 
             saved_options = config.get('render_options', {})
             self.render_options = {
@@ -4142,18 +4230,15 @@ class MapTab(QWidget):
                 with open(features_file, 'r', encoding='utf-8') as f:
                     features = json.load(f)
                     
-            # 유효한 핵심 지형 데이터만 필터링
             cleaned_features = {
                 feature_id: data
                 for feature_id, data in features.items()
                 if isinstance(data, dict) and 'image_base64' in data
             }
             
-            # 정화 작업이 필요했는지 확인
             if len(cleaned_features) != len(features):
                 self.update_general_log("경고: 유효하지 않은 데이터가 'map_key_features.json'에서 발견되어 자동 정리합니다.", "orange")
                 self.key_features = cleaned_features
-                # 정리된 내용으로 즉시 파일 덮어쓰기 (save_profile_data 호출 시 다시 저장되지만, 명시적으로 처리)
                 profile_path = os.path.join(MAPS_DIR, profile_name)
                 with open(os.path.join(profile_path, 'map_key_features.json'), 'w', encoding='utf-8') as f:
                     json.dump(self.key_features, f, indent=4, ensure_ascii=False)
@@ -4166,13 +4251,10 @@ class MapTab(QWidget):
             else:
                 self.geometry_data = {"terrain_lines": [], "transition_objects": [], "waypoints": [], "jump_links": []}
 
-            # v10.0.0: 데이터 구조 마이그레이션
-            # features 변수를 인자에서 제거합니다.
             config_updated, features_updated, geometry_updated = self.migrate_data_structures(config, self.key_features, self.geometry_data)
 
             self.route_profiles = config.get('route_profiles', {})
             self.active_route_profile_name = config.get('active_route_profile')
-            # self.key_features = features 라인을 삭제합니다. (이미 위에서 할당됨)
             self.minimap_region = config.get('minimap_region')
 
             if config_updated or features_updated or geometry_updated:
@@ -4288,14 +4370,32 @@ class MapTab(QWidget):
         geometry_file = os.path.join(profile_path, 'map_geometry.json')
 
         try:
-            #  저장 전 데이터 정화 ---
+            # [v11.3.0] 저장할 데이터에 상태 판정 설정 추가
+            state_machine_config = {
+                "idle_time_threshold": self.cfg_idle_time_threshold,
+                "climbing_state_frame_threshold": self.cfg_climbing_state_frame_threshold,
+                "falling_state_frame_threshold": self.cfg_falling_state_frame_threshold,
+                "jumping_state_frame_threshold": self.cfg_jumping_state_frame_threshold,
+                "on_terrain_y_threshold": self.cfg_on_terrain_y_threshold,
+                "jump_y_min_threshold": self.cfg_jump_y_min_threshold,
+                "jump_y_max_threshold": self.cfg_jump_y_max_threshold,
+                "fall_y_min_threshold": self.cfg_fall_y_min_threshold,
+                "climb_x_movement_threshold": self.cfg_climb_x_movement_threshold,
+                "fall_on_ladder_x_movement_threshold": self.cfg_fall_on_ladder_x_movement_threshold,
+                "ladder_x_grab_threshold": self.cfg_ladder_x_grab_threshold,
+                "move_deadzone": self.cfg_move_deadzone,
+                "max_jump_duration": self.cfg_max_jump_duration,
+            }
+
             config_data = self._prepare_data_for_json({
                 'minimap_region': self.minimap_region,
                 'active_route_profile': self.active_route_profile_name,
                 'route_profiles': self.route_profiles,
                 'render_options': self.render_options,
-                'reference_anchor_id': self.reference_anchor_id
+                'reference_anchor_id': self.reference_anchor_id,
+                'state_machine_config': state_machine_config # <<< 추가
             })
+            
             key_features_data = self._prepare_data_for_json(self.key_features)
             geometry_data = self._prepare_data_for_json(self.geometry_data)
             
@@ -4899,25 +4999,45 @@ class MapTab(QWidget):
                 if self.debug_dialog:
                     self.debug_dialog.close()
 
-    # [v11.1.0] 상태 판정 설정 변경 시 호출되는 슬롯
-    def _on_state_config_changed(self):
-        """상태 판정 UI의 값이 변경되면, 멤버 변수를 업데이트합니다."""
-        self.cfg_idle_time_threshold = self.sb_idle_time.value()
-        self.cfg_climbing_state_frame_threshold = self.sb_climb_frames.value()
-        self.cfg_falling_state_frame_threshold = self.sb_fall_frames.value()
-        self.cfg_jumping_state_frame_threshold = self.sb_jump_frames.value()
-        self.cfg_on_terrain_y_threshold = self.sb_on_terrain_y.value()
-        self.cfg_jump_y_min_threshold = self.sb_jump_y_min.value()
-        self.cfg_jump_y_max_threshold = self.sb_jump_y_max.value()
-        self.cfg_fall_y_min_threshold = self.sb_fall_y_min.value()
-        self.cfg_climb_x_movement_threshold = self.sb_climb_x_move.value()
-        self.cfg_ladder_x_grab_threshold = self.sb_ladder_x_grab.value()
-        self.cfg_move_deadzone = self.sb_move_deadzone.value()
-        self.cfg_max_jump_duration = self.sb_max_jump_duration.value()
+    def _open_state_config_dialog(self):
+        # 현재 설정값들을 딕셔너리로 만듦
+        current_config = {
+            "idle_time_threshold": self.cfg_idle_time_threshold,
+            "climbing_state_frame_threshold": self.cfg_climbing_state_frame_threshold,
+            "falling_state_frame_threshold": self.cfg_falling_state_frame_threshold,
+            "jumping_state_frame_threshold": self.cfg_jumping_state_frame_threshold,
+            "on_terrain_y_threshold": self.cfg_on_terrain_y_threshold,
+            "jump_y_min_threshold": self.cfg_jump_y_min_threshold,
+            "jump_y_max_threshold": self.cfg_jump_y_max_threshold,
+            "fall_y_min_threshold": self.cfg_fall_y_min_threshold,
+            "climb_x_movement_threshold": self.cfg_climb_x_movement_threshold,
+            "fall_on_ladder_x_movement_threshold": self.cfg_fall_on_ladder_x_movement_threshold,
+            "ladder_x_grab_threshold": self.cfg_ladder_x_grab_threshold,
+            "move_deadzone": self.cfg_move_deadzone,
+            "max_jump_duration": self.cfg_max_jump_duration,
+        }
         
-        # 변경 로그 출력 (디버깅용)
-        # print(f"상태 판정 설정 업데이트: Idle Time = {self.cfg_idle_time_threshold}")
-
+        dialog = StateConfigDialog(current_config, self)
+        if dialog.exec(): # 사용자가 '저장'을 눌렀을 경우
+            updated_config = dialog.get_updated_config()
+            
+            # 멤버 변수 업데이트
+            self.cfg_idle_time_threshold = updated_config.get("idle_time_threshold", self.cfg_idle_time_threshold)
+            self.cfg_climbing_state_frame_threshold = updated_config.get("climbing_state_frame_threshold", self.cfg_climbing_state_frame_threshold)
+            self.cfg_falling_state_frame_threshold = updated_config.get("falling_state_frame_threshold", self.cfg_falling_state_frame_threshold)
+            self.cfg_jumping_state_frame_threshold = updated_config.get("jumping_state_frame_threshold", self.cfg_jumping_state_frame_threshold)
+            self.cfg_on_terrain_y_threshold = updated_config.get("on_terrain_y_threshold", self.cfg_on_terrain_y_threshold)
+            self.cfg_jump_y_min_threshold = updated_config.get("jump_y_min_threshold", self.cfg_jump_y_min_threshold)
+            self.cfg_jump_y_max_threshold = updated_config.get("jump_y_max_threshold", self.cfg_jump_y_max_threshold)
+            self.cfg_fall_y_min_threshold = updated_config.get("fall_y_min_threshold", self.cfg_fall_y_min_threshold)
+            self.cfg_climb_x_movement_threshold = updated_config.get("climb_x_movement_threshold", self.cfg_climb_x_movement_threshold)
+            self.cfg_fall_on_ladder_x_movement_threshold = updated_config.get("fall_on_ladder_x_movement_threshold", self.cfg_fall_on_ladder_x_movement_threshold)
+            self.cfg_ladder_x_grab_threshold = updated_config.get("ladder_x_grab_threshold", self.cfg_ladder_x_grab_threshold)
+            self.cfg_move_deadzone = updated_config.get("move_deadzone", self.cfg_move_deadzone)
+            self.cfg_max_jump_duration = updated_config.get("max_jump_duration", self.cfg_max_jump_duration)
+            
+            self.update_general_log("상태 판정 설정이 업데이트되었습니다.", "blue")
+            self.save_profile_data() # 변경사항을 즉시 파일에 저장
 
     def on_detection_ready(self, frame_bgr, found_features, my_player_rects_ignored, other_player_rects_ignored):
         """
@@ -5409,43 +5529,54 @@ class MapTab(QWidget):
             self.falling_candidate_frames = 0
             self.jumping_candidate_frames = 0
         else: # 공중 상태
-            # [v11.1.0] 상수 대신 멤버 변수 사용
             is_near_ladder = self._check_near_ladder(final_player_pos, self.geometry_data.get("transition_objects", []), self.cfg_ladder_x_grab_threshold)
             
-            is_climbing_now = (is_near_ladder and y_movement > 0 and x_movement_abs < self.cfg_climb_x_movement_threshold and y_above_terrain > self.cfg_jump_y_min_threshold) or \
-                              (y_above_terrain > self.cfg_jump_y_max_threshold)
+            # [v11.3.9] climbing <-> falling 즉시 전환 로직 (우선순위 높음)
+            if previous_state == 'climbing' and y_movement < 0 and is_near_ladder:
+                new_state = 'falling'
+                self.climbing_candidate_frames = 0 # 카운터 초기화
+            elif previous_state == 'falling' and y_movement > 0 and is_near_ladder and x_movement_abs < self.cfg_climb_x_movement_threshold:
+                new_state = 'climbing'
+                self.falling_candidate_frames = 0 # 카운터 초기화
             
-            is_jumping_now = (previous_state == 'on_terrain' and y_movement > self.cfg_move_deadzone)
-            
-            is_falling_now = (y_above_terrain < -self.cfg_fall_y_min_threshold and y_movement < 0) or (is_near_ladder and y_movement < 0)
+            # 위에서 상태가 즉시 결정되지 않은 경우에만 기존 로직 수행
+            if new_state == previous_state:
+                # [v11.3.10] is_climbing_now 계산 로직 수정
+                # 조건 1: 사다리를 타고 정상적으로 올라가는 경우
+                is_climbing_on_ladder = is_near_ladder and y_movement > 0 and x_movement_abs < self.cfg_climb_x_movement_threshold
+                # 조건 2: 일반 점프 범위를 초과하여 '상승'하는 경우 (안전장치)
+                is_climbing_high_jump = y_movement > 0 and y_above_terrain > self.cfg_jump_y_max_threshold
+                is_climbing_now = is_climbing_on_ladder or is_climbing_high_jump
+                
+                is_jumping_now = (previous_state == 'on_terrain' and y_movement > self.cfg_move_deadzone)
+                
+                is_falling_now = (y_above_terrain < -self.cfg_fall_y_min_threshold and y_movement < 0) or \
+                                 (is_near_ladder and y_movement < 0 and x_movement_abs < self.cfg_fall_on_ladder_x_movement_threshold and not self.in_jump)
 
-            self.climbing_candidate_frames = self.climbing_candidate_frames + 1 if is_climbing_now else 0
-            self.jumping_candidate_frames = self.jumping_candidate_frames + 1 if is_jumping_now else 0
-            self.falling_candidate_frames = self.falling_candidate_frames + 1 if is_falling_now else 0
+                self.climbing_candidate_frames = self.climbing_candidate_frames + 1 if is_climbing_now else 0
+                self.jumping_candidate_frames = self.jumping_candidate_frames + 1 if is_jumping_now else 0
+                self.falling_candidate_frames = self.falling_candidate_frames + 1 if is_falling_now else 0
 
-            if self.in_jump:
-                if self.climbing_candidate_frames >= self.cfg_climbing_state_frame_threshold:
-                    new_state = 'climbing'
-                    self.in_jump = False
-                elif self.falling_candidate_frames >= self.cfg_falling_state_frame_threshold:
-                    new_state = 'falling'
-                    self.in_jump = False
-                else:
-                    new_state = 'jumping'
-            else:
-                if self.jumping_candidate_frames >= self.cfg_jumping_state_frame_threshold:
-                    new_state = 'jumping'
-                    self.in_jump = True
-                    self.jump_start_time = time.time()
-                elif self.climbing_candidate_frames >= self.cfg_climbing_state_frame_threshold:
-                    new_state = 'climbing'
-                elif self.falling_candidate_frames >= self.cfg_falling_state_frame_threshold:
-                    new_state = 'falling'
-                else:
-                    if previous_state in ['climbing', 'falling', 'jumping']:
-                        new_state = previous_state
-                    else:
+                if self.in_jump:
+                    if self.climbing_candidate_frames >= self.cfg_climbing_state_frame_threshold:
+                        new_state = 'climbing'
+                        self.in_jump = False
+                    elif self.falling_candidate_frames >= self.cfg_falling_state_frame_threshold:
                         new_state = 'falling'
+                        self.in_jump = False
+                    else:
+                        new_state = 'jumping'
+                else:
+                    if self.jumping_candidate_frames >= self.cfg_jumping_state_frame_threshold:
+                        new_state = 'jumping'
+                        self.in_jump = True
+                        self.jump_start_time = time.time()
+                    elif self.climbing_candidate_frames >= self.cfg_climbing_state_frame_threshold:
+                        new_state = 'climbing'
+                    elif self.falling_candidate_frames >= self.cfg_falling_state_frame_threshold:
+                        new_state = 'falling'
+                    else:
+                        new_state = previous_state
         
         # [v11.1.0] 상수 대신 멤버 변수 사용
         if self.in_jump and (time.time() - self.jump_start_time) > self.cfg_max_jump_duration:
