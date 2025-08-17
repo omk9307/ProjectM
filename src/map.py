@@ -90,19 +90,19 @@ PLAYER_ICON_STD_HEIGHT = 11
 # ==================== v10.9.0 상태 판정 시스템 상수 ====================
 # [v11.3.1] 사용자 피드백 기반 기본값 조정
 IDLE_TIME_THRESHOLD = 0.8      # 정지 상태로 판정되기까지의 시간 (초)
-CLIMBING_STATE_FRAME_THRESHOLD = 5 # climbing 상태로 변경되기까지 필요한 연속 프레임
-FALLING_STATE_FRAME_THRESHOLD = 15  # falling 상태로 변경되기까지 필요한 연속 프레임
+CLIMBING_STATE_FRAME_THRESHOLD = 2 # climbing 상태로 변경되기까지 필요한 연속 프레임
+FALLING_STATE_FRAME_THRESHOLD = 10  # falling 상태로 변경되기까지 필요한 연속 프레임
 JUMPING_STATE_FRAME_THRESHOLD = 1  # jumping 상태로 변경되기까지 필요한 연속 프레임
 ON_TERRAIN_Y_THRESHOLD = 3.0    # 지상 판정 y축 허용 오차 (px)
 JUMP_Y_MIN_THRESHOLD = 1.0     # 점프 상태로 인식될 최소 y 오프셋 (px)
-JUMP_Y_MAX_THRESHOLD = 10.0      # 점프 상태로 인식될 최대 y 오프셋 (px)
+JUMP_Y_MAX_THRESHOLD = 10.5     # 점프 상태로 인식될 최대 y 오프셋 (px)
 FALL_Y_MIN_THRESHOLD = 4.0      # 낙하 상태로 인식될 최소 y 오프셋 (px)
-CLIMB_X_MOVEMENT_THRESHOLD = 1.3 # 등반 상태로 판정될 최대 수평 이동량 (px/frame)
+CLIMB_X_MOVEMENT_THRESHOLD = 1.0 # 등반 상태로 판정될 최대 수평 이동량 (px/frame)
 FALL_ON_LADDER_X_MOVEMENT_THRESHOLD = 1.0 # [v11.3.1] 사다리 낙하 판정 최대 수평 이동량
 CLIMB_BREAK_Y_THRESHOLD = 1.0   # (미사용)
-LADDER_X_GRAB_THRESHOLD = 2.0   # 사다리 근접으로 판정될 x축 허용 오차 (px)
+LADDER_X_GRAB_THRESHOLD = 8.0   # 사다리 근접으로 판정될 x축 허용 오차 (px)
 MOVE_DEADZONE = 0.2             # 움직임으로 인식되지 않을 최소 이동 거리 (px)
-MAX_JUMP_DURATION = 1.5         # 점프 상태가 강제로 해제되기까지의 최대 시간 (초)
+MAX_JUMP_DURATION = 3.0         # 점프 상태가 강제로 해제되기까지의 최대 시간 (초)
 # =================================================================
 
 # --- 도착 판정 기준 ---
@@ -3743,7 +3743,7 @@ class StateConfigDialog(QDialog):
             layout.addLayout(h_layout)
             return spinbox
 
-        add_spinbox(form_layout, "idle_time_threshold", "정지 판정 시간(초):", 0.5, 5.0, 0.1)
+        add_spinbox(form_layout, "idle_time_threshold", "정지 판정 시간(초):", 0.1, 5.0, 0.1)
         add_spinbox(form_layout, "climbing_state_frame_threshold", "등반 판정 프레임:", 1, 100, 1, is_double=False)
         add_spinbox(form_layout, "falling_state_frame_threshold", "낙하 판정 프레임:", 1, 100, 1, is_double=False)
         add_spinbox(form_layout, "jumping_state_frame_threshold", "점프 판정 프레임:", 1, 100, 1, is_double=False)
@@ -3754,8 +3754,8 @@ class StateConfigDialog(QDialog):
         add_spinbox(form_layout, "climb_x_movement_threshold", "등반 최대 X이동(px/f):", 0.01, 5.0, 0.01)
         add_spinbox(form_layout, "fall_on_ladder_x_movement_threshold", "사다리 낙하 최대 X이동(px/f):", 0.01, 5.0, 0.01)
         add_spinbox(form_layout, "ladder_x_grab_threshold", "사다리 X오차(px):", 0.5, 10.0, 0.1)
-        add_spinbox(form_layout, "move_deadzone", "이동 감지 최소값(px):", 0.0, 5.0, 0.1, decimals=1)
-        add_spinbox(form_layout, "max_jump_duration", "최대 점프 시간(초):", 0.5, 5.0, 0.1)
+        add_spinbox(form_layout, "move_deadzone", "이동 감지 최소값(px):", 0.0, 5.0, 0.01, decimals=1)
+        add_spinbox(form_layout, "max_jump_duration", "최대 점프 시간(초):", 0.1, 5.0, 0.1)
         
         main_layout.addLayout(form_layout)
         
@@ -5545,13 +5545,15 @@ class MapTab(QWidget):
                     towards_ladder_count = 0
                     reference_x = final_player_pos.x() - x_movement 
                     for move in self.x_movement_history:
-                        if abs(move) > self.cfg_climb_x_movement_threshold:
+                        if abs(move) > self.cfg_move_deadzone:
                             if (nearest_ladder_x > reference_x and move > 0) or \
                                (nearest_ladder_x < reference_x and move < 0):
                                 towards_ladder_count += 1
                         reference_x += move 
                     if towards_ladder_count >= 3:
                         approaching_ladder = True
+                # [v11.3.18] 디버그 로그 추가
+                debug_log_lines.append(f"[STATE_DEBUG] Intentional Grab Check: approaching={approaching_ladder}, towards_count={towards_ladder_count}")
 
                 if approaching_ladder and x_movement_abs < self.cfg_climb_x_movement_threshold and y_above_terrain > self.cfg_jump_y_min_threshold:
                     new_state = 'climbing'
