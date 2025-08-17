@@ -5535,16 +5535,17 @@ class MapTab(QWidget):
     def _update_player_state_and_navigation(self, final_player_pos):
         """
         v10.8.0: 플레이어의 현재 상태를 판정하고, 상태 머신에 따라 다음 행동을 결정합니다.
-        [v11.3.13] '의도된 사다리 타기 점프' 판정 로직 추가
+        [v11.4.5] 디버그 로그 형식 및 출력 조건 최종 개편
         """
+        # --- [v11.4.5] 디버그를 위한 변수 초기화 ---
+        log_data = {}
+
         current_terrain_name = "" 
 
         if final_player_pos is None:
             self.navigator_display.update_data("N/A", "", "없음", "", "", "-", 0, [], None, None, self.is_forward, 'walk', "대기 중", "오류: 위치 없음")
             return
 
-        # ==================== v10.9.5 수정 시작 (UnboundLocalError 해결) ====================
-        # --- 1A. 플레이어 물리적 상태(player_state) 판정 ---
         previous_state = self.player_state
         
         contact_terrain = self._get_contact_terrain(final_player_pos)
@@ -5555,7 +5556,6 @@ class MapTab(QWidget):
         x_movement_abs = abs(x_movement)
         y_movement_abs = abs(y_movement)
         
-        # [v11.3.13] 매 프레임 X축 이동량 기록
         self.x_movement_history.append(x_movement)
 
         if x_movement_abs > self.cfg_move_deadzone or y_movement_abs > self.cfg_move_deadzone:
@@ -5563,7 +5563,6 @@ class MapTab(QWidget):
 
         new_state = previous_state
 
-        # [v11.1.0] 상수 대신 멤버 변수 사용
         if (time.time() - self.last_movement_time) >= self.cfg_idle_time_threshold:
             new_state = 'idle'
             self.in_jump = False
@@ -5580,15 +5579,20 @@ class MapTab(QWidget):
         else: # 공중 상태
             is_near_ladder, nearest_ladder_x = self._check_near_ladder(final_player_pos, self.geometry_data.get("transition_objects", []), self.cfg_ladder_x_grab_threshold, return_x=True)
             
-            # [v11.3.14] 최우선 순위: '의도된 사다리 타기 점프' 판정 로직 보강
+            # [디버그 로그] 데이터 수집
+            log_data['condition'] = 'In Air'
+            if is_near_ladder:
+                dist_to_ladder = abs(final_player_pos.x() - nearest_ladder_x)
+                log_data['ladder_info'] = f"True ({dist_to_ladder:.2f}px)"
+            else:
+                log_data['ladder_info'] = "False"
+
             if self.in_jump and is_near_ladder:
                 approaching_ladder = False
-                # 최근 움직임이 충분히 쌓였을 때만 분석
+                towards_ladder_count = 0
                 if len(self.x_movement_history) == self.x_movement_history.maxlen:
-                    towards_ladder_count = 0
                     reference_x = final_player_pos.x() - x_movement 
                     for move in self.x_movement_history:
-                         # [v11.4.0] '의도된 사다리 타기' 판정 시 move_deadzone 사용
                         if abs(move) > self.cfg_move_deadzone:
                             if (nearest_ladder_x > reference_x and move > 0) or \
                                (nearest_ladder_x < reference_x and move < 0):
@@ -5596,8 +5600,10 @@ class MapTab(QWidget):
                         reference_x += move 
                     if towards_ladder_count >= 3:
                         approaching_ladder = True
+                
+                # [디버그 로그] 데이터 수집
+                log_data['intent_check'] = f"approaching={approaching_ladder}, towards_count={towards_ladder_count}"
 
-                # [v11.3.14] 최소 높이 조건 추가
                 if approaching_ladder and x_movement_abs < self.cfg_climb_x_movement_threshold and y_above_terrain > self.cfg_jump_y_min_threshold:
                     new_state = 'climbing'
                     self.in_jump = False
@@ -5605,24 +5611,26 @@ class MapTab(QWidget):
                     self.jumping_candidate_frames = 0
                     self.falling_candidate_frames = 0
             
-            # [v11.3.9] climbing <-> falling 즉시 전환 로직 (두 번째 우선순위)
-            if new_state == previous_state: 
-                if previous_state == 'climbing' and y_movement < 0 and is_near_ladder:
+            # [v11.4.7] climbing <-> falling 즉시 전환 로직 최종 수정
+            if new_state == previous_state:
+                time_since_change = time.time() - self.last_state_change_time
+                can_switch = time_since_change > 0.2 # 0.2초의 상태 변경 불응기
+
+                # climbing -> falling 전환 조건
+                if previous_state == 'climbing' and y_movement < -self.cfg_y_movement_deadzone and is_near_ladder and can_switch:
                     new_state = 'falling'
                     self.climbing_candidate_frames = 0
-                elif previous_state == 'falling' and y_movement > self.cfg_y_movement_deadzone and is_near_ladder and x_movement_abs < self.cfg_climb_x_movement_threshold:
+                # falling -> climbing 전환 조건
+                elif previous_state == 'falling' and y_movement > self.cfg_y_movement_deadzone and is_near_ladder and x_movement_abs < self.cfg_climb_x_movement_threshold and can_switch:
                     new_state = 'climbing'
                     self.falling_candidate_frames = 0
             
-            # 위에서 상태가 즉시 결정되지 않은 경우에만 프레임 기반 판정 로직 수행
             if new_state == previous_state:
                 climb_condition_for_jump = not self.in_jump or (self.in_jump and y_above_terrain > self.cfg_jump_y_max_threshold)
                 is_climbing_on_ladder = is_near_ladder and y_movement > 0 and x_movement_abs < self.cfg_climb_x_movement_threshold and climb_condition_for_jump
                 is_climbing_high_jump = y_movement > 0 and y_above_terrain > self.cfg_jump_y_max_threshold
                 is_climbing_now = is_climbing_on_ladder or is_climbing_high_jump
-                
-                is_jumping_now = (previous_state == 'on_terrain' and y_movement > self.cfg_move_deadzone)
-                
+                is_jumping_now = (previous_state in ['on_terrain', 'idle'] and y_movement > self.cfg_y_movement_deadzone)
                 is_falling_now = (y_above_terrain < -self.cfg_fall_y_min_threshold and y_movement < 0 and not is_near_ladder) or \
                                  (is_near_ladder and y_movement < 0 and x_movement_abs < self.cfg_fall_on_ladder_x_movement_threshold and not self.in_jump)
 
@@ -5656,12 +5664,24 @@ class MapTab(QWidget):
             if new_state == 'jumping':
                 new_state = 'falling'
 
+        # [v11.4.5] 통합 디버그 로그 출력
+        if new_state != previous_state and new_state in ['climbing', 'falling']:
+            # [디버그 로그]
+            print("\n" + "="*15 + " 프레임 시작 " + "="*15)
+            print(f"이전상태: '{previous_state}', in_jump={self.in_jump}, 현재상태: '{new_state}'")
+            if 'condition' in log_data:
+                print(f"-> Condition: {log_data.get('condition', 'N/A')}, 사다리 범위: {log_data.get('ladder_info', 'N/A')}")
+            print(f"Pos: y_move={y_movement:.2f}, y_above={y_above_terrain:.2f}, x_move_abs={x_movement_abs:.2f}")
+            if 'intent_check' in log_data:
+                print(f"의도적인 사다리타기 체크: {log_data['intent_check']}")
+            print(f"상태변화 '{previous_state}' -> '{new_state}'")
+            print("="*42)
+
         self.player_state = new_state
         
         if new_state != previous_state:
             self.last_state_change_time = time.time()
 
-        # 1B. 층/지형 이름 정보 갱신
         if contact_terrain:
             self.current_player_floor = contact_terrain.get('floor')
             current_terrain_name = contact_terrain.get('dynamic_name', '')
