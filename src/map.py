@@ -26,12 +26,11 @@ from PyQt6.QtWidgets import (
 
     QGraphicsView, QGraphicsScene, QGraphicsPixmapItem, QCheckBox, QGraphicsRectItem,
     QGraphicsLineItem, QGraphicsTextItem, QGraphicsEllipseItem, QTabWidget,
-    QGraphicsSimpleTextItem, QFormLayout
+    QGraphicsSimpleTextItem
 )
 from PyQt6.QtGui import QPixmap, QImage, QPainter, QPen, QColor, QBrush, QFont, QCursor, QIcon, QPolygonF, QFontMetrics, QFontMetricsF
-from PyQt6.QtCore import (
-    Qt, QThread, pyqtSignal, QRect, QPoint, QRectF, QPointF, QSize, QSizeF, QObject, QRunnable, QThreadPool, QTimer
-)
+from PyQt6.QtCore import Qt, QThread, pyqtSignal, QRect, QPoint, QRectF, QPointF, QSize, QSizeF
+
 try:
     from Learning import ScreenSnipper
 except ImportError:
@@ -3715,36 +3714,6 @@ class AnchorDetectionThread(QThread):
         except Exception as e:
             print(f"[AnchorDetectionThread] 정지 대기 실패: {e}")
 
-# [v12.0.0] RANSAC 비동기 워커 정의
-class _RansacWorkerSignals(QObject):
-    finished = pyqtSignal(object)
-
-class _RansacWorker(QRunnable):
-    """QRunnable 기반 워커로 백그라운드에서 RANSAC 연산을 수행합니다."""
-    def __init__(self, src_pts: np.ndarray, dst_pts: np.ndarray, feature_ids: list, reproj_thresh: float, max_iters: int):
-        super().__init__()
-        self.src = np.asarray(src_pts, dtype=np.float32)
-        self.dst = np.asarray(dst_pts, dtype=np.float32)
-        self.feature_ids = feature_ids # [v12.0.1] 추가
-        self.reproj_thresh = float(reproj_thresh)
-        self.max_iters = int(max_iters)
-        self.signals = _RansacWorkerSignals()
-
-    def run(self):
-        try:
-            M, inliers = cv2.estimateAffinePartial2D(
-                self.src, self.dst,
-                method=cv2.RANSAC,
-                ransacReprojThreshold=self.reproj_thresh,
-                maxIters=self.max_iters
-            )
-            inliers_list = None if inliers is None else inliers.flatten().astype(int).tolist()
-            # [v12.0.1] 결과에 feature_ids 추가
-            self.signals.finished.emit({'M': M, 'inliers': inliers_list, 'feature_ids': self.feature_ids})
-        except Exception as e:
-            traceback.print_exc()
-            self.signals.finished.emit({'M': None, 'inliers': None, 'feature_ids': self.feature_ids})
-
 # [v11.3.0] 상태 판정 설정을 위한 팝업 다이얼로그 클래스
 class StateConfigDialog(QDialog):
     def __init__(self, current_config, parent=None):
@@ -3803,26 +3772,6 @@ class StateConfigDialog(QDialog):
         add_spinbox(form_layout, "ladder_arrival_x_threshold", "사다리 도착 X오차(px):", 0.0, 20.0, 0.1)
         add_spinbox(form_layout, "jump_link_arrival_x_threshold", "점프/낭떠러지 도착 X오차(px):", 0.0, 20.0, 0.1)
 
-        # [v12.0.0] RANSAC 설정 UI 추가
-        form_layout.addSpacing(15)
-        ransac_group = QGroupBox("RANSAC 조건부 실행 설정")
-        ransac_layout = QFormLayout(ransac_group) # QFormLayout 사용
-        
-        self._ui_ransac_min_spin = QSpinBox()
-        self._ui_ransac_min_spin.setRange(3, 50)
-        self._ui_ransac_min_spin.setValue(self.config.get("min_candidates_for_ransac", 3))
-        self._ui_ransac_min_spin.setObjectName("min_candidates_for_ransac")
-        ransac_layout.addRow("최소 후보 수:", self._ui_ransac_min_spin)
-        
-        self._ui_ransac_conf_spin = QDoubleSpinBox()
-        self._ui_ransac_conf_spin.setRange(0.80, 1.00)
-        self._ui_ransac_conf_spin.setSingleStep(0.01)
-        self._ui_ransac_conf_spin.setDecimals(2)
-        self._ui_ransac_conf_spin.setValue(self.config.get("ransac_skip_confidence_threshold", 0.98))
-        self._ui_ransac_conf_spin.setObjectName("ransac_skip_confidence_threshold")
-        ransac_layout.addRow("신뢰도 임계값 (이상이면 Skip):", self._ui_ransac_conf_spin)
-        
-        form_layout.addWidget(ransac_group)
         main_layout.addLayout(form_layout)
         
         button_box = QDialogButtonBox()
@@ -3862,9 +3811,6 @@ class StateConfigDialog(QDialog):
             "waypoint_arrival_x_threshold": WAYPOINT_ARRIVAL_X_THRESHOLD,
             "ladder_arrival_x_threshold": LADDER_ARRIVAL_X_THRESHOLD,
             "jump_link_arrival_x_threshold": JUMP_LINK_ARRIVAL_X_THRESHOLD,
-            # [v12.0.0] RANSAC 설정 기본값 복원 추가
-            "min_candidates_for_ransac": 3,
-            "ransac_skip_confidence_threshold": 0.98,
         }
         for spinbox in self.findChildren(QSpinBox) + self.findChildren(QDoubleSpinBox):
             key = spinbox.objectName()
@@ -3895,17 +3841,6 @@ class MapTab(QWidget):
             self.active_feature_info = []
             self.reference_anchor_id = None
             self.smoothed_player_pos = None
-            # [v12.0.0] RANSAC 비동기 실행 제어 관련 속성
-            self.is_ransac_running = False
-            self.ransac_pool = QThreadPool.globalInstance()
-            self.min_candidates_for_ransac = 3
-            self.ransac_skip_confidence_threshold = 0.98
-            self.ransac_reproj_threshold = 3.0
-            self.ransac_max_iters = 1000
-            # [v12.0.0] RANSAC 결과(변환 행렬)를 저장할 변수
-            self.last_transform_matrix = None
-            # [v12.0.1] RANSAC 결과(inliers)를 저장할 변수
-            self.last_inlier_ids = set()
             self.line_id_to_floor_map = {}  # [v11.4.5] 지형선 ID <-> 층 정보 캐싱용 딕셔너리
             
             # [v11.3.7] 설정 변수 선언만 하고 값 할당은 load_profile_data로 위임
@@ -4072,43 +4007,30 @@ class MapTab(QWidget):
         left_layout.addWidget(self.editor_groupbox)
         
         # 7. 탐지 제어
+        # [v11.3.5] UI 순서 및 텍스트 변경
         detect_groupbox = QGroupBox("7. 탐지 제어")
-        
-        # [v12.0.0] 레이아웃 구조 변경: 버튼 영역과 드롭 라벨 영역 분리
-        group_layout = QVBoxLayout(detect_groupbox)
-        
-        top_layout = QHBoxLayout()
-        
+        detect_layout = QHBoxLayout()
+
+        # 좌측: 디버그 뷰 체크박스
         self.debug_view_checkbox = QCheckBox("디버그 뷰")
         self.debug_view_checkbox.toggled.connect(self.toggle_debug_view)
-        top_layout.addWidget(self.debug_view_checkbox)
+        detect_layout.addWidget(self.debug_view_checkbox)
         
-        top_layout.addStretch(1)
+        detect_layout.addStretch(1) # 중앙 공간
         
+        # 우측: 버튼들
         self.state_config_btn = QPushButton("판정 설정")
         self.state_config_btn.clicked.connect(self._open_state_config_dialog)
         
         self.detect_anchor_btn = QPushButton("탐지 시작")
         self.detect_anchor_btn.setCheckable(True)
-        font = self.detect_anchor_btn.font()
-        font.setPointSize(font.pointSize() + 2)
-        self.detect_anchor_btn.setFont(font)
-        self.detect_anchor_btn.setStyleSheet("padding: 3px 60px;")
+        self.detect_anchor_btn.setStyleSheet("padding: 3px 60px")
         self.detect_anchor_btn.clicked.connect(self.toggle_anchor_detection)
         
-        top_layout.addWidget(self.state_config_btn)
-        top_layout.addWidget(self.detect_anchor_btn)
+        detect_layout.addWidget(self.state_config_btn)
+        detect_layout.addWidget(self.detect_anchor_btn)
         
-        group_layout.addLayout(top_layout)
-        
-        # [v12.0.0] RANSAC 드롭 표시기 추가
-        self._ransac_drop_label = QLabel("")
-        self._ransac_drop_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self._ransac_drop_label.setStyleSheet(
-            "QLabel { background-color: rgba(255,165,0,0.9); color: black; padding: 2px; border-radius: 3px; font-size: 9px; min-height: 15px; }"
-        )
-        group_layout.addWidget(self._ransac_drop_label)
-        
+        detect_groupbox.setLayout(detect_layout)
         left_layout.addWidget(detect_groupbox)
 
         left_layout.addStretch(1)
@@ -5115,93 +5037,6 @@ class MapTab(QWidget):
                     self.debug_dialog.close()
 
     def _open_state_config_dialog(self):
-        current_config = {
-            # ... (기존 상태 판정 설정값들) ...
-            "jump_link_arrival_x_threshold": self.cfg_jump_link_arrival_x_threshold,
-            # [v12.0.0] RANSAC 설정값 전달
-            "min_candidates_for_ransac": self.min_candidates_for_ransac,
-            "ransac_skip_confidence_threshold": self.ransac_skip_confidence_threshold,
-        }
-        
-        dialog = StateConfigDialog(current_config, self)
-        if dialog.exec():
-            updated_config = dialog.get_updated_config()
-            
-            # ... (기존 상태 판정 설정값들 업데이트) ...
-            self.cfg_jump_link_arrival_x_threshold = updated_config.get("jump_link_arrival_x_threshold", self.cfg_jump_link_arrival_x_threshold)
-
-            # [v12.0.0] RANSAC 설정값 업데이트
-            self.min_candidates_for_ransac = updated_config.get("min_candidates_for_ransac", self.min_candidates_for_ransac)
-            self.ransac_skip_confidence_threshold = updated_config.get("ransac_skip_confidence_threshold", self.ransac_skip_confidence_threshold)
-
-            self.update_general_log("판정 설정이 업데이트되었습니다.", "blue")
-            self.save_profile_data()
-
-    # [v12.0.0] 신규 메서드
-    def _indicate_ransac_dropped(self, text: str = "RANSAC Dropped (Processing Previous Frame)"):
-        """RANSAC 드롭 시 UI 표시기를 1.2초간 보여줍니다."""
-        try:
-            self._ransac_drop_label.setText(text)
-            QTimer.singleShot(1200, lambda: self._ransac_drop_label.setText(""))
-        except Exception:
-            pass
-
-    # [v12.0.0] 신규 메서드: 비동기 RANSAC 결과 처리
-    def _on_ransac_done(self, result):
-        """백그라운드 RANSAC 완료 시 호출되는 슬롯."""
-        try:
-            M = result.get('M', None)
-            inliers_indices = result.get('inliers', None)
-            feature_ids = result.get('feature_ids', [])
-            
-            if M is not None:
-                self.last_transform_matrix = M
-                # [v12.0.1] inlier ID 목록 계산 및 저장
-                if inliers_indices is not None:
-                    self.last_inlier_ids = {feature_ids[i] for i, is_inlier in enumerate(inliers_indices) if is_inlier}
-                else:
-                    self.last_inlier_ids = set() # RANSAC은 성공했으나 inlier가 없는 경우
-            else:
-                # RANSAC 실패 시, 이전 변환 행렬을 유지할지 None으로 할지는 정책에 따름. 여기서는 유지.
-                self.last_inlier_ids = set()
-
-        finally:
-            self.is_ransac_running = False
-
-    # [v12.0.0] 신규 메서드: RANSAC 변환 적용
-    def _apply_ransac_transform(self, M, player_anchor_local):
-        """RANSAC 변환 행렬을 사용하여 플레이어의 전역 좌표를 계산합니다."""
-        if M is None or player_anchor_local is None:
-            return None
-        A = M[:, :2]
-        t = M[:, 2]
-        px, py = player_anchor_local.x(), player_anchor_local.y()
-        transformed = (A @ np.array([px, py], dtype=np.float32)) + t
-        return QPointF(float(transformed[0]), float(transformed[1]))
-
-    # [v12.0.0] 신규 메서드: 간단 변환 적용 (가중 평균)
-    def _apply_simple_transform(self, reliable_features, player_anchor_local):
-        """RANSAC을 건너뛸 때 사용하는 가중 평균 기반 위치 계산."""
-        if not reliable_features or player_anchor_local is None:
-            return None
-        
-        total_confidence = sum(f['conf'] for f in reliable_features)
-        if total_confidence <= 0:
-            return None
-            
-        weighted_player_x_sum = 0
-        weighted_player_y_sum = 0
-        for feature in reliable_features:
-            feature_center_local = QPointF(feature['local_pos']) + QPointF(feature['size'].width()/2, feature['size'].height()/2)
-            feature_center_global = self.global_positions[feature['id']] + QPointF(feature['size'].width()/2, feature['size'].height()/2)
-            offset = player_anchor_local - feature_center_local
-            player_global_pos = feature_center_global + offset
-            weighted_player_x_sum += player_global_pos.x() * feature['conf']
-            weighted_player_y_sum += player_global_pos.y() * feature['conf']
-        
-        return QPointF(weighted_player_x_sum / total_confidence, weighted_player_y_sum / total_confidence)
-
-    def _open_state_config_dialog(self):
         # 현재 설정값들을 딕셔너리로 만듦
         current_config = {
             "idle_time_threshold": self.cfg_idle_time_threshold,
@@ -5251,8 +5086,10 @@ class MapTab(QWidget):
 
     def on_detection_ready(self, frame_bgr, found_features, my_player_rects_ignored, other_player_rects_ignored):
         """
-        [v12.0.1 BUGFIX] 비동기 RANSAC 흐름에 따른 NameError 해결
+        탐지 스레드로부터 받은 정보를 처리하고, RANSAC을 이용해 플레이어의 전역 좌표를 강건하게 추정합니다.
+        [v11.0.0] 이 메서드에서 직접 플레이어 아이콘을 탐지합니다.
         """
+        # [v11.0.0] 플레이어 아이콘 탐지 책임을 이 메서드로 이동
         my_player_rects = self.find_player_icon(frame_bgr)
         other_player_rects = self.find_other_player_icons(frame_bgr)
 
@@ -5262,107 +5099,192 @@ class MapTab(QWidget):
                 self.debug_dialog.update_debug_info(frame_bgr, {'all_features': found_features, 'inlier_ids': set(), 'player_pos_local': None})
             return
 
-        player_anchor_local = QPointF(my_player_rects[0].center().x(), float(my_player_rects[0].y() + my_player_rects[0].height()) + PLAYER_Y_OFFSET)
-        
         reliable_features = []
-        confidences = []
         for f in found_features:
             if f['id'] in self.key_features and f['conf'] >= self.key_features[f['id']].get('threshold', 0.85):
                 reliable_features.append(f)
-                confidences.append(f['conf'])
-        
-        n_candidates = len(reliable_features)
-        mean_conf = float(np.mean(confidences)) if confidences else 0.0
+
+        source_points, dest_points, valid_features_map = [], [], {}
+        feature_ids = []
+
+        for feature in reliable_features:
+            feature_id = feature['id']
+            if feature_id in self.global_positions:
+                valid_features_map[feature_id] = feature
+                size = feature['size']
+                local_pos = QPointF(feature['local_pos'])
+                global_pos = self.global_positions[feature_id]
+
+                src_cx = local_pos.x() + size.width()/2
+                src_cy = local_pos.y() + size.height()/2
+                dst_cx = global_pos.x() + size.width()/2
+                dst_cy = global_pos.y() + size.height()/2
+                source_points.append([src_cx, src_cy])
+                dest_points.append([dst_cx, dst_cy])
+                feature_ids.append(feature_id)
+
+        player_anchor_local = QPointF(self.minimap_region['width'] / 2.0, self.minimap_region['height'] / 2.0)
+        if my_player_rects:
+            player_rect = my_player_rects[0]
+            player_anchor_local = QPointF(player_rect.center().x(), float(player_rect.y() + player_rect.height()) + PLAYER_Y_OFFSET)
+
         avg_player_global_pos = None
+        inlier_ids = set()
+        transform_matrix = None
 
-        if n_candidates < self.min_candidates_for_ransac or mean_conf >= self.ransac_skip_confidence_threshold:
-            avg_player_global_pos = self._apply_simple_transform(reliable_features, player_anchor_local)
-            if self.last_transform_matrix is not None:
-                ransac_pos = self._apply_ransac_transform(self.last_transform_matrix, player_anchor_local)
-                if ransac_pos and avg_player_global_pos:
-                    avg_player_global_pos = (ransac_pos + avg_player_global_pos) / 2.0
-                elif ransac_pos:
-                    avg_player_global_pos = ransac_pos
+        if len(source_points) < 3:
+            if valid_features_map:
+                total_confidence = sum(f['conf'] for f in valid_features_map.values())
+                if total_confidence > 0:
+                    weighted_player_x_sum = 0
+                    weighted_player_y_sum = 0
+                    for feature in valid_features_map.values():
+                        feature_center_local = QPointF(feature['local_pos']) + QPointF(feature['size'].width()/2, feature['size'].height()/2)
+                        feature_center_global = self.global_positions[feature['id']] + QPointF(feature['size'].width()/2, feature['size'].height()/2)
+
+                        offset = player_anchor_local - feature_center_local
+                        player_global_pos = feature_center_global + offset
+
+                        weighted_player_x_sum += player_global_pos.x() * feature['conf']
+                        weighted_player_y_sum += player_global_pos.y() * feature['conf']
+
+                    avg_player_global_pos = QPointF(weighted_player_x_sum / total_confidence, weighted_player_y_sum / total_confidence)
+                inlier_ids = set(valid_features_map.keys())
         else:
-            if self.is_ransac_running:
-                self._indicate_ransac_dropped()
-                if self.last_transform_matrix is not None:
-                    avg_player_global_pos = self._apply_ransac_transform(self.last_transform_matrix, player_anchor_local)
-                else:
-                    avg_player_global_pos = self._apply_simple_transform(reliable_features, player_anchor_local)
-            else:
-                src_pts, dst_pts, feature_ids = [], [], []
-                for feature in reliable_features:
-                    if feature['id'] in self.global_positions:
-                        size = feature['size']
-                        local_pos = QPointF(feature['local_pos'])
-                        global_pos = self.global_positions[feature['id']]
-                        src_pts.append([local_pos.x() + size.width()/2, local_pos.y() + size.height()/2])
-                        dst_pts.append([global_pos.x() + size.width()/2, global_pos.y() + size.height()/2])
-                        feature_ids.append(feature['id'])
-                
-                if src_pts:
-                    worker = _RansacWorker(src_pts, dst_pts, feature_ids, self.ransac_reproj_threshold, self.ransac_max_iters)
-                    worker.signals.finished.connect(self._on_ransac_done)
-                    self.is_ransac_running = True
-                    self.ransac_pool.start(worker)
+            src_pts = np.float32(source_points)
+            dst_pts = np.float32(dest_points)
 
-                if self.last_transform_matrix is not None:
-                    avg_player_global_pos = self._apply_ransac_transform(self.last_transform_matrix, player_anchor_local)
+            ransac_thresh = getattr(self, 'ransac_reproj_threshold', 3.0)
+            max_iters = getattr(self, 'ransac_max_iters', 2000)
+            transform_matrix, inliers = cv2.estimateAffinePartial2D(
+                src_pts, dst_pts,
+                method=cv2.RANSAC,
+                ransacReprojThreshold=ransac_thresh,
+                maxIters=max_iters
+            )
+
+            if inliers is None:
+                transform_matrix = None
+            else:
+                inliers = inliers.reshape(-1)
+                inlier_features = []
+                for idx, fid in enumerate(feature_ids):
+                    if inliers[idx] == 1:
+                        inlier_features.append(valid_features_map[fid])
+                        inlier_ids.add(fid)
+
+                min_inliers_for_confidence = getattr(self, 'min_inliers_for_confidence', 3)
+                if transform_matrix is not None and len(inlier_features) >= min_inliers_for_confidence:
+                    A = transform_matrix[:, :2]
+                    t = transform_matrix[:, 2]
+                    px, py = player_anchor_local.x(), player_anchor_local.y()
+                    transformed = (A @ np.array([px, py], dtype=np.float32)) + t
+                    avg_player_global_pos = QPointF(float(transformed[0]), float(transformed[1]))
                 else:
-                    avg_player_global_pos = self._apply_simple_transform(reliable_features, player_anchor_local)
-        
+                    if inlier_features:
+                        total_confidence = sum(f['conf'] for f in inlier_features)
+                        if total_confidence > 0:
+                            weighted_player_x_sum = 0
+                            weighted_player_y_sum = 0
+                            for feature in inlier_features:
+                                feature_center_local = QPointF(feature['local_pos']) + QPointF(feature['size'].width()/2, feature['size'].height()/2)
+                                feature_center_global = self.global_positions[feature['id']] + QPointF(feature['size'].width()/2, feature['size'].height()/2)
+                                offset = player_anchor_local - feature_center_local
+                                player_global_pos = feature_center_global + offset
+                                weighted_player_x_sum += player_global_pos.x() * feature['conf']
+                                weighted_player_y_sum += player_global_pos.y() * feature['conf']
+                            avg_player_global_pos = QPointF(weighted_player_x_sum / total_confidence, weighted_player_y_sum / total_confidence)
+
         if avg_player_global_pos is None:
             if self.debug_dialog and self.debug_dialog.isVisible():
-                self.debug_dialog.update_debug_info(frame_bgr, {'all_features': found_features, 'inlier_ids': self.last_inlier_ids, 'player_pos_local': player_anchor_local})
-            self.update_detection_log_from_features(reliable_features, [])
+                self.debug_dialog.update_debug_info(frame_bgr, {'all_features': found_features, 'inlier_ids': set(), 'player_pos_local': None})
+            self.update_detection_log_from_features([], [])
             return
 
         min_alpha = getattr(self, 'min_alpha', 0.05)
         max_alpha = getattr(self, 'max_alpha', 0.5)
-        inlier_count = max(1, len(reliable_features))
-        alpha = min_alpha + (max_alpha - min_alpha) * (min(1.0, mean_conf) * min(1.0, inlier_count / 6.0))
-        
+        inlier_count = max(1, len(inlier_ids))
+        avg_conf = 0.0
+        if inlier_count > 0:
+            try:
+                inlier_features_for_conf = [valid_features_map[fid] for fid in inlier_ids]
+                avg_conf = sum(f['conf'] for f in inlier_features_for_conf) / len(inlier_features_for_conf)
+            except Exception:
+                avg_conf = 1.0
+        alpha = min_alpha + (max_alpha - min_alpha) * (min(1.0, avg_conf) * min(1.0, inlier_count / 6.0))
         if self.smoothed_player_pos is None:
             self.smoothed_player_pos = avg_player_global_pos
         else:
             new_x = (avg_player_global_pos.x() * alpha) + (self.smoothed_player_pos.x() * (1 - alpha))
             new_y = (avg_player_global_pos.y() * alpha) + (self.smoothed_player_pos.y() * (1 - alpha))
             self.smoothed_player_pos = QPointF(new_x, new_y)
-        
+
         final_player_pos = self.smoothed_player_pos
-        
+
         self._update_player_state_and_navigation(final_player_pos)
-        
+
         if self.debug_dialog and self.debug_dialog.isVisible():
             debug_data = {
                 'all_features': found_features,
-                'inlier_ids': self.last_inlier_ids,
+                'inlier_ids': inlier_ids,
                 'player_pos_local': player_anchor_local,
+                'ransac_matrix': transform_matrix,
+                'ransac_inliers': list(inlier_ids)
             }
             self.debug_dialog.update_debug_info(frame_bgr, debug_data)
 
         my_player_global_rects = []
         other_player_global_rects = []
-        
-        transform_to_use = self.last_transform_matrix
-        
-        if transform_to_use is not None:
-            A = transform_to_use[:, :2]
-            t = transform_to_use[:, 2]
+        if transform_matrix is not None:
+            A = transform_matrix[:, :2]
+            t = transform_matrix[:, 2]
+            def transform_point(x, y):
+                res = (A @ np.array([x, y], dtype=np.float32)) + t
+                return float(res[0]), float(res[1])
+
             def transform_rect(rect):
-                center_tx = (A[0, 0] * rect.center().x() + A[0, 1] * rect.center().y()) + t[0]
-                center_ty = (A[1, 0] * rect.center().x() + A[1, 1] * rect.center().y()) + t[1]
-                return QRectF(center_tx - rect.width()/2, center_ty - rect.height()/2, rect.width(), rect.height())
+                corners = [
+                    (rect.left(), rect.top()), (rect.right(), rect.top()),
+                    (rect.right(), rect.bottom()), (rect.left(), rect.bottom()),
+                ]
+                txs, tys = zip(*[transform_point(x, y) for (x, y) in corners])
+                min_x, max_x = min(txs), max(txs)
+                min_y, max_y = min(tys), max(tys)
+                return QRectF(min_x, min_y, max_x - min_x, max_y - min_y)
 
             my_player_global_rects = [transform_rect(rect) for rect in my_player_rects]
             other_player_global_rects = [transform_rect(rect) for rect in other_player_rects]
         else:
-            if my_player_rects:
-                offset = avg_player_global_pos - player_anchor_local
-                my_player_global_rects = [QRectF(rect).translated(offset) for rect in my_player_rects]
-                other_player_global_rects = [rect.translated(offset) for rect in other_player_rects]
+            def local_rect_to_global_center(rect, features_source):
+                if not features_source:
+                    return QPointF(final_player_pos.x(), final_player_pos.y())
 
+                rx, ry = rect.center().x(), rect.center().y()
+                sum_x, sum_y, sum_w = 0.0, 0.0, 0.0
+                for f in features_source:
+                    fid = f['id']
+                    if fid not in self.global_positions: continue
+                    f_local = QPointF(f['local_pos']) + QPointF(f['size'].width()/2, f['size'].height()/2)
+                    f_global = self.global_positions[fid] + QPointF(f['size'].width()/2, f['size'].height()/2)
+                    dx_local, dy_local = rx - f_local.x(), ry - f_local.y()
+                    cand_x, cand_y = f_global.x() + dx_local, f_global.y() + dy_local
+                    w = f.get('conf', 1.0)
+                    sum_x += cand_x * w
+                    sum_y += cand_y * w
+                    sum_w += w
+                if sum_w <= 0: return QPointF(final_player_pos.x(), final_player_pos.y())
+                return QPointF(sum_x / sum_w, sum_y / sum_w)
+
+            fallback_features = [valid_features_map[fid] for fid in inlier_ids] if inlier_ids else list(valid_features_map.values())
+
+            for rect in my_player_rects:
+                center_global = local_rect_to_global_center(rect, fallback_features)
+                my_player_global_rects.append(QRectF(center_global.x() - rect.width()/2, center_global.y() - rect.height()/2, rect.width(), rect.height()))
+
+            for rect in other_player_global_rects:
+                center_global = local_rect_to_global_center(rect, fallback_features)
+                other_player_global_rects.append(QRectF(center_global.x() - rect.width()/2, center_global.y() - rect.height()/2, rect.width(), rect.height()))
+        
         camera_pos_to_send = final_player_pos if self.center_on_player_checkbox.isChecked() else self.minimap_view_label.camera_center_global
         
         self.minimap_view_label.update_view_data(
@@ -5378,8 +5300,11 @@ class MapTab(QWidget):
         
         self.global_pos_updated.emit(final_player_pos)
         
-        self.update_detection_log_from_features(reliable_features, [f for f in found_features if f not in reliable_features])
-
+        inlier_list = [f for f in reliable_features if f['id'] in inlier_ids]
+        outlier_list = [f for f in reliable_features if f['id'] not in inlier_ids]
+        
+        self.update_detection_log_from_features(inlier_list, outlier_list)
+        
     def _generate_full_map_pixmap(self):
             """
             v10.0.0: 모든 핵심 지형의 문맥 이미지를 합성하여 하나의 큰 배경 지도 QPixmap을 생성하고,
@@ -5713,6 +5638,7 @@ class MapTab(QWidget):
             self.in_jump = False
             if new_state == 'jumping':
                 new_state = 'falling'
+                
         # 디버그 로그
         # if new_state != previous_state and new_state in ['climbing', 'falling']:
         #     ladder_info = f"True ({ladder_dist_x:.2f}px)" if is_near_ladder else f"False ({ladder_dist_x:.2f}px)"
