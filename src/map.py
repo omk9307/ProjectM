@@ -3132,6 +3132,12 @@ class RealtimeMinimapView(QLabel):
         self.last_reached_waypoint_id = None
         #진행 방향 플래그 추가 ---
         self.is_forward = True
+        # ==================== v11.6.2 시각화 변수 추가 시작 ====================
+        self.intermediate_target_pos = None
+        self.intermediate_target_type = None
+        # ==================== v11.6.3 상태 변수 추가 시작 ====================
+        self.navigation_action = 'move_to_target'
+        # ==================== v11.6.3 상태 변수 추가 끝 ======================
         # 패닝(드래그) 상태 변수
         self.is_panning = False
         self.last_pan_pos = QPoint()
@@ -3167,7 +3173,7 @@ class RealtimeMinimapView(QLabel):
             self.setCursor(Qt.CursorShape.ArrowCursor)
         super().mouseReleaseEvent(event)
 
-    def update_view_data(self, camera_center, active_features, my_players, other_players, target_wp_id, reached_wp_id, final_player_pos, is_forward):
+    def update_view_data(self, camera_center, active_features, my_players, other_players, target_wp_id, reached_wp_id, final_player_pos, is_forward, intermediate_pos, intermediate_type, nav_action):
         """MapTab으로부터 렌더링에 필요한 최신 데이터를 받습니다."""
         self.camera_center_global = camera_center
         self.active_features = active_features
@@ -3177,6 +3183,9 @@ class RealtimeMinimapView(QLabel):
         self.last_reached_waypoint_id = reached_wp_id
         self.final_player_pos_global = final_player_pos
         self.is_forward = is_forward
+        self.intermediate_target_pos = intermediate_pos
+        self.intermediate_target_type = intermediate_type
+        self.navigation_action = nav_action
         self.update()
 
     def paintEvent(self, event):
@@ -3459,6 +3468,73 @@ class RealtimeMinimapView(QLabel):
                     self._draw_text_with_outline(painter, arrival_rect, Qt.AlignmentFlag.AlignCenter, "도착", font_arrival, Qt.GlobalColor.yellow, Qt.GlobalColor.black)
 
             painter.restore()
+
+        # ==================== v11.6.2 시각적 보정 로직 추가 시작 ====================
+        if self.intermediate_target_pos and self.final_player_pos_global:
+            painter.save()
+            
+            # --- 시작/끝점 좌표 계산 ---
+            # 시작점: 플레이어 아이콘의 중앙
+            p1_global = self.final_player_pos_global
+            if self.my_player_rects:
+                p1_global = self.my_player_rects[0].center()
+
+            # 끝점: 타입에 따라 보정
+            p2_global = self.intermediate_target_pos
+            if self.intermediate_target_type == 'walk':
+                # 목표 웨이포인트 ID 찾기
+                target_wp_id_for_render = self.target_waypoint_id
+                if self.navigation_action.startswith('prepare_to_') or self.navigation_action.endswith('_in_progress'):
+                    # 행동 중일 때는 intermediate_target이 최종 목표가 아닐 수 있음
+                    # 이 경우 target_waypoint_id가 최종 목표임
+                    pass
+                else: # move_to_target
+                    target_wp_id_for_render = self.target_waypoint_id
+                
+                # 웨이포인트 데이터에서 크기 정보 가져오기 (임시 크기 사용)
+                WAYPOINT_SIZE = 12.0
+                target_wp_rect = QRectF(p2_global.x() - WAYPOINT_SIZE/2, p2_global.y() - WAYPOINT_SIZE, WAYPOINT_SIZE, WAYPOINT_SIZE)
+                p2_global = target_wp_rect.center()
+
+            # 1. 경로 안내선 (Guidance Line) - 굵기 3px로 변경
+            pen = QPen(QColor("cyan"), 3, Qt.PenStyle.DashLine)
+            painter.setPen(pen)
+            
+            p1_local = global_to_local(p1_global)
+            p2_local = global_to_local(p2_global)
+            painter.drawLine(p1_local, p2_local)
+            
+            # 2. 중간 목표 아이콘 (Target Icon) - 스타일 변경
+            # 아이콘 위치는 정확한 좌표(p2_global)를 사용
+            icon_center_local = p2_local
+            TARGET_ICON_SIZE = 5.0 # 전역 좌표계 기준 크기 5x5로 변경
+            scaled_size = TARGET_ICON_SIZE * self.zoom_level
+            
+            icon_rect = QRectF(
+                icon_center_local.x() - scaled_size / 2,
+                icon_center_local.y() - scaled_size / 2,
+                scaled_size,
+                scaled_size
+            )
+            # ==================== v11.6.2 시각적 보정 로직 추가 끝 ======================
+            
+            # 배경 (단색 빨간색 원)
+            painter.setPen(Qt.PenStyle.NoPen) # 배경에는 테두리 없음
+            painter.setBrush(QBrush(Qt.GlobalColor.red))
+            painter.drawEllipse(icon_rect)
+            
+            # 테두리 (흰색, 1.5px)
+            painter.setPen(QPen(Qt.GlobalColor.white, 1.5))
+            painter.setBrush(Qt.BrushStyle.NoBrush) # 테두리에는 채우기 없음
+            painter.drawEllipse(icon_rect)
+
+            # 흰색 X자 (굵기 1px로 변경)
+            painter.setPen(QPen(Qt.GlobalColor.white, 1))
+            painter.drawLine(icon_rect.topLeft(), icon_rect.bottomRight())
+            painter.drawLine(icon_rect.topRight(), icon_rect.bottomLeft())
+            
+            painter.restore()
+        # ==================== v11.6.1 시각화 스타일 수정 끝 ======================
 
         # 내 캐릭터, 다른 유저 
         painter.save()
@@ -3921,6 +3997,11 @@ class MapTab(QWidget):
             # v10.2.0: 중간 목표 상태 변수
             self.intermediate_target_pos = None
             self.intermediate_target_type = 'walk' # 'walk', 'climb', 'fall', 'jump'
+            # ==================== v11.6.5 변수 추가 시작 ====================
+            self.intermediate_target_entry_pos = None
+            # ==================== v11.6.5 변수 추가 끝 ======================
+            self.intermediate_target_exit_pos = None
+            self.intermediate_target_object_name = ""
             self.guidance_text = "없음"
             
             #지형 간 상대 위치 벡터 저장
@@ -5335,17 +5416,12 @@ class MapTab(QWidget):
         
         camera_pos_to_send = final_player_pos if self.center_on_player_checkbox.isChecked() else self.minimap_view_label.camera_center_global
         
-        self.minimap_view_label.update_view_data(
-            camera_center=camera_pos_to_send,
-            active_features=found_features,
-            my_players=my_player_global_rects,
-            other_players=other_player_global_rects,
-            target_wp_id=self.target_waypoint_id,
-            reached_wp_id=self.last_reached_wp_id,
-            final_player_pos=final_player_pos,
-            is_forward=self.is_forward
-        )
-        
+        # ==================== v11.6.0 멤버 변수 저장 로직 추가 시작 ====================
+        self.my_player_global_rects = my_player_global_rects
+        self.other_player_global_rects = other_player_global_rects
+        self.active_feature_info = found_features
+        # ==================== v11.6.0 멤버 변수 저장 로직 추가 끝 ======================
+             
         self.global_pos_updated.emit(final_player_pos)
         
         inlier_list = [f for f in reliable_features if f['id'] in inlier_ids]
@@ -5582,6 +5658,10 @@ class MapTab(QWidget):
 
     def _update_player_state_and_navigation(self, final_player_pos):
             """
+            v11.6.4: 행동 준비(prepare_to_*) 상태의 타임아웃이 즉시 발동하던 버그를 수정합니다.
+            v11.6.3: 실시간 뷰 렌더링 시 발생하던 AttributeError 버그 수정
+            v11.6.2: 내비게이션 로직 고도화 및 시각적 표현 개선
+            v11.6.1: 'walk' 타입 웨이포인트 도착 판정 버그 수정
             v11.5.0: 플레이어의 현재 상태를 판정하고, 상태 머신에 따라 다음 행동을 결정합니다.
             디바운스, 타임아웃, 피드백 루프를 포함한 견고한 상태 머신으로 재설계되었습니다.
             """
@@ -5700,7 +5780,6 @@ class MapTab(QWidget):
                 self.last_player_pos = final_player_pos
                 return
 
-            # 최종 목표(final_target_wp) 결정 로직
             if not self.start_waypoint_found and self.current_player_floor is not None:
                 forward_path = active_route.get("forward_path", [])
                 backward_path = active_route.get("backward_path", [])
@@ -5754,7 +5833,6 @@ class MapTab(QWidget):
                             self.start_waypoint_found = True
                             self.update_general_log(f"가장 가까운 경로의 웨이포인트 '{start_wp_candidate['name']}'({start_wp_candidate['floor']}층)에서 내비게이션 시작.", "purple")
 
-            # 중간 목표가 없거나, 잠겨있지 않을 때만 새로운 중간 목표를 계산
             if self.intermediate_target_pos is None and not self.navigation_state_locked:
                 final_target_wp = all_waypoints_map.get(self.target_waypoint_id)
                 if not final_target_wp or self.current_player_floor is None:
@@ -5822,14 +5900,39 @@ class MapTab(QWidget):
                     self.guidance_text = "경로 탐색 불가"
                     self.intermediate_target_pos = None
                     self.intermediate_target_type = 'walk'
+                    self.intermediate_target_exit_pos = None
+                    self.intermediate_target_object_name = ""
                 else:
                     for cand in all_candidates:
                         cand['cost'] = self._calculate_total_cost(final_player_pos, final_target_wp, cand)
+                    
                     best_candidate = min(all_candidates, key=lambda c: c.get('cost', float('inf')))
+                    
                     self.intermediate_target_type = best_candidate['type']
                     self.intermediate_target_pos = best_candidate['entry_point']
-                    if self.intermediate_target_type == 'walk': self.guidance_text = final_target_wp.get('name', '')
-                    elif self.intermediate_target_type == 'climb': self.guidance_text = best_candidate['object'].get('dynamic_name', '사다리로 이동')
+                    # ==================== v11.6.5 수정 시작 ====================
+                    self.intermediate_target_entry_pos = best_candidate['entry_point'] # 입구 좌표 저장
+                    # ==================== v11.6.5 수정 끝 ======================
+                    
+                    # 출구 좌표 및 오브젝트 이름 저장
+                    if self.intermediate_target_type == 'climb':
+                        obj = best_candidate['object']
+                        p1_y, p2_y = obj['points'][0][1], obj['points'][1][1]
+                        exit_y = min(p1_y, p2_y)
+                        self.intermediate_target_exit_pos = QPointF(obj['points'][0][0], exit_y)
+                        self.intermediate_target_object_name = obj.get('dynamic_name', '사다리 출구')
+                    elif self.intermediate_target_type == 'jump':
+                        self.intermediate_target_exit_pos = best_candidate['exit_point']
+                        self.intermediate_target_object_name = best_candidate['link'].get('dynamic_name', '점프 도착점')
+                    else:
+                        self.intermediate_target_exit_pos = None
+                        if self.intermediate_target_type == 'walk':
+                            self.intermediate_target_object_name = final_target_wp.get('name', '')
+                        else:
+                            self.intermediate_target_object_name = "낙하 지점"
+                    
+                    if self.intermediate_target_type == 'walk': self.guidance_text = self.intermediate_target_object_name
+                    elif self.intermediate_target_type == 'climb': self.guidance_text = self.intermediate_target_object_name.replace("출구", "")
                     elif self.intermediate_target_type == 'fall': self.guidance_text = "낭떠러지로 이동"
                     elif self.intermediate_target_type == 'jump': self.guidance_text = "점프 지점으로 이동"
 
@@ -5837,24 +5940,19 @@ class MapTab(QWidget):
             if self.intermediate_target_pos is not None and not self.navigation_state_locked:
                 distance_to_target = abs(final_player_pos.x() - self.intermediate_target_pos.x())
                 
-                # --- 4.1 'move_to_target' 상태: 도착 판정 및 상태 전이 ---
                 if self.navigation_action == 'move_to_target':
                     arrival_threshold = self.cfg_waypoint_arrival_x_threshold
                     if self.intermediate_target_type == 'climb': arrival_threshold = self.cfg_ladder_arrival_x_threshold
                     elif self.intermediate_target_type in ['jump', 'fall']: arrival_threshold = self.cfg_jump_link_arrival_x_threshold
 
-                    # 디바운스 적용
                     if distance_to_target < arrival_threshold:
                         self.state_transition_counters['arrival'] += 1
                     else:
                         self.state_transition_counters['arrival'] = 0
 
-                    # ==================== v11.5.1 수정 시작 ====================
                     if self.state_transition_counters['arrival'] >= self.cfg_arrival_frame_threshold:
-                        # Case 1: 일반 웨이포인트 도착 (walk)
                         if self.intermediate_target_type == 'walk':
                             self.last_reached_wp_id = self.target_waypoint_id
-                            
                             current_path_list = active_route.get("forward_path" if self.is_forward else "backward_path", [])
                             if not current_path_list and not self.is_forward:
                                 current_path_list = list(reversed(active_route.get("forward_path", [])))
@@ -5862,7 +5960,7 @@ class MapTab(QWidget):
                             self.current_path_index += 1
                             if self.current_path_index < len(current_path_list):
                                 self.target_waypoint_id = current_path_list[self.current_path_index]
-                            else: # 경로 끝에 도달
+                            else:
                                 self.is_forward = not self.is_forward
                                 next_path_list = active_route.get("forward_path" if self.is_forward else "backward_path", [])
                                 if not next_path_list and not self.is_forward:
@@ -5875,33 +5973,41 @@ class MapTab(QWidget):
                                     self.target_waypoint_id = None
                                     self.update_general_log("경로 완주. 순환할 경로가 없습니다.", "green")
 
-                            self.intermediate_target_pos = None # 다음 목표 재탐색 트리거
+                            self.intermediate_target_pos = None
                             self.state_transition_counters['arrival'] = 0
                             self.update_general_log(f"웨이포인트 '{all_waypoints_map.get(self.last_reached_wp_id, {}).get('name')}' 도착.", "green")
 
-                        # Case 2: 중간 목표 도착 (climb, fall, jump)
-                        elif self.intermediate_target_type == 'climb': self.navigation_action = 'prepare_to_climb'
-                        elif self.intermediate_target_type == 'fall': self.navigation_action = 'prepare_to_fall'
-                        elif self.intermediate_target_type == 'jump': self.navigation_action = 'prepare_to_jump'
+                        elif self.intermediate_target_type == 'climb':
+                            self.navigation_action = 'prepare_to_climb'
+                            self.intermediate_target_pos = self.intermediate_target_exit_pos
+                            self.guidance_text = self.intermediate_target_object_name
+                        elif self.intermediate_target_type == 'fall':
+                            self.navigation_action = 'prepare_to_fall'
+                        elif self.intermediate_target_type == 'jump':
+                            self.navigation_action = 'prepare_to_jump'
+                            self.intermediate_target_pos = self.intermediate_target_exit_pos
+                            self.guidance_text = self.intermediate_target_object_name
                         
                         if self.navigation_action != 'move_to_target':
                             self.prepare_timeout_start = time.time()
                             self.state_transition_counters['arrival'] = 0
                             self.update_general_log(f"중간 목표 도착. 행동 준비({self.navigation_action}) 시작.", "blue")
-                    # ==================== v11.5.1 수정 끝 ======================
 
                 elif self.navigation_action.startswith('prepare_to_'):
+                    # ==================== v11.6.5 수정 시작 ====================
+                    # 이탈 판정 기준을 '출구'가 아닌 '입구'와의 거리로 변경
+                    distance_to_entry = abs(final_player_pos.x() - self.intermediate_target_entry_pos.x())
+                    # ==================== v11.6.5 수정 끝 ======================
+
                     exit_threshold = self.cfg_waypoint_arrival_x_threshold + HYSTERESIS_EXIT_OFFSET
                     if self.intermediate_target_type == 'climb': exit_threshold = self.cfg_ladder_arrival_x_threshold + HYSTERESIS_EXIT_OFFSET
                     elif self.intermediate_target_type in ['jump', 'fall']: exit_threshold = self.cfg_jump_link_arrival_x_threshold + HYSTERESIS_EXIT_OFFSET
-
-                    # ==================== v11.5.2 수정 시작 ====================
-                    # 'idle' 상태 진입 시 준비 상태가 취소되던 버그 수정
-                    if distance_to_target > exit_threshold:
-                    # ==================== v11.5.2 수정 끝 ======================
+                    
+                    if distance_to_entry > exit_threshold: # <<< 기준 변수 변경
                         self.update_general_log(f"행동 준비({self.navigation_action}) 취소. 목표에서 벗어남.", "orange")
                         self.navigation_action = 'move_to_target'
                         self.intermediate_target_pos = None
+
                     else:
                         action_type = self.navigation_action.split('_')[-1]
                         expected_player_state = 'climbing' if action_type == 'climb' else ('jumping' if action_type == 'jump' else 'falling')
@@ -5918,7 +6024,7 @@ class MapTab(QWidget):
                             self.lock_timeout_start = time.time()
                             self.state_transition_counters[counter_key] = 0
                             self.update_general_log(f"플레이어 행동({self.player_state}) 감지. 상태 잠금 시작.", "blue")
-
+            
             # ==================== Phase 5: UI 업데이트 ====================
             prev_name, next_name, direction, distance = "", "", "-", 0
             full_path = active_route.get("forward_path" if self.is_forward else "backward_path", [])
@@ -5970,6 +6076,22 @@ class MapTab(QWidget):
                 intermediate_type=self.intermediate_target_type,
                 player_state=player_state_text,
                 nav_action=nav_action_text
+            )
+            
+            camera_pos_to_send = final_player_pos if self.center_on_player_checkbox.isChecked() else self.minimap_view_label.camera_center_global
+            
+            self.minimap_view_label.update_view_data(
+                camera_center=camera_pos_to_send,
+                active_features=self.active_feature_info,
+                my_players=self.my_player_global_rects,
+                other_players=self.other_player_global_rects,
+                target_wp_id=self.target_waypoint_id,
+                reached_wp_id=self.last_reached_wp_id,
+                final_player_pos=final_player_pos,
+                is_forward=self.is_forward,
+                intermediate_pos=self.intermediate_target_pos,
+                intermediate_type=self.intermediate_target_type,
+                nav_action=self.navigation_action
             )
             
             self.last_player_pos = final_player_pos
