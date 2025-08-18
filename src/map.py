@@ -4023,11 +4023,7 @@ class MapTab(QWidget):
         
         self.detect_anchor_btn = QPushButton("탐지 시작")
         self.detect_anchor_btn.setCheckable(True)
-        # [v11.4.0] 버튼 크기 키우기
-        font = self.detect_anchor_btn.font()
-        font.setPointSize(font.pointSize() + 2)
-        self.detect_anchor_btn.setFont(font)
-        self.detect_anchor_btn.setStyleSheet("padding: 5px;")
+        self.detect_anchor_btn.setStyleSheet("padding: 3px 60px")
         self.detect_anchor_btn.clicked.connect(self.toggle_anchor_detection)
         
         detect_layout.addWidget(self.state_config_btn)
@@ -5535,11 +5531,8 @@ class MapTab(QWidget):
     def _update_player_state_and_navigation(self, final_player_pos):
         """
         v10.8.0: 플레이어의 현재 상태를 판정하고, 상태 머신에 따라 다음 행동을 결정합니다.
-        [v11.4.5] 디버그 로그 형식 및 출력 조건 최종 개편
+        [v11.4.1] 상태 판정 로직 종합 업데이트
         """
-        # --- [v11.4.5] 디버그를 위한 변수 초기화 ---
-        log_data = {}
-
         current_terrain_name = "" 
 
         if final_player_pos is None:
@@ -5579,18 +5572,10 @@ class MapTab(QWidget):
         else: # 공중 상태
             is_near_ladder, nearest_ladder_x = self._check_near_ladder(final_player_pos, self.geometry_data.get("transition_objects", []), self.cfg_ladder_x_grab_threshold, return_x=True)
             
-            # [디버그 로그] 데이터 수집
-            log_data['condition'] = 'In Air'
-            if is_near_ladder:
-                dist_to_ladder = abs(final_player_pos.x() - nearest_ladder_x)
-                log_data['ladder_info'] = f"True ({dist_to_ladder:.2f}px)"
-            else:
-                log_data['ladder_info'] = "False"
-
             if self.in_jump and is_near_ladder:
                 approaching_ladder = False
-                towards_ladder_count = 0
                 if len(self.x_movement_history) == self.x_movement_history.maxlen:
+                    towards_ladder_count = 0
                     reference_x = final_player_pos.x() - x_movement 
                     for move in self.x_movement_history:
                         if abs(move) > self.cfg_move_deadzone:
@@ -5600,9 +5585,6 @@ class MapTab(QWidget):
                         reference_x += move 
                     if towards_ladder_count >= 3:
                         approaching_ladder = True
-                
-                # [디버그 로그] 데이터 수집
-                log_data['intent_check'] = f"approaching={approaching_ladder}, towards_count={towards_ladder_count}"
 
                 if approaching_ladder and x_movement_abs < self.cfg_climb_x_movement_threshold and y_above_terrain > self.cfg_jump_y_min_threshold:
                     new_state = 'climbing'
@@ -5611,28 +5593,29 @@ class MapTab(QWidget):
                     self.jumping_candidate_frames = 0
                     self.falling_candidate_frames = 0
             
-            # [v11.4.7] climbing <-> falling 즉시 전환 로직 최종 수정
             if new_state == previous_state:
-                time_since_change = time.time() - self.last_state_change_time
-                can_switch = time_since_change > 0.2 # 0.2초의 상태 변경 불응기
-
-                # climbing -> falling 전환 조건
-                if previous_state == 'climbing' and y_movement < -self.cfg_y_movement_deadzone and is_near_ladder and can_switch:
+                if previous_state == 'climbing' and y_movement < -self.cfg_y_movement_deadzone and is_near_ladder:
                     new_state = 'falling'
                     self.climbing_candidate_frames = 0
-                # falling -> climbing 전환 조건
-                elif previous_state == 'falling' and y_movement > self.cfg_y_movement_deadzone and is_near_ladder and x_movement_abs < self.cfg_climb_x_movement_threshold and can_switch:
+                elif previous_state == 'falling' and y_movement > self.cfg_y_movement_deadzone and is_near_ladder and x_movement_abs < self.cfg_climb_x_movement_threshold:
                     new_state = 'climbing'
                     self.falling_candidate_frames = 0
             
             if new_state == previous_state:
-                climb_condition_for_jump = not self.in_jump or (self.in_jump and y_above_terrain > self.cfg_jump_y_max_threshold)
-                is_climbing_on_ladder = is_near_ladder and y_movement > 0 and x_movement_abs < self.cfg_climb_x_movement_threshold and climb_condition_for_jump
-                is_climbing_high_jump = y_movement > 0 and y_above_terrain > self.cfg_jump_y_max_threshold
-                is_climbing_now = is_climbing_on_ladder or is_climbing_high_jump
+                # [v11.4.1] climbing 진입은 jumping 상태에서만 가능하도록 로직 수정
+                is_climbing_now = False
+                if self.in_jump:
+                    is_climbing_on_ladder = is_near_ladder and y_movement > self.cfg_y_movement_deadzone and x_movement_abs < self.cfg_climb_x_movement_threshold
+                    is_climbing_high_jump = y_above_terrain > self.cfg_jump_y_max_threshold
+                    if is_climbing_on_ladder or is_climbing_high_jump:
+                        is_climbing_now = True
+
+                # [v11.4.1] idle 상태에서도 점프 가능하도록 수정
                 is_jumping_now = (previous_state in ['on_terrain', 'idle'] and y_movement > self.cfg_y_movement_deadzone)
-                is_falling_now = (y_above_terrain < -self.cfg_fall_y_min_threshold and y_movement < 0 and not is_near_ladder) or \
-                                 (is_near_ladder and y_movement < 0 and x_movement_abs < self.cfg_fall_on_ladder_x_movement_threshold and not self.in_jump)
+                
+                # [v11.4.1] 일반 낙하 판정에 y_movement_deadzone 적용
+                is_falling_now = (y_above_terrain < -self.cfg_fall_y_min_threshold and y_movement < -self.cfg_y_movement_deadzone and not is_near_ladder) or \
+                                 (is_near_ladder and y_movement < -self.cfg_y_movement_deadzone and x_movement_abs < self.cfg_fall_on_ladder_x_movement_threshold and not self.in_jump)
 
                 self.climbing_candidate_frames = self.climbing_candidate_frames + 1 if is_climbing_now else 0
                 self.jumping_candidate_frames = self.jumping_candidate_frames + 1 if is_jumping_now else 0
@@ -5663,19 +5646,6 @@ class MapTab(QWidget):
             self.in_jump = False
             if new_state == 'jumping':
                 new_state = 'falling'
-
-        # [v11.4.5] 통합 디버그 로그 출력
-        if new_state != previous_state and new_state in ['climbing', 'falling']:
-            # [디버그 로그]
-            print("\n" + "="*15 + " 프레임 시작 " + "="*15)
-            print(f"이전상태: '{previous_state}', in_jump={self.in_jump}, 현재상태: '{new_state}'")
-            if 'condition' in log_data:
-                print(f"-> Condition: {log_data.get('condition', 'N/A')}, 사다리 범위: {log_data.get('ladder_info', 'N/A')}")
-            print(f"Pos: y_move={y_movement:.2f}, y_above={y_above_terrain:.2f}, x_move_abs={x_movement_abs:.2f}")
-            if 'intent_check' in log_data:
-                print(f"의도적인 사다리타기 체크: {log_data['intent_check']}")
-            print(f"상태변화 '{previous_state}' -> '{new_state}'")
-            print("="*42)
 
         self.player_state = new_state
         
