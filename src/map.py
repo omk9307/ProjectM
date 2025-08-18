@@ -101,8 +101,6 @@ CLIMB_X_MOVEMENT_THRESHOLD = 1.0 # 등반 상태로 판정될 최대 수평 이�
 FALL_ON_LADDER_X_MOVEMENT_THRESHOLD = 1.0
 Y_MOVEMENT_DEADZONE = 0.5       # 상승/하강으로 인식될 최소 y 이동량 (px/frame)
 LADDER_X_GRAB_THRESHOLD = 8.0   # 사다리 근접으로 판정될 x축 허용 오차 (px)
-LADDER_GRAB_X_TOLERANCE = 3.0   # 사다리를 잡기 위해 허용되는 최종 X좌표 오차 (px)
-LADDER_GRAB_FRAME_THRESHOLD = 3 # 사다리 잡기 판정을 위한 연속 프레임
 MOVE_DEADZONE = 0.2             # 움직임으로 인식되지 않을 최소 이동 거리 (px)
 MAX_JUMP_DURATION = 3.0         # 점프 상태가 강제로 해제되기까지의 최대 시간 (초)
 # =================================================================
@@ -3766,9 +3764,7 @@ class StateConfigDialog(QDialog):
         add_spinbox(form_layout, "y_movement_deadzone", "상승/하강 감지 Y최소값(px/f):", 0.01, 5.0, 0.01, decimals=2)
         add_spinbox(form_layout, "climb_x_movement_threshold", "등반 최대 X이동(px/f):", 0.01, 5.0, 0.01)
         add_spinbox(form_layout, "fall_on_ladder_x_movement_threshold", "사다리 낙하 최대 X이동(px/f):", 0.01, 5.0, 0.01)
-        add_spinbox(form_layout, "ladder_x_grab_threshold", "사다리 근접인정 X오차(px):", 0.5, 20.0, 0.1)
-        add_spinbox(form_layout, "ladder_grab_x_tolerance", "사다리 잡기판정 X오차(px):", 0.01, 5.0, 0.01)
-        add_spinbox(form_layout, "ladder_grab_frame_threshold", "사다리 잡기 판정 프레임:", 1, 100, 1, is_double=False)
+        add_spinbox(form_layout, "ladder_x_grab_threshold", "사다리 근접 X오차(px):", 0.5, 20.0, 0.1)
         
         form_layout.addSpacing(10)
         
@@ -3809,8 +3805,6 @@ class StateConfigDialog(QDialog):
             "climb_x_movement_threshold": CLIMB_X_MOVEMENT_THRESHOLD,
             "fall_on_ladder_x_movement_threshold": FALL_ON_LADDER_X_MOVEMENT_THRESHOLD,
             "ladder_x_grab_threshold": LADDER_X_GRAB_THRESHOLD,
-            "ladder_grab_x_tolerance": LADDER_GRAB_X_TOLERANCE,
-            "ladder_grab_frame_threshold": LADDER_GRAB_FRAME_THRESHOLD,
             "move_deadzone": MOVE_DEADZONE,
             "max_jump_duration": MAX_JUMP_DURATION,
             "y_movement_deadzone": Y_MOVEMENT_DEADZONE,
@@ -3862,9 +3856,6 @@ class MapTab(QWidget):
             self.cfg_ladder_x_grab_threshold = None
             self.cfg_move_deadzone = None
             self.cfg_max_jump_duration = None
-            self.cfg_ladder_grab_x_tolerance = None
-            self.cfg_ladder_grab_frame_threshold = None
-            self.in_ladder_x_range_frames = 0
             self.cfg_y_movement_deadzone = None
             self.cfg_waypoint_arrival_x_threshold = None
             self.cfg_ladder_arrival_x_threshold = None
@@ -4226,9 +4217,7 @@ class MapTab(QWidget):
             self.cfg_waypoint_arrival_x_threshold = WAYPOINT_ARRIVAL_X_THRESHOLD
             self.cfg_ladder_arrival_x_threshold = LADDER_ARRIVAL_X_THRESHOLD
             self.cfg_jump_link_arrival_x_threshold = JUMP_LINK_ARRIVAL_X_THRESHOLD
-            self.cfg_ladder_grab_x_tolerance = LADDER_GRAB_X_TOLERANCE
-            self.cfg_ladder_grab_frame_threshold = LADDER_GRAB_FRAME_THRESHOLD
-            
+
             config = {}
             if os.path.exists(config_file):
                 with open(config_file, 'r', encoding='utf-8') as f:
@@ -4256,8 +4245,6 @@ class MapTab(QWidget):
                 self.cfg_waypoint_arrival_x_threshold = state_config.get("waypoint_arrival_x_threshold", self.cfg_waypoint_arrival_x_threshold)
                 self.cfg_ladder_arrival_x_threshold = state_config.get("ladder_arrival_x_threshold", self.cfg_ladder_arrival_x_threshold)
                 self.cfg_jump_link_arrival_x_threshold = state_config.get("jump_link_arrival_x_threshold", self.cfg_jump_link_arrival_x_threshold)
-                self.cfg_ladder_grab_x_tolerance = state_config.get("ladder_grab_x_tolerance", self.cfg_ladder_grab_x_tolerance)
-                self.cfg_ladder_grab_frame_threshold = state_config.get("ladder_grab_frame_threshold", self.cfg_ladder_grab_frame_threshold)
 
                 self.update_general_log("저장된 상태 판정 설정을 로드했습니다.", "gray")
 
@@ -4432,8 +4419,6 @@ class MapTab(QWidget):
                 "waypoint_arrival_x_threshold": self.cfg_waypoint_arrival_x_threshold,
                 "ladder_arrival_x_threshold": self.cfg_ladder_arrival_x_threshold,
                 "jump_link_arrival_x_threshold": self.cfg_jump_link_arrival_x_threshold,
-                "ladder_grab_x_tolerance": self.cfg_ladder_grab_x_tolerance,
-                "ladder_grab_frame_threshold": self.cfg_ladder_grab_frame_threshold,
             }
 
             config_data = self._prepare_data_for_json({
@@ -5068,8 +5053,6 @@ class MapTab(QWidget):
             "waypoint_arrival_x_threshold": self.cfg_waypoint_arrival_x_threshold,
             "ladder_arrival_x_threshold": self.cfg_ladder_arrival_x_threshold,
             "jump_link_arrival_x_threshold": self.cfg_jump_link_arrival_x_threshold,
-            "ladder_grab_x_tolerance": self.cfg_ladder_grab_x_tolerance,
-            "ladder_grab_frame_threshold": self.cfg_ladder_grab_frame_threshold,
         }
         
         dialog = StateConfigDialog(current_config, self)
@@ -5094,9 +5077,7 @@ class MapTab(QWidget):
             self.cfg_waypoint_arrival_x_threshold = updated_config.get("waypoint_arrival_x_threshold", self.cfg_waypoint_arrival_x_threshold)
             self.cfg_ladder_arrival_x_threshold = updated_config.get("ladder_arrival_x_threshold", self.cfg_ladder_arrival_x_threshold)
             self.cfg_jump_link_arrival_x_threshold = updated_config.get("jump_link_arrival_x_threshold", self.cfg_jump_link_arrival_x_threshold)
-            self.cfg_ladder_grab_x_tolerance = updated_config.get("ladder_grab_x_tolerance", self.cfg_ladder_grab_x_tolerance)
-            self.cfg_ladder_grab_frame_threshold = updated_config.get("ladder_grab_frame_threshold", self.cfg_ladder_grab_frame_threshold)
-
+            
             self.update_general_log("상태 판정 설정이 업데이트되었습니다.", "blue")
             self.save_profile_data() # 변경사항을 즉시 파일에 저장
 
@@ -5550,7 +5531,7 @@ class MapTab(QWidget):
     def _update_player_state_and_navigation(self, final_player_pos):
         """
         v10.8.0: 플레이어의 현재 상태를 판정하고, 상태 머신에 따라 다음 행동을 결정합니다.
-        [v11.4.1] 상태 판정 로직 종합 업데이트
+        [v11.4.3 BUGFIX] NameError: 'ladder_dist_x' is not defined 해결
         """
         current_terrain_name = "" 
 
@@ -5559,6 +5540,10 @@ class MapTab(QWidget):
             return
 
         previous_state = self.player_state
+        # [v11.4.3] 변수 초기화
+        ladder_dist_x = -1.0
+        is_near_ladder = False
+        nearest_ladder_x = None
         
         contact_terrain = self._get_contact_terrain(final_player_pos)
         
@@ -5589,38 +5574,12 @@ class MapTab(QWidget):
             self.falling_candidate_frames = 0
             self.jumping_candidate_frames = 0
         else: # 공중 상태
-            is_near_ladder, nearest_ladder_x = self._check_near_ladder(final_player_pos, self.geometry_data.get("transition_objects", []), self.cfg_ladder_x_grab_threshold, return_x=True)
-            
-            # [v11.4.2] 사다리 X좌표 근접 범위 내 프레임 카운트
-            if is_near_ladder and nearest_ladder_x is not None and abs(final_player_pos.x() - nearest_ladder_x) <= self.cfg_ladder_grab_x_tolerance:
-                self.in_ladder_x_range_frames += 1
-            else:
-                self.in_ladder_x_range_frames = 0
+            is_near_ladder, nearest_ladder_x, ladder_dist_x = self._check_near_ladder(final_player_pos, self.geometry_data.get("transition_objects", []), self.cfg_ladder_x_grab_threshold, return_dist=True)
+            # [v11.4.4] 지형에서 사다리로 하강 시작 즉시 전환 (최우선 순위)
+            if previous_state == 'on_terrain' and is_near_ladder and y_movement < -self.cfg_y_movement_deadzone:
+                new_state = 'falling'
+                self.falling_candidate_frames = 0
 
-            # [v11.4.2] 최우선 순위: '의도된 사다리 타기 점프' 판정 로직 보강
-            if self.in_jump and is_near_ladder:
-                approaching_ladder = False
-                if len(self.x_movement_history) == self.x_movement_history.maxlen:
-                    towards_ladder_count = 0
-                    reference_x = final_player_pos.x() - x_movement 
-                    for move in self.x_movement_history:
-                        if abs(move) > self.cfg_move_deadzone:
-                            if (nearest_ladder_x > reference_x and move > 0) or \
-                               (nearest_ladder_x < reference_x and move < 0):
-                                towards_ladder_count += 1
-                        reference_x += move 
-                    if towards_ladder_count >= 3:
-                        approaching_ladder = True
-
-                if approaching_ladder and x_movement_abs < self.cfg_climb_x_movement_threshold and \
-                   y_above_terrain > self.cfg_jump_y_min_threshold and \
-                   self.in_ladder_x_range_frames >= self.cfg_ladder_grab_frame_threshold:
-                    new_state = 'climbing'
-                    self.in_jump = False
-                    self.climbing_candidate_frames = 0
-                    self.jumping_candidate_frames = 0
-                    self.falling_candidate_frames = 0
-            
             if new_state == previous_state:
                 if previous_state == 'climbing' and y_movement < -self.cfg_y_movement_deadzone and is_near_ladder:
                     new_state = 'falling'
@@ -5630,18 +5589,13 @@ class MapTab(QWidget):
                     self.falling_candidate_frames = 0
             
             if new_state == previous_state:
-                # [v11.4.1] climbing 진입은 jumping 상태에서만 가능하도록 로직 수정
                 is_climbing_now = False
                 if self.in_jump:
-                    is_climbing_on_ladder = is_near_ladder and y_movement > self.cfg_y_movement_deadzone and x_movement_abs < self.cfg_climb_x_movement_threshold
-                    is_climbing_high_jump = y_above_terrain > self.cfg_jump_y_max_threshold
-                    if is_climbing_on_ladder or is_climbing_high_jump:
+                    if y_above_terrain > self.cfg_jump_y_max_threshold:
                         is_climbing_now = True
 
-                # [v11.4.1] idle 상태에서도 점프 가능하도록 수정
                 is_jumping_now = (previous_state in ['on_terrain', 'idle'] and y_movement > self.cfg_y_movement_deadzone)
                 
-                # [v11.4.1] 일반 낙하 판정에 y_movement_deadzone 적용
                 is_falling_now = (y_above_terrain < -self.cfg_fall_y_min_threshold and y_movement < -self.cfg_y_movement_deadzone and not is_near_ladder) or \
                                  (is_near_ladder and y_movement < -self.cfg_y_movement_deadzone and x_movement_abs < self.cfg_fall_on_ladder_x_movement_threshold and not self.in_jump)
 
@@ -5674,6 +5628,15 @@ class MapTab(QWidget):
             self.in_jump = False
             if new_state == 'jumping':
                 new_state = 'falling'
+
+        if new_state != previous_state and new_state in ['climbing', 'falling']:
+            ladder_info = f"True ({ladder_dist_x:.2f}px)" if is_near_ladder else f"False ({ladder_dist_x:.2f}px)"
+            print("-" * 50)
+            print(f"이전상태: {previous_state}, in_jump={self.in_jump} ,현재상태 : {new_state}")
+            print(f"-> Condition: In Air, 사다리 범위: {ladder_info}")
+            print(f"Pos: y_move={y_movement:.2f}, y_above={y_above_terrain:.2f}, x_move_abs={x_movement_abs:.2f}")
+            print(f"상태변화 '{previous_state}' -> '{new_state}'")
+            print("-" * 50)
 
         self.player_state = new_state
         
@@ -5922,11 +5885,11 @@ class MapTab(QWidget):
 
         if self.intermediate_target_pos:
             distance = abs(final_player_pos.x() - self.intermediate_target_pos.x())
-            threshold = WAYPOINT_ARRIVAL_X_THRESHOLD # 기본값
+            threshold = self.cfg_waypoint_arrival_x_threshold # 기본값
             if self.intermediate_target_type == 'climb':
-                threshold = LADDER_ARRIVAL_X_THRESHOLD
+                threshold = self.cfg_ladder_arrival_x_threshold
             elif self.intermediate_target_type in ['jump', 'fall']:
-                threshold = JUMP_LINK_ARRIVAL_X_THRESHOLD
+                threshold = self.cfg_jump_link_arrival_x_threshold
             if distance < threshold:
                 direction = "도착 근접"
             elif final_player_pos.x() < self.intermediate_target_pos.x():
@@ -6000,14 +5963,15 @@ class MapTab(QWidget):
                     return line['id']
         return None
 
-    def _check_near_ladder(self, pos, transition_objects, x_tol, return_x=False):
+    def _check_near_ladder(self, pos, transition_objects, x_tol, return_x=False, return_dist=False):
         """
         주어진 위치가 사다리 근처인지 확인합니다.
-        [v11.3.13] 가장 가까운 사다리의 X좌표를 선택적으로 반환하는 기능 추가
+        [v11.4.2] 가장 가까운 사다리와의 X거리도 선택적으로 반환
         """
         min_dist_sq = float('inf')
         nearest_ladder_x = None
         is_near = False
+        actual_dist_x = -1
 
         for obj in transition_objects:
             points = obj.get("points")
@@ -6017,17 +5981,21 @@ class MapTab(QWidget):
             ladder_x = points[0][0]
             dist_x = abs(pos.x() - ladder_x)
 
+            # 가장 가까운 사다리의 정보를 항상 추적
+            if dist_x**2 < min_dist_sq:
+                min_dist_sq = dist_x**2
+                nearest_ladder_x = ladder_x
+                actual_dist_x = dist_x
+
             if dist_x <= x_tol:
                 min_y = min(points[0][1], points[1][1])
                 max_y = max(points[0][1], points[1][1])
                 if pos.y() >= min_y and pos.y() <= max_y:
                     is_near = True
-                    # 가장 가까운 사다리를 찾기 위해 거리 제곱 비교
-                    if dist_x**2 < min_dist_sq:
-                        min_dist_sq = dist_x**2
-                        nearest_ladder_x = ladder_x
         
-        if return_x:
+        if return_dist:
+            return is_near, nearest_ladder_x, actual_dist_x
+        elif return_x:
             return is_near, nearest_ladder_x
         else:
             return is_near
