@@ -3841,6 +3841,7 @@ class MapTab(QWidget):
             self.active_feature_info = []
             self.reference_anchor_id = None
             self.smoothed_player_pos = None
+            self.line_id_to_floor_map = {}  # [v11.4.5] 지형선 ID <-> 층 정보 캐싱용 딕셔너리
             
             # [v11.3.7] 설정 변수 선언만 하고 값 할당은 load_profile_data로 위임
             self.cfg_idle_time_threshold = None
@@ -4290,6 +4291,7 @@ class MapTab(QWidget):
             if config_updated or features_updated or geometry_updated:
                 self.save_profile_data()
 
+            self._build_line_floor_map()    # [v11.4.5] 맵 데이터 로드 후 캐시 빌드
             self.global_positions = self._calculate_global_positions()
             self._generate_full_map_pixmap()
             self._assign_dynamic_names()
@@ -4439,6 +4441,7 @@ class MapTab(QWidget):
             with open(geometry_file, 'w', encoding='utf-8') as f: json.dump(geometry_data, f, indent=4, ensure_ascii=False)
             
             # save 후에 뷰 업데이트
+            self._build_line_floor_map() # [v11.4.5] 맵 데이터 저장 후 캐시 빌드 및 뷰 업데이트
             self._update_map_data_and_views()
 
         except Exception as e:
@@ -5574,7 +5577,14 @@ class MapTab(QWidget):
             self.falling_candidate_frames = 0
             self.jumping_candidate_frames = 0
         else: # 공중 상태
-            is_near_ladder, nearest_ladder_x, ladder_dist_x = self._check_near_ladder(final_player_pos, self.geometry_data.get("transition_objects", []), self.cfg_ladder_x_grab_threshold, return_dist=True)
+            # [v11.4.5] _check_near_ladder 호출 시 current_floor 전달
+            is_near_ladder, nearest_ladder_x, ladder_dist_x = self._check_near_ladder(
+                final_player_pos, 
+                self.geometry_data.get("transition_objects", []), 
+                self.cfg_ladder_x_grab_threshold, 
+                return_dist=True, 
+                current_floor=self.current_player_floor
+            )
             # [v11.4.4] 지형에서 사다리로 하강 시작 즉시 전환 (최우선 순위)
             if previous_state == 'on_terrain' and is_near_ladder and y_movement < -self.cfg_y_movement_deadzone:
                 new_state = 'falling'
@@ -5628,15 +5638,15 @@ class MapTab(QWidget):
             self.in_jump = False
             if new_state == 'jumping':
                 new_state = 'falling'
-
-        if new_state != previous_state and new_state in ['climbing', 'falling']:
-            ladder_info = f"True ({ladder_dist_x:.2f}px)" if is_near_ladder else f"False ({ladder_dist_x:.2f}px)"
-            print("-" * 50)
-            print(f"이전상태: {previous_state}, in_jump={self.in_jump} ,현재상태 : {new_state}")
-            print(f"-> Condition: In Air, 사다리 범위: {ladder_info}")
-            print(f"Pos: y_move={y_movement:.2f}, y_above={y_above_terrain:.2f}, x_move_abs={x_movement_abs:.2f}")
-            print(f"상태변화 '{previous_state}' -> '{new_state}'")
-            print("-" * 50)
+        # 디버그 로그
+        # if new_state != previous_state and new_state in ['climbing', 'falling']:
+        #     ladder_info = f"True ({ladder_dist_x:.2f}px)" if is_near_ladder else f"False ({ladder_dist_x:.2f}px)"
+        #     print("-" * 50)
+        #     print(f"이전상태: {previous_state}, in_jump={self.in_jump} ,현재상태 : {new_state}")
+        #     print(f"-> Condition: In Air, 사다리 범위: {ladder_info}")
+        #     print(f"Pos: y_move={y_movement:.2f}, y_above={y_above_terrain:.2f}, x_move_abs={x_movement_abs:.2f}")
+        #     print(f"상태변화 '{previous_state}' -> '{new_state}'")
+        #     print("-" * 50)
 
         self.player_state = new_state
         
@@ -5963,17 +5973,36 @@ class MapTab(QWidget):
                     return line['id']
         return None
 
-    def _check_near_ladder(self, pos, transition_objects, x_tol, return_x=False, return_dist=False):
+    def _check_near_ladder(self, pos, transition_objects, x_tol, return_x=False, return_dist=False, current_floor=None):
         """
-        주어진 위치가 사다리 근처인지 확인합니다.
-        [v11.4.2] 가장 가까운 사다리와의 X거리도 선택적으로 반환
+        주어진 위치가 현재 층과 연결된 사다리 근처인지 확인합니다.
+        [v11.4.5] 현재 층 기반 필터링 로직 추가
         """
         min_dist_sq = float('inf')
         nearest_ladder_x = None
         is_near = False
         actual_dist_x = -1
 
-        for obj in transition_objects:
+        # [v11.4.5] 1. 현재 층과 연결된 사다리만 필터링
+        candidate_ladders = []
+        if current_floor is not None:
+            for obj in transition_objects:
+                start_line_id = obj.get("start_line_id")
+                end_line_id = obj.get("end_line_id")
+                
+                start_floor = self.line_id_to_floor_map.get(start_line_id)
+                end_floor = self.line_id_to_floor_map.get(end_line_id)
+
+                if start_floor is not None and end_floor is not None:
+                    # 현재 층이 사다리의 시작 또는 끝 층과 일치하는 경우 후보로 추가
+                    if abs(current_floor - start_floor) < 0.1 or abs(current_floor - end_floor) < 0.1:
+                        candidate_ladders.append(obj)
+        else:
+            # current_floor 정보가 없으면, 이전처럼 모든 사다리를 검사 (안전장치)
+            candidate_ladders = transition_objects
+
+        # [v11.4.5] 2. 필터링된 후보군을 대상으로 근접 검사
+        for obj in candidate_ladders:
             points = obj.get("points")
             if not points or len(points) < 2:
                 continue
@@ -5981,7 +6010,6 @@ class MapTab(QWidget):
             ladder_x = points[0][0]
             dist_x = abs(pos.x() - ladder_x)
 
-            # 가장 가까운 사다리의 정보를 항상 추적
             if dist_x**2 < min_dist_sq:
                 min_dist_sq = dist_x**2
                 nearest_ladder_x = ladder_x
@@ -6064,6 +6092,19 @@ class MapTab(QWidget):
         
     def update_detection_log(self, message, color):
         self.detection_log_viewer.setText(f'<font color="{color}">{message}</font>')
+    
+    def _build_line_floor_map(self): # [v11.4.5] 지형선 ID와 층 정보를 매핑하는 캐시를 생성하는 헬퍼 메서드
+        """self.geometry_data를 기반으로 line_id_to_floor_map을 생성/갱신합니다."""
+        self.line_id_to_floor_map.clear()
+        if not self.geometry_data or "terrain_lines" not in self.geometry_data:
+            return
+        
+        for line in self.geometry_data.get("terrain_lines", []):
+            line_id = line.get("id")
+            floor = line.get("floor")
+            if line_id is not None and floor is not None:
+                self.line_id_to_floor_map[line_id] = floor
+        self.update_general_log("지형-층 정보 맵 캐시를 갱신했습니다.", "gray")
 
     def _update_map_data_and_views(self):
             """데이터 변경 후 전역 좌표와 전체 맵 뷰를 갱신합니다."""
