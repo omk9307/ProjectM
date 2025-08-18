@@ -3973,7 +3973,6 @@ class MapTab(QWidget):
             self.state_transition_counters = defaultdict(int) # 상태 전이 프레임 카운터
             self.prepare_timeout_start = 0.0
             self.lock_timeout_start = 0.0
-            self.realtime_minimap_enabled = True  # 체크박스 상태를 저장 (기본 활성)
             # ==================== v11.5.0 상태 머신 변수 추가 끝 ======================
             
             self.jumping_candidate_frames = 0
@@ -4159,21 +4158,12 @@ class MapTab(QWidget):
         logs_layout.addWidget(self.detection_log_viewer)
 
         # 우측 레이아웃 (네비게이터 + 실시간 뷰)
-        # ==================== v11.7.2 UI 개편 시작 ====================
         view_header_layout = QHBoxLayout()
         view_header_layout.addWidget(QLabel("실시간 미니맵 뷰 (휠: 확대/축소, 드래그: 이동)"))
-        view_header_layout.addStretch(1)
-
-        # 사용자가 미니맵 업데이트를 끌 수 있게 하는 체크박스
-        self.realtime_minimap_checkbox = QCheckBox("실시간 미니맵 갱신")
-        self.realtime_minimap_checkbox.setChecked(True)
-        self.realtime_minimap_checkbox.toggled.connect(self.on_realtime_minimap_toggled)
-        view_header_layout.addWidget(self.realtime_minimap_checkbox)
-
         self.center_on_player_checkbox = QCheckBox("캐릭터 중심")
         self.center_on_player_checkbox.setChecked(True)
         view_header_layout.addWidget(self.center_on_player_checkbox)
-        # ==================== v11.7.2 UI 개편 끝 ======================
+        view_header_layout.addStretch(1)
         
         self.navigator_display = NavigatorDisplay(self)
         self.minimap_view_label = RealtimeMinimapView(self)
@@ -4186,40 +4176,6 @@ class MapTab(QWidget):
         main_layout.addLayout(logs_layout, 1)
         main_layout.addLayout(right_layout, 2)
         self.update_general_log("MapTab이 초기화되었습니다. 맵 프로필을 선택해주세요.", "black")
-
-    def on_realtime_minimap_toggled(self, checked):
-            """'실시간 미니맵 갱신' 체크박스 토글 핸들러.
-            checked==False 면 미니맵 뷰로의 데이터 전달을 중단(렌더링 중단)한다.
-            """
-            self.realtime_minimap_enabled = bool(checked)
-            self.update_general_log("실시간 미니맵 갱신 " + ("활성화" if checked else "비활성화"), "gray")
-
-    def _maybe_update_realtime_minimap(self,
-                                    camera_center,
-                                    active_features,
-                                    my_players,
-                                    other_players,
-                                    target_wp_id,
-                                    reached_wp_id,
-                                    final_player_pos,
-                                    is_forward,
-                                    intermediate_pos,
-                                    intermediate_type,
-                                    nav_action):
-        """미니맵 갱신 권한을 체크박스 상태에 따라 중앙에서 제어한다.
-        이 함수를 통해 실제로 RealtimeMinimapView.update_view_data를 호출할지 결정.
-        """
-        if not self.realtime_minimap_enabled:
-            return
-
-        try:
-            self.minimap_view_label.update_view_data(
-                camera_center, active_features, my_players, other_players,
-                target_wp_id, reached_wp_id, final_player_pos,
-                is_forward, intermediate_pos, intermediate_type, nav_action
-            )
-        except Exception as e:
-            print("미니맵 업데이트 실패:", e)
 
     def _get_floor_from_closest_terrain_data(self, point, terrain_lines):
             """주어진 점에서 가장 가까운 지형선 데이터를 찾아 그 층 번호를 반환합니다."""
@@ -5986,6 +5942,7 @@ class MapTab(QWidget):
                 
                 if self.navigation_action == 'move_to_target':
                     arrival_threshold = self.cfg_waypoint_arrival_x_threshold
+                    
                     # ==================== v11.7.1 수정 시작 ====================
                     # 'walk' 타입일 때만 층 검사가 필요
                     floor_matches = True # 기본값은 True
@@ -5993,7 +5950,7 @@ class MapTab(QWidget):
                         target_wp_data = all_waypoints_map.get(self.target_waypoint_id)
                         if target_wp_data and self.current_player_floor is not None:
                             target_floor = target_wp_data.get('floor', -999) # 목표 층 정보
-                            floor_matches = abs(self.current_player_floor - target_floor) < 0.1
+                            floor_matches = abs(self.current_player_floor - target_floor) < 0.05
                     # ==================== v11.7.1 수정 끝 ======================
                     
                     if self.intermediate_target_type == 'climb': arrival_threshold = self.cfg_ladder_arrival_x_threshold
@@ -6002,6 +5959,8 @@ class MapTab(QWidget):
                     # 디바운스 적용 (층 검사 조건 추가)
                     if distance_to_target < arrival_threshold and floor_matches:
                         self.state_transition_counters['arrival'] += 1
+                    else:
+                        self.state_transition_counters['arrival'] = 0
 
                     if self.state_transition_counters['arrival'] >= self.cfg_arrival_frame_threshold:
                         if self.intermediate_target_type == 'walk':
@@ -6133,9 +6092,7 @@ class MapTab(QWidget):
             
             camera_pos_to_send = final_player_pos if self.center_on_player_checkbox.isChecked() else self.minimap_view_label.camera_center_global
             
-            # ==================== v11.7.2 갱신 호출 방식 변경 시작 ====================
-            # 미니맵 갱신은 체크박스 상태에 따라 _maybe_update_realtime_minimap로 위임합니다.
-            self._maybe_update_realtime_minimap(
+            self.minimap_view_label.update_view_data(
                 camera_center=camera_pos_to_send,
                 active_features=self.active_feature_info,
                 my_players=self.my_player_global_rects,
@@ -6148,7 +6105,6 @@ class MapTab(QWidget):
                 intermediate_type=self.intermediate_target_type,
                 nav_action=self.navigation_action
             )
-            # ==================== v11.7.2 갱신 호출 방식 변경 끝 ======================
             
             self.last_player_pos = final_player_pos
 
