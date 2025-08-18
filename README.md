@@ -53,6 +53,44 @@ ClassTreeWidget(QTreeWidget): 클래스 목록을 위한 커스텀 위젯.
 역할: 클래스-카테고리 간 드래그앤드롭을 지원하며, 계층 구조 규칙(예: 클래스를 최상위로 이동 불가)을 강제합니다. 드롭 완료 시 drop_completed 시그널을 발생시켜 manifest.json을 업데이트하도록 합니다.
 ScreenSnipper, DetectionPopup, EditModeDialog, MultiCaptureDialog: 각각 화면 영역 지정, 탐지 뷰 팝업, 편집 모드 선택, 다중 캡처 선택을 위한 유틸리티 다이얼로그.
 map.py - 전체 미니맵 편집 및 내비게이션 시스템
+[v10.0.2 이후 추가 및 변경된 내용]
+map.py - 전체 미니맵 편집 및 지능형 내비게이션 시스템 (v11.4.5 기준)
+v9.0.0에서 도입된 '카메라 뷰' 시스템을 기반으로, 지능형 내비게이션과 정교한 플레이어 상태 판정을 위한 핵심 기능들이 대거 추가 및 개선되었습니다. 특히 v11.0.0에서는 실시간 탐지 파이프라인을 '캡처-탐지 분리' 아키텍처로 전면 개편하여 성능을 극대화했습니다.
+캡처-탐지 스레드 분리:
+기존: AnchorDetectionThread가 화면 캡처와 탐지를 모두 수행하여 병목 현상 발생.
+변경: MinimapCaptureThread가 지정된 FPS로 화면 캡처만 전담하고, AnchorDetectionThread는 캡처된 프레임을 받아 탐지만 수행하도록 역할을 완벽히 분리했습니다. 이를 통해 캡처는 지연 없이 이루어지고, 무거운 탐지 연산이 캡처 주기에 영향을 주지 않아 전체 시스템의 지연 시간(latency)을 대폭 개선했습니다.
+연산량 최적화: AnchorDetectionThread는 탐지 시 프레임과 템플릿을 **다운스케일(downscale)**하고, 이전에 탐지된 위치 주변을 먼저 탐색하는 ROI 우선 검색을 적용하여 cv2.matchTemplate 연산량을 크게 줄였습니다.
+책임 재분배: 플레이어 아이콘(노란색, 빨간색) 탐지 로직은 AnchorDetectionThread에서 MapTab으로 이동되었습니다. 이로써 AnchorDetectionThread는 핵심 지형 탐지에만 집중하고, MapTab이 모든 정보를 종합하여 최종 판단을 내리는 명확한 구조가 되었습니다.
+지능형 내비게이션 엔진 (v10.2 ~ v10.7):
+비용 기반 경로 탐색: 단순 거리 계산을 넘어, 걷기, 오르기, 내리기, 점프 등 모든 이동 수단의 비용을 종합적으로 고려하여 최적의 경로를 동적으로 탐색합니다. _calculate_total_cost 메서드가 "현재위치→중간목표→최종목표"의 총 비용을 계산하는 핵심 역할을 합니다.
+동적 중간 목표 설정: 최종 목표가 다른 층에 있을 경우, 먼저 도달해야 할 사다리, 점프 지점, 낭떠러지 등을 중간 목표로 자동 설정하고 NavigatorDisplay에 "사다리로 이동"과 같이 명확한 행동 지침을 안내합니다.
+플레이어 상태 머신 (v10.8 ~ v11.4):
+정교한 상태 판정: 플레이어의 실시간 좌표, 속도, 마지막 지형과의 상대 높이(y_above_terrain) 등을 종합하여 idle, on_terrain, climbing, jumping, falling 5가지 상태를 우선순위 기반으로 판정합니다.
+안정적인 상태 전이: in_jump 플래그, 상태 변경 지연(프레임 카운트), 상태 변경 직후의 불응기(last_state_change_time) 등 다양한 메커니즘을 통해, 점프 중 falling으로 바뀌거나 climbing/falling이 빠르게 반복되는 등의 상태 깜빡임(flickering) 문제를 해결하고 안정성을 확보했습니다.
+사용자 설정 지원: 상태 판정에 사용되는 모든 임계값(예: JUMP_Y_MIN_THRESHOLD)은 StateConfigDialog를 통해 사용자가 실시간으로 조정하고 프로필에 저장할 수 있습니다.
+MapTab(QWidget): '맵' 탭의 모든 UI와 로직을 총괄하는 중앙 컨트롤 타워.
+__init__(self): UI 생성, 프로필 로드 등 초기화 작업을 수행합니다. v11.3.7부터 상태 판정 설정 변수(self.cfg_...)는 여기서 None으로 선언만 하고, 실제 값 할당은 load_profile_data로 위임하여 데이터 흐름을 명확히 했습니다.
+_update_player_state_and_navigation(self, final_player_pos): 내비게이션 시스템의 두뇌. 매 프레임마다 플레이어의 전역 좌표를 입력받아, 위에서 설명한 플레이어 상태 머신을 구동하고, 비용 기반 경로 탐색 엔진을 통해 다음 행동을 결정한 뒤, 그 결과를 NavigatorDisplay에 업데이트합니다.
+toggle_anchor_detection(self, checked): 탐지 시작/중단 버튼과 연결된 메서드. v11.0.0 업데이트로 인해, 이제 MinimapCaptureThread와 AnchorDetectionThread 두 개의 스레드를 생성하고 관리하는 역할을 합니다.
+on_detection_ready(self, frame_bgr, found_features, ...): AnchorDetectionThread로부터 핵심 지형 탐지 결과를 받는 슬롯. v11.0.0부터 이 메서드가 직접 frame_bgr에서 플레이어 아이콘을 탐지하고, RANSAC 알고리즘을 통해 플레이어의 최종 전역 좌표를 계산하는 핵심적인 역할을 수행합니다.
+_open_state_config_dialog(self): [v11.3.0 신규] '판정 설정' 버튼과 연결되어, StateConfigDialog 팝업을 열고 사용자가 변경한 설정값을 저장하는 역할을 합니다.
+_build_line_floor_map(self): [v11.4.5 신규] 지형선 ID와 층 정보를 미리 계산하여 self.line_id_to_floor_map 딕셔너리에 캐싱하는 헬퍼 메서드. 맵 데이터가 변경될 때만 호출되어 성능을 최적화합니다.
+_check_near_ladder(self, ...): [v11.4.5 개선] 플레이어가 사다리 근처에 있는지 판별하는 함수. 캐싱된 line_id_to_floor_map을 사용하여, 현재 플레이어가 있는 층과 연결된 사다리만 필터링하여 검사함으로써 성능과 정확도를 향상시켰습니다.
+MinimapCaptureThread(QThread): [v11.0.0 신규]
+역할: 화면 캡처 전담 스레드. 오직 mss.grab()을 이용해 지정된 FPS로 미니맵 영역을 캡처하고, threading.Lock을 통해 최신 프레임을 self.latest_frame에 안전하게 저장하는 역할만 수행합니다.
+run(self): target_fps에 맞춰 while self.is_running: 루프를 돌며 화면을 캡처하고 time.sleep()으로 주기를 조절합니다.
+AnchorDetectionThread(QThread):
+역할: [v11.0.0 역할 변경] 핵심 지형 탐지 전담 스레드. 더 이상 화면을 직접 캡처하지 않습니다.
+run(self): safe_read_latest_frame 헬퍼 함수를 통해 MinimapCaptureThread로부터 최신 프레임의 복사본을 안전하게 가져옵니다. 가져온 프레임과 미리 처리된 템플릿을 다운스케일하여 cv2.matchTemplate을 수행합니다. ROI 우선 검색을 통해 탐지 속도를 높이고, 성능 저하 시 다운스케일 비율을 자동 조절하는 폴백(fallback) 로직을 포함합니다. 탐지된 핵심 지형 정보와 원본 프레임을 detection_ready 시그널로 MapTab에 전달합니다.
+StateConfigDialog(QDialog): [v11.3.0 신규]
+역할: 플레이어 상태 판정 및 도착 판정에 사용되는 모든 임계값을 사용자가 직접 조정할 수 있는 팝업 창입니다.
+주요 상호작용: MapTab으로부터 현재 설정값을 받아 UI를 초기화하고, 사용자가 '저장' 버튼을 누르면 변경된 값을 반환하여 MapTab이 이를 map_config.json에 저장하도록 합니다. '기본값 복원' 기능도 제공합니다.
+FullMinimapEditorDialog(QDialog):
+역할: 전체 맵의 모든 물리적 구조(geometry_data)를 시각적으로 생성하고 편집하는 통합 도구.
+최신 변경 사항 (v11.2+): LOD(Level of Detail) 기능이 강화되어, 특정 배율 이상으로 확대 시 지형선과 층 이동 오브젝트의 좌표가 텍스트로 표시됩니다. 텍스트와 배경의 스타일(색상, 모양, 크기)이 여러 번의 개선을 통해 가독성이 최적화되었습니다. _create_coord_text_item 헬퍼 메서드를 통해 좌표 텍스트와 배경을 생성하고, populate_scene에서 이들의 위치를 정밀하게 계산하여 배치합니다.
+NavigatorDisplay(QWidget):
+역할: [v10.3+ 기능 활성화] 실시간 내비게이션 정보를 시각적으로 표시하는 대시보드.
+최신 변경 사항: MapTab의 상태 머신이 판정한 플레이어의 현재 상태(예: '점프 중')와 필요 행동(예: '다음 목표로 이동')을 우측 패널에 명확히 표시하여, 시스템의 내부 동작을 사용자가 직관적으로 이해할 수 있도록 합니다.
 v9.0.0 대규모 시스템 개편을 기점으로, 기존의 웨이포인트 기반 위치 추정 방식에서 벗어나 전체 맵 데이터를 직접 활용하는 '카메라 뷰' 방식으로 시스템을 전면 개편했습니다. 이를 통해 시스템의 복잡도를 낮추고 정확성과 직관성을 크게 향상시켰습니다.
 전체 맵 기반 렌더링: 더 이상 개별 웨이포인트의 미니맵 조각을 사용하지 않습니다. 대신, 프로필 로드 시 _generate_full_map_pixmap을 통해 모든 웨이포인트 배경과 지형/오브젝트 정보를 합성한 단 하나의 거대한 '전체 맵' 이미지를 미리 생성합니다.
 탐지 로직 단순화: AnchorDetectionThread의 역할이 대폭 축소되었습니다. 이제 이 스레드는 복잡한 위치 보정이나 경로 안내 없이, 오직 실시간 미니맵 화면에서 '핵심 지형'과 '플레이어'를 탐지하고 그 로컬 좌표를 MapTab에 전달하는 역할만 수행합니다.
