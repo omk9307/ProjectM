@@ -3106,6 +3106,14 @@ class FullMinimapEditorDialog(QDialog):
             self._finish_drawing_object(cancel=True)
         super().accept()
 
+class NavigationNode:
+    """A* 경로 탐색 그래프의 노드를 나타내는 데이터 클래스."""
+    def __init__(self, node_id, node_type, pos, floor):
+        self.id = node_id
+        self.type = node_type # WAYPOINT, TERRAIN_VERTEX, LADDER_ENTRY, LADDER_EXIT, LANDING
+        self.pos = pos # QPointF
+        self.floor = floor
+
 # --- v9.0.0: 실시간 뷰를 위한 커스텀 위젯 ---
 class RealtimeMinimapView(QLabel):
     """
@@ -4007,6 +4015,12 @@ class MapTab(QWidget):
             #지형 간 상대 위치 벡터 저장
             self.feature_offsets = {}
             
+            # ==================== v12.0.0 A* 내비게이션 멤버 변수 추가 시작 ====================
+            self.navigation_graph = {}
+            self.current_astar_path = []
+            self.current_path_index = -1 # A* 경로 추적을 위해 재사용
+            # ==================== v12.0.0 A* 내비게이션 멤버 변수 추가 끝 ======================
+            
             self.render_options = {
                 'background': True, 'features': True, 'waypoints': True,
                 'terrain': True, 'objects': True, 'jump_links': True
@@ -4410,6 +4424,7 @@ class MapTab(QWidget):
 
             self._build_line_floor_map()    # [v11.4.5] 맵 데이터 로드 후 캐시 빌드
             self.global_positions = self._calculate_global_positions()
+            self._build_navigation_graph()
             self._generate_full_map_pixmap()
             self._assign_dynamic_names()
             self.update_ui_for_new_profile()
@@ -4564,7 +4579,8 @@ class MapTab(QWidget):
             # save 후에 뷰 업데이트
             self._build_line_floor_map() # [v11.4.5] 맵 데이터 저장 후 캐시 빌드 및 뷰 업데이트
             self._update_map_data_and_views()
-
+            self._build_navigation_graph()
+            
         except Exception as e:
             self.update_general_log(f"프로필 저장 오류: {e}", "red")
 
@@ -6449,6 +6465,134 @@ class MapTab(QWidget):
                 self.feature_offsets[(id2, id1)] = -offset
 
         return global_positions
+
+    def _get_terrain_line_by_vertex(self, vertex_pos):
+            """주어진 꼭짓점 좌표가 포함된 지형선 데이터를 반환합니다."""
+            for line in self.geometry_data.get("terrain_lines", []):
+                for p in line.get("points", []):
+                    if abs(p[0] - vertex_pos.x()) < 1e-6 and abs(p[1] - vertex_pos.y()) < 1e-6:
+                        return line
+            return None
+
+    def _get_terrain_lines_below(self, x_pos, y_pos, floor):
+        """주어진 위치의 수직 아래에 있는 모든 지형선을 찾습니다."""
+        lines_below = []
+        for line in self.geometry_data.get("terrain_lines", []):
+            if line.get('floor', -999) < floor:
+                points = line.get("points", [])
+                if len(points) >= 2:
+                    min_x = min(p[0] for p in points)
+                    max_x = max(p[0] for p in points)
+                    if min_x <= x_pos <= max_x:
+                        lines_below.append(line)
+        return sorted(lines_below, key=lambda l: l.get('floor', -999), reverse=True)
+
+    def _build_navigation_graph(self):
+        """geometry_data를 기반으로 A* 탐색을 위한 내비게이션 그래프를 생성합니다."""
+        self.navigation_graph = {}
+        nodes = {} # node_id: NavigationNode
+
+        def add_node(node_id, node_type, pos, floor):
+            if node_id not in nodes:
+                node = NavigationNode(node_id, node_type, pos, floor)
+                nodes[node_id] = node
+                self.navigation_graph[node_id] = {'node_obj': node, 'edges': []}
+            return nodes[node_id]
+
+        def add_edge(from_id, to_id, cost, edge_type):
+            # 양방향 엣지 추가 시 중복 방지
+            if not any(e['to_node_id'] == to_id for e in self.navigation_graph[from_id]['edges']):
+                self.navigation_graph[from_id]['edges'].append({'to_node_id': to_id, 'cost': cost, 'type': edge_type})
+            if not any(e['to_node_id'] == from_id for e in self.navigation_graph[to_id]['edges']):
+                self.navigation_graph[to_id]['edges'].append({'to_node_id': from_id, 'cost': cost, 'type': edge_type})
+
+        # Step 1: 기본 노드 생성
+        # Waypoints
+        for wp in self.geometry_data.get("waypoints", []):
+            add_node(wp['id'], 'WAYPOINT', QPointF(*wp['pos']), wp['floor'])
+
+        # Terrain Vertices
+        terrain_lines = self.geometry_data.get("terrain_lines", [])
+        for line in terrain_lines:
+            points = line.get("points", [])
+            if len(points) >= 2:
+                p_start, p_end = points[0], points[-1]
+                start_id = f"vtx-{line['id']}-start"
+                end_id = f"vtx-{line['id']}-end"
+                add_node(start_id, 'TERRAIN_VERTEX', QPointF(*p_start), line['floor'])
+                add_node(end_id, 'TERRAIN_VERTEX', QPointF(*p_end), line['floor'])
+
+        # Ladder Entry/Exit
+        for obj in self.geometry_data.get("transition_objects", []):
+            p1, p2 = obj['points']
+            line1 = next((line for line in terrain_lines if line['id'] == obj.get('start_line_id')), None)
+            line2 = next((line for line in terrain_lines if line['id'] == obj.get('end_line_id')), None)
+            if not line1 or not line2: continue
+            
+            entry_pos, exit_pos = (p1, p2) if line1['floor'] < line2['floor'] else (p2, p1)
+            entry_floor, exit_floor = (line1['floor'], line2['floor']) if line1['floor'] < line2['floor'] else (line2['floor'], line1['floor'])
+
+            entry_id = f"ladder-{obj['id']}-entry"
+            exit_id = f"ladder-{obj['id']}-exit"
+            add_node(entry_id, 'LADDER_ENTRY', QPointF(*entry_pos), entry_floor)
+            add_node(exit_id, 'LADDER_EXIT', QPointF(*exit_pos), exit_floor)
+
+        # Step 2: 기본 엣지 연결
+        # WALK edges (within same terrain group)
+        for line in terrain_lines:
+            if line.get("points"):
+                start_id = f"vtx-{line['id']}-start"
+                end_id = f"vtx-{line['id']}-end"
+                p1 = nodes[start_id].pos
+                p2 = nodes[end_id].pos
+                dist = math.hypot(p2.x() - p1.x(), p2.y() - p1.y())
+                add_edge(start_id, end_id, dist, 'WALK')
+        
+        # CLIMB edges
+        for obj in self.geometry_data.get("transition_objects", []):
+            entry_id = f"ladder-{obj['id']}-entry"
+            exit_id = f"ladder-{obj['id']}-exit"
+            cost = abs(nodes[entry_id].pos.y() - nodes[exit_id].pos.y())
+            add_edge(entry_id, exit_id, cost, 'CLIMB')
+
+        # JUMP edges
+        for link in self.geometry_data.get("jump_links", []):
+            start_line = self._get_terrain_line_by_vertex(QPointF(*link['start_vertex_pos']))
+            end_line = self._get_terrain_line_by_vertex(QPointF(*link['end_vertex_pos']))
+            if start_line and end_line:
+                start_id = f"vtx-{start_line['id']}-start" if link['start_vertex_pos'] == start_line['points'][0] else f"vtx-{start_line['id']}-end"
+                end_id = f"vtx-{end_line['id']}-start" if link['end_vertex_pos'] == end_line['points'][0] else f"vtx-{end_line['id']}-end"
+                p1 = nodes[start_id].pos
+                p2 = nodes[end_id].pos
+                dist = math.hypot(p2.x() - p1.x(), p2.y() - p1.y())
+                add_edge(start_id, end_id, dist, 'JUMP')
+
+        # Step 3 & 4: FALL, DOWN_JUMP 엣지 및 LANDING 노드 생성/연결
+        landing_nodes_cache = {}
+        all_node_ids = list(nodes.keys())
+
+        # ... (FALL 및 DOWN_JUMP 로직은 복잡하므로 다음 단계에서 구현) ...
+        # 현재는 기본 노드와 엣지만 연결합니다.
+
+        # 최종 연결: 모든 노드들을 같은 지형 그룹 내 다른 노드들과 연결
+        # 이 로직은 더 정교화가 필요하지만, 우선 각 노드를 부모 지형선의 꼭짓점과 연결
+        for wp in self.geometry_data.get("waypoints", []):
+            line_id = wp.get('parent_line_id')
+            if line_id:
+                start_id = f"vtx-{line_id}-start"
+                end_id = f"vtx-{line_id}-end"
+                wp_node = nodes[wp['id']]
+                # ==================== v12.0.2 수정 시작 ====================
+                p_wp = wp_node.pos
+                p_start = nodes[start_id].pos
+                p_end = nodes[end_id].pos
+                dist_start = math.hypot(p_wp.x() - p_start.x(), p_wp.y() - p_start.y())
+                dist_end = math.hypot(p_wp.x() - p_end.x(), p_wp.y() - p_end.y())
+                # ==================== v12.0.2 수정 끝 ======================
+                add_edge(wp['id'], start_id, dist_start, 'WALK')
+                add_edge(wp['id'], end_id, dist_end, 'WALK')
+        
+        self.update_general_log(f"내비게이션 그래프 생성 완료. (노드: {len(nodes)}개)", "purple")
 
     def _assign_dynamic_names(self):
         """
