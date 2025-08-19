@@ -6499,12 +6499,15 @@ class MapTab(QWidget):
                 self.navigation_graph[node_id] = {'node_obj': node, 'edges': []}
             return nodes[node_id]
 
-        def add_edge(from_id, to_id, cost, edge_type):
-            # 양방향 엣지 추가 시 중복 방지
+        def add_edge(from_id, to_id, cost, edge_type, bidirectional=True):
+            if from_id not in self.navigation_graph or to_id not in self.navigation_graph: return
+            # 단방향 엣지 추가
             if not any(e['to_node_id'] == to_id for e in self.navigation_graph[from_id]['edges']):
-                self.navigation_graph[from_id]['edges'].append({'to_node_id': to_id, 'cost': cost, 'type': edge_type})
-            if not any(e['to_node_id'] == from_id for e in self.navigation_graph[to_id]['edges']):
-                self.navigation_graph[to_id]['edges'].append({'to_node_id': from_id, 'cost': cost, 'type': edge_type})
+                 self.navigation_graph[from_id]['edges'].append({'to_node_id': to_id, 'cost': cost, 'type': edge_type})
+            # 양방향일 경우 반대 방향도 추가
+            if bidirectional:
+                if not any(e['to_node_id'] == from_id for e in self.navigation_graph[to_id]['edges']):
+                     self.navigation_graph[to_id]['edges'].append({'to_node_id': from_id, 'cost': cost, 'type': edge_type})
 
         # Step 1: 기본 노드 생성
         # Waypoints
@@ -6517,25 +6520,17 @@ class MapTab(QWidget):
             points = line.get("points", [])
             if len(points) >= 2:
                 p_start, p_end = points[0], points[-1]
-                start_id = f"vtx-{line['id']}-start"
-                end_id = f"vtx-{line['id']}-end"
-                add_node(start_id, 'TERRAIN_VERTEX', QPointF(*p_start), line['floor'])
-                add_node(end_id, 'TERRAIN_VERTEX', QPointF(*p_end), line['floor'])
-
-        # Ladder Entry/Exit
+                add_node(f"vtx-{line['id']}-start", 'TERRAIN_VERTEX', QPointF(*p_start), line['floor'])
+                add_node(f"vtx-{line['id']}-end", 'TERRAIN_VERTEX', QPointF(*p_end), line['floor'])
         for obj in self.geometry_data.get("transition_objects", []):
             p1, p2 = obj['points']
             line1 = next((line for line in terrain_lines if line['id'] == obj.get('start_line_id')), None)
             line2 = next((line for line in terrain_lines if line['id'] == obj.get('end_line_id')), None)
             if not line1 or not line2: continue
-            
             entry_pos, exit_pos = (p1, p2) if line1['floor'] < line2['floor'] else (p2, p1)
             entry_floor, exit_floor = (line1['floor'], line2['floor']) if line1['floor'] < line2['floor'] else (line2['floor'], line1['floor'])
-
-            entry_id = f"ladder-{obj['id']}-entry"
-            exit_id = f"ladder-{obj['id']}-exit"
-            add_node(entry_id, 'LADDER_ENTRY', QPointF(*entry_pos), entry_floor)
-            add_node(exit_id, 'LADDER_EXIT', QPointF(*exit_pos), exit_floor)
+            add_node(f"ladder-{obj['id']}-entry", 'LADDER_ENTRY', QPointF(*entry_pos), entry_floor)
+            add_node(f"ladder-{obj['id']}-exit", 'LADDER_EXIT', QPointF(*exit_pos), exit_floor)
 
         # Step 2: 기본 엣지 연결
         # WALK edges (within same terrain group)
@@ -6567,30 +6562,72 @@ class MapTab(QWidget):
                 dist = math.hypot(p2.x() - p1.x(), p2.y() - p1.y())
                 add_edge(start_id, end_id, dist, 'JUMP')
 
-        # Step 3 & 4: FALL, DOWN_JUMP 엣지 및 LANDING 노드 생성/연결
+        # Step 3: FALL 및 DOWN_JUMP 엣지 및 LANDING 노드 생성
         landing_nodes_cache = {}
-        all_node_ids = list(nodes.keys())
 
-        # ... (FALL 및 DOWN_JUMP 로직은 복잡하므로 다음 단계에서 구현) ...
-        # 현재는 기본 노드와 엣지만 연결합니다.
+        # DOWN_JUMP
+        for line_from in terrain_lines:
+            for x_pos in [p[0] for p in line_from.get("points", [])]:
+                lines_below = self._get_terrain_lines_below(x_pos, line_from.get("points")[0][1], line_from['floor'])
+                if lines_below:
+                    line_to = lines_below[0]
+                    delta_y = line_from.get("points")[0][1] - line_to.get("points")[0][1]
+                    if delta_y <= 70:
+                        is_obstructed = any(line_from['floor'] > l['floor'] > line_to['floor'] for l in lines_below[1:])
+                        if not is_obstructed:
+                            landing_floor = line_to['floor']
+                            landing_x_rounded = round(x_pos)
+                            landing_id = f"landing-{landing_floor}-{landing_x_rounded}"
+                            landing_pos = QPointF(x_pos, line_to.get("points")[0][1])
+                            add_node(landing_id, 'LANDING', landing_pos, landing_floor)
+                            
+                            from_vtx = next((v for v in line_from.get("points", []) if v[0] == x_pos), None)
+                            if from_vtx:
+                                from_line = self._get_terrain_line_by_vertex(QPointF(*from_vtx))
+                                from_id = f"vtx-{from_line['id']}-start" if from_vtx == from_line['points'][0] else f"vtx-{from_line['id']}-end"
+                                add_edge(from_id, landing_id, 0.5 * delta_y, 'DOWN_JUMP', bidirectional=False)
+        # FALL
+        vertex_nodes = [n for n in nodes.values() if n.type == 'TERRAIN_VERTEX']
+        for v_node in vertex_nodes:
+            lines_below = self._get_terrain_lines_below(v_node.pos.x(), v_node.pos.y(), v_node.floor)
+            if lines_below:
+                line_to = lines_below[0]
+                delta_y = v_node.pos.y() - line_to.get("points")[0][1]
+                if delta_y > 0:
+                    delta_x = 1.6236947 * math.sqrt(delta_y)
+                    for direction in [-1, 1]:
+                        landing_x = v_node.pos.x() + (delta_x * direction)
+                        points_to = line_to.get("points", [])
+                        min_x_to, max_x_to = min(p[0] for p in points_to), max(p[0] for p in points_to)
+                        if min_x_to <= landing_x <= max_x_to:
+                            landing_floor = line_to['floor']
+                            landing_x_rounded = round(landing_x)
+                            landing_id = f"landing-{landing_floor}-{landing_x_rounded}"
+                            landing_pos = QPointF(landing_x, line_to.get("points")[0][1])
+                            add_node(landing_id, 'LANDING', landing_pos, landing_floor)
+                            cost_info = {'delta_y': delta_y, 'delta_x': delta_x * direction}
+                            add_edge(v_node.id, landing_id, cost_info, 'FALL', bidirectional=False)
+        
+        # Step 4: LANDING 노드를 같은 층의 다른 노드들과 연결
+        all_nodes = list(nodes.values())
+        landing_nodes = [n for n in all_nodes if n.type == 'LANDING']
+        for l_node in landing_nodes:
+            for other_node in all_nodes:
+                if l_node.id != other_node.id and l_node.floor == other_node.floor:
+                    dist = math.hypot(other_node.pos.x() - l_node.pos.x(), other_node.pos.y() - l_node.pos.y())
+                    add_edge(l_node.id, other_node.id, dist, 'WALK')
 
-        # 최종 연결: 모든 노드들을 같은 지형 그룹 내 다른 노드들과 연결
-        # 이 로직은 더 정교화가 필요하지만, 우선 각 노드를 부모 지형선의 꼭짓점과 연결
+        # 최종 연결 (기존 로직 유지)
         for wp in self.geometry_data.get("waypoints", []):
             line_id = wp.get('parent_line_id')
-            if line_id:
-                start_id = f"vtx-{line_id}-start"
-                end_id = f"vtx-{line_id}-end"
-                wp_node = nodes[wp['id']]
-                # ==================== v12.0.2 수정 시작 ====================
-                p_wp = wp_node.pos
-                p_start = nodes[start_id].pos
-                p_end = nodes[end_id].pos
-                dist_start = math.hypot(p_wp.x() - p_start.x(), p_wp.y() - p_start.y())
-                dist_end = math.hypot(p_wp.x() - p_end.x(), p_wp.y() - p_end.y())
-                # ==================== v12.0.2 수정 끝 ======================
-                add_edge(wp['id'], start_id, dist_start, 'WALK')
-                add_edge(wp['id'], end_id, dist_end, 'WALK')
+            if line_id and line_id in self.line_id_to_floor_map:
+                start_id, end_id = f"vtx-{line_id}-start", f"vtx-{line_id}-end"
+                if start_id in nodes and end_id in nodes:
+                    p_wp, p_start, p_end = nodes[wp['id']].pos, nodes[start_id].pos, nodes[end_id].pos
+                    dist_start = math.hypot(p_wp.x() - p_start.x(), p_wp.y() - p_start.y())
+                    dist_end = math.hypot(p_wp.x() - p_end.x(), p_wp.y() - p_end.y())
+                    add_edge(wp['id'], start_id, dist_start, 'WALK')
+                    add_edge(wp['id'], end_id, dist_end, 'WALK')
         
         self.update_general_log(f"내비게이션 그래프 생성 완료. (노드: {len(nodes)}개)", "purple")
 
