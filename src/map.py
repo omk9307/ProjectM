@@ -1,7 +1,7 @@
 # map.py
 # 2025년 08月 22日 10:00 (KST)
 # 기능: v11.0.0 - 성능 개편: 캡처/탐지 스레드 분리 및 연산 최적화
-import cProfile, pstats
+
 import sys
 import os
 import json
@@ -1910,14 +1910,13 @@ class FullMinimapEditorDialog(QDialog):
         elif checked and self.y_indicator_line and self.locked_position is not None:
             self.y_indicator_line.setVisible(True)
 
-    # FullMinimapEditorDialog 클래스 내부
-
     def update_locked_position(self, global_pos):
         self.locked_position = global_pos
         y_pos = global_pos.y()
         x_pos = global_pos.x()
         
         pen = QPen(QColor(255, 0, 0, 150), 1, Qt.PenStyle.DashLine)
+        # [v11.2.4] 폰트 크기 2로 통일
         coord_font = QFont("맑은 고딕", 2, QFont.Weight.Bold)
         
         # Y축 고정선
@@ -1930,40 +1929,18 @@ class FullMinimapEditorDialog(QDialog):
             self.x_indicator_line = self.scene.addLine(0, 0, 1, 1, pen)
             self.x_indicator_line.setZValue(200)
 
-        # === [v11.7.4 BUGFIX] 씬 경계 무한 확장 문제 해결 ===
-        # 1. 고정선(indicator)을 제외한 실제 콘텐츠의 경계만 계산합니다.
-        #    이렇게 하면 고정선이 스스로의 길이에 영향을 주는 피드백 루프가 끊어집니다.
-        content_items = [
-            item for item in self.scene.items() 
-            if item not in [self.y_indicator_line, self.x_indicator_line, self.lock_coord_text_item]
-        ]
+        scene_rect = self.scene.sceneRect()
+        if not scene_rect.isValid(): return
         
-        # 2. QGraphicsScene의 유틸리티 함수를 사용해 여러 아이템의 경계를 한 번에 계산합니다.
-        content_rect = QRectF()
-        if content_items:
-            # 첫 번째 아이템의 경계로 초기화
-            content_rect = content_items[0].sceneBoundingRect()
-            # 나머지 아이템들의 경계를 합쳐나감
-            for i in range(1, len(content_items)):
-                content_rect = content_rect.united(content_items[i].sceneBoundingRect())
-
-        if not content_rect.isValid(): 
-            # 씬에 아무것도 없으면 기본값으로 처리하여 오류 방지
-            content_rect = QRectF(-1000, -1000, 2000, 2000)
-        else:
-            # 계산된 경계에 약간의 여백을 주어 라인이 콘텐츠에 너무 붙지 않게 함
-            content_rect.adjust(-20, -20, 20, 20)
-
-
-        # 3. 계산된 '정적인' 콘텐츠 경계를 기준으로 라인을 그립니다.
+        # Y축 고정선 업데이트
         if self.y_indicator_line and self.y_indicator_line.scene():
-            self.y_indicator_line.setLine(content_rect.left(), y_pos, content_rect.right(), y_pos)
+            self.y_indicator_line.setLine(scene_rect.left(), y_pos, scene_rect.right(), y_pos)
             self.y_indicator_line.setVisible(self.is_y_locked)
             
+        # X축 고정선 업데이트
         if self.x_indicator_line and self.x_indicator_line.scene():
-            self.x_indicator_line.setLine(x_pos, content_rect.top(), x_pos, content_rect.bottom())
+            self.x_indicator_line.setLine(x_pos, scene_rect.top(), x_pos, scene_rect.bottom())
             self.x_indicator_line.setVisible(self.is_x_locked)
-        # =======================================================
 
         # [v11.2.4] X/Y축 고정 좌표 텍스트 (QGraphicsSimpleTextItem으로 변경)
         if not self.lock_coord_text_item:
@@ -2164,9 +2141,6 @@ class FullMinimapEditorDialog(QDialog):
         return background_item, text_item
     
     def populate_scene(self):
-                # 함수 시작 시점의 씬 경계 기록
-                initial_rect = self.scene.itemsBoundingRect()
-                print(f"[DEBUG] populate_scene 시작. 현재 씬 경계: {initial_rect.x():.1f}, {initial_rect.y():.1f}, {initial_rect.width():.1f}, {initial_rect.height():.1f}")
                 self.scene.clear()
                 # --- v10.3.4 수정: 씬 아이템을 참조하는 멤버 변수 초기화 ---
                 # [v11.3.2 BUGFIX] RuntimeError 방지를 위해 초기화 강화
@@ -2368,11 +2342,7 @@ class FullMinimapEditorDialog(QDialog):
                     
                 # 5. 모든 층 번호 텍스트를 마지막에 그림
                 self._update_all_floor_texts()
-                
-                # 함수 종료 직전, 모든 아이템이 추가된 후의 씬 경계 기록
-                final_rect = self.scene.itemsBoundingRect()
-                print(f"[DEBUG] populate_scene 종료. 최종 씬 경계: {final_rect.x():.1f}, {final_rect.y():.1f}, {final_rect.width():.1f}, {final_rect.height():.1f}")
-                
+
                 # v10.3.5: 보기 옵션 및 LOD 상태를 항상 마지막에 다시 적용
                 self._update_visibility()
                 self._update_lod_visibility()
@@ -3247,21 +3217,9 @@ class RealtimeMinimapView(QLabel):
         
         image_source_rect = source_rect.translated(-bounding_rect.topLeft())
         
-        # 1. 실제 Pixmap의 유효한 사각형과 그리려는 소스 사각형의 교차 영역을 구합니다.
-        valid_source_rect = image_source_rect.intersected(QRectF(map_bg.rect()))
+        target_rect = QRectF(self.rect())
+        painter.drawPixmap(target_rect, map_bg, image_source_rect)
 
-        # 2. 교차 영역이 유효한 경우에만 그리기를 수행합니다.
-        if valid_source_rect.isValid():
-            # 3. 소스 영역이 잘려나간 만큼, 위젯에 그려질 대상 영역도 조정합니다.
-            #    (잘려나간 부분은 그리지 않도록 위치와 크기를 다시 계산)
-            target_x = (valid_source_rect.x() - image_source_rect.x()) * self.zoom_level
-            target_y = (valid_source_rect.y() - image_source_rect.y()) * self.zoom_level
-            target_w = valid_source_rect.width() * self.zoom_level
-            target_h = valid_source_rect.height() * self.zoom_level
-            
-            valid_target_rect = QRectF(target_x, target_y, target_w, target_h)
-            
-            painter.drawPixmap(valid_target_rect, map_bg, valid_source_rect)
         def global_to_local(global_pos):
             relative_pos = global_pos - source_rect.topLeft()
             return relative_pos * self.zoom_level
@@ -3723,10 +3681,9 @@ def safe_read_latest_frame(capture_thread):
 # [v11.0.0] 개편: 캡처 로직 분리 및 탐지 연산 최적화
 class AnchorDetectionThread(QThread):
     """
-    캡처 스레드로부터 프레임을 받아, 등록된 핵심 지형과 플레이어 아이콘의 위치를
-    탐지하여 메인 스레드로 전달하는 역할. (모든 이미지 처리 담당)
+    캡처 스레드로부터 프레임을 받아, 등록된 핵심 지형의 위치만 탐지하여 전달하는 역할.
     """
-    # [수정] 보내는 데이터 종류와 받는 슬롯의 인자 개수를 일치시키는 것이 중요
+    # 기존과 호환되는 시그널 시그니처 유지 (호출부 변경 위험 방지)
     detection_ready = pyqtSignal(object, list, list, list)
     status_updated = pyqtSignal(str, str)
 
@@ -3766,16 +3723,16 @@ class AnchorDetectionThread(QThread):
         while self.is_running:
             loop_start = time.perf_counter()
             try:
-                # 1. 프레임 획득
-                frame_bgr = safe_read_latest_frame(self.capture_thread)
+                # 안전하게 최신 프레임 읽기 (락 최소점유)
+                frame_bgr = safe_read_latest_frame(self.capture_thread) # <<< [v11.0.1] 'self.' 제거
                 if frame_bgr is None:
                     time.sleep(0.005)
                     continue
 
-                # 2. 모든 이미지 처리 (플레이어 탐지 + 지형 탐지)
                 my_player_rects = self.find_player_icon(frame_bgr)
                 other_player_rects = self.find_other_player_icons(frame_bgr)
 
+                # 처리용 저해상도 프레임 생성 (연산량 감소)
                 frame_gray = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2GRAY)
                 frame_gray_small = cv2.resize(frame_gray, (0, 0), fx=self._downscale, fy=self._downscale, interpolation=cv2.INTER_AREA)
 
@@ -3785,7 +3742,7 @@ class AnchorDetectionThread(QThread):
                     t_h, t_w = tpl_small.shape
                     search_result = None
 
-                    # ROI 우선 검색
+                    # 1) ROI 우선 검색
                     last_pos = self.last_positions.get(fid)
                     if last_pos is not None:
                         lx = int(last_pos.x() * self._downscale)
@@ -3803,7 +3760,7 @@ class AnchorDetectionThread(QThread):
                                 found_y = (y1 + max_loc[1]) / self._downscale
                                 search_result = {'id': fid, 'local_pos': QPointF(found_x, found_y), 'conf': max_val, 'size': tpl_data['size']}
 
-                    # ROI에서 못 찾으면 전체 검색
+                    # 2) ROI에서 못 찾으면 전체(저해상도) 검색
                     if search_result is None:
                         res = cv2.matchTemplate(frame_gray_small, tpl_small, cv2.TM_CCOEFF_NORMED)
                         _, max_val, _, max_loc = cv2.minMaxLoc(res)
@@ -3814,33 +3771,26 @@ class AnchorDetectionThread(QThread):
                     
                     if search_result:
                         all_detected_features.append(search_result)
+                        # ROI 검색을 위해 TopLeft 좌표 저장
                         self.last_positions[fid] = search_result['local_pos']
 
-                # 3. 모든 결과가 준비된 후 시그널 전송
+                # 기존 시그널 시그니처를 유지하여 호환성 보장 (플레이어 정보는 빈 리스트로 전달)
                 self.detection_ready.emit(frame_bgr, all_detected_features, my_player_rects, other_player_rects)
 
-                # 4. 루프 시간 측정 및 성능 조정
+                # 루프 시간 측정 및 폴백 적용
                 loop_time_ms = (time.perf_counter() - loop_start) * 1000.0
                 if loop_time_ms > MapConfig["loop_time_fallback_ms"]:
                     old_scale = self._downscale
                     self._downscale = max(0.3, old_scale * 0.95)
-                    MapConfig["downscale"] = self._downscale
+                    MapConfig["downscale"] = self._downscale # 전역 설정도 갱신
                     print(f"[AnchorDetectionThread] 느린 루프 감지 ({loop_time_ms:.1f}ms), 다운스케일 조정: {old_scale:.2f} -> {self._downscale:.2f}")
 
             except Exception as e:
+                # 루프 전체가 죽지 않도록 모든 예외를 잡아 로깅 후 계속
                 print(f"[AnchorDetectionThread] 예기치 않은 오류: {e}")
                 traceback.print_exc()
                 time.sleep(0.02)
 
-    def stop(self):
-        self.is_running = False
-        try:
-            self.quit()
-            self.wait(2000)
-        except Exception as e:
-            print(f"[AnchorDetectionThread] 정지 대기 실패: {e}")
-
-    # 플레이어 탐지 메서드 (MapTab에서 이동해 옴)
     def find_player_icon(self, frame_bgr):
         hsv = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2HSV)
         mask = cv2.inRange(hsv, PLAYER_ICON_LOWER, PLAYER_ICON_UPPER)
@@ -3851,11 +3801,22 @@ class AnchorDetectionThread(QThread):
         
         valid_rects = []
         for i in range(1, num_labels):
-            x, y, w, h = stats[i, cv2.CC_STAT_LEFT], stats[i, cv2.CC_STAT_TOP], stats[i, cv2.CC_STAT_WIDTH], stats[i, cv2.CC_STAT_HEIGHT]
-            if (MIN_ICON_WIDTH <= w < MAX_ICON_WIDTH and MIN_ICON_HEIGHT <= h < MAX_ICON_HEIGHT):
-                center_x, center_y = x + w / 2, y + h / 2
-                new_x, new_y = int(center_x - PLAYER_ICON_STD_WIDTH / 2), int(center_y - PLAYER_ICON_STD_HEIGHT / 2)
+            x = stats[i, cv2.CC_STAT_LEFT]
+            y = stats[i, cv2.CC_STAT_TOP]
+            w = stats[i, cv2.CC_STAT_WIDTH]
+            h = stats[i, cv2.CC_STAT_HEIGHT]
+            
+            if (MIN_ICON_WIDTH <= w < MAX_ICON_WIDTH and
+                MIN_ICON_HEIGHT <= h < MAX_ICON_HEIGHT):
+                
+                center_x = x + w / 2
+                center_y = y + h / 2
+                
+                new_x = int(center_x - PLAYER_ICON_STD_WIDTH / 2)
+                new_y = int(center_y - PLAYER_ICON_STD_HEIGHT / 2)
+                
                 valid_rects.append(QRect(new_x, new_y, PLAYER_ICON_STD_WIDTH, PLAYER_ICON_STD_HEIGHT))
+                
         return valid_rects
 
     def find_other_player_icons(self, frame_bgr):
@@ -3865,17 +3826,37 @@ class AnchorDetectionThread(QThread):
         mask = cv2.bitwise_or(mask1, mask2)
         
         output = cv2.connectedComponentsWithStats(mask, 8, cv2.CV_32S)
-        num_labels, _, stats, _ = output
+        num_labels = output[0]
+        stats = output[2]
         
         valid_rects = []
         for i in range(1, num_labels):
-            x, y, w, h = stats[i, cv2.CC_STAT_LEFT], stats[i, cv2.CC_STAT_TOP], stats[i, cv2.CC_STAT_WIDTH], stats[i, cv2.CC_STAT_HEIGHT]
-            if (MIN_ICON_WIDTH <= w < MAX_ICON_WIDTH and MIN_ICON_HEIGHT <= h < MAX_ICON_HEIGHT):
-                center_x, center_y = x + w / 2, y + h / 2
-                new_x, new_y = int(center_x - PLAYER_ICON_STD_WIDTH / 2), int(center_y - PLAYER_ICON_STD_HEIGHT / 2)
+            x = stats[i, cv2.CC_STAT_LEFT]
+            y = stats[i, cv2.CC_STAT_TOP]
+            w = stats[i, cv2.CC_STAT_WIDTH]
+            h = stats[i, cv2.CC_STAT_HEIGHT]
+            
+            if (MIN_ICON_WIDTH <= w < MAX_ICON_WIDTH and
+                MIN_ICON_HEIGHT <= h < MAX_ICON_HEIGHT):
+                
+                center_x = x + w / 2
+                center_y = y + h / 2
+                
+                new_x = int(center_x - PLAYER_ICON_STD_WIDTH / 2)
+                new_y = int(center_y - PLAYER_ICON_STD_HEIGHT / 2)
+                
                 valid_rects.append(QRect(new_x, new_y, PLAYER_ICON_STD_WIDTH, PLAYER_ICON_STD_HEIGHT))
+                
         return valid_rects
-    
+
+    def stop(self):
+        self.is_running = False
+        try:
+            self.quit()
+            self.wait(2000)
+        except Exception as e:
+            print(f"[AnchorDetectionThread] 정지 대기 실패: {e}")
+
 # [v11.3.0] 상태 판정 설정을 위한 팝업 다이얼로그 클래스
 class StateConfigDialog(QDialog):
     def __init__(self, current_config, parent=None):
@@ -5113,37 +5094,13 @@ class MapTab(QWidget):
                 self.debug_dialog.close()
 
     def toggle_anchor_detection(self, checked):
-            # ▼▼▼ 프로파일링 코드 추가 ▼▼▼
-            if checked:
-                # 프로파일러 객체 생성
-                self.profiler = cProfile.Profile()
-                # 프로파일링 시작
-                self.profiler.enable()
-            else:
-                # 탐지 중단 시 프로파일링 중지 및 결과 저장
-                if hasattr(self, 'profiler') and self.profiler:
-                    self.profiler.disable()
-                    # 분석 결과를 'profile_results.prof' 파일에 저장합니다.
-                    stats_file = os.path.join(WORKSPACE_ROOT, 'profile_results.prof')
-                    self.profiler.dump_stats(stats_file)
-                    print(f"\n[PROFILING] 프로파일링 결과가 다음 파일에 저장되었습니다:\n{stats_file}\n")
-                    
-                    # (선택사항) 가장 오래 걸린 함수 20개를 바로 출력
-                    with open(os.path.join(WORKSPACE_ROOT, 'profile_log.txt'), 'w') as f:
-                        stats = pstats.Stats(self.profiler, stream=f).sort_stats('cumulative')
-                        stats.print_stats(20)
-                    print(f"[PROFILING] 상위 20개 함수 실행 시간 로그가 'profile_log.txt'에 저장되었습니다.")
-
-            # ▲▲▲ 프로파일링 코드 추가 끝 ▲▲▲
             if checked:
                 if not self.minimap_region:
                     QMessageBox.warning(self, "오류", "먼저 '미니맵 범위 지정'을 해주세요.")
                     self.detect_anchor_btn.setChecked(False)
-                    if hasattr(self, 'profiler'): self.profiler.disable()
                     return
                 if not self.key_features:
                     QMessageBox.warning(self, "오류", "하나 이상의 '핵심 지형'을 등록해야 합니다.")
-                    if hasattr(self, 'profiler'): self.profiler.disable()
                     self.detect_anchor_btn.setChecked(False)
                     return
                 if not self.full_map_pixmap or self.full_map_pixmap.isNull():
@@ -5263,6 +5220,7 @@ class MapTab(QWidget):
         탐지 스레드로부터 받은 정보를 처리하고, RANSAC을 이용해 플레이어의 전역 좌표를 강건하게 추정합니다.
         [v11.0.0] 이 메서드에서 직접 플레이어 아이콘을 탐지합니다.
         """
+
         if not my_player_rects:
             self.update_detection_log_message("플레이어 아이콘 탐지 실패", "red")
             if self.debug_dialog and self.debug_dialog.isVisible():
@@ -5393,99 +5351,76 @@ class MapTab(QWidget):
 
         self._update_player_state_and_navigation(final_player_pos)
 
-        # 맵 경계가 유효하고, 계산된 플레이어 위치가 이 경계 내에 있을 때만 뷰를 업데이트합니다.
-        if self.full_map_bounding_rect.isValid() and self.full_map_bounding_rect.contains(final_player_pos):
-            
-            # (기존 렌더링 데이터 준비 로직 전체를 이 안으로 이동)
-            if self.debug_dialog and self.debug_dialog.isVisible():
-                debug_data = {
-                    'all_features': found_features,
-                    'inlier_ids': inlier_ids,
-                    'player_pos_local': player_anchor_local,
-                    'ransac_matrix': transform_matrix,
-                    'ransac_inliers': list(inlier_ids)
-                }
-                self.debug_dialog.update_debug_info(frame_bgr, debug_data)
+        if self.debug_dialog and self.debug_dialog.isVisible():
+            debug_data = {
+                'all_features': found_features,
+                'inlier_ids': inlier_ids,
+                'player_pos_local': player_anchor_local,
+                'ransac_matrix': transform_matrix,
+                'ransac_inliers': list(inlier_ids)
+            }
+            self.debug_dialog.update_debug_info(frame_bgr, debug_data)
 
-            my_player_global_rects = []
-            other_player_global_rects = []
-            if transform_matrix is not None:
-                A = transform_matrix[:, :2]
-                t = transform_matrix[:, 2]
-                def transform_point(x, y):
-                    res = (A @ np.array([x, y], dtype=np.float32)) + t
-                    return float(res[0]), float(res[1])
+        my_player_global_rects = []
+        other_player_global_rects = []
+        if transform_matrix is not None:
+            A = transform_matrix[:, :2]
+            t = transform_matrix[:, 2]
+            def transform_point(x, y):
+                res = (A @ np.array([x, y], dtype=np.float32)) + t
+                return float(res[0]), float(res[1])
 
-                def transform_rect(rect):
-                    corners = [
-                        (rect.left(), rect.top()), (rect.right(), rect.top()),
-                        (rect.right(), rect.bottom()), (rect.left(), rect.bottom()),
-                    ]
-                    txs, tys = zip(*[transform_point(x, y) for (x, y) in corners])
-                    min_x, max_x = min(txs), max(txs)
-                    min_y, max_y = min(tys), max(tys)
-                    return QRectF(min_x, min_y, max_x - min_x, max_y - min_y)
+            def transform_rect(rect):
+                corners = [
+                    (rect.left(), rect.top()), (rect.right(), rect.top()),
+                    (rect.right(), rect.bottom()), (rect.left(), rect.bottom()),
+                ]
+                txs, tys = zip(*[transform_point(x, y) for (x, y) in corners])
+                min_x, max_x = min(txs), max(txs)
+                min_y, max_y = min(tys), max(tys)
+                return QRectF(min_x, min_y, max_x - min_x, max_y - min_y)
 
-                my_player_global_rects = [transform_rect(rect) for rect in my_player_rects]
-                other_player_global_rects = [transform_rect(rect) for rect in other_player_rects]
-            else:
-                def local_rect_to_global_center(rect, features_source):
-                    if not features_source:
-                        return QPointF(final_player_pos.x(), final_player_pos.y())
-
-                    rx, ry = rect.center().x(), rect.center().y()
-                    sum_x, sum_y, sum_w = 0.0, 0.0, 0.0
-                    for f in features_source:
-                        fid = f['id']
-                        if fid not in self.global_positions: continue
-                        f_local = QPointF(f['local_pos']) + QPointF(f['size'].width()/2, f['size'].height()/2)
-                        f_global = self.global_positions[fid] + QPointF(f['size'].width()/2, f['size'].height()/2)
-                        dx_local, dy_local = rx - f_local.x(), ry - f_local.y()
-                        cand_x, cand_y = f_global.x() + dx_local, f_global.y() + dy_local
-                        w = f.get('conf', 1.0)
-                        sum_x += cand_x * w
-                        sum_y += cand_y * w
-                        sum_w += w
-                    if sum_w <= 0: return QPointF(final_player_pos.x(), final_player_pos.y())
-                    return QPointF(sum_x / sum_w, sum_y / sum_w)
-
-                fallback_features = [valid_features_map[fid] for fid in inlier_ids] if inlier_ids else list(valid_features_map.values())
-
-                for rect in my_player_rects:
-                    center_global = local_rect_to_global_center(rect, fallback_features)
-                    my_player_global_rects.append(QRectF(center_global.x() - rect.width()/2, center_global.y() - rect.height()/2, rect.width(), rect.height()))
-
-                for rect in other_player_rects:
-                    center_global = local_rect_to_global_center(rect, fallback_features)
-                    other_player_global_rects.append(QRectF(center_global.x() - rect.width()/2, center_global.y() - rect.height()/2, rect.width(), rect.height()))
-            
-            camera_pos_to_send = final_player_pos if self.center_on_player_checkbox.isChecked() else self.minimap_view_label.camera_center_global
-            
-            # 멤버 변수 업데이트
-            self.my_player_global_rects = my_player_global_rects
-            self.other_player_global_rects = other_player_global_rects
-            self.active_feature_info = found_features
-            
-            # RealtimeMinimapView 업데이트 호출
-            self.minimap_view_label.update_view_data(
-                camera_center=camera_pos_to_send,
-                active_features=self.active_feature_info,
-                my_players=self.my_player_global_rects,
-                other_players=self.other_player_global_rects,
-                target_wp_id=self.target_waypoint_id,
-                reached_wp_id=self.last_reached_wp_id,
-                final_player_pos=final_player_pos,
-                is_forward=self.is_forward,
-                intermediate_pos=self.intermediate_target_pos,
-                intermediate_type=self.intermediate_target_type,
-                nav_action=self.navigation_action
-            )
+            my_player_global_rects = [transform_rect(rect) for rect in my_player_rects]
+            other_player_global_rects = [transform_rect(rect) for rect in other_player_rects]
         else:
-            # [수정] 좌표계가 비정상적일 때의 처리
-            self.update_detection_log_message("위치 계산 오류: 좌표계 이탈", "orange")
-            self.minimap_view_label.setText("위치 계산 오류...\n맵 좌표계를 확인해주세요.")
-            # 프리즈를 유발하는 뷰 업데이트를 건너뛴다.
+            def local_rect_to_global_center(rect, features_source):
+                if not features_source:
+                    return QPointF(final_player_pos.x(), final_player_pos.y())
 
+                rx, ry = rect.center().x(), rect.center().y()
+                sum_x, sum_y, sum_w = 0.0, 0.0, 0.0
+                for f in features_source:
+                    fid = f['id']
+                    if fid not in self.global_positions: continue
+                    f_local = QPointF(f['local_pos']) + QPointF(f['size'].width()/2, f['size'].height()/2)
+                    f_global = self.global_positions[fid] + QPointF(f['size'].width()/2, f['size'].height()/2)
+                    dx_local, dy_local = rx - f_local.x(), ry - f_local.y()
+                    cand_x, cand_y = f_global.x() + dx_local, f_global.y() + dy_local
+                    w = f.get('conf', 1.0)
+                    sum_x += cand_x * w
+                    sum_y += cand_y * w
+                    sum_w += w
+                if sum_w <= 0: return QPointF(final_player_pos.x(), final_player_pos.y())
+                return QPointF(sum_x / sum_w, sum_y / sum_w)
+
+            fallback_features = [valid_features_map[fid] for fid in inlier_ids] if inlier_ids else list(valid_features_map.values())
+
+            for rect in my_player_rects:
+                center_global = local_rect_to_global_center(rect, fallback_features)
+                my_player_global_rects.append(QRectF(center_global.x() - rect.width()/2, center_global.y() - rect.height()/2, rect.width(), rect.height()))
+
+            for rect in other_player_global_rects:
+                center_global = local_rect_to_global_center(rect, fallback_features)
+                other_player_global_rects.append(QRectF(center_global.x() - rect.width()/2, center_global.y() - rect.height()/2, rect.width(), rect.height()))
+        
+        camera_pos_to_send = final_player_pos if self.center_on_player_checkbox.isChecked() else self.minimap_view_label.camera_center_global
+        
+        # ==================== v11.6.0 멤버 변수 저장 로직 추가 시작 ====================
+        self.my_player_global_rects = my_player_global_rects
+        self.other_player_global_rects = other_player_global_rects
+        self.active_feature_info = found_features
+        # ==================== v11.6.0 멤버 변수 저장 로직 추가 끝 ======================
+             
         self.global_pos_updated.emit(final_player_pos)
         
         inlier_list = [f for f in reliable_features if f['id'] in inlier_ids]
@@ -6324,24 +6259,49 @@ class MapTab(QWidget):
 
     def _calculate_global_positions(self):
         """
-        [v11.7.3 STABLE] 기준 앵커를 원점으로 모든 핵심 지형의 전역 좌표를 계산합니다.
-        좌표 발산 및 무한 루프 문제를 해결하기 위해, 모든 지형 간의 관계를 종합하여
-        가장 가능성 높은 위치를 찾는 투표/평균화 방식으로 재설계되었습니다.
+        v10.0.0: 기준 앵커를 원점으로 하여 모든 핵심 지형과 구버전 웨이포인트의 전역 좌표를 계산합니다.
+        핵심 지형 간의 양방향 템플릿 매칭을 통해 웨이포인트 없이도 좌표계를 확장합니다. (임계값 조정 및 디버깅 로그 추가)
         """
         if not self.key_features:
             self.reference_anchor_id = None
             return {}
 
-        # 1. 템플릿 및 크기 정보 사전 처리
-        templates, contexts, sizes = {}, {}, {}
+        for f_id, f_data in self.key_features.items():
+            if 'size' not in f_data:
+                try:
+                    img_data = base64.b64decode(f_data['image_base64'])
+                    np_arr = np.frombuffer(img_data, np.uint8)
+                    template = cv2.imdecode(np_arr, cv2.IMREAD_COLOR)
+                    if template is not None:
+                        f_data['size'] = QSize(template.shape[1], template.shape[0])
+                except:
+                    pass
+
+        global_positions = {}
+        
+        # 1. 기준 앵커 설정
+        anchor_id = self.reference_anchor_id
+        if not anchor_id or anchor_id not in self.key_features:
+            try:
+                anchor_id = sorted(self.key_features.keys())[0]
+                self.reference_anchor_id = anchor_id
+                self.update_general_log(f"경고: 기준 앵커가 없어, '{anchor_id}'을(를) 새 기준으로 자동 설정합니다.", "orange")
+            except IndexError:
+                return {}
+        
+        # 2. 핵심 지형 좌표 계산 (양방향 탐색 로직)
+        known_features = {anchor_id}
+        pending_features = set(self.key_features.keys()) - known_features
+        
+        global_positions[anchor_id] = QPointF(0, 0)
+
+        templates = {}
+        contexts = {}
         for f_id, f_data in self.key_features.items():
             try:
                 img_data = base64.b64decode(f_data['image_base64'])
                 np_arr = np.frombuffer(img_data, np.uint8)
-                template = cv2.imdecode(np_arr, cv2.IMREAD_GRAYSCALE)
-                templates[f_id] = template
-                sizes[f_id] = QSize(template.shape[1], template.shape[0]) if template is not None else QSize(0,0)
-
+                templates[f_id] = cv2.imdecode(np_arr, cv2.IMREAD_GRAYSCALE)
                 if 'context_image_base64' in f_data and f_data['context_image_base64']:
                     context_img_data = base64.b64decode(f_data['context_image_base64'])
                     context_np_arr = np.frombuffer(context_img_data, np.uint8)
@@ -6350,89 +6310,77 @@ class MapTab(QWidget):
                     contexts[f_id] = None
             except Exception as e:
                 print(f"이미지 디코딩 오류 (ID: {f_id}): {e}")
+                templates[f_id] = None
+                contexts[f_id] = None
 
-        # 2. 모든 지형 쌍 간의 상대 위치 벡터(offset)를 미리 계산
-        self.feature_offsets.clear()
-        all_feature_ids = sorted(list(self.key_features.keys()))
-        MATCH_THRESHOLD = 0.85 # 임계값을 약간 낮춰 더 많은 관계를 찾도록 함
+        MATCH_THRESHOLD = 0.90  # --- 임계값 하향 조정 ---
 
-        for i in range(len(all_feature_ids)):
-            for j in range(i + 1, len(all_feature_ids)):
-                id1, id2 = all_feature_ids[i], all_feature_ids[j]
-                
-                # 관계 찾기 (id1의 context에서 id2 찾기)
-                context1 = contexts.get(id1)
-                template2 = templates.get(id2)
-                if context1 is not None and template2 is not None:
-                    res = cv2.matchTemplate(context1, template2, cv2.TM_CCOEFF_NORMED)
-                    _, max_val, _, max_loc = cv2.minMaxLoc(res)
-                    if max_val >= MATCH_THRESHOLD:
-                        rect1 = self.key_features[id1].get('rect_in_context', [0,0,0,0])
-                        # 중심점 기준 오프셋 계산
-                        center1_in_context = QPointF(rect1[0] + sizes[id1].width()/2, rect1[1] + sizes[id1].height()/2)
-                        center2_in_context = QPointF(max_loc[0] + sizes[id2].width()/2, max_loc[1] + sizes[id2].height()/2)
-                        offset = center2_in_context - center1_in_context
-                        self.feature_offsets[(id1, id2)] = offset
-                        self.feature_offsets[(id2, id1)] = -offset
-                        continue # 관계를 찾았으면 반대 방향은 탐색 안함
-
-                # 관계 찾기 (id2의 context에서 id1 찾기)
-                context2 = contexts.get(id2)
-                template1 = templates.get(id1)
-                if context2 is not None and template1 is not None:
-                    res = cv2.matchTemplate(context2, template1, cv2.TM_CCOEFF_NORMED)
-                    _, max_val, _, max_loc = cv2.minMaxLoc(res)
-                    if max_val >= MATCH_THRESHOLD:
-                        rect2 = self.key_features[id2].get('rect_in_context', [0,0,0,0])
-                        center2_in_context = QPointF(rect2[0] + sizes[id2].width()/2, rect2[1] + sizes[id2].height()/2)
-                        center1_in_context = QPointF(max_loc[0] + sizes[id1].width()/2, max_loc[1] + sizes[id1].height()/2)
-                        offset = center1_in_context - center2_in_context
-                        self.feature_offsets[(id2, id1)] = offset
-                        self.feature_offsets[(id1, id2)] = -offset
-
-        # 3. 기준 앵커를 시작으로 BFS/DFS를 통해 연결된 모든 지형의 좌표 계산
-        global_positions = {}
-        anchor_id = self.reference_anchor_id
-        if not anchor_id or anchor_id not in self.key_features:
-            anchor_id = all_feature_ids[0] if all_feature_ids else None
-            self.reference_anchor_id = anchor_id
-
-        if not anchor_id: return {}
-        
-        q = deque([anchor_id])
-        visited = {anchor_id}
-        # 중심 좌표 기준 계산
-        global_centers = {anchor_id: QPointF(0, 0)}
-
-        while q:
-            current_id = q.popleft()
-            current_center = global_centers[current_id]
+        for _ in range(len(self.key_features) + 1):
+            if not pending_features:
+                break
             
-            # current_id와 연결된 모든 지형을 찾아서 좌표 계산
-            for other_id in all_feature_ids:
-                if other_id not in visited:
-                    offset = self.feature_offsets.get((current_id, other_id))
-                    if offset is not None:
-                        global_centers[other_id] = current_center + offset
-                        visited.add(other_id)
-                        q.append(other_id)
+            found_in_iteration = set()
+            
+            for pending_id in pending_features:
+                is_found = False
+                for known_id in known_features:
+                    
+                    # 탐색 A: known의 문맥에서 pending 찾기
+                    known_context = contexts.get(known_id)
+                    pending_template = templates.get(pending_id)
+                    if known_context is not None and pending_template is not None:
+                        res = cv2.matchTemplate(known_context, pending_template, cv2.TM_CCOEFF_NORMED)
+                        _, max_val, _, max_loc = cv2.minMaxLoc(res)
+                        # print(f"[DEBUG] 탐색 A: {known_id}(문맥) -> {pending_id}(템플릿) | 매칭률: {max_val:.4f}") # 디버그 로그
+                        if max_val >= MATCH_THRESHOLD:
+                            known_global_pos = global_positions[known_id]
+                            known_rect = self.key_features[known_id].get('rect_in_context', [0,0,0,0])
+                            known_local_pos_in_context = QPointF(known_rect[0], known_rect[1])
+                            context_global_origin = known_global_pos - known_local_pos_in_context
+                            pending_local_pos_in_context = QPointF(max_loc[0], max_loc[1])
+                            pending_global_pos = context_global_origin + pending_local_pos_in_context
+                            global_positions[pending_id] = pending_global_pos
+                            is_found = True
 
-        # 4. 계산된 중심 좌표를 TopLeft 좌표로 변환
-        for fid, center_pos in global_centers.items():
-            size = sizes.get(fid, QSize(0,0))
-            top_left = center_pos - QPointF(size.width()/2, size.height()/2)
-            global_positions[fid] = top_left
+                    if is_found: break
 
-        # 5. 좌표가 계산되지 않은 지형에 대한 경고
-        pending_features = set(all_feature_ids) - visited
+                    # 탐색 B: pending의 문맥에서 known 찾기
+                    pending_context = contexts.get(pending_id)
+                    known_template = templates.get(known_id)
+                    if pending_context is not None and known_template is not None:
+                        res = cv2.matchTemplate(pending_context, known_template, cv2.TM_CCOEFF_NORMED)
+                        _, max_val, _, max_loc = cv2.minMaxLoc(res)
+                        # print(f"[DEBUG] 탐색 B: {pending_id}(문맥) -> {known_id}(템플릿) | 매칭률: {max_val:.4f}") # 디버그 로그
+                        if max_val >= MATCH_THRESHOLD:
+                            known_global_pos = global_positions[known_id]
+                            pending_rect = self.key_features[pending_id].get('rect_in_context', [0,0,0,0])
+                            pending_local_pos_in_context = QPointF(pending_rect[0], pending_rect[1])
+                            known_local_pos_in_pending_context = QPointF(max_loc[0], max_loc[1])
+                            context_global_origin = known_global_pos - known_local_pos_in_pending_context
+                            pending_global_pos = context_global_origin + pending_local_pos_in_context
+                            global_positions[pending_id] = pending_global_pos
+                            is_found = True
+
+                    if is_found: break
+                
+                if is_found:
+                    found_in_iteration.add(pending_id)
+
+            if found_in_iteration:
+                known_features.update(found_in_iteration)
+                pending_features -= found_in_iteration
+            else:
+                break
+        
         if pending_features:
             failed_ids = ", ".join(sorted(list(pending_features)))
-            message = (f"경고: 다음 핵심 지형들이 다른 지형과 연결되지 않아 위치를 계산할 수 없습니다: {failed_ids}. "
-                       f"문맥 이미지를 다시 등록하거나, 탐지 정확도 설정을 조절해보세요.")
+            message = (f"경고: 다음 핵심 지형들의 위치를 계산하지 못했습니다: {failed_ids}. ...") # 이하 동일
             self.update_general_log(message, "orange")
-            
-        # 6. 문맥 이미지 원점 좌표 계산 (기존 로직과 동일)
-        for feature_id in visited:
+
+        # (이하 문맥 원점 계산 및 구버전 웨이포인트 처리 로직은 동일)
+        # ... (이전 답변과 동일한 코드) ...
+        # 3. 모든 핵심 지형의 문맥 이미지 원점 좌표 계산
+        for feature_id in known_features:
             if feature_id in global_positions:
                 feature_data = self.key_features[feature_id]
                 if 'rect_in_context' in feature_data and feature_data['rect_in_context']:
@@ -6440,6 +6388,64 @@ class MapTab(QWidget):
                     feature_local_pos_in_context = QPointF(rect[0], rect[1])
                     context_origin_pos = global_positions[feature_id] - feature_local_pos_in_context
                     global_positions[f"{feature_id}_context"] = context_origin_pos
+
+        # 4. 구버전 웨이포인트 처리 (호환성 유지)
+        all_waypoints_old = self.get_all_waypoints_with_route_name()
+        if all_waypoints_old:
+            pending_waypoints = all_waypoints_old[:]
+            for _ in range(len(all_waypoints_old) + 5):
+                found_new = False
+                remaining_waypoints = []
+                for wp in pending_waypoints:
+                    known_ref_feature = next((link for link in wp.get('key_feature_ids', []) if link['id'] in global_positions), None)
+                    if known_ref_feature:
+                        found_new = True
+                        try:
+                            img_data = base64.b64decode(wp['image_base64'])
+                            np_arr = np.frombuffer(img_data, np.uint8)
+                            wp_map_gray = cv2.imdecode(np_arr, cv2.IMREAD_GRAYSCALE)
+                            feature_id = known_ref_feature['id']
+                            template = templates.get(feature_id)
+                            if wp_map_gray is None or template is None: continue
+                            res = cv2.matchTemplate(wp_map_gray, template, cv2.TM_CCOEFF_NORMED)
+                            _, _, _, max_loc = cv2.minMaxLoc(res)
+                            ref_global_pos = global_positions[feature_id]
+                            ref_local_pos_in_wp = QPointF(max_loc[0], max_loc[1])
+                            wp_map_global_origin = ref_global_pos - ref_local_pos_in_wp
+                            offset_x, offset_y = known_ref_feature['offset_to_target']
+                            wp_target_global_pos = ref_global_pos + QPointF(offset_x, offset_y)
+                            global_positions[wp['name']] = {'map_origin': wp_map_global_origin, 'target_pos': wp_target_global_pos}
+                        except Exception as e:
+                            print(f"Error processing old waypoint {wp.get('name', 'N/A')}: {e}")
+                    else:
+                        remaining_waypoints.append(wp)
+                pending_waypoints = remaining_waypoints
+                if not found_new or not pending_waypoints:
+                    break
+
+        # 5. 모든 핵심 지형 쌍 간의 상대 위치 벡터 미리 계산
+        self.feature_offsets.clear()
+        known_feature_ids = [fid for fid in known_features if fid in global_positions]
+        for i in range(len(known_feature_ids)):
+            for j in range(i + 1, len(known_feature_ids)):
+                id1 = known_feature_ids[i]
+                id2 = known_feature_ids[j]
+                pos1 = global_positions[id1]
+                pos2 = global_positions[id2]
+                
+                # 중심점 기준 오프셋 계산
+                #  리스트로 저장된 size를 QSize 객체로 변환 ---
+                size1_data = self.key_features[id1].get('size')
+                size2_data = self.key_features[id2].get('size')
+                size1 = QSize(size1_data[0], size1_data[1]) if isinstance(size1_data, list) and len(size1_data) == 2 else QSize(0,0)
+                size2 = QSize(size2_data[0], size2_data[1]) if isinstance(size2_data, list) and len(size2_data) == 2 else QSize(0,0)
+                
+                center1 = pos1 + QPointF(size1.width()/2, size1.height()/2)
+                center2 = pos2 + QPointF(size2.width()/2, size2.height()/2)
+
+                offset = center2 - center1
+                self.feature_offsets[(id1, id2)] = offset
+                self.feature_offsets[(id2, id1)] = -offset
 
         return global_positions
 
