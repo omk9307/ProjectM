@@ -1,6 +1,6 @@
 # map.py
-# 2025년 08月 22日 10:00 (KST)
-# 기능: v11.0.0 - 성능 개편: 캡처/탐지 스레드 분리 및 연산 최적화
+# 2025년 08月 22日 12:30 (KST)
+# 기능: v11.0.0 - 버그 개선완료 - 미니맵 무한 확장, 미니맵 한장짜리 프로필 오류 해결
 
 import sys
 import os
@@ -1918,7 +1918,6 @@ class FullMinimapEditorDialog(QDialog):
         x_pos = global_pos.x()
         
         pen = QPen(QColor(255, 0, 0, 150), 1, Qt.PenStyle.DashLine)
-        # [v11.2.4] 폰트 크기 2로 통일
         coord_font = QFont("맑은 고딕", 2, QFont.Weight.Bold)
         
         # Y축 고정선
@@ -1931,17 +1930,20 @@ class FullMinimapEditorDialog(QDialog):
             self.x_indicator_line = self.scene.addLine(0, 0, 1, 1, pen)
             self.x_indicator_line.setZValue(200)
 
-        scene_rect = self.scene.sceneRect()
-        if not scene_rect.isValid(): return
+        # [MODIFIED] 씬 경계 대신 현재 보이는 뷰포트 영역을 기준으로 라인을 그림
+        view_rect = self.view.viewport().rect()
+        scene_visible_rect = self.view.mapToScene(view_rect).boundingRect()
+
+        if not scene_visible_rect.isValid(): return
         
         # Y축 고정선 업데이트
         if self.y_indicator_line and self.y_indicator_line.scene():
-            self.y_indicator_line.setLine(scene_rect.left(), y_pos, scene_rect.right(), y_pos)
+            self.y_indicator_line.setLine(scene_visible_rect.left(), y_pos, scene_visible_rect.right(), y_pos)
             self.y_indicator_line.setVisible(self.is_y_locked)
             
         # X축 고정선 업데이트
         if self.x_indicator_line and self.x_indicator_line.scene():
-            self.x_indicator_line.setLine(x_pos, scene_rect.top(), x_pos, scene_rect.bottom())
+            self.x_indicator_line.setLine(x_pos, scene_visible_rect.top(), x_pos, scene_visible_rect.bottom())
             self.x_indicator_line.setVisible(self.is_x_locked)
 
         # [v11.2.4] X/Y축 고정 좌표 텍스트 (QGraphicsSimpleTextItem으로 변경)
@@ -5367,8 +5369,8 @@ class MapTab(QWidget):
                 corners = np.float32([[rect.left(), rect.top()], [rect.right(), rect.bottom()]]).reshape(-1, 1, 2)
                 t_corners = cv2.transform(corners, matrix).reshape(2, 2)
                 return QRectF(QPointF(t_corners[0,0], t_corners[0,1]), QPointF(t_corners[1,0], t_corners[1,1])).normalized()
-            else: # 폴백 # 프로필 변경시 이제 안내선오류는 없고 Traceback (most recent call last):
-                center_local = rect.center()
+            else: # 폴백
+                center_local = QPointF(rect.center()) # [MODIFIED] QPoint를 QPointF로 형 변환
                 sum_pos, sum_conf = QPointF(0, 0), 0
                 for f in fallback_features:
                     offset = center_local - (f['local_pos'] + QPointF(f['size'].width()/2, f['size'].height()/2))
