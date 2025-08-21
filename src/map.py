@@ -5367,7 +5367,7 @@ class MapTab(QWidget):
                 corners = np.float32([[rect.left(), rect.top()], [rect.right(), rect.bottom()]]).reshape(-1, 1, 2)
                 t_corners = cv2.transform(corners, matrix).reshape(2, 2)
                 return QRectF(QPointF(t_corners[0,0], t_corners[0,1]), QPointF(t_corners[1,0], t_corners[1,1])).normalized()
-            else: # 폴백
+            else: # 폴백 # 프로필 변경시 이제 안내선오류는 없고 Traceback (most recent call last):
                 center_local = rect.center()
                 sum_pos, sum_conf = QPointF(0, 0), 0
                 for f in fallback_features:
