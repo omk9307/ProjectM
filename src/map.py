@@ -4474,7 +4474,10 @@ class MapTab(QWidget):
             self.global_positions = self._calculate_global_positions()
             self._generate_full_map_pixmap()
             self._assign_dynamic_names()
-            self._build_navigation_graph()
+            # --- v12.0.0 수정: 현재 경로 기준으로 그래프 생성 ---
+            active_route = self.route_profiles.get(self.active_route_profile_name, {})
+            wp_ids = set(active_route.get("forward_path", []) + active_route.get("backward_path", []))
+            self._build_navigation_graph(list(wp_ids))
             self.update_ui_for_new_profile()
             self.update_general_log(f"'{profile_name}' 맵 프로필을 로드했습니다.", "blue")
             self._center_realtime_view_on_map()
@@ -4627,7 +4630,10 @@ class MapTab(QWidget):
             # save 후에 뷰 업데이트
             self._build_line_floor_map() # [v11.4.5] 맵 데이터 저장 후 캐시 빌드 및 뷰 업데이트
             self._update_map_data_and_views()
-            self._build_navigation_graph()
+            # --- v12.0.0 수정: 현재 경로 기준으로 그래프 재생성 ---
+            active_route = self.route_profiles.get(self.active_route_profile_name, {})
+            wp_ids = set(active_route.get("forward_path", []) + active_route.get("backward_path", []))
+            self._build_navigation_graph(list(wp_ids))
             
         except Exception as e:
             self.update_general_log(f"프로필 저장 오류: {e}", "red")
@@ -4790,6 +4796,11 @@ class MapTab(QWidget):
             self.active_route_profile_name = route_name
             self.update_general_log(f"'{route_name}' 경로 프로필로 전환했습니다.", "SaddleBrown")
             self.populate_waypoint_list()
+            # --- v12.0.0 추가: 경로 프로필 변경 시 그래프 재생성 ---
+            active_route = self.route_profiles.get(self.active_route_profile_name, {})
+            wp_ids = set(active_route.get("forward_path", []) + active_route.get("backward_path", []))
+            self._build_navigation_graph(list(wp_ids))
+            # --- 추가 끝 ---
             self.save_profile_data()
 
     def add_route_profile(self):
@@ -5074,6 +5085,11 @@ class MapTab(QWidget):
         # 역방향 리스트에서 새 순서 가져오기
         new_backward_ids = [self.backward_wp_list.item(i).data(Qt.ItemDataRole.UserRole) for i in range(self.backward_wp_list.count())]
         current_route["backward_path"] = new_backward_ids
+
+        # --- v12.0.0 추가: 경로 변경 시 그래프 재생성 ---
+        wp_ids = set(new_forward_ids + new_backward_ids)
+        self._build_navigation_graph(list(wp_ids))
+        # --- 추가 끝 ---
 
         self.save_profile_data()
         self.update_general_log("웨이포인트 순서가 변경되었습니다.", "SaddleBrown")
@@ -6514,131 +6530,148 @@ class MapTab(QWidget):
         
         return closest_node_key, math.sqrt(min_dist_sq)
 
-    def _build_navigation_graph(self):
-        """
-        맵의 모든 지오메트리 데이터를 기반으로 A* 탐색을 위한 내비게이션 그래프를 생성합니다.
-        그래프는 self.nav_nodes와 self.nav_graph에 저장됩니다.
-        """
-        self.nav_nodes.clear()
-        self.nav_graph = defaultdict(dict)
-        
-        if not self.geometry_data:
-            return
+    def _build_navigation_graph(self, waypoint_ids_in_route=None):
+            """
+            맵의 지오메트리 데이터와 현재 경로의 WP 목록을 기반으로 A* 탐색용 그래프를 생성합니다.
+            그래프는 self.nav_nodes와 self.nav_graph에 저장됩니다.
+            """
+            self.nav_nodes.clear()
+            self.nav_graph = defaultdict(dict)
 
-        terrain_lines = self.geometry_data.get("terrain_lines", [])
-        lines_by_id = {line['id']: line for line in terrain_lines}
+            if not self.geometry_data:
+                return
 
-        # --- 1. 모든 잠재적 노드 생성 ---
-        # 1a. 웨이포인트 노드
-        for wp in self.geometry_data.get("waypoints", []):
-            key = f"wp_{wp['id']}"
-            self.nav_nodes[key] = {'type': 'waypoint', 'pos': QPointF(*wp['pos']), 'floor': wp.get('floor'), 'name': wp.get('name'), 'id': wp['id']}
+            # 경로에 포함된 WP ID가 없으면, 모든 WP를 대상으로 그래프 생성 (편집기 등에서 사용)
+            if waypoint_ids_in_route is None:
+                waypoint_ids_in_route = [wp['id'] for wp in self.geometry_data.get("waypoints", [])]
 
-        # 1b. 사다리 노드
-        for obj in self.geometry_data.get("transition_objects", []):
-            p1 = QPointF(*obj['points'][0])
-            p2 = QPointF(*obj['points'][1])
-            entry_pos, exit_pos = (p1, p2) if p1.y() > p2.y() else (p2, p1)
-            
-            entry_key = f"ladder_entry_{obj['id']}"
-            exit_key = f"ladder_exit_{obj['id']}"
-            
-            self.nav_nodes[entry_key] = {'type': 'ladder_entry', 'pos': entry_pos, 'obj_id': obj['id'], 'name': obj.get('dynamic_name')}
-            self.nav_nodes[exit_key] = {'type': 'ladder_exit', 'pos': exit_pos, 'obj_id': obj['id'], 'name': obj.get('dynamic_name')}
-            
-            # 사다리 내부 이동 간선 추가
-            cost_up = abs(entry_pos.y() - exit_pos.y()) * 1.5
-            cost_down = abs(entry_pos.y() - exit_pos.y()) * 5.0
-            self.nav_graph[entry_key][exit_key] = cost_up
-            self.nav_graph[exit_key][entry_key] = cost_down
+            terrain_lines = self.geometry_data.get("terrain_lines", [])
+            lines_by_id = {line['id']: line for line in terrain_lines}
 
-        # 1c. 점프 링크 노드
-        for link in self.geometry_data.get("jump_links", []):
-            start_pos = QPointF(*link['start_vertex_pos'])
-            end_pos = QPointF(*link['end_vertex_pos'])
-            
-            key1 = f"jump_{link['id']}_p1"
-            key2 = f"jump_{link['id']}_p2"
+            # --- 1. 모든 잠재적 노드 생성 ---
+            # 1a. 웨이포인트 노드 (경로에 포함된 것만)
+            for wp in self.geometry_data.get("waypoints", []):
+                if wp['id'] in waypoint_ids_in_route:
+                    key = f"wp_{wp['id']}"
+                    self.nav_nodes[key] = {'type': 'waypoint', 'pos': QPointF(*wp['pos']), 'floor': wp.get('floor'), 'name': wp.get('name'), 'id': wp['id']}
 
-            self.nav_nodes[key1] = {'type': 'jump_vertex', 'pos': start_pos, 'link_id': link['id'], 'name': link.get('dynamic_name')}
-            self.nav_nodes[key2] = {'type': 'jump_vertex', 'pos': end_pos, 'link_id': link['id'], 'name': link.get('dynamic_name')}
-            
-            cost = math.hypot(start_pos.x() - end_pos.x(), start_pos.y() - end_pos.y())
-            self.nav_graph[key1][key2] = cost
-            self.nav_graph[key2][key1] = cost
+            # 1b. 사다리 노드
+            for obj in self.geometry_data.get("transition_objects", []):
+                p1 = QPointF(*obj['points'][0])
+                p2 = QPointF(*obj['points'][1])
+                entry_pos, exit_pos = (p1, p2) if p1.y() > p2.y() else (p2, p1)
+                
+                entry_key = f"ladder_entry_{obj['id']}"
+                exit_key = f"ladder_exit_{obj['id']}"
+                
+                self.nav_nodes[entry_key] = {'type': 'ladder_entry', 'pos': entry_pos, 'obj_id': obj['id'], 'name': obj.get('dynamic_name')}
+                self.nav_nodes[exit_key] = {'type': 'ladder_exit', 'pos': exit_pos, 'obj_id': obj['id'], 'name': obj.get('dynamic_name')}
+                
+                cost_up = abs(entry_pos.y() - exit_pos.y()) * 1.5
+                cost_down = abs(entry_pos.y() - exit_pos.y()) * 5.0
+                self.nav_graph[entry_key][exit_key] = cost_up
+                self.nav_graph[exit_key][entry_key] = cost_down
 
-        # 1d. 낙하(Fall) 및 아래 점프(Down Jump) 노드
-        for i, line_above in enumerate(terrain_lines):
-            # 낙하 노드 (양 끝점)
-            for v_idx, vertex in enumerate([line_above['points'][0], line_above['points'][-1]]):
-                for line_below in terrain_lines:
+            # 1c. 점프 링크 노드
+            for link in self.geometry_data.get("jump_links", []):
+                start_pos = QPointF(*link['start_vertex_pos'])
+                end_pos = QPointF(*link['end_vertex_pos'])
+                
+                key1 = f"jump_{link['id']}_p1"
+                key2 = f"jump_{link['id']}_p2"
+
+                self.nav_nodes[key1] = {'type': 'jump_vertex', 'pos': start_pos, 'link_id': link['id'], 'name': link.get('dynamic_name')}
+                self.nav_nodes[key2] = {'type': 'jump_vertex', 'pos': end_pos, 'link_id': link['id'], 'name': link.get('dynamic_name')}
+                
+                cost = math.hypot(start_pos.x() - end_pos.x(), start_pos.y() - end_pos.y())
+                self.nav_graph[key1][key2] = cost
+                self.nav_graph[key2][key1] = cost
+
+            # 1d. 낙하(Fall) 및 아래 점프(Down Jump) 노드
+            for i, line_above in enumerate(terrain_lines):
+                # 낙하 노드 (양 끝점)
+                for v_idx, vertex in enumerate([line_above['points'][0], line_above['points'][-1]]):
+                    for line_below in terrain_lines:
+                        if line_above['id'] == line_below['id'] or line_above['floor'] <= line_below['floor']: continue
+                        
+                        min_x, max_x = min(line_below['points'][0][0], line_below['points'][-1][0]), max(line_below['points'][0][0], line_below['points'][-1][0])
+                        if min_x <= vertex[0] <= max_x:
+                            fall_start_pos = QPointF(*vertex)
+                            
+                            # 착지 지점의 정확한 Y좌표 계산
+                            contact_terrain_at_fall = self._get_contact_terrain(QPointF(vertex[0], line_below['points'][0][1] + self.cfg_on_terrain_y_threshold))
+                            if contact_terrain_at_fall:
+                                points = contact_terrain_at_fall.get("points", [])
+                                p1_b, p2_b = points[0], points[-1]
+                                line_y_b = p1_b[1] + (p2_b[1] - p1_b[1]) * ((vertex[0] - p1_b[0]) / (p2_b[0] - p1_b[0])) if (p2_b[0] - p1_b[0]) != 0 else p1_b[1]
+                                fall_end_y = line_y_b
+                            else: # 혹시 모를 예외상황
+                                fall_end_y = line_below['points'][0][1]
+
+                            fall_end_pos = QPointF(vertex[0], fall_end_y)
+                            
+                            start_key = f"fall_start_{line_above['id']}_{v_idx}"
+                            end_key = f"fall_end_{line_above['id']}_{v_idx}_{line_below['id']}"
+                            
+                            self.nav_nodes[start_key] = {'type': 'fall_start', 'pos': fall_start_pos, 'name': f"{line_above.get('dynamic_name')} 낙하"}
+                            self.nav_nodes[end_key] = {'type': 'fall_end', 'pos': fall_end_pos, 'name': f"{line_below.get('dynamic_name')} 착지"}
+                            
+                            cost = abs(fall_start_pos.y() - fall_end_pos.y()) * 0.6
+                            self.nav_graph[start_key][end_key] = cost
+                            break
+
+                # 아래 점프 노드 (선분 전체)
+                for j, line_below in enumerate(terrain_lines):
                     if line_above['id'] == line_below['id'] or line_above['floor'] <= line_below['floor']: continue
                     
-                    min_x, max_x = min(line_below['points'][0][0], line_below['points'][-1][0]), max(line_below['points'][0][0], line_below['points'][-1][0])
-                    if min_x <= vertex[0] <= max_x:
-                        fall_start_pos = QPointF(*vertex)
-                        fall_end_y = self._get_contact_terrain(QPointF(vertex[0], line_below['points'][0][1])).get('points')[0][1] # 정확한 y좌표
-                        fall_end_pos = QPointF(vertex[0], fall_end_y)
-                        
-                        start_key = f"fall_start_{line_above['id']}_{v_idx}"
-                        end_key = f"fall_end_{line_above['id']}_{v_idx}_{line_below['id']}"
-                        
-                        self.nav_nodes[start_key] = {'type': 'fall_start', 'pos': fall_start_pos, 'name': f"{line_above.get('dynamic_name')} 낙하"}
-                        self.nav_nodes[end_key] = {'type': 'fall_end', 'pos': fall_end_pos, 'name': f"{line_below.get('dynamic_name')} 착지"}
-                        
-                        cost = abs(fall_start_pos.y() - fall_end_pos.y()) * 0.6
-                        self.nav_graph[start_key][end_key] = cost
-                        break # 가장 위에 있는 아래 지형 하나에만 연결
+                    # 평평한 지형이라고 가정하고 높이 차 계산
+                    y_above = line_above['points'][0][1]
+                    y_below = line_below['points'][0][1]
+                    y_diff = abs(y_above - y_below)
 
-            # 아래 점프 노드 (선분 전체)
-            for j, line_below in enumerate(terrain_lines):
-                if line_above['id'] == line_below['id'] or line_above['floor'] <= line_below['floor']: continue
-                y_diff = abs(line_above['points'][0][1] - line_below['points'][0][1]) # 평평한 지형 가정
-                if 0 < y_diff <= 70:
-                    ax1, ax2 = min(line_above['points'][0][0], line_above['points'][-1][0]), max(line_above['points'][0][0], line_above['points'][-1][0])
-                    bx1, bx2 = min(line_below['points'][0][0], line_below['points'][-1][0]), max(line_below['points'][0][0], line_below['points'][-1][0])
-                    overlap_x1, overlap_x2 = max(ax1, bx1), min(ax2, bx2)
-                    
-                    if overlap_x1 < overlap_x2: # 겹치는 구간이 있으면
-                        start_key = f"djump_start_{line_above['id']}_{line_below['id']}"
-                        end_key = f"djump_end_{line_above['id']}_{line_below['id']}"
+                    if 0 < y_diff <= 70:
+                        ax1, ax2 = min(line_above['points'][0][0], line_above['points'][-1][0]), max(line_above['points'][0][0], line_above['points'][-1][0])
+                        bx1, bx2 = min(line_below['points'][0][0], line_below['points'][-1][0]), max(line_below['points'][0][0], line_below['points'][-1][0])
+                        overlap_x1, overlap_x2 = max(ax1, bx1), min(ax2, bx2)
                         
-                        # 대표 위치는 겹치는 구간의 중앙으로
-                        center_x = (overlap_x1 + overlap_x2) / 2.0
-                        start_pos = QPointF(center_x, line_above['points'][0][1])
-                        end_pos = QPointF(center_x, line_below['points'][0][1])
+                        if overlap_x1 < overlap_x2:
+                            start_key = f"djump_start_{line_above['id']}_{line_below['id']}"
+                            end_key = f"djump_end_{line_above['id']}_{line_below['id']}"
+                            
+                            center_x = (overlap_x1 + overlap_x2) / 2.0
+                            start_pos = QPointF(center_x, y_above)
+                            end_pos = QPointF(center_x, y_below)
 
-                        self.nav_nodes[start_key] = {'type': 'djump_area', 'pos': start_pos, 'name': f"{line_above.get('dynamic_name')} 아래 점프"}
-                        self.nav_nodes[end_key] = {'type': 'djump_area', 'pos': end_pos, 'name': f"{line_below.get('dynamic_name')} 착지"}
+                            self.nav_nodes[start_key] = {'type': 'djump_area', 'pos': start_pos, 'name': f"{line_above.get('dynamic_name')} 아래 점프"}
+                            self.nav_nodes[end_key] = {'type': 'djump_area', 'pos': end_pos, 'name': f"{line_below.get('dynamic_name')} 착지"}
 
-                        cost = abs(start_pos.y() - end_pos.y()) * 0.5
-                        self.nav_graph[start_key][end_key] = cost
+                            cost = abs(start_pos.y() - end_pos.y()) * 0.5
+                            self.nav_graph[start_key][end_key] = cost
 
-        # --- 2. 걷기(Walk) 간선 추가 ---
-        # 같은 지형 그룹 내의 모든 노드들을 연결
-        nodes_by_terrain_group = defaultdict(list)
-        for key, node_data in self.nav_nodes.items():
-            if node_data['type'] not in ['fall_end', 'djump_area']: # 착지 지점은 출발지가 될 수 없음
+            # --- 2. 걷기(Walk) 간선 추가 ---
+            nodes_by_terrain_group = defaultdict(list)
+            for key, node_data in self.nav_nodes.items():
+                # 착지 지점은 출발지가 될 수 없지만, 다른 노드와 연결은 되어야 함
                 contact_terrain = self._get_contact_terrain(node_data['pos'])
                 if contact_terrain:
                     group_name = contact_terrain.get('dynamic_name')
                     if group_name:
                         nodes_by_terrain_group[group_name].append(key)
-        
-        for group_name, node_keys in nodes_by_terrain_group.items():
-            for i in range(len(node_keys)):
-                for j in range(i + 1, len(node_keys)):
-                    key1, key2 = node_keys[i], node_keys[j]
-                    pos1 = self.nav_nodes[key1]['pos']
-                    pos2 = self.nav_nodes[key2]['pos']
-                    
-                    # TODO: 실제 지형선을 따라가는 거리 계산 필요. 현재는 x축 거리로 단순화.
-                    cost = abs(pos1.x() - pos2.x())
-                    
-                    self.nav_graph[key1][key2] = cost
-                    self.nav_graph[key2][key1] = cost
-        
-        self.update_general_log(f"내비게이션 그래프 생성 완료. (노드: {len(self.nav_nodes)}개, 간선 그룹: {len(self.nav_graph)}개)", "purple")
+            
+            for group_name, node_keys in nodes_by_terrain_group.items():
+                for i in range(len(node_keys)):
+                    for j in range(i + 1, len(node_keys)):
+                        key1, key2 = node_keys[i], node_keys[j]
+                        pos1 = self.nav_nodes[key1]['pos']
+                        pos2 = self.nav_nodes[key2]['pos']
+                        
+                        # TODO: 실제 지형선을 따라가는 거리 계산 필요. 현재는 x축 거리로 단순화.
+                        cost = abs(pos1.x() - pos2.x())
+                        
+                        self.nav_graph[key1][key2] = cost
+                        self.nav_graph[key2][key1] = cost
+
+            self.update_general_log(f"내비게이션 그래프 생성 완료. (경로 WP 기준 노드: {len(self.nav_nodes)}개, 간선 그룹: {len(self.nav_graph)}개)", "purple")
 
     def _find_path_astar(self, start_key, goal_key):
         """A* 알고리즘을 사용하여 두 노드 간의 최단 경로를 찾습니다."""
