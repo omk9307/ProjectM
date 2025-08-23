@@ -6174,7 +6174,6 @@ class MapTab(QWidget):
                     self.current_segment_index = next_index
             return
 
-
     def _handle_action_preparation(self, final_player_pos):
         """'prepare_to_...' 상태일 때의 모든 로직을 담당합니다."""
         # [v12.4.3] 목표 설정 로직을 맨 위로 이동 및 강화
@@ -6621,6 +6620,7 @@ class MapTab(QWidget):
     
     def _build_navigation_graph(self, waypoint_ids_in_route=None):
             """
+            v12.9.3: [수정] '낭떠러지' 및 '아래 점프' 노드 생성 시, 그에 짝이 되는 '착지 지점' 노드를 명시적으로 함께 생성하고 직접 연결합니다. 이를 통해 A* 알고리즘이 착지 지점을 추측할 필요 없이 명확한 경로를 탐색하도록 구조를 변경합니다.
             v12.9.2: [수정] '아래 점프' 노드 생성 로직을 전면 개편합니다. 
                      1. 아래층의 웨이포인트 바로 위 지점에 '목표 정렬 노드'를 생성하여 최적의 경로를 제공합니다.
                      2. 점프 가능 구간의 양 끝 지점에도 노드를 생성하여 유연성을 확보합니다.
@@ -6649,7 +6649,7 @@ class MapTab(QWidget):
             CLIMB_UP_COST_MULTIPLIER = 1.5
             CLIMB_DOWN_COST_MULTIPLIER = 500.0
             JUMP_COST_MULTIPLIER = 1.1
-            FALL_COST_MULTIPLIER = 1.6
+            FALL_COST_MULTIPLIER = 2.0
             DOWN_JUMP_COST_MULTIPLIER = 1.2
 
             # --- 1. 모든 잠재적 노드 생성 및 역할(walkable) 부여 ---
@@ -6710,11 +6710,22 @@ class MapTab(QWidget):
                                         is_obstructed = True
                                         break
                             if is_obstructed: continue
+                            
+                            # --- [v12.9.3 수정] '낙하'와 '착지' 노드를 함께 생성하여 직접 연결 ---
                             start_key = f"fall_start_{line_above['id']}_{v_idx}"
-                            self.nav_nodes[start_key] = {'type': 'fall_start', 'pos': QPointF(*vertex), 'name': f"{group_above} 낙하 지점", 'group': group_above, 'walkable': False}
-                            cost = (abs(vertex[1] - line_below['points'][0][1]) * FALL_COST_MULTIPLIER) + FLOOR_CHANGE_PENALTY
-                            target_group, action_key = line_below.get('dynamic_name'), f"fall_action_{line_above['id']}_{v_idx}_{line_below['id']}"
-                            self.nav_graph[start_key][action_key] = {'cost': cost, 'action': 'fall', 'target_group': target_group}
+                            start_pos = QPointF(*vertex)
+                            self.nav_nodes[start_key] = {'type': 'fall_start', 'pos': start_pos, 'name': f"{group_above} 낙하 지점", 'group': group_above, 'walkable': False}
+
+                            landing_x = start_pos.x()
+                            p1, p2 = line_below['points'][0], line_below['points'][-1]
+                            landing_y = p1[1] + (p2[1] - p1[1]) * ((landing_x - p1[0]) / (p2[0] - p1[0])) if (p2[0] - p1[0]) != 0 else p1[1]
+                            landing_pos = QPointF(landing_x, landing_y)
+                            target_group = line_below.get('dynamic_name')
+                            landing_key = f"fall_landing_{line_above['id']}_{v_idx}_{line_below['id']}"
+                            self.nav_nodes[landing_key] = {'type': 'fall_landing', 'pos': landing_pos, 'name': f"{target_group} 착지 지점", 'group': target_group, 'walkable': True}
+
+                            cost = (abs(start_pos.y() - landing_pos.y()) * FALL_COST_MULTIPLIER) + FLOOR_CHANGE_PENALTY
+                            self.nav_graph[start_key][landing_key] = {'cost': cost, 'action': 'fall'}
                             break
 
                 for line_below in terrain_lines:
@@ -6756,13 +6767,11 @@ class MapTab(QWidget):
                             if current_x < overlap_x2:
                                 valid_jump_zones.append((current_x, overlap_x2))
 
-                            # --- [v12.9.2 수정] 각 유효 점프 구간에 대해 전략적 노드 생성 ---
                             for zone_idx, (zone_x1, zone_x2) in enumerate(valid_jump_zones):
                                 LADDER_AVOIDANCE_WIDTH = 5.0
                                 if abs(zone_x2 - zone_x1) < LADDER_AVOIDANCE_WIDTH:
                                     continue
                                 
-                                # 1. 목적지 정렬 노드: 아래층의 WP 바로 위에 노드 생성
                                 strategic_x_positions = set()
                                 waypoints_on_line_below = [
                                     wp for wp in self.geometry_data.get("waypoints", []) 
@@ -6773,12 +6782,11 @@ class MapTab(QWidget):
                                     if zone_x1 <= wp_x <= zone_x2:
                                         strategic_x_positions.add(round(wp_x, 1))
 
-                                # 2. 경계 노드: 구간의 양 끝점에 노드 추가
                                 strategic_x_positions.add(round(zone_x1, 1))
                                 strategic_x_positions.add(round(zone_x2, 1))
                                 
-                                # 3. 생성된 전략적 위치에 노드 배치
                                 for i, x_pos in enumerate(sorted(list(strategic_x_positions))):
+                                    # --- [v12.9.3 수정] '아래 점프'와 '착지' 노드를 함께 생성하여 직접 연결 ---
                                     start_key = f"djump_start_{line_above['id']}_{line_below['id']}_{zone_idx}_{i}"
                                     start_pos = QPointF(x_pos, y_above)
                                     
@@ -6787,14 +6795,20 @@ class MapTab(QWidget):
                                         'pos': start_pos, 
                                         'name': f"{group_above} 아래 점프 지점", 
                                         'group': group_above, 
-                                        'x_range': [zone_x1, zone_x2], # 도착 판정은 전체 존(zone)을 기준으로 함
+                                        'x_range': [zone_x1, zone_x2],
                                         'walkable': False
                                     }
                                     
-                                    cost = (y_diff * DOWN_JUMP_COST_MULTIPLIER) + FLOOR_CHANGE_PENALTY
+                                    landing_x = start_pos.x()
+                                    p1, p2 = line_below['points'][0], line_below['points'][-1]
+                                    landing_y = p1[1] + (p2[1] - p1[1]) * ((landing_x - p1[0]) / (p2[0] - p1[0])) if (p2[0] - p1[0]) != 0 else p1[1]
+                                    landing_pos = QPointF(landing_x, landing_y)
                                     target_group = line_below.get('dynamic_name')
-                                    action_key = f"djump_action_{line_above['id']}_{line_below['id']}_{zone_idx}_{i}"
-                                    self.nav_graph[start_key][action_key] = {'cost': cost, 'action': 'down_jump', 'target_group': target_group}
+                                    landing_key = f"djump_landing_{line_above['id']}_{line_below['id']}_{zone_idx}_{i}"
+                                    self.nav_nodes[landing_key] = {'type': 'djump_landing', 'pos': landing_pos, 'name': f"{target_group} 착지 지점", 'group': target_group, 'walkable': True}
+
+                                    cost = (y_diff * DOWN_JUMP_COST_MULTIPLIER) + FLOOR_CHANGE_PENALTY
+                                    self.nav_graph[start_key][landing_key] = {'cost': cost, 'action': 'down_jump'}
             
             # --- 2. 걷기(Walk) 간선 추가 ---
             nodes_by_terrain_group = defaultdict(list)
@@ -6832,9 +6846,9 @@ class MapTab(QWidget):
 
             self.update_general_log(f"내비게이션 그래프 생성 완료. (노드: {len(self.nav_nodes)}개)", "purple")
 
-    
     def _find_path_astar(self, start_pos, start_group, goal_key):
         """
+        v12.9.3: [수정] 그래프 생성 로직이 '점프->착지'를 직접 연결하도록 변경됨에 따라, 이 함수에서 착지 지점을 추측하던 복잡한 로직을 제거하고 단순화합니다.
         v12.8.8: [수정] '아래 점프' 또는 '낙하' 이후의 착지 지점을 계산할 때, '사다리 입/출구'를 후보에서 제외하여 비현실적인 경로 생성을 방지합니다.
         v12.8.1: A* 알고리즘을 수정하여, 플레이어의 실제 위치(가상 노드)에서 탐색을 시작합니다.
         """
@@ -6893,6 +6907,7 @@ class MapTab(QWidget):
                 cost = edge_data.get('cost', float('inf'))
                 tentative_g_score = g_score[current_key] + cost
                 
+                # [v12.9.3 수정] 모든 이웃은 self.nav_nodes에 존재해야 하므로, 'target_group'을 이용한 복잡한 추측 로직을 제거.
                 if neighbor_key in self.nav_nodes:
                     if tentative_g_score < g_score[neighbor_key]:
                         came_from[neighbor_key] = (current_key, edge_data)
@@ -6901,32 +6916,6 @@ class MapTab(QWidget):
                         h_score = math.hypot(neighbor_pos.x() - goal_pos.x(), neighbor_pos.y() - goal_pos.y())
                         f_score[neighbor_key] = tentative_g_score + h_score
                         heapq.heappush(open_set, (f_score[neighbor_key], neighbor_key))
-                
-                elif 'target_group' in edge_data:
-                    target_group = edge_data['target_group']
-                    best_landing_node, min_landing_cost = None, float('inf')
-                    action_start_pos = self.nav_nodes[current_key]['pos']
-                    for node_key_in_group, node_data in self.nav_nodes.items():
-                        if node_data.get('group') == target_group:
-                            # [v12.8.8 수정] 착지 지점 후보에서 사다리 입/출구 제외
-                            node_type = node_data.get('type')
-                            if node_type in ['ladder_entry', 'ladder_exit']:
-                                continue
-
-                            landing_pos = node_data['pos']
-                            landing_cost = abs(action_start_pos.y() - landing_pos.y()) + abs(action_start_pos.x() - landing_pos.x()) * 0.5
-                            if landing_cost < min_landing_cost:
-                                min_landing_cost = landing_cost
-                                best_landing_node = node_key_in_group
-                    if best_landing_node:
-                        final_tentative_g_score = tentative_g_score + min_landing_cost
-                        if final_tentative_g_score < g_score[best_landing_node]:
-                            came_from[best_landing_node] = (current_key, edge_data)
-                            g_score[best_landing_node] = final_tentative_g_score
-                            landing_node_pos = self.nav_nodes[best_landing_node]['pos']
-                            h_score = math.hypot(landing_node_pos.x() - goal_pos.x(), landing_node_pos.y() - goal_pos.y())
-                            f_score[best_landing_node] = final_tentative_g_score + h_score
-                            heapq.heappush(open_set, (f_score[best_landing_node], best_landing_node))
 
         return None, float('inf')
 
