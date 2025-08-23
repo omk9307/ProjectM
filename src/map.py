@@ -4201,45 +4201,6 @@ class MapTab(QWidget):
         main_layout.addLayout(right_layout, 2)
         self.update_general_log("MapTab이 초기화되었습니다. 맵 프로필을 선택해주세요.", "black")
 
-    def _get_closest_walkable_node_on_floor(self, point, floor):
-        """
-        주어진 층(floor)의 워커블(walkable) 노드 중에서, 
-        주어진 지점(point)에서 가장 가까운 노드를 찾습니다.
-        만약 해당 층에 워커블 노드가 없으면, 모든 층을 대상으로 다시 찾습니다.
-        """
-        if not self.nav_nodes:
-            return None, float('inf')
-
-        # 1. 지정된 층의 워커블 노드만 필터링
-        candidate_nodes = [
-            (key, node_data) for key, node_data in self.nav_nodes.items()
-            if node_data.get('walkable', False) and abs(node_data.get('floor', 0.0) - floor) < 0.1
-        ]
-        
-        # 2. 해당 층에 후보가 없으면, 모든 층의 워커블 노드를 대상으로 확장
-        if not candidate_nodes:
-            # print(f"[DEBUG] {floor}층에서 워커블 노드를 찾지 못해 전체 층을 탐색합니다.")
-            candidate_nodes = [
-                (key, node_data) for key, node_data in self.nav_nodes.items()
-                if node_data.get('walkable', False)
-            ]
-
-        if not candidate_nodes:
-            return None, float('inf')
-
-        # 3. 최종 후보군 중에서 가장 가까운 노드 찾기
-        min_dist_sq = float('inf')
-        closest_node_key = None
-        for key, node_data in candidate_nodes:
-            pos = node_data.get('pos')
-            if pos:
-                dist_sq = (point.x() - pos.x())**2 + (point.y() - pos.y())**2
-                if dist_sq < min_dist_sq:
-                    min_dist_sq = dist_sq
-                    closest_node_key = key
-        
-        return closest_node_key, math.sqrt(min_dist_sq)
-
     def _get_floor_from_closest_terrain_data(self, point, terrain_lines):
             """주어진 점에서 가장 가까운 지형선 데이터를 찾아 그 층 번호를 반환합니다."""
             min_dist_sq = float('inf')
@@ -5816,60 +5777,49 @@ class MapTab(QWidget):
             print(f"[INFO] 새 여정 계획: {[self.nav_nodes.get(f'wp_{wp_id}', {}).get('name', '??') for wp_id in self.journey_plan]}")
 
     def _calculate_segment_path(self, final_player_pos):
-        """현재 구간(Segment)의 상세 경로를 A*로 계산합니다."""
-        
-        # [수정된 로직]
-        # 항상 현재 플레이어의 위치와 층을 기준으로 가장 가까운 '워커블' 노드를 찾습니다.
-        # 이것이 경로 탐색의 시작점이 됩니다.
-        start_node_key, dist = self._get_closest_walkable_node_on_floor(final_player_pos, self.current_player_floor)
-        
-        if not start_node_key:
-            self.update_general_log(f"경로 계산 실패: 현재 위치 주변에서 유효한 시작점(워커블 노드)을 찾을 수 없습니다.", "red")
-            print(f"[ERROR] 경로 계산 실패: 워커블 시작 노드 탐색 실패. 현재 위치: {final_player_pos.x():.1f}, {final_player_pos.y():.1f}")
-            self.journey_plan = []
+        """
+        [v12.8.1 수정] 플레이어의 실제 위치를 가상 시작 노드로 사용하여 A* 탐색을 수행합니다.
+        """
+        current_terrain = self._get_contact_terrain(final_player_pos)
+        if not current_terrain:
+            # 이전에 계산된 경로가 있다면, 잠시 지형을 벗어난 것일 수 있으므로 즉시 경로를 파기하지 않음
+            # 단, 새로운 여정을 시작해야 하는 경우는 예외
+            if not self.current_segment_path:
+                self.update_general_log("경로 계산 실패: 현재 지형을 파악할 수 없습니다.", "red")
+                self.journey_plan = []
+            return
+
+        start_group = current_terrain.get('dynamic_name')
+        if not self.journey_plan or self.current_journey_index >= len(self.journey_plan):
             return
 
         goal_wp_id = self.journey_plan[self.current_journey_index]
         self.target_waypoint_id = goal_wp_id
         goal_node_key = f"wp_{goal_wp_id}"
 
-        path, cost = self._find_path_astar(start_node_key, goal_node_key)
+        # A* 탐색에 플레이어의 실제 위치와 그룹을 전달
+        path, cost = self._find_path_astar(final_player_pos, start_group, goal_node_key)
         
         if path:
-            # --- [새로운 부분 시작: 경로 가지치기 로직] ---
-            # 경로의 첫 노드가 경유할 필요 없는 웨이포인트인지 확인
-            if len(path) > 1 and path[0].startswith("wp_"):
-                # 시작 노드(path[0])가 최종 목적지(goal_node_key)가 아닌 경우에만 가지치기
-                if path[0] != goal_node_key:
-                    print(f"[Path Pruning] 불필요한 시작 웨이포인트('{self.nav_nodes.get(path[0], {}).get('name')}')를 경로에서 제거합니다.")
-                    self.current_segment_path = path[1:] # 첫 번째 웨이포인트를 건너뛰고 경로 설정
-                else:
-                    self.current_segment_path = path # 시작점이 곧 목적지이므로 그대로 사용
-            else:
-                 self.current_segment_path = path # 웨이포인트가 아니거나 경로가 하나뿐인 경우 그대로 사용
-            # --- [새로운 부분 끝] ---
-
+            self.current_segment_path = path
             self.current_segment_index = 0
             
-            # 실제 총 비용 = (현재 위치에서 프록시 시작점까지의 거리) + (A* 경로 비용)
-            realistic_cost = dist + cost
-
-            start_name = self.nav_nodes.get(start_node_key, {}).get('name', '???')
+            start_name = "현재 위치"
             goal_name = self.nav_nodes.get(goal_node_key, {}).get('name', '??')
-            log_msg = f"[경로 탐색 성공] '{start_name}' -> '{goal_name}' (총 비용: {realistic_cost:.1f})"
-            # --- [수정] 가지치기 후의 최종 경로를 로그에 표시 ---
-            path_str = " -> ".join([self.nav_nodes.get(p, {}).get('name', '??') for p in self.current_segment_path])
+            log_msg = f"[경로 탐색 성공] '{start_name}' -> '{goal_name}' (총 비용: {cost:.1f})"
+            path_str = " -> ".join([self.nav_nodes.get(p, {}).get('name', '??') for p in path])
             log_msg += f"\n[상세 경로] {path_str}"
             print(log_msg)
             self.update_general_log(log_msg.replace('\n', '<br>'), 'SaddleBrown')
             self.last_path_recalculation_time = time.time()
         else:
-            start_name = self.nav_nodes.get(start_node_key, {}).get('name', '???')
+            start_name = "현재 위치"
             goal_name = self.nav_nodes.get(goal_node_key, {}).get('name', '??')
             log_msg = f"[경로 탐색 실패] '{start_name}' -> '{goal_name}'"
-            log_msg += f"\n[진단] 시작점과 목표점이 그래프 상에서 연결되어 있지 않습니다."
+            log_msg += f"\n[진단] 시작 지형 그룹과 목표 지점이 그래프 상에서 연결되어 있지 않습니다."
             print(log_msg)
             self.update_general_log(log_msg.replace('\n', '<br>'), 'red')
+            # 경로 계산 실패 시 현재 여정을 중단하여 무한 재시도를 방지
             self.journey_plan = []
 
     def _get_arrival_threshold(self, node_type):
@@ -6677,7 +6627,7 @@ class MapTab(QWidget):
 
             FLOOR_CHANGE_PENALTY = 5.0
             CLIMB_UP_COST_MULTIPLIER = 1.5
-            CLIMB_DOWN_COST_MULTIPLIER = 5.0
+            CLIMB_DOWN_COST_MULTIPLIER = 500.0
             JUMP_COST_MULTIPLIER = 1.2
             FALL_COST_MULTIPLIER = 1.5
 
@@ -6787,107 +6737,100 @@ class MapTab(QWidget):
                         self.nav_graph[key2][key1] = {'cost': cost, 'action': 'walk'}
 
             self.update_general_log(f"내비게이션 그래프 생성 완료. (노드: {len(self.nav_nodes)}개)", "purple")
+            
     def _reconstruct_path(self, came_from, current_key, start_key):
         """
-        v12.5.4: A* 탐색 결과를 바탕으로 최종 경로 리스트를 재구성합니다.
-        [수정] 경로 역추적 로직을 단순화하고 중복 노드 생성 버그를 해결합니다.
+        v12.8.1: A* 탐색 결과를 바탕으로 최종 경로 리스트를 재구성합니다.
+        가상 시작 노드("__START__")를 처리합니다.
         """
-        path = [current_key]  # 최종 목표 지점부터 경로를 만들기 시작
+        path = [current_key]
         
-        # current_key가 시작점이 아니고, came_from에 정보가 있는 동안 반복
-        while current_key != start_key and current_key in came_from:
-            # came_from 딕셔너리에서 이전 노드 키만 가져옵니다.
-            # action_data는 이 단계에서는 필요 없습니다.
+        while current_key in came_from:
             prev_key, _ = came_from[current_key]
             
-            # 경로의 맨 앞에 이전 노드를 추가합니다.
-            path.insert(0, prev_key)
+            # [수정] 가상 시작 노드에 도달하면 경로 재구성을 중단합니다.
+            if prev_key == start_key:
+                break
             
-            # 다음 반복을 위해 current_key를 이전 노드로 업데이트합니다.
+            path.insert(0, prev_key)
             current_key = prev_key
             
-        # 만약 경로가 시작점으로 시작하지 않으면(드문 경우), 시작점을 맨 앞에 추가
-        if path and path[0] != start_key:
-             path.insert(0, start_key)
-
         return path
 
-    def _find_path_astar(self, start_key, goal_key):
-        """v12.5.3: A* 알고리즘에 상세 디버그 로그를 추가합니다."""
-        if start_key not in self.nav_nodes or goal_key not in self.nav_nodes:
-            print(f"[A* DEBUG] 시작 또는 목표 노드가 nav_nodes에 없습니다. 시작: {start_key}, 목표: {goal_key}")
+    def _find_path_astar(self, start_pos, start_group, goal_key):
+        """v12.8.1: A* 알고리즘을 수정하여, 플레이어의 실제 위치(가상 노드)에서 탐색을 시작합니다."""
+        if goal_key not in self.nav_nodes:
+            print(f"[A* DEBUG] 목표 노드가 nav_nodes에 없습니다. 목표: {goal_key}")
             return None, float('inf')
 
         import heapq
         
-        start_pos = self.nav_nodes[start_key]['pos']
         goal_pos = self.nav_nodes[goal_key]['pos']
 
-        open_set = [(0, start_key)]
+        open_set = []
         came_from = {}
         g_score = {key: float('inf') for key in self.nav_nodes}
-        g_score[start_key] = 0
         f_score = {key: float('inf') for key in self.nav_nodes}
-        h_start = math.hypot(start_pos.x() - goal_pos.x(), start_pos.y() - goal_pos.y())
-        f_score[start_key] = h_start
 
-        print("\n" + "="*20 + " A* 탐색 시작 " + "="*20)
-        print(f"[A* DEBUG] 시작: '{self.nav_nodes[start_key]['name']}' ({start_key})")
+        # --- [핵심 변경] 시작 단계: start_pos에서 연결된 모든 walkable 노드를 open_set에 추가 ---
+        nodes_in_start_group = [
+            key for key, data in self.nav_nodes.items()
+            if data.get('walkable', False) and data.get('group') == start_group
+        ]
+
+        if not nodes_in_start_group:
+            print(f"[A* DEBUG] 시작 그룹 '{start_group}' 내에 walkable 노드가 없습니다.")
+            return None, float('inf')
+        
+        print("\n" + "="*20 + " A* 탐색 시작 (동적 확장) " + "="*20)
+        print(f"[A* DEBUG] 가상 시작점: {start_pos.x():.1f}, {start_pos.y():.1f} (그룹: '{start_group}')")
         print(f"[A* DEBUG] 목표: '{self.nav_nodes[goal_key]['name']}' ({goal_key})")
-        print(f"[A* DEBUG] 시작 F_Score = g(0) + h({h_start:.1f}) = {f_score[start_key]:.1f}")
-
+        
+        for node_key in nodes_in_start_group:
+            node_pos = self.nav_nodes[node_key]['pos']
+            # 비용 = 현재 위치에서 해당 노드까지의 직선 x축 거리 (걷기 비용과 동일하게)
+            cost_to_node = abs(start_pos.x() - node_pos.x())
+            
+            g_score[node_key] = cost_to_node
+            h_score = math.hypot(node_pos.x() - goal_pos.x(), node_pos.y() - goal_pos.y())
+            f_score[node_key] = cost_to_node + h_score
+            heapq.heappush(open_set, (f_score[node_key], node_key))
+            came_from[node_key] = ("__START__", None) # 가상 시작 노드임을 표시
+            
+            print(f"[A* DEBUG]  - 초기 탐색 노드: '{self.nav_nodes[node_key]['name']}' | G: {cost_to_node:.1f} | H: {h_score:.1f} | F: {f_score[node_key]:.1f}")
+        
+        # --- 이하 A* 메인 루프 (기존과 거의 동일, 디버그 로그 제거) ---
         iter_count = 0
         while open_set:
             iter_count += 1
-            if iter_count > 2000: # 무한 루프 방지
+            if iter_count > 2000:
                 print("[A* DEBUG] ERROR: 탐색 반복 횟수가 2000회를 초과했습니다. 탐색을 중단합니다.")
                 break
                 
             _, current_key = heapq.heappop(open_set)
-            current_name = self.nav_nodes[current_key]['name']
-            
-            print(f"\n--- [ 반복 #{iter_count} ] ---")
-            print(f"[A* DEBUG] 현재 노드: '{current_name}' ({current_key})")
-            print(f"[A* DEBUG]   - g_score: {g_score[current_key]:.1f}, f_score: {f_score[current_key]:.1f}")
-
 
             if current_key == goal_key:
-                print("="*20 + " 목표 도달! 경로 재구성 시작 " + "="*20)
-                path = self._reconstruct_path(came_from, current_key, start_key)
+                path = self._reconstruct_path(came_from, current_key, "__START__")
                 return path, g_score[goal_key]
 
             # 이웃 노드 탐색
-            print(f"[A* DEBUG]   '{current_name}'의 이웃 노드(후보) 탐색:")
             for neighbor_key, edge_data in self.nav_graph.get(current_key, {}).items():
                 cost = edge_data.get('cost', float('inf'))
-                action = edge_data.get('action', 'unknown')
                 tentative_g_score = g_score[current_key] + cost
                 
-                # Case 1: 이웃이 실제 노드인 경우 (걷기, 점프, 사다리 등)
+                # Case 1: 이웃이 실제 노드인 경우
                 if neighbor_key in self.nav_nodes:
-                    neighbor_name = self.nav_nodes[neighbor_key]['name']
-                    print(f"[A* DEBUG]     -> 후보: '{neighbor_name}' ({neighbor_key}), 액션: {action}, 비용: {cost:.1f}")
-                    print(f"[A* DEBUG]        - 잠정 g_score: {g_score[current_key]:.1f} + {cost:.1f} = {tentative_g_score:.1f}")
-                    
                     if tentative_g_score < g_score[neighbor_key]:
-                        print(f"[A* DEBUG]        - [경로 갱신] 기존 g_score({g_score[neighbor_key]:.1f})보다 저렴. 경로를 업데이트합니다.")
                         came_from[neighbor_key] = (current_key, edge_data)
                         g_score[neighbor_key] = tentative_g_score
-                        
                         neighbor_pos = self.nav_nodes[neighbor_key]['pos']
                         h_score = math.hypot(neighbor_pos.x() - goal_pos.x(), neighbor_pos.y() - goal_pos.y())
                         f_score[neighbor_key] = tentative_g_score + h_score
-                        
-                        print(f"[A* DEBUG]        - 새 f_score: g({tentative_g_score:.1f}) + h({h_score:.1f}) = {f_score[neighbor_key]:.1f}")
                         heapq.heappush(open_set, (f_score[neighbor_key], neighbor_key))
-                    else:
-                        print(f"[A* DEBUG]        - [경로 유지] 기존 g_score({g_score[neighbor_key]:.1f})가 더 저렴. 무시합니다.")
                 
-                # Case 2: 이웃이 가상 액션 노드인 경우 (낙하, 아래점프)
+                # Case 2: 이웃이 가상 액션 노드인 경우
                 elif 'target_group' in edge_data:
                     target_group = edge_data['target_group']
-                    print(f"[A* DEBUG]     -> 후보: 가상 액션 노드, 액션: {action}, 비용: {cost:.1f}, 목표 그룹: {target_group}")
-                    # ... (이하 로직은 이전과 동일) ...
                     best_landing_node, min_landing_cost = None, float('inf')
                     action_start_pos = self.nav_nodes[current_key]['pos']
                     for node_key_in_group, node_data in self.nav_nodes.items():
@@ -6898,23 +6841,15 @@ class MapTab(QWidget):
                                 min_landing_cost = landing_cost
                                 best_landing_node = node_key_in_group
                     if best_landing_node:
-                        landing_name = self.nav_nodes[best_landing_node]['name']
-                        print(f"[A* DEBUG]        - 최적 착지 지점: '{landing_name}' (추가 비용: {min_landing_cost:.1f})")
                         final_tentative_g_score = tentative_g_score + min_landing_cost
-                        print(f"[A* DEBUG]        - 잠정 g_score (착지 포함): {tentative_g_score:.1f} + {min_landing_cost:.1f} = {final_tentative_g_score:.1f}")
                         if final_tentative_g_score < g_score[best_landing_node]:
-                            print(f"[A* DEBUG]        - [경로 갱신] 기존 g_score({g_score[best_landing_node]:.1f})보다 저렴. 경로를 업데이트합니다.")
                             came_from[best_landing_node] = (current_key, edge_data)
                             g_score[best_landing_node] = final_tentative_g_score
                             landing_node_pos = self.nav_nodes[best_landing_node]['pos']
                             h_score = math.hypot(landing_node_pos.x() - goal_pos.x(), landing_node_pos.y() - goal_pos.y())
                             f_score[best_landing_node] = final_tentative_g_score + h_score
-                            print(f"[A* DEBUG]        - 새 f_score: g({final_tentative_g_score:.1f}) + h({h_score:.1f}) = {f_score[best_landing_node]:.1f}")
                             heapq.heappush(open_set, (f_score[best_landing_node], best_landing_node))
-                        else:
-                            print(f"[A* DEBUG]        - [경로 유지] 기존 g_score({g_score[best_landing_node]:.1f})가 더 저렴. 무시합니다.")
 
-        print("="*20 + " 탐색 종료 (경로 없음) " + "="*20)
         return None, float('inf')
 
 
