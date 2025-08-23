@@ -5779,7 +5779,17 @@ class MapTab(QWidget):
 
     def _calculate_segment_path(self, final_player_pos):
         """현재 구간(Segment)의 상세 경로를 A*로 계산합니다."""
-        start_node_key, _ = self._get_closest_node_to_point(final_player_pos)
+        # [v12.3.0] 시작점을 현재 지형 그룹 내에서 우선적으로 탐색
+        current_group = None
+        contact_terrain = self._get_contact_terrain(final_player_pos)
+        if contact_terrain:
+            current_group = contact_terrain.get('dynamic_name')
+
+        start_node_key, _ = self._get_closest_node_to_point(final_player_pos, current_group)
+        
+        if not start_node_key: # 현재 그룹에서 못찾으면 전체에서 다시 탐색
+            start_node_key, _ = self._get_closest_node_to_point(final_player_pos)
+
         goal_wp_id = self.journey_plan[self.current_journey_index]
         self.target_waypoint_id = goal_wp_id
         goal_node_key = f"wp_{goal_wp_id}"
@@ -5818,19 +5828,23 @@ class MapTab(QWidget):
     
     def _process_arrival_and_transition(self, final_player_pos, terrain_lines):
         """도착을 판정하고, 상태를 전환하며, 경로 이탈을 감지합니다."""
+        current_node_key = self.current_segment_path[self.current_segment_index]
+        current_node = self.nav_nodes.get(current_node_key, {})
+        current_node_type = current_node.get('type')
+        
         distance_to_target = abs(final_player_pos.x() - self.intermediate_target_pos.x())
         target_floor = self._get_floor_from_closest_terrain_data(self.intermediate_target_pos, terrain_lines)
         floor_matches = abs(self.current_player_floor - target_floor) < 0.1
 
-        # 1. 도착 판정
-        current_node_key = self.current_segment_path[self.current_segment_index]
-        current_node_type = self.nav_nodes.get(current_node_key, {}).get('type')
-
+        # 1. 도착 판정 임계값 설정
         arrival_threshold = self.cfg_waypoint_arrival_x_threshold
         if current_node_type == 'ladder_entry': arrival_threshold = self.cfg_ladder_arrival_x_threshold
-        elif current_node_type in ['jump_vertex', 'fall_start']: arrival_threshold = self.cfg_jump_link_arrival_x_threshold
+        elif current_node_type in ['jump_vertex', 'fall_start', 'djump_area']: 
+            arrival_threshold = self.cfg_jump_link_arrival_x_threshold
         
+        # 2. 도착 처리
         if distance_to_target < arrival_threshold and floor_matches:
+            print(f"[INFO] 중간 목표 '{self.guidance_text}' 도착. 다음 단계 준비.")
             self.current_segment_index += 1
             # 구간 완료 시
             if self.current_segment_index >= len(self.current_segment_path):
@@ -5839,46 +5853,59 @@ class MapTab(QWidget):
                 self.current_segment_path = []
                 wp_name = self.nav_nodes.get(f"wp_{self.last_reached_wp_id}", {}).get('name')
                 self.update_general_log(f"'{wp_name}' 도착. 다음 구간으로 진행합니다.", "green")
-            # 다음 액션 준비 (상태 전환의 첫 단계)
-            else:
-                print(f"[INFO] 중간 목표 '{self.guidance_text}' 도착. 다음 단계 준비.")
+                self.navigation_action = 'move_to_target' # 다음 구간 시작을 위해 상태 초기화
+            # 도착은 했지만 아직 구간이 끝나지 않았으면, 다음 프레임에 상태 전환 로직이 처리하도록 둠
+            return # 도착했으므로 이탈 판정은 건너뜀
 
-        # 2. 상태 전환 (다음 목표가 액션 목표일 때)
-        if self.current_segment_index < len(self.current_segment_path):
-            next_node_key = self.current_segment_path[self.current_segment_index]
-            next_node = self.nav_nodes.get(next_node_key)
-            if next_node and self.navigation_action == 'move_to_target':
-                # 조건: 현재 목표는 액션의 목표점이고, 플레이어는 아직 이전 노드(액션 시작점) 근처에 있을 때
-                prev_node_key = self.current_segment_path[self.current_segment_index - 1]
-                prev_node_pos = self.nav_nodes.get(prev_node_key, {}).get('pos')
-                if prev_node_pos and abs(final_player_pos.x() - prev_node_pos.x()) < arrival_threshold * 1.5:
-                    action = self.nav_graph.get(prev_node_key, {}).get(next_node_key, {}).get('action')
-                    if action == 'climb': self.navigation_action = 'prepare_to_climb'; self.prepare_timeout_start = time.time()
-                    elif action == 'jump': self.navigation_action = 'prepare_to_jump'; self.prepare_timeout_start = time.time()
-                    elif action == 'fall': self.navigation_action = 'prepare_to_fall'; self.prepare_timeout_start = time.time()
-                    elif action == 'down_jump': self.navigation_action = 'prepare_to_down_jump'; self.prepare_timeout_start = time.time()
-                    if self.navigation_action != 'move_to_target':
-                        print(f"[상태 변경] -> {self.navigation_action}")
+        # 3. 상태 전환 (걷기 -> 액션 준비)
+        # 조건: 걷기 상태이고, 아직 액션을 시작 안했으며, 다음 목표가 있고, 플레이어는 액션 시작점 근처에 있을 때
+        if self.navigation_action == 'move_to_target' and self.current_segment_index > 0:
+            prev_node_key = self.current_segment_path[self.current_segment_index - 1]
+            prev_node = self.nav_nodes.get(prev_node_key, {})
+            
+            # 이전 노드(액션 시작점) 근처에 있는지 확인
+            if prev_node.get('pos') and abs(final_player_pos.x() - prev_node['pos'].x()) < arrival_threshold * 1.5:
+                edge_data = self.nav_graph.get(prev_node_key, {}).get(current_node_key, {})
+                action = edge_data.get('action')
+                
+                next_action = None
+                if action == 'climb': next_action = 'prepare_to_climb'
+                elif action == 'jump': next_action = 'prepare_to_jump'
+                
+                # 'target_group'이 있는 액션(낙하, 아래점프) 처리
+                if not next_action:
+                    for key, data in self.nav_graph.get(prev_node_key, {}).items():
+                        if data.get('target_group'):
+                            action = data['action']
+                            if action == 'fall': next_action = 'prepare_to_fall'; break
+                            elif action == 'down_jump': next_action = 'prepare_to_down_jump'; break
+                
+                if next_action:
+                    self.navigation_action = next_action
+                    self.prepare_timeout_start = time.time()
+                    print(f"[상태 변경] -> {self.navigation_action}")
+                    self.update_general_log(f"'{prev_node.get('name')}' 도착. 다음 행동 준비.", "blue")
 
-        # 3. 경로 이탈 판정
+        # 4. 경로 이탈 판정
         exit_threshold = arrival_threshold + HYSTERESIS_EXIT_OFFSET
         recalc_cooldown = 1.0
-        if (self.navigation_action != 'move_to_target' and # 액션 준비 상태에서만 이탈 판정
-                time.time() - self.last_path_recalculation_time > recalc_cooldown and
-                distance_to_target > exit_threshold):
+        if (self.navigation_action != 'move_to_target' and
+                time.time() - self.last_path_recalculation_time > recalc_cooldown):
             
-            # 점프 링크 이탈 판정 강화
-            is_jump_y_off = False
+            is_off_course = False
+            if distance_to_target > exit_threshold:
+                is_off_course = True
+            
             if self.navigation_action == 'prepare_to_jump':
-                 if abs(final_player_pos.y() - self.intermediate_target_pos.y()) > 20.0:
-                     is_jump_y_off = True
-
-            if is_jump_y_off or self.navigation_action != 'prepare_to_jump':
+                 prev_node_pos = self.nav_nodes.get(self.current_segment_path[self.current_segment_index - 1], {}).get('pos')
+                 if prev_node_pos and abs(final_player_pos.y() - prev_node_pos.y()) > 20.0:
+                     is_off_course = True
+            
+            if is_off_course:
                 self.update_general_log(f"[경로 이탈 감지] 행동 준비 중 목표에서 벗어났습니다. 경로를 다시 계산합니다.", "orange")
                 print(f"[INFO] 경로 이탈 감지. 목표: {self.guidance_text}")
                 self.current_segment_path = []
                 self.navigation_action = 'move_to_target'
-                self.last_path_recalculation_time = time.time()
 
     def _update_navigator_and_view(self, final_player_pos, current_terrain_name):
         """계산된 모든 상태를 기반으로 UI 위젯들을 업데이트합니다."""
@@ -6363,8 +6390,11 @@ class MapTab(QWidget):
             return global_positions
 
 # === v12.0.0: A* 경로 탐색 시스템 메서드 ===
-    def _get_closest_node_to_point(self, point):
-        """주어진 좌표에서 가장 가까운 내비게이션 그래프 노드를 찾습니다."""
+    def _get_closest_node_to_point(self, point, target_group=None):
+        """
+        주어진 좌표에서 가장 가까운 내비게이션 그래프 노드를 찾습니다.
+        target_group이 지정되면 해당 그룹 내의 노드만 검색합니다.
+        """
         if not self.nav_nodes:
             return None, float('inf')
 
@@ -6372,6 +6402,9 @@ class MapTab(QWidget):
         closest_node_key = None
 
         for key, node_data in self.nav_nodes.items():
+            if target_group and node_data.get('group') != target_group:
+                continue
+
             pos = node_data.get('pos')
             if pos:
                 dist_sq = (point.x() - pos.x())**2 + (point.y() - pos.y())**2
@@ -6488,7 +6521,7 @@ class MapTab(QWidget):
                         action_key = f"djump_action_{line_above['id']}_{line_below['id']}"
                         self.nav_graph[start_key][action_key] = {'cost': cost, 'action': 'down_jump', 'target_group': target_group}
 
-        # --- 2. 걷기(Walk) 간선 추가 ---
+# --- 2. 걷기(Walk) 간선 추가 ---
         nodes_by_terrain_group = defaultdict(list)
         for key, node_data in self.nav_nodes.items():
             if node_data.get('group'):
@@ -6498,10 +6531,16 @@ class MapTab(QWidget):
             for i in range(len(node_keys)):
                 for j in range(i + 1, len(node_keys)):
                     key1, key2 = node_keys[i], node_keys[j]
-                    pos1, pos2 = self.nav_nodes[key1]['pos'], self.nav_nodes[key2]['pos']
-                    cost = abs(pos1.x() - pos2.x())
-                    self.nav_graph[key1][key2] = {'cost': cost, 'action': 'walk'}
-                    self.nav_graph[key2][key1] = {'cost': cost, 'action': 'walk'}
+                    
+                    # [v12.3.0] 동일 지형 그룹인지 한 번 더 확실하게 확인
+                    group1 = self.nav_nodes[key1].get('group')
+                    group2 = self.nav_nodes[key2].get('group')
+
+                    if group1 and group2 and group1 == group2:
+                        pos1, pos2 = self.nav_nodes[key1]['pos'], self.nav_nodes[key2]['pos']
+                        cost = abs(pos1.x() - pos2.x())
+                        self.nav_graph[key1][key2] = {'cost': cost, 'action': 'walk'}
+                        self.nav_graph[key2][key1] = {'cost': cost, 'action': 'walk'}
 
         self.update_general_log(f"내비게이션 그래프 생성 완료. (노드: {len(self.nav_nodes)}개)", "purple")
 
