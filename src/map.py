@@ -6102,78 +6102,92 @@ class MapTab(QWidget):
             intermediate_type=self.intermediate_target_type, # 수정된 타입을 전달
             nav_action=self.navigation_action
         )
-        
+    
     def _handle_move_to_target(self, final_player_pos):
-        """
-        v12.8.6: [수정] '낭떠러지' 또는 '아래 점프' 지점 도착 시, 다음 경로를 확인하기 전에 먼저 해당 노드의 타입을 확인하고 즉시 행동 준비 상태로 전환하도록 수정하여 경로 실행 오류를 해결합니다.
-        'move_to_target' 상태일 때의 도착 판정, 상태 전환, 이탈 판정을 처리합니다.
-        """
-        if not (self.current_segment_path and self.current_segment_index < len(self.current_segment_path)):
-            self.expected_terrain_group = None
-            return
-
-        current_node_key = self.current_segment_path[self.current_segment_index]
-        current_node = self.nav_nodes.get(current_node_key, {})
-        self.intermediate_target_pos = current_node.get('pos')
-        self.guidance_text = current_node.get('name', '')
-        self.expected_terrain_group = current_node.get('group') 
-
-        if not self.intermediate_target_pos: return
-
-        # 도착 판정
-        arrival_threshold = self._get_arrival_threshold(current_node.get('type'))
-        target_floor = current_node.get('floor')
-        floor_matches = target_floor is None or abs(self.current_player_floor - target_floor) < 0.1
-        
-        arrived = False
-        if current_node.get('type') == 'djump_area':
-            x_range = current_node.get('x_range')
-            if x_range and x_range[0] <= final_player_pos.x() <= x_range[1] and floor_matches:
-                arrived = True
-        else: # 일반 노드 (waypoint, ladder_entry, fall_start 등)
-            distance_to_target = abs(final_player_pos.x() - self.intermediate_target_pos.x())
-            if distance_to_target < arrival_threshold and floor_matches:
-                arrived = True
-
-        if arrived:
-            print(f"[INFO] 중간 목표 '{self.guidance_text}' 도착.")
-
-            # --- [v12.8.6 수정] 도착한 노드의 타입에 따라 즉시 행동 준비 상태로 전환 ---
-            node_type = current_node.get('type')
-            if node_type == 'fall_start':
-                self._transition_to_action_state('prepare_to_fall', current_node_key)
-                return
-            elif node_type == 'djump_area':
-                self._transition_to_action_state('prepare_to_down_jump', current_node_key)
-                return
-            # --- 수정 끝 ---
-            
-            next_index = self.current_segment_index + 1
-            if next_index >= len(self.current_segment_path):
-                # 구간 완료
-                self.last_reached_wp_id = self.journey_plan[self.current_journey_index]
-                self.current_journey_index += 1
-                self.current_segment_path = []
+            """
+            v12.9.4: [수정] '낭떠러지' 또는 '아래 점프' 지점 도착 시, 경로 안내선(intermediate_target_pos)이 즉시 실제 '착지 지점'을 가리키도록 수정하여 사용자에게 명확한 시각적 피드백을 제공합니다.
+            v12.8.6: [수정] '낭떠러지' 또는 '아래 점프' 지점 도착 시, 다음 경로를 확인하기 전에 먼저 해당 노드의 타입을 확인하고 즉시 행동 준비 상태로 전환하도록 수정하여 경로 실행 오류를 해결합니다.
+            'move_to_target' 상태일 때의 도착 판정, 상태 전환, 이탈 판정을 처리합니다.
+            """
+            if not (self.current_segment_path and self.current_segment_index < len(self.current_segment_path)):
                 self.expected_terrain_group = None
-                wp_name = self.nav_nodes.get(f"wp_{self.last_reached_wp_id}", {}).get('name')
-                self.update_general_log(f"'{wp_name}' 도착. 다음 구간으로 진행합니다.", "green")
-            else:
-                # 다음 단계가 액션인지 확인하고 상태 전환
-                next_node_key = self.current_segment_path[next_index]
-                edge_data = self.nav_graph.get(current_node_key, {}).get(next_node_key, {})
-                action = edge_data.get('action') if edge_data else None
+                return
+
+            current_node_key = self.current_segment_path[self.current_segment_index]
+            current_node = self.nav_nodes.get(current_node_key, {})
+            self.intermediate_target_pos = current_node.get('pos')
+            self.guidance_text = current_node.get('name', '')
+            self.expected_terrain_group = current_node.get('group') 
+
+            if not self.intermediate_target_pos: return
+
+            # 도착 판정
+            arrival_threshold = self._get_arrival_threshold(current_node.get('type'))
+            target_floor = current_node.get('floor')
+            floor_matches = target_floor is None or abs(self.current_player_floor - target_floor) < 0.1
+            
+            arrived = False
+            if current_node.get('type') == 'djump_area':
+                x_range = current_node.get('x_range')
+                if x_range and x_range[0] <= final_player_pos.x() <= x_range[1] and floor_matches:
+                    arrived = True
+            else: # 일반 노드 (waypoint, ladder_entry, fall_start 등)
+                distance_to_target = abs(final_player_pos.x() - self.intermediate_target_pos.x())
+                if distance_to_target < arrival_threshold and floor_matches:
+                    arrived = True
+
+            if arrived:
+                print(f"[INFO] 중간 목표 '{self.guidance_text}' 도착.")
+
+                node_type = current_node.get('type')
                 
-                next_action_state = None
-                if action == 'climb': next_action_state = 'prepare_to_climb'
-                elif action == 'jump': next_action_state = 'prepare_to_jump'
-                elif action == 'climb_down': next_action_state = 'prepare_to_fall'
-
-                if next_action_state:
-                    self._transition_to_action_state(next_action_state, current_node_key)
+                # --- [v12.9.4 수정] 도착한 노드가 액션을 유발하는 경우, 안내 목표를 '착지 지점'으로 즉시 변경 ---
+                if node_type in ['fall_start', 'djump_area']:
+                    # 현재 노드와 직접 연결된 유일한 이웃(착지 지점)을 찾음
+                    neighbors = self.nav_graph.get(current_node_key, {})
+                    if len(neighbors) == 1:
+                        landing_key = list(neighbors.keys())[0]
+                        landing_node = self.nav_nodes.get(landing_key)
+                        if landing_node:
+                            # 안내 목표를 착지 지점의 좌표와 이름으로 갱신
+                            self.intermediate_target_pos = landing_node.get('pos')
+                            self.guidance_text = landing_node.get('name', '착지 지점')
+                    
+                    # 상태 전환
+                    if node_type == 'fall_start':
+                        self._transition_to_action_state('prepare_to_fall', current_node_key)
+                    elif node_type == 'djump_area':
+                        self._transition_to_action_state('prepare_to_down_jump', current_node_key)
+                    return # 액션 준비 상태로 전환했으므로, 여기서 처리를 종료
+                # --- 수정 끝 ---
+                
+                next_index = self.current_segment_index + 1
+                if next_index >= len(self.current_segment_path):
+                    # 구간 완료
+                    self.last_reached_wp_id = self.journey_plan[self.current_journey_index]
+                    self.current_journey_index += 1
+                    self.current_segment_path = []
+                    self.expected_terrain_group = None
+                    wp_name = self.nav_nodes.get(f"wp_{self.last_reached_wp_id}", {}).get('name')
+                    self.update_general_log(f"'{wp_name}' 도착. 다음 구간으로 진행합니다.", "green")
                 else:
-                    self.current_segment_index = next_index
-            return
+                    # 다음 단계가 액션인지 확인하고 상태 전환
+                    next_node_key = self.current_segment_path[next_index]
+                    edge_data = self.nav_graph.get(current_node_key, {}).get(next_node_key, {})
+                    action = edge_data.get('action') if edge_data else None
+                    
+                    next_action_state = None
+                    if action == 'climb': next_action_state = 'prepare_to_climb'
+                    elif action == 'jump': next_action_state = 'prepare_to_jump'
+                    elif action == 'climb_down': next_action_state = 'prepare_to_fall'
 
+                    if next_action_state:
+                        self._transition_to_action_state(next_action_state, current_node_key)
+                    else:
+                        self.current_segment_index = next_index
+                return
+
+    
     def _handle_action_preparation(self, final_player_pos):
         """'prepare_to_...' 상태일 때의 모든 로직을 담당합니다."""
         # [v12.4.3] 목표 설정 로직을 맨 위로 이동 및 강화
@@ -6620,13 +6634,11 @@ class MapTab(QWidget):
     
     def _build_navigation_graph(self, waypoint_ids_in_route=None):
             """
-            v12.9.3: [수정] '낭떠러지' 및 '아래 점프' 노드 생성 시, 그에 짝이 되는 '착지 지점' 노드를 명시적으로 함께 생성하고 직접 연결합니다. 이를 통해 A* 알고리즘이 착지 지점을 추측할 필요 없이 명확한 경로를 탐색하도록 구조를 변경합니다.
+            v12.9.5: [수정] '아래 점프' 노드 생성 시, 사다리 좌우 일정 범위(LADDER_AVOIDANCE_WIDTH) 내에는 노드가 생성되지 않도록 하여 키 입력 충돌을 확실히 방지합니다. 또한 착지 지점의 x좌표가 점프 지점과 항상 동일하도록 보장합니다.
+            v12.9.3: [수정] '낭떠러지' 및 '아래 점프' 노드 생성 시, 그에 짝이 되는 '착지 지점' 노드를 명시적으로 함께 생성하고 직접 연결합니다.
             v12.9.2: [수정] '아래 점프' 노드 생성 로직을 전면 개편합니다. 
-                     1. 아래층의 웨이포인트 바로 위 지점에 '목표 정렬 노드'를 생성하여 최적의 경로를 제공합니다.
-                     2. 점프 가능 구간의 양 끝 지점에도 노드를 생성하여 유연성을 확보합니다.
-                     3. 이 모든 과정에서 사다리의 x좌표는 항상 제외하여 키 입력 충돌을 방지합니다.
-            v12.9.1: [수정] '아래 점프' 구간 생성 시, 사다리가 차지하는 x좌표를 제외한 나머지 유효 구간에만 노드를 생성하도록 로직을 수정하여 키 입력 충돌 문제를 해결합니다.
-            v12.9.0: [수정] '아래 점프' 구간을 생성할 때, 해당 x축 범위에 이미 층 이동 오브젝트(사다리)가 존재하는 경우 '아래 점프' 노드를 생성하지 않도록 수정하여 경로 중복 및 비효율 문제를 해결합니다.
+            v12.9.1: [수정] '아래 점프' 구간 생성 시, 사다리가 차지하는 x좌표를 제외한 나머지 유효 구간에만 노드를 생성하도록 로직을 수정합니다.
+            v12.9.0: [수정] '아래 점프' 구간을 생성할 때, 해당 x축 범위에 이미 층 이동 오브젝트(사다리)가 존재하는 경우 '아래 점프' 노드를 생성하지 않도록 수정합니다.
             v12.8.9: [수정] '아래 점프' 지점을 구간의 중앙 한 곳에만 생성하던 문제를 해결하기 위해, 구간의 왼쪽/중앙/오른쪽에 여러 개의 노드를 생성하여 경로 탐색의 유연성을 높입니다.
             v12.8.8: [수정] 요청에 따라 경로 탐색 비용 상수를 조정합니다.
             v12.8.7: [수정] 층 이동 오브젝트(사다리)에서 '낭떠러지'나 '아래 점프' 지점으로 직접 연결되는 비현실적인 경로가 생성되지 않도록 예외 처리 로직을 추가합니다.
@@ -6649,8 +6661,10 @@ class MapTab(QWidget):
             CLIMB_UP_COST_MULTIPLIER = 1.5
             CLIMB_DOWN_COST_MULTIPLIER = 500.0
             JUMP_COST_MULTIPLIER = 1.1
-            FALL_COST_MULTIPLIER = 2.0
+            FALL_COST_MULTIPLIER = 1.8
             DOWN_JUMP_COST_MULTIPLIER = 1.2
+            # [v12.9.5 추가] 사다리 주변에 아래 점프 노드를 생성하지 않을 x축 반경
+            LADDER_AVOIDANCE_WIDTH = 5.0
 
             # --- 1. 모든 잠재적 노드 생성 및 역할(walkable) 부여 ---
             for wp in self.geometry_data.get("waypoints", []):
@@ -6711,7 +6725,6 @@ class MapTab(QWidget):
                                         break
                             if is_obstructed: continue
                             
-                            # --- [v12.9.3 수정] '낙하'와 '착지' 노드를 함께 생성하여 직접 연결 ---
                             start_key = f"fall_start_{line_above['id']}_{v_idx}"
                             start_pos = QPointF(*vertex)
                             self.nav_nodes[start_key] = {'type': 'fall_start', 'pos': start_pos, 'name': f"{group_above} 낙하 지점", 'group': group_above, 'walkable': False}
@@ -6738,15 +6751,6 @@ class MapTab(QWidget):
                         overlap_x1, overlap_x2 = max(ax1, bx1), min(ax2, bx2)
                         
                         if overlap_x1 < overlap_x2:
-                            ladders_in_overlap = []
-                            for obj in transition_objects:
-                                ladder_x = obj['points'][0][0]
-                                if overlap_x1 <= ladder_x <= overlap_x2:
-                                    start_line_id = obj.get('start_line_id')
-                                    end_line_id = obj.get('end_line_id')
-                                    if {line_above['id'], line_below['id']} == {start_line_id, end_line_id}:
-                                        ladders_in_overlap.append(ladder_x)
-                            
                             is_obstructed = False
                             for other_line in terrain_lines:
                                 if (other_line['id'] != line_above['id'] and other_line['id'] != line_below['id'] and
@@ -6757,58 +6761,65 @@ class MapTab(QWidget):
                                         break
                             if is_obstructed: continue
 
-                            valid_jump_zones = []
-                            current_x = overlap_x1
-                            sorted_ladders_x = sorted(ladders_in_overlap)
-                            for ladder_x in sorted_ladders_x:
-                                if current_x < ladder_x:
-                                    valid_jump_zones.append((current_x, ladder_x))
-                                current_x = ladder_x
-                            if current_x < overlap_x2:
-                                valid_jump_zones.append((current_x, overlap_x2))
+                            # --- [v12.9.5 수정] 전략적 노드 생성 전, 사다리 충돌 회피 로직 강화 ---
+                            
+                            # 1. 이 구간과 관련된 모든 사다리의 x좌표 및 안전 구역을 찾음
+                            ladder_exclusion_zones = []
+                            for obj in transition_objects:
+                                start_line_id = obj.get('start_line_id')
+                                end_line_id = obj.get('end_line_id')
+                                if {line_above['id'], line_below['id']} == {start_line_id, end_line_id}:
+                                    ladder_x = obj['points'][0][0]
+                                    ladder_exclusion_zones.append((ladder_x - LADDER_AVOIDANCE_WIDTH, ladder_x + LADDER_AVOIDANCE_WIDTH))
 
-                            for zone_idx, (zone_x1, zone_x2) in enumerate(valid_jump_zones):
-                                LADDER_AVOIDANCE_WIDTH = 5.0
-                                if abs(zone_x2 - zone_x1) < LADDER_AVOIDANCE_WIDTH:
-                                    continue
+                            # 2. 생성할 모든 전략적 위치 후보를 수집
+                            strategic_x_positions = set()
+                            # 2a. 목적지 정렬 노드 (아래층 WP 바로 위)
+                            waypoints_on_line_below = [wp for wp in self.geometry_data.get("waypoints", []) if wp.get('parent_line_id') == line_below['id']]
+                            for wp in waypoints_on_line_below:
+                                wp_x = wp['pos'][0]
+                                if overlap_x1 <= wp_x <= overlap_x2:
+                                    strategic_x_positions.add(round(wp_x, 1))
+                            # 2b. 경계 노드 (겹치는 구간의 양 끝)
+                            strategic_x_positions.add(round(overlap_x1, 1))
+                            strategic_x_positions.add(round(overlap_x2, 1))
+
+                            # 3. 후보 위치들 중, 사다리 안전 구역과 겹치는 위치를 제거
+                            final_x_positions = set()
+                            for x_pos in strategic_x_positions:
+                                is_safe = True
+                                for (ex_start, ex_end) in ladder_exclusion_zones:
+                                    if ex_start <= x_pos <= ex_end:
+                                        is_safe = False
+                                        break
+                                if is_safe:
+                                    final_x_positions.add(x_pos)
+
+                            # 4. 최종적으로 안전이 확인된 위치에만 노드를 생성
+                            for i, x_pos in enumerate(sorted(list(final_x_positions))):
+                                start_key = f"djump_start_{line_above['id']}_{line_below['id']}_{i}"
+                                start_pos = QPointF(x_pos, y_above)
                                 
-                                strategic_x_positions = set()
-                                waypoints_on_line_below = [
-                                    wp for wp in self.geometry_data.get("waypoints", []) 
-                                    if wp.get('parent_line_id') == line_below['id']
-                                ]
-                                for wp in waypoints_on_line_below:
-                                    wp_x = wp['pos'][0]
-                                    if zone_x1 <= wp_x <= zone_x2:
-                                        strategic_x_positions.add(round(wp_x, 1))
-
-                                strategic_x_positions.add(round(zone_x1, 1))
-                                strategic_x_positions.add(round(zone_x2, 1))
+                                self.nav_nodes[start_key] = {
+                                    'type': 'djump_area', 
+                                    'pos': start_pos, 
+                                    'name': f"{group_above} 아래 점프 지점", 
+                                    'group': group_above, 
+                                    'x_range': [overlap_x1, overlap_x2],
+                                    'walkable': False
+                                }
                                 
-                                for i, x_pos in enumerate(sorted(list(strategic_x_positions))):
-                                    # --- [v12.9.3 수정] '아래 점프'와 '착지' 노드를 함께 생성하여 직접 연결 ---
-                                    start_key = f"djump_start_{line_above['id']}_{line_below['id']}_{zone_idx}_{i}"
-                                    start_pos = QPointF(x_pos, y_above)
-                                    
-                                    self.nav_nodes[start_key] = {
-                                        'type': 'djump_area', 
-                                        'pos': start_pos, 
-                                        'name': f"{group_above} 아래 점프 지점", 
-                                        'group': group_above, 
-                                        'x_range': [zone_x1, zone_x2],
-                                        'walkable': False
-                                    }
-                                    
-                                    landing_x = start_pos.x()
-                                    p1, p2 = line_below['points'][0], line_below['points'][-1]
-                                    landing_y = p1[1] + (p2[1] - p1[1]) * ((landing_x - p1[0]) / (p2[0] - p1[0])) if (p2[0] - p1[0]) != 0 else p1[1]
-                                    landing_pos = QPointF(landing_x, landing_y)
-                                    target_group = line_below.get('dynamic_name')
-                                    landing_key = f"djump_landing_{line_above['id']}_{line_below['id']}_{zone_idx}_{i}"
-                                    self.nav_nodes[landing_key] = {'type': 'djump_landing', 'pos': landing_pos, 'name': f"{target_group} 착지 지점", 'group': target_group, 'walkable': True}
+                                # [v12.9.5] 착지 지점의 x좌표는 점프 지점과 반드시 동일하게 설정
+                                landing_x = start_pos.x()
+                                p1, p2 = line_below['points'][0], line_below['points'][-1]
+                                landing_y = p1[1] + (p2[1] - p1[1]) * ((landing_x - p1[0]) / (p2[0] - p1[0])) if (p2[0] - p1[0]) != 0 else p1[1]
+                                landing_pos = QPointF(landing_x, landing_y)
+                                target_group = line_below.get('dynamic_name')
+                                landing_key = f"djump_landing_{line_above['id']}_{line_below['id']}_{i}"
+                                self.nav_nodes[landing_key] = {'type': 'djump_landing', 'pos': landing_pos, 'name': f"{target_group} 착지 지점", 'group': target_group, 'walkable': True}
 
-                                    cost = (y_diff * DOWN_JUMP_COST_MULTIPLIER) + FLOOR_CHANGE_PENALTY
-                                    self.nav_graph[start_key][landing_key] = {'cost': cost, 'action': 'down_jump'}
+                                cost = (y_diff * DOWN_JUMP_COST_MULTIPLIER) + FLOOR_CHANGE_PENALTY
+                                self.nav_graph[start_key][landing_key] = {'cost': cost, 'action': 'down_jump'}
             
             # --- 2. 걷기(Walk) 간선 추가 ---
             nodes_by_terrain_group = defaultdict(list)
@@ -6846,6 +6857,7 @@ class MapTab(QWidget):
 
             self.update_general_log(f"내비게이션 그래프 생성 완료. (노드: {len(self.nav_nodes)}개)", "purple")
 
+    
     def _find_path_astar(self, start_pos, start_group, goal_key):
         """
         v12.9.3: [수정] 그래프 생성 로직이 '점프->착지'를 직접 연결하도록 변경됨에 따라, 이 함수에서 착지 지점을 추측하던 복잡한 로직을 제거하고 단순화합니다.
