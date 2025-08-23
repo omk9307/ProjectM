@@ -6158,7 +6158,7 @@ class MapTab(QWidget):
                 next_action_state = None
                 if action == 'climb': next_action_state = 'prepare_to_climb'
                 elif action == 'jump': next_action_state = 'prepare_to_jump'
-                elif action == 'fall': next_action_state = 'prepare_to_fall'
+                elif action == 'fall' or action == 'climb_down': next_action_state = 'prepare_to_fall'
 
                 if next_action_state:
                     self._transition_to_action_state(next_action_state, current_node_key)
@@ -6614,6 +6614,7 @@ class MapTab(QWidget):
     
     def _build_navigation_graph(self, waypoint_ids_in_route=None):
             """
+            v12.8.2: [수정] 사다리 노드(ladder_entry, ladder_exit) 생성 시, 연결된 지형의 층(floor) 정보를 명시적으로 추가하여 도착 판정 오류를 해결합니다.
             v12.6.1: [수정] 누락되었던 is_obstructed 충돌 검사 로직을 복원하여 프로필 로드 오류를 해결합니다.
             """
             self.nav_nodes.clear()
@@ -6627,7 +6628,7 @@ class MapTab(QWidget):
 
             FLOOR_CHANGE_PENALTY = 5.0
             CLIMB_UP_COST_MULTIPLIER = 1.5
-            CLIMB_DOWN_COST_MULTIPLIER = 500.0
+            CLIMB_DOWN_COST_MULTIPLIER = 10.0
             JUMP_COST_MULTIPLIER = 1.2
             FALL_COST_MULTIPLIER = 1.5
 
@@ -6643,11 +6644,20 @@ class MapTab(QWidget):
                 p1, p2 = QPointF(*obj['points'][0]), QPointF(*obj['points'][1])
                 entry_pos, exit_pos = (p1, p2) if p1.y() > p2.y() else (p2, p1)
                 entry_key, exit_key = f"ladder_entry_{obj['id']}", f"ladder_exit_{obj['id']}"
+                
+                # [v12.8.2 수정] 각 지점의 지형 정보를 가져와 층(floor)과 그룹(group) 정보를 추출
                 entry_terrain, exit_terrain = self._get_contact_terrain(entry_pos), self._get_contact_terrain(exit_pos)
-                entry_group, exit_group = (entry_terrain.get('dynamic_name') if entry_terrain else None), (exit_terrain.get('dynamic_name') if exit_terrain else None)
+                entry_group = entry_terrain.get('dynamic_name') if entry_terrain else None
+                exit_group = exit_terrain.get('dynamic_name') if exit_terrain else None
+                entry_floor = entry_terrain.get('floor') if entry_terrain else None
+                exit_floor = exit_terrain.get('floor') if exit_terrain else None
+                
                 base_name = obj.get('dynamic_name', obj['id'])
-                self.nav_nodes[entry_key] = {'type': 'ladder_entry', 'pos': entry_pos, 'obj_id': obj['id'], 'name': f"{base_name} (입구)", 'group': entry_group, 'walkable': True}
-                self.nav_nodes[exit_key] = {'type': 'ladder_exit', 'pos': exit_pos, 'obj_id': obj['id'], 'name': f"{base_name} (출구)", 'group': exit_group, 'walkable': True}
+                
+                # [v12.8.2 수정] 노드 정보에 'floor' 키 추가
+                self.nav_nodes[entry_key] = {'type': 'ladder_entry', 'pos': entry_pos, 'obj_id': obj['id'], 'name': f"{base_name} (입구)", 'group': entry_group, 'walkable': True, 'floor': entry_floor}
+                self.nav_nodes[exit_key] = {'type': 'ladder_exit', 'pos': exit_pos, 'obj_id': obj['id'], 'name': f"{base_name} (출구)", 'group': exit_group, 'walkable': True, 'floor': exit_floor}
+                
                 y_diff = abs(entry_pos.y() - exit_pos.y())
                 cost_up, cost_down = (y_diff * CLIMB_UP_COST_MULTIPLIER) + FLOOR_CHANGE_PENALTY, (y_diff * CLIMB_DOWN_COST_MULTIPLIER) + FLOOR_CHANGE_PENALTY
                 self.nav_graph[entry_key][exit_key] = {'cost': cost_up, 'action': 'climb'}
@@ -6698,20 +6708,15 @@ class MapTab(QWidget):
                         bx1, bx2 = min(line_below['points'][0][0], line_below['points'][-1][0]), max(line_below['points'][0][0], line_below['points'][-1][0])
                         overlap_x1, overlap_x2 = max(ax1, bx1), min(ax2, bx2)
                         if overlap_x1 < overlap_x2:
-                            # --- [수정된 부분] ---
-                            # 누락되었던 is_obstructed 충돌 검사 로직 전체를 여기에 복원합니다.
                             is_obstructed = False
                             for other_line in terrain_lines:
                                 if (other_line['id'] != line_above['id'] and other_line['id'] != line_below['id'] and
                                     line_below['floor'] < other_line['floor'] < line_above['floor']):
                                     other_min_x, other_max_x = min(other_line['points'][0][0], other_line['points'][-1][0]), max(other_line['points'][0][0], other_line['points'][-1][0])
-                                    # 두 x축 범위가 겹치는지 확인
                                     if max(overlap_x1, other_min_x) < min(overlap_x2, other_max_x):
                                         is_obstructed = True
                                         break
                             if is_obstructed: continue
-                            # --- [수정 끝] ---
-
                             start_key = f"djump_start_{line_above['id']}_{line_below['id']}"
                             center_x = (overlap_x1 + overlap_x2) / 2.0
                             start_pos = QPointF(center_x, y_above)
