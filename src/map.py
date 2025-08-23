@@ -6657,11 +6657,11 @@ class MapTab(QWidget):
             terrain_lines = self.geometry_data.get("terrain_lines", [])
             transition_objects = self.geometry_data.get("transition_objects", [])
 
-            FLOOR_CHANGE_PENALTY = 5.0
+            FLOOR_CHANGE_PENALTY = 0.0
             CLIMB_UP_COST_MULTIPLIER = 1.5
             CLIMB_DOWN_COST_MULTIPLIER = 500.0
             JUMP_COST_MULTIPLIER = 1.1
-            FALL_COST_MULTIPLIER = 1.8
+            FALL_COST_MULTIPLIER = 2.0
             DOWN_JUMP_COST_MULTIPLIER = 1.2
             # [v12.9.5 추가] 사다리 주변에 아래 점프 노드를 생성하지 않을 x축 반경
             LADDER_AVOIDANCE_WIDTH = 5.0
