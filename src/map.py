@@ -4200,6 +4200,45 @@ class MapTab(QWidget):
         main_layout.addLayout(right_layout, 2)
         self.update_general_log("MapTab이 초기화되었습니다. 맵 프로필을 선택해주세요.", "black")
 
+    def _get_closest_walkable_node_on_floor(self, point, floor):
+        """
+        주어진 층(floor)의 워커블(walkable) 노드 중에서, 
+        주어진 지점(point)에서 가장 가까운 노드를 찾습니다.
+        만약 해당 층에 워커블 노드가 없으면, 모든 층을 대상으로 다시 찾습니다.
+        """
+        if not self.nav_nodes:
+            return None, float('inf')
+
+        # 1. 지정된 층의 워커블 노드만 필터링
+        candidate_nodes = [
+            (key, node_data) for key, node_data in self.nav_nodes.items()
+            if node_data.get('walkable', False) and abs(node_data.get('floor', 0.0) - floor) < 0.1
+        ]
+        
+        # 2. 해당 층에 후보가 없으면, 모든 층의 워커블 노드를 대상으로 확장
+        if not candidate_nodes:
+            # print(f"[DEBUG] {floor}층에서 워커블 노드를 찾지 못해 전체 층을 탐색합니다.")
+            candidate_nodes = [
+                (key, node_data) for key, node_data in self.nav_nodes.items()
+                if node_data.get('walkable', False)
+            ]
+
+        if not candidate_nodes:
+            return None, float('inf')
+
+        # 3. 최종 후보군 중에서 가장 가까운 노드 찾기
+        min_dist_sq = float('inf')
+        closest_node_key = None
+        for key, node_data in candidate_nodes:
+            pos = node_data.get('pos')
+            if pos:
+                dist_sq = (point.x() - pos.x())**2 + (point.y() - pos.y())**2
+                if dist_sq < min_dist_sq:
+                    min_dist_sq = dist_sq
+                    closest_node_key = key
+        
+        return closest_node_key, math.sqrt(min_dist_sq)
+
     def _get_floor_from_closest_terrain_data(self, point, terrain_lines):
             """주어진 점에서 가장 가까운 지형선 데이터를 찾아 그 층 번호를 반환합니다."""
             min_dist_sq = float('inf')
@@ -5777,45 +5816,32 @@ class MapTab(QWidget):
 
     def _calculate_segment_path(self, final_player_pos):
         """현재 구간(Segment)의 상세 경로를 A*로 계산합니다."""
-        # [수정] 시작 노드 탐색 로직 강화
-        contact_terrain = self._get_contact_terrain(final_player_pos)
-        current_group = contact_terrain.get('dynamic_name') if contact_terrain else None
-
-        # 1. 현재 플레이어가 있는 지형 그룹 내에서 가장 가까운 노드를 우선적으로 찾습니다.
-        start_node_key, dist = self._get_closest_node_to_point(final_player_pos, current_group)
         
-        # 2. 만약 현재 그룹에서 노드를 못찾거나, 찾은 노드가 너무 멀면(>50px), 전체 노드에서 다시 찾습니다.
-        #    이는 플레이어가 지형 그룹 경계에 있거나, 그룹 정보가 없는 경우를 대비한 안전장치입니다.
-        if start_node_key is None or dist > 50.0:
-            # print(f"[DEBUG] 현재 그룹 '{current_group}'에서 가까운 노드 없음. 전체 탐색 시도.")
-            start_node_key, dist = self._get_closest_node_to_point(final_player_pos)
-
-        # 3. 최종적으로 시작 노드를 찾지 못하면 경로 계산을 포기합니다.
+        # [수정된 로직]
+        # 항상 현재 플레이어의 위치와 층을 기준으로 가장 가까운 '워커블' 노드를 찾습니다.
+        # 이것이 경로 탐색의 시작점이 됩니다.
+        start_node_key, dist = self._get_closest_walkable_node_on_floor(final_player_pos, self.current_player_floor)
+        
         if not start_node_key:
-            self.update_general_log(f"경로 계산 실패: 현재 위치 주변에서 내비게이션 시작점을 찾을 수 없습니다.", "red")
-            print(f"[ERROR] 경로 계산 실패: 시작 노드 탐색 실패. 현재 위치: {final_player_pos.x():.1f}, {final_player_pos.y():.1f}")
-            self.journey_plan = [] # 경로 계획을 중단
+            self.update_general_log(f"경로 계산 실패: 현재 위치 주변에서 유효한 시작점(워커블 노드)을 찾을 수 없습니다.", "red")
+            print(f"[ERROR] 경로 계산 실패: 워커블 시작 노드 탐색 실패. 현재 위치: {final_player_pos.x():.1f}, {final_player_pos.y():.1f}")
+            self.journey_plan = []
             return
 
         goal_wp_id = self.journey_plan[self.current_journey_index]
         self.target_waypoint_id = goal_wp_id
         goal_node_key = f"wp_{goal_wp_id}"
 
-        # A* 탐색을 위한 시작점은 '현재 위치'가 아닌, 그래프 상의 '가장 가까운 노드'입니다.
         path, cost = self._find_path_astar(start_node_key, goal_node_key)
         
         if path:
-            # [수정] A* 경로는 start_node_key에서 시작하므로, 실제 플레이어 위치를 경로의 맨 앞에 추가해줍니다.
-            # 하지만 이 경우 혼란을 야기할 수 있으므로, 경로 자체는 start_node_key부터 시작하도록 두고
-            # 안내 로직에서 현재 위치와 경로의 첫 노드 사이의 거리를 계산하도록 합니다.
-            # 여기서는 경로를 그대로 사용합니다.
             self.current_segment_path = path
             self.current_segment_index = 0
+            
+            # 실제 총 비용 = (현재 위치에서 프록시 시작점까지의 거리) + (A* 경로 비용)
+            realistic_cost = dist + cost
 
-            # 비용에 현재 위치에서 첫 노드까지의 직선 거리를 추가하여 더 현실적인 비용 표시
-            realistic_cost = cost + dist
-
-            start_name = self.nav_nodes.get(start_node_key, {}).get('name', '현재 위치 근처')
+            start_name = self.nav_nodes.get(start_node_key, {}).get('name', '???')
             goal_name = self.nav_nodes.get(goal_node_key, {}).get('name', '??')
             log_msg = f"[경로 탐색 성공] '{start_name}' -> '{goal_name}' (총 비용: {realistic_cost:.1f})"
             path_str = " -> ".join([self.nav_nodes.get(p, {}).get('name', '??') for p in path])
@@ -5824,13 +5850,13 @@ class MapTab(QWidget):
             self.update_general_log(log_msg.replace('\n', '<br>'), 'SaddleBrown')
             self.last_path_recalculation_time = time.time()
         else:
-            start_name = self.nav_nodes.get(start_node_key, {}).get('name', '현재 위치 근처')
+            start_name = self.nav_nodes.get(start_node_key, {}).get('name', '???')
             goal_name = self.nav_nodes.get(goal_node_key, {}).get('name', '??')
             log_msg = f"[경로 탐색 실패] '{start_name}' -> '{goal_name}'"
-            log_msg += f"\n[진단] 시작점과 목표점이 그래프 상에서 연결되어 있지 않습니다. 두 지점 사이에 이동 경로(사다리/점프 등)가 있는지 확인해주세요."
+            log_msg += f"\n[진단] 시작점과 목표점이 그래프 상에서 연결되어 있지 않습니다."
             print(log_msg)
             self.update_general_log(log_msg.replace('\n', '<br>'), 'red')
-            self.journey_plan = [] # 경로 계획을 중단
+            self.journey_plan = []
 
     def _get_arrival_threshold(self, node_type):
         """노드 타입에 맞는 도착 판정 임계값을 반환합니다."""
@@ -5949,8 +5975,8 @@ class MapTab(QWidget):
 
     def _update_player_state_and_navigation(self, final_player_pos):
         """
-        v12.5.1: A* 경로 계획을 기반으로 플레이어 상태를 판정하고 다음 행동을 결정합니다.
-        시작점 탐색 로직을 제거하고, 정해진 경로 순서대로만 진행하도록 수정.
+        v12.7.0: [수정] 경로 이탈 판정 로직을 폐기하고,
+        목표에서 일정 거리 이상 멀어졌을 때만 경로를 재탐색하는 방식으로 변경.
         """
         current_terrain_name = ""
         contact_terrain = self._get_contact_terrain(final_player_pos)
@@ -5963,23 +5989,23 @@ class MapTab(QWidget):
             self.navigator_display.update_data("N/A", "", "없음", "", "", "-", 0, [], None, None, self.is_forward, 'walk', "대기 중", "오류: 위치/층 정보 없음")
             return
         
-        # Phase 0: 타임아웃
+        # Phase 0: 타임아웃 (유지)
         if (self.navigation_state_locked and (time.time() - self.lock_timeout_start > MAX_LOCK_DURATION)) or \
            (self.navigation_action.startswith('prepare_to_') and (time.time() - self.prepare_timeout_start > PREPARE_TIMEOUT)):
             self.update_general_log(f"경고: 행동({self.navigation_action}) 시간 초과. 경로를 재탐색합니다.", "orange")
             self.navigation_action = 'move_to_target'
             self.navigation_state_locked = False
-            self.current_segment_path = []
+            self.current_segment_path = [] # 경로 초기화하여 재탐색 유도
         
-        # Phase 1: 물리적 상태 판정
+        # Phase 1: 물리적 상태 판정 (유지)
         self.player_state = self._determine_player_physical_state(final_player_pos, contact_terrain)
 
-        # Phase 2: 행동 완료/실패 판정 (잠금 상태일 때만)
+        # Phase 2: 행동 완료/실패 판정 (유지)
         if self.navigation_state_locked and self.player_state == 'on_terrain':
             self._process_action_completion(final_player_pos, contact_terrain)
 
-        # --- [수정된 경로 계획 로직] ---
-        # Phase 3: 경로 계획 (필요 시)
+        # --- [새로운 경로 관리 로직] ---
+        # Phase 3: 경로 계획 및 재탐색 트리거
         active_route = self.route_profiles.get(self.active_route_profile_name)
         if not active_route: self.last_player_pos = final_player_pos; return
 
@@ -5987,12 +6013,35 @@ class MapTab(QWidget):
         if not self.journey_plan or self.current_journey_index >= len(self.journey_plan):
             self._plan_next_journey(active_route)
 
-        # 3b. 상세 구간 경로가 없으면 새로 계산 (시작점 탐색 없이 바로 진행)
+        # 3b. (핵심 수정) 재탐색 트리거: 현재 목표에서 너무 멀어졌는지 확인
+        #    단, 액션 준비 중이거나 액션 진행 중일 때는 재탐색하지 않음
+        if self.navigation_action == 'move_to_target' and self.current_segment_path:
+            RECALC_DISTANCE_THRESHOLD = 40.0 # 40px 이상 벗어나면 재탐색
+            
+            # 현재 중간 목표 정보 가져오기
+            current_target_key = self.current_segment_path[self.current_segment_index]
+            current_target_node = self.nav_nodes.get(current_target_key)
+            
+            if current_target_node and current_target_node.get('pos'):
+                target_pos = current_target_node['pos']
+                
+                # 거리 계산 시, y축 차이도 고려하여 층간 이동 중 오탐지 방지
+                distance = math.hypot(final_player_pos.x() - target_pos.x(), final_player_pos.y() - target_pos.y())
+                
+                arrival_threshold = self._get_arrival_threshold(current_target_node.get('type'))
+                
+                # 도착 임계값의 4배 이상 멀어지면 이탈로 간주 (튜닝 가능)
+                if distance > max(arrival_threshold * 4, RECALC_DISTANCE_THRESHOLD):
+                    print(f"[INFO] 경로 재탐색: 목표 '{current_target_node.get('name')}'에서 너무 멀리 벗어났습니다 (거리: {distance:.1f}px).")
+                    self.update_general_log("경로에서 벗어나 재탐색합니다.", "orange")
+                    self.current_segment_path = [] # 경로를 비워서 재탐색을 유도
+
+        # 3c. 상세 구간 경로가 없으면 새로 계산
         if self.journey_plan and self.start_waypoint_found and not self.current_segment_path:
             self._calculate_segment_path(final_player_pos)
         # --- [수정 끝] ---
 
-        # Phase 4: 상태에 따른 핵심 로직 처리
+        # Phase 4: 상태에 따른 핵심 로직 처리 (유지)
         if self.navigation_state_locked:
             self._handle_action_in_progress(final_player_pos)
         elif self.navigation_action.startswith('prepare_to_'):
@@ -6000,7 +6049,7 @@ class MapTab(QWidget):
         else: # move_to_target
             self._handle_move_to_target(final_player_pos)
 
-        # Phase 5: UI 업데이트
+        # Phase 5: UI 업데이트 (유지)
         self._update_navigator_and_view(final_player_pos, current_terrain_name)
         self.last_player_pos = final_player_pos
 
@@ -6141,21 +6190,8 @@ class MapTab(QWidget):
                 else:
                     # 다음 노드가 일반 '걷기' 노드일 경우에만 인덱스를 즉시 증가시킵니다.
                     self.current_segment_index = next_index
-                # self.current_segment_index = next_index # <<< 이 줄을 위와 같이 조건부로 변경하거나 삭제
             return
-        
-        # 걷기 중 이탈 판정
-        recalc_cooldown = 1.0
-        if time.time() - self.last_path_recalculation_time > recalc_cooldown:
-            current_terrain = self._get_contact_terrain(final_player_pos)
-            current_group = current_terrain.get('dynamic_name') if current_terrain else None
-            target_node_group = current_node.get('group')
-            
-            if current_group and target_node_group and current_group != target_node_group:
-                self.update_general_log(f"[경로 이탈 감지] 다른 지형 그룹으로 이동했습니다. 경로를 다시 계산합니다.", "orange")
-                print(f"[INFO] 경로 이탈 감지 (걷기 중). 목표 그룹: {target_node_group}, 현재 그룹: {current_group}")
-                self.current_segment_path = []
-                self.last_path_recalculation_time = time.time()
+
 
     def _handle_action_preparation(self, final_player_pos):
         """'prepare_to_...' 상태일 때의 모든 로직을 담당합니다."""
@@ -6554,76 +6590,91 @@ class MapTab(QWidget):
             return global_positions
 
 # === v12.0.0: A* 경로 탐색 시스템 메서드 ===
-    def _get_closest_node_to_point(self, point, target_group=None):
+    def _get_closest_node_to_point(self, point, target_group=None, target_floor=None, walkable_only=False):
         """
         주어진 좌표에서 가장 가까운 내비게이션 그래프 노드를 찾습니다.
-        target_group이 지정되면 해당 그룹 내의 노드만 검색합니다.
+        [수정] walkable_only 플래그를 추가하여 탐색 대상을 제한합니다.
         """
         if not self.nav_nodes:
             return None, float('inf')
 
         min_dist_sq = float('inf')
         closest_node_key = None
-
+        
+        candidate_nodes = []
         for key, node_data in self.nav_nodes.items():
+            # walkable_only 필터
+            if walkable_only and not node_data.get('walkable', False):
+                continue
+            # 그룹 필터
             if target_group and node_data.get('group') != target_group:
                 continue
+            # 층 필터 (우선순위)
+            if target_floor is not None:
+                node_floor = node_data.get('floor')
+                if node_floor is not None and abs(node_floor - target_floor) < 0.1:
+                    candidate_nodes.append((key, node_data))
+            else: # 층 필터가 없으면 모든 후보를 추가
+                candidate_nodes.append((key, node_data))
 
+        # 층 필터링된 후보가 없으면, 층 무시하고 다시 탐색
+        if target_floor is not None and not candidate_nodes:
+            for key, node_data in self.nav_nodes.items():
+                if walkable_only and not node_data.get('walkable', False):
+                    continue
+                if target_group and node_data.get('group') != target_group:
+                    continue
+                candidate_nodes.append((key, node_data))
+
+        # 최종 후보군에서 거리 계산
+        for key, node_data in candidate_nodes:
             pos = node_data.get('pos')
             if pos:
                 dist_sq = (point.x() - pos.x())**2 + (point.y() - pos.y())**2
                 if dist_sq < min_dist_sq:
                     min_dist_sq = dist_sq
                     closest_node_key = key
-        
-        return closest_node_key, math.sqrt(min_dist_sq)
 
+        return closest_node_key, math.sqrt(min_dist_sq) if closest_node_key else float('inf')
+    
     def _build_navigation_graph(self, waypoint_ids_in_route=None):
             """
-            v12.5.3: 맵의 지오메트리 데이터와 현재 경로의 WP 목록을 기반으로 A* 탐색용 그래프를 생성합니다.
-            [수정] 노드 이름에 역할을 명시하고, 비용 모델 상수를 조정합니다.
+            v12.6.1: [수정] 누락되었던 is_obstructed 충돌 검사 로직을 복원하여 프로필 로드 오류를 해결합니다.
             """
             self.nav_nodes.clear()
             self.nav_graph = defaultdict(dict)
 
-            if not self.geometry_data:
-                return
-
+            if not self.geometry_data: return
             if waypoint_ids_in_route is None:
                 waypoint_ids_in_route = [wp['id'] for wp in self.geometry_data.get("waypoints", [])]
 
             terrain_lines = self.geometry_data.get("terrain_lines", [])
 
-            # --- 비용 모델 상수 (튜닝 가능) ---
-            FLOOR_CHANGE_PENALTY = 300.0  # 페널티를 조금 더 강화
+            FLOOR_CHANGE_PENALTY = 300.0
             CLIMB_UP_COST_MULTIPLIER = 2.0
             CLIMB_DOWN_COST_MULTIPLIER = 1.5
             JUMP_COST_MULTIPLIER = 1.2
-            FALL_COST_MULTIPLIER = 1.8  # 낙하 비용 증가
+            FALL_COST_MULTIPLIER = 1.8
 
-            # --- 1. 모든 잠재적 노드 생성 ---
+            # --- 1. 모든 잠재적 노드 생성 및 역할(walkable) 부여 ---
             for wp in self.geometry_data.get("waypoints", []):
                 if wp['id'] in waypoint_ids_in_route:
                     key = f"wp_{wp['id']}"
                     contact_terrain = self._get_contact_terrain(QPointF(*wp['pos']))
                     group = contact_terrain.get('dynamic_name') if contact_terrain else None
-                    self.nav_nodes[key] = {'type': 'waypoint', 'pos': QPointF(*wp['pos']), 'floor': wp.get('floor'), 'name': wp.get('name'), 'id': wp['id'], 'group': group}
+                    self.nav_nodes[key] = {'type': 'waypoint', 'pos': QPointF(*wp['pos']), 'floor': wp.get('floor'), 'name': wp.get('name'), 'id': wp['id'], 'group': group, 'walkable': True}
 
             for obj in self.geometry_data.get("transition_objects", []):
-                p1 = QPointF(*obj['points'][0])
-                p2 = QPointF(*obj['points'][1])
+                p1, p2 = QPointF(*obj['points'][0]), QPointF(*obj['points'][1])
                 entry_pos, exit_pos = (p1, p2) if p1.y() > p2.y() else (p2, p1)
                 entry_key, exit_key = f"ladder_entry_{obj['id']}", f"ladder_exit_{obj['id']}"
                 entry_terrain, exit_terrain = self._get_contact_terrain(entry_pos), self._get_contact_terrain(exit_pos)
                 entry_group, exit_group = (entry_terrain.get('dynamic_name') if entry_terrain else None), (exit_terrain.get('dynamic_name') if exit_terrain else None)
-                
                 base_name = obj.get('dynamic_name', obj['id'])
-                self.nav_nodes[entry_key] = {'type': 'ladder_entry', 'pos': entry_pos, 'obj_id': obj['id'], 'name': f"{base_name} (입구)", 'group': entry_group}
-                self.nav_nodes[exit_key] = {'type': 'ladder_exit', 'pos': exit_pos, 'obj_id': obj['id'], 'name': f"{base_name} (출구)", 'group': exit_group}
-                
+                self.nav_nodes[entry_key] = {'type': 'ladder_entry', 'pos': entry_pos, 'obj_id': obj['id'], 'name': f"{base_name} (입구)", 'group': entry_group, 'walkable': True}
+                self.nav_nodes[exit_key] = {'type': 'ladder_exit', 'pos': exit_pos, 'obj_id': obj['id'], 'name': f"{base_name} (출구)", 'group': exit_group, 'walkable': True}
                 y_diff = abs(entry_pos.y() - exit_pos.y())
-                cost_up = (y_diff * CLIMB_UP_COST_MULTIPLIER) + FLOOR_CHANGE_PENALTY
-                cost_down = (y_diff * CLIMB_DOWN_COST_MULTIPLIER) + FLOOR_CHANGE_PENALTY
+                cost_up, cost_down = (y_diff * CLIMB_UP_COST_MULTIPLIER) + FLOOR_CHANGE_PENALTY, (y_diff * CLIMB_DOWN_COST_MULTIPLIER) + FLOOR_CHANGE_PENALTY
                 self.nav_graph[entry_key][exit_key] = {'cost': cost_up, 'action': 'climb'}
                 self.nav_graph[exit_key][entry_key] = {'cost': cost_down, 'action': 'climb_down'}
 
@@ -6632,16 +6683,13 @@ class MapTab(QWidget):
                 key1, key2 = f"jump_{link['id']}_p1", f"jump_{link['id']}_p2"
                 start_terrain, end_terrain = self._get_contact_terrain(start_pos), self._get_contact_terrain(end_pos)
                 start_group, end_group = (start_terrain.get('dynamic_name') if start_terrain else None), (end_terrain.get('dynamic_name') if end_terrain else None)
-
                 base_name = link.get('dynamic_name', link['id'])
-                self.nav_nodes[key1] = {'type': 'jump_vertex', 'pos': start_pos, 'link_id': link['id'], 'name': f"{base_name} (시작점)", 'group': start_group}
-                self.nav_nodes[key2] = {'type': 'jump_vertex', 'pos': end_pos, 'link_id': link['id'], 'name': f"{base_name} (도착점)", 'group': end_group}
-                
+                self.nav_nodes[key1] = {'type': 'jump_vertex', 'pos': start_pos, 'link_id': link['id'], 'name': f"{base_name} (시작점)", 'group': start_group, 'walkable': True}
+                self.nav_nodes[key2] = {'type': 'jump_vertex', 'pos': end_pos, 'link_id': link['id'], 'name': f"{base_name} (도착점)", 'group': end_group, 'walkable': True}
                 cost = math.hypot(start_pos.x() - end_pos.x(), start_pos.y() - end_pos.y()) * JUMP_COST_MULTIPLIER
                 if start_terrain and end_terrain and start_terrain.get('floor') != end_terrain.get('floor'):
                     cost += FLOOR_CHANGE_PENALTY
-                self.nav_graph[key1][key2] = {'cost': cost, 'action': 'jump'}
-                self.nav_graph[key2][key1] = {'cost': cost, 'action': 'jump'}
+                self.nav_graph[key1][key2], self.nav_graph[key2][key1] = {'cost': cost, 'action': 'jump'}, {'cost': cost, 'action': 'jump'}
 
             for line_above in terrain_lines:
                 group_above = line_above.get('dynamic_name')
@@ -6650,23 +6698,19 @@ class MapTab(QWidget):
                         if line_above['id'] == line_below['id'] or line_above['floor'] <= line_below['floor']: continue
                         min_x, max_x = min(line_below['points'][0][0], line_below['points'][-1][0]), max(line_below['points'][0][0], line_below['points'][-1][0])
                         if min_x <= vertex[0] <= max_x:
-                            # ... (충돌 검사 로직은 동일) ...
                             is_obstructed = False
                             for other_line in terrain_lines:
                                 if (other_line['id'] != line_above['id'] and other_line['id'] != line_below['id'] and
                                     line_below['floor'] < other_line['floor'] < line_above['floor']):
-                                    other_min_x = min(other_line['points'][0][0], other_line['points'][-1][0])
-                                    other_max_x = max(other_line['points'][0][0], other_line['points'][-1][0])
+                                    other_min_x, other_max_x = min(other_line['points'][0][0], other_line['points'][-1][0]), max(other_line['points'][0][0], other_line['points'][-1][0])
                                     if other_min_x <= vertex[0] <= other_max_x:
                                         is_obstructed = True
                                         break
                             if is_obstructed: continue
-
                             start_key = f"fall_start_{line_above['id']}_{v_idx}"
-                            self.nav_nodes[start_key] = {'type': 'fall_start', 'pos': QPointF(*vertex), 'name': f"{group_above} 낙하 지점", 'group': group_above}
+                            self.nav_nodes[start_key] = {'type': 'fall_start', 'pos': QPointF(*vertex), 'name': f"{group_above} 낙하 지점", 'group': group_above, 'walkable': False}
                             cost = (abs(vertex[1] - line_below['points'][0][1]) * FALL_COST_MULTIPLIER) + FLOOR_CHANGE_PENALTY
-                            target_group = line_below.get('dynamic_name')
-                            action_key = f"fall_action_{line_above['id']}_{v_idx}_{line_below['id']}"
+                            target_group, action_key = line_below.get('dynamic_name'), f"fall_action_{line_above['id']}_{v_idx}_{line_below['id']}"
                             self.nav_graph[start_key][action_key] = {'cost': cost, 'action': 'fall', 'target_group': target_group}
                             break
 
@@ -6675,57 +6719,49 @@ class MapTab(QWidget):
                     y_above, y_below = line_above['points'][0][1], line_below['points'][0][1]
                     y_diff = abs(y_above - y_below)
                     if 0 < y_diff <= 70:
-                        # ... (겹침 및 충돌 검사 로직은 동일) ...
                         ax1, ax2 = min(line_above['points'][0][0], line_above['points'][-1][0]), max(line_above['points'][0][0], line_above['points'][-1][0])
                         bx1, bx2 = min(line_below['points'][0][0], line_below['points'][-1][0]), max(line_below['points'][0][0], line_below['points'][-1][0])
                         overlap_x1, overlap_x2 = max(ax1, bx1), min(ax2, bx2)
                         if overlap_x1 < overlap_x2:
+                            # --- [수정된 부분] ---
+                            # 누락되었던 is_obstructed 충돌 검사 로직 전체를 여기에 복원합니다.
                             is_obstructed = False
                             for other_line in terrain_lines:
                                 if (other_line['id'] != line_above['id'] and other_line['id'] != line_below['id'] and
                                     line_below['floor'] < other_line['floor'] < line_above['floor']):
-                                    other_min_x = min(other_line['points'][0][0], other_line['points'][-1][0])
-                                    other_max_x = max(other_line['points'][0][0], other_line['points'][-1][0])
+                                    other_min_x, other_max_x = min(other_line['points'][0][0], other_line['points'][-1][0]), max(other_line['points'][0][0], other_line['points'][-1][0])
+                                    # 두 x축 범위가 겹치는지 확인
                                     if max(overlap_x1, other_min_x) < min(overlap_x2, other_max_x):
                                         is_obstructed = True
                                         break
                             if is_obstructed: continue
+                            # --- [수정 끝] ---
 
                             start_key = f"djump_start_{line_above['id']}_{line_below['id']}"
                             center_x = (overlap_x1 + overlap_x2) / 2.0
                             start_pos = QPointF(center_x, y_above)
-                            self.nav_nodes[start_key] = {'type': 'djump_area', 'pos': start_pos, 'name': f"{group_above} 아래 점프 지점", 'group': group_above, 'x_range': [overlap_x1, overlap_x2]}
+                            self.nav_nodes[start_key] = {'type': 'djump_area', 'pos': start_pos, 'name': f"{group_above} 아래 점프 지점", 'group': group_above, 'x_range': [overlap_x1, overlap_x2], 'walkable': False}
                             cost = (y_diff * FALL_COST_MULTIPLIER) + FLOOR_CHANGE_PENALTY
-                            target_group = line_below.get('dynamic_name')
-                            action_key = f"djump_action_{line_above['id']}_{line_below['id']}"
+                            target_group, action_key = line_below.get('dynamic_name'), f"djump_action_{line_above['id']}_{line_below['id']}"
                             self.nav_graph[start_key][action_key] = {'cost': cost, 'action': 'down_jump', 'target_group': target_group}
-
-            # --- 2. 걷기(Walk) 간선 추가 (로직 동일) ---
-            # ... (이 부분은 이전과 동일하게 유지) ...
+            
+            # --- 2. 걷기(Walk) 간선 추가 ---
             nodes_by_terrain_group = defaultdict(list)
             for key, node_data in self.nav_nodes.items():
-                if node_data.get('type') in ['djump_area', 'fall_start']:
-                    continue
-                if node_data.get('group'):
-                    nodes_by_terrain_group[node_data['group']].append(key)
+                if node_data.get('walkable'):
+                    if node_data.get('group'):
+                        nodes_by_terrain_group[node_data['group']].append(key)
             
             for group_name, node_keys in nodes_by_terrain_group.items():
                 for i in range(len(node_keys)):
                     for j in range(i + 1, len(node_keys)):
                         key1, key2 = node_keys[i], node_keys[j]
-                        node1_type = self.nav_nodes[key1].get('type')
-                        node2_type = self.nav_nodes[key2].get('type')
-                        if node1_type in ['djump_area', 'fall_start'] or node2_type in ['djump_area', 'fall_start']:
-                            continue
-                        group1, group2 = self.nav_nodes[key1].get('group'), self.nav_nodes[key2].get('group')
-                        if group1 and group2 and group1 == group2:
-                            pos1, pos2 = self.nav_nodes[key1]['pos'], self.nav_nodes[key2]['pos']
-                            cost = abs(pos1.x() - pos2.x())
-                            self.nav_graph[key1][key2] = {'cost': cost, 'action': 'walk'}
-                            self.nav_graph[key2][key1] = {'cost': cost, 'action': 'walk'}
+                        pos1, pos2 = self.nav_nodes[key1]['pos'], self.nav_nodes[key2]['pos']
+                        cost = abs(pos1.x() - pos2.x())
+                        self.nav_graph[key1][key2] = {'cost': cost, 'action': 'walk'}
+                        self.nav_graph[key2][key1] = {'cost': cost, 'action': 'walk'}
 
             self.update_general_log(f"내비게이션 그래프 생성 완료. (노드: {len(self.nav_nodes)}개)", "purple")
-
     def _reconstruct_path(self, came_from, current_key, start_key):
         """
         v12.5.4: A* 탐색 결과를 바탕으로 최종 경로 리스트를 재구성합니다.
