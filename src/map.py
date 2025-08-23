@@ -4023,6 +4023,7 @@ class MapTab(QWidget):
             self.current_journey_index = 0      # 현재 여정 진행 인덱스
             self.current_segment_path = []      # 현재 구간의 상세 경로 [node_key1, node_key2, ...]
             self.current_segment_index = 0      # 현재 상세 경로 진행 인덱스
+            self.last_path_recalculation_time = 0.0 # <<< [v12.2.0] 추가: 경로 떨림 방지용
             # --- v12.0.0: 추가 끝 ---
 
             #지형 간 상대 위치 벡터 저장
@@ -5409,7 +5410,8 @@ class MapTab(QWidget):
                 
                 if sum_conf > 0:
                     center_global = sum_pos / sum_conf
-                    return QRectF(center_global - QPointF(rect.width()/2, rect.height()/2), rect.size())
+                    # [v12.2.0 BUGFIX] QSize를 QSizeF로 명시적으로 변환하여 TypeError 방지
+                    return QRectF(center_global - QPointF(rect.width()/2, rect.height()/2), QSizeF(rect.size()))
                 return QRectF() # 계산 실패 시 빈 사각형 반환
 
         for rect in my_player_rects:
@@ -5848,6 +5850,7 @@ class MapTab(QWidget):
                         log_msg += f"\n[상세 경로] {path_str}"
                         print(log_msg)
                         self.update_general_log(log_msg.replace('\n', '<br>'), 'SaddleBrown')
+                        self.last_path_recalculation_time = time.time() # <<< [v12.2.0] 추가: 경로 계산 시간 기록
                     else:
                         start_name = self.nav_nodes.get(start_node_key, {}).get('name', '현재 위치')
                         goal_name = self.nav_nodes.get(goal_node_key, {}).get('name', '??')
@@ -5907,10 +5910,14 @@ class MapTab(QWidget):
                                 elif 'djump_end' in next_node_key: self.navigation_action = 'prepare_to_down_jump'; self.prepare_timeout_start = time.time()
                     
                     exit_threshold = arrival_threshold + HYSTERESIS_EXIT_OFFSET
-                    if distance_to_target > exit_threshold * 2 and self.player_state == 'on_terrain':
+                    # [v12.2.0] 경로 떨림 방지를 위해 재탐색 유예 시간(cooldown) 적용
+                    recalc_cooldown = 1.0 # 경로 재계산 후 최소 1초의 유예 시간
+                    if (time.time() - self.last_path_recalculation_time > recalc_cooldown and
+                            distance_to_target > exit_threshold * 2 and self.player_state == 'on_terrain'):
                         self.update_general_log(f"[경로 이탈 감지] 목표에서 벗어났습니다. 현재 구간 경로를 다시 계산합니다.", "orange")
                         print(f"[INFO] 경로 이탈 감지. 목표: {self.guidance_text}")
-                        self.current_segment_path = []
+                        self.current_segment_path = [] # 경로 재계산 유도
+                        self.last_path_recalculation_time = time.time() # 이탈로 인한 재탐색 시간도 기록
 
                 # ==================== Phase 5: UI 업데이트 (기존 로직과 유사) ====================
                 all_waypoints_map = {wp['id']: wp for wp in self.geometry_data.get("waypoints", [])}
