@@ -4022,6 +4022,7 @@ class MapTab(QWidget):
             self.current_segment_path = []      # 현재 구간의 상세 경로 [node_key1, node_key2, ...]
             self.current_segment_index = 0      # 현재 상세 경로 진행 인덱스
             self.last_path_recalculation_time = 0.0 # <<< [v12.2.0] 추가: 경로 떨림 방지용
+            self.expected_terrain_group = None  # 현재 안내 경로가 유효하기 위해 플레이어가 있어야 할 지형 그룹
             # --- v12.0.0: 추가 끝 ---
 
             #지형 간 상대 위치 벡터 저장
@@ -6025,34 +6026,22 @@ class MapTab(QWidget):
         # 3a. 전체 여정이 없거나 끝났으면 새로 계획
         if not self.journey_plan or self.current_journey_index >= len(self.journey_plan):
             self._plan_next_journey(active_route)
-
-        # 3b. (핵심 수정) 재탐색 트리거: 현재 목표에서 너무 멀어졌는지 확인
-        #    단, 액션 준비 중이거나 액션 진행 중일 때는 재탐색하지 않음
-        if self.navigation_action == 'move_to_target' and self.current_segment_path:
-            RECALC_DISTANCE_THRESHOLD = 40.0 # 40px 이상 벗어나면 재탐색
+        
+        # 3b. (핵심 수정) 맥락(Context) 기반 재탐색 트리거
+        #    'move_to_target' 상태에서, 예상된 지형 그룹을 벗어났을 때만 재탐색
+        if (self.navigation_action == 'move_to_target' and 
+            self.expected_terrain_group is not None and
+            contact_terrain and
+            contact_terrain.get('dynamic_name') != self.expected_terrain_group):
             
-            # 현재 중간 목표 정보 가져오기
-            current_target_key = self.current_segment_path[self.current_segment_index]
-            current_target_node = self.nav_nodes.get(current_target_key)
-            
-            if current_target_node and current_target_node.get('pos'):
-                target_pos = current_target_node['pos']
-                
-                # 거리 계산 시, y축 차이도 고려하여 층간 이동 중 오탐지 방지
-                distance = math.hypot(final_player_pos.x() - target_pos.x(), final_player_pos.y() - target_pos.y())
-                
-                arrival_threshold = self._get_arrival_threshold(current_target_node.get('type'))
-                
-                # 도착 임계값의 4배 이상 멀어지면 이탈로 간주 (튜닝 가능)
-                if distance > max(arrival_threshold * 4, RECALC_DISTANCE_THRESHOLD):
-                    print(f"[INFO] 경로 재탐색: 목표 '{current_target_node.get('name')}'에서 너무 멀리 벗어났습니다 (거리: {distance:.1f}px).")
-                    self.update_general_log("경로에서 벗어나 재탐색합니다.", "orange")
-                    self.current_segment_path = [] # 경로를 비워서 재탐색을 유도
+            print(f"[INFO] 경로 재탐색: 예상 지형 그룹('{self.expected_terrain_group}')을 벗어났습니다. (현재: '{contact_terrain.get('dynamic_name')}')")
+            self.update_general_log("예상 경로를 벗어나 재탐색합니다.", "orange")
+            self.current_segment_path = []      # 재탐색 유도
+            self.expected_terrain_group = None  # 예상 그룹 초기화
 
         # 3c. 상세 구간 경로가 없으면 새로 계산
         if self.journey_plan and self.start_waypoint_found and not self.current_segment_path:
             self._calculate_segment_path(final_player_pos)
-        # --- [수정 끝] ---
 
         # Phase 4: 상태에 따른 핵심 로직 처리 (유지)
         if self.navigation_state_locked:
@@ -6151,6 +6140,8 @@ class MapTab(QWidget):
         current_node = self.nav_nodes.get(current_node_key, {})
         self.intermediate_target_pos = current_node.get('pos')
         self.guidance_text = current_node.get('name', '')
+        # 현재 안내 중인 중간 목표가 속한 지형 그룹을 '예상 그룹'으로 설정
+        self.expected_terrain_group = current_node.get('group')
 
         if not self.intermediate_target_pos: return
 
