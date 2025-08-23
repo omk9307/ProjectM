@@ -5979,13 +5979,32 @@ class MapTab(QWidget):
             self.navigation_action = 'move_to_target'
             self.navigation_state_locked = False
             self.current_segment_path = []
+            self.expected_terrain_group = None # 실패 시 예상 그룹 초기화
 
         elif action_completed:
-            self.update_general_log(f"행동({self.navigation_action}) 완료. 지상 착지 확인.", "green")
-            print(f"[INFO] 행동 완료: {self.navigation_action}")
+            action_name = self.navigation_action # 로그용으로 저장
+            # --- [새로운 부분 시작: 상태 전이 및 맥락 갱신] ---
+            # 1. 상태를 정상 '걷기' 모드로 전환
             self.navigation_action = 'move_to_target'
             self.navigation_state_locked = False
-            self.current_segment_index += 1 # 액션이 성공적으로 끝나면 다음 단계로 진행
+            
+            # 2. 경로의 다음 단계로 진행
+            self.current_segment_index += 1
+            
+            # 3. 다음 안내를 위한 새로운 '예상 지형 그룹'을 즉시 설정
+            if self.current_segment_index < len(self.current_segment_path):
+                next_node_key = self.current_segment_path[self.current_segment_index]
+                next_node = self.nav_nodes.get(next_node_key, {})
+                self.expected_terrain_group = next_node.get('group')
+                log_message = f"행동({action_name}) 완료. 다음 목표 그룹: '{self.expected_terrain_group}'"
+                print(f"[INFO] {log_message}")
+                self.update_general_log(log_message, "green")
+            else:
+                # 현재 구간의 마지막 단계였다면 예상 그룹을 초기화
+                self.expected_terrain_group = None
+                log_message = f"행동({action_name}) 완료. 현재 구간 종료."
+                print(f"[INFO] {log_message}")
+                self.update_general_log(log_message, "green")
 
     def _update_player_state_and_navigation(self, final_player_pos):
         """
@@ -6029,10 +6048,13 @@ class MapTab(QWidget):
         
         # 3b. (핵심 수정) 맥락(Context) 기반 재탐색 트리거
         #    'move_to_target' 상태에서, 예상된 지형 그룹을 벗어났을 때만 재탐색
+        RECALCULATION_COOLDOWN = 1.0 # 최소 1초의 재탐색 대기시간
+        
         if (self.navigation_action == 'move_to_target' and 
             self.expected_terrain_group is not None and
             contact_terrain and
-            contact_terrain.get('dynamic_name') != self.expected_terrain_group):
+            contact_terrain.get('dynamic_name') != self.expected_terrain_group and
+            time.time() - self.last_path_recalculation_time > RECALCULATION_COOLDOWN):
             
             print(f"[INFO] 경로 재탐색: 예상 지형 그룹('{self.expected_terrain_group}')을 벗어났습니다. (현재: '{contact_terrain.get('dynamic_name')}')")
             self.update_general_log("예상 경로를 벗어나 재탐색합니다.", "orange")
@@ -6134,14 +6156,14 @@ class MapTab(QWidget):
     def _handle_move_to_target(self, final_player_pos):
         """'move_to_target' 상태일 때의 도착 판정, 상태 전환, 이탈 판정을 처리합니다."""
         if not (self.current_segment_path and self.current_segment_index < len(self.current_segment_path)):
+            self.expected_terrain_group = None
             return
 
         current_node_key = self.current_segment_path[self.current_segment_index]
         current_node = self.nav_nodes.get(current_node_key, {})
         self.intermediate_target_pos = current_node.get('pos')
         self.guidance_text = current_node.get('name', '')
-        # 현재 안내 중인 중간 목표가 속한 지형 그룹을 '예상 그룹'으로 설정
-        self.expected_terrain_group = current_node.get('group')
+        self.expected_terrain_group = current_node.get('group') 
 
         if not self.intermediate_target_pos: return
 
@@ -6160,8 +6182,9 @@ class MapTab(QWidget):
         
         # 일반 도착 판정
         arrival_threshold = self._get_arrival_threshold(current_node.get('type'))
-        target_floor = self._get_floor_from_closest_terrain_data(self.intermediate_target_pos, self.geometry_data.get("terrain_lines", []))
-        floor_matches = abs(self.current_player_floor - target_floor) < 0.1
+        # --- [수정] 목표 층 계산 로직을 _get_contact_terrain 대신 nav_nodes에서 직접 가져오도록 변경하여 안정성 향상 ---
+        target_floor = current_node.get('floor')
+        floor_matches = target_floor is None or abs(self.current_player_floor - target_floor) < 0.1
         distance_to_target = abs(final_player_pos.x() - self.intermediate_target_pos.x())
 
         if distance_to_target < arrival_threshold and floor_matches:
@@ -6173,6 +6196,7 @@ class MapTab(QWidget):
                 self.last_reached_wp_id = self.journey_plan[self.current_journey_index]
                 self.current_journey_index += 1
                 self.current_segment_path = []
+                self.expected_terrain_group = None # 구간 완료 시 예상 그룹 초기화
                 wp_name = self.nav_nodes.get(f"wp_{self.last_reached_wp_id}", {}).get('name')
                 self.update_general_log(f"'{wp_name}' 도착. 다음 구간으로 진행합니다.", "green")
             else:
@@ -6188,11 +6212,8 @@ class MapTab(QWidget):
 
                 if next_action_state:
                     self._transition_to_action_state(next_action_state, current_node_key)
-                # --- [수정된 부분] ---
-                # 경로 인덱스를 바로 증가시키지 않고 상태 전환만 수행합니다.
-                # 인덱스 증가는 액션이 완료된 후 _process_action_completion 에서 처리됩니다.
                 else:
-                    # 다음 노드가 일반 '걷기' 노드일 경우에만 인덱스를 즉시 증가시킵니다.
+                    # [수정] 다음 노드가 액션이 아닌 일반 '걷기' 노드일 경우에만 인덱스를 즉시 증가
                     self.current_segment_index = next_index
             return
 
@@ -6654,7 +6675,7 @@ class MapTab(QWidget):
 
             terrain_lines = self.geometry_data.get("terrain_lines", [])
 
-            FLOOR_CHANGE_PENALTY = 300.0
+            FLOOR_CHANGE_PENALTY = 5.0
             CLIMB_UP_COST_MULTIPLIER = 1.5
             CLIMB_DOWN_COST_MULTIPLIER = 5.0
             JUMP_COST_MULTIPLIER = 1.2
