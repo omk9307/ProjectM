@@ -5835,7 +5835,19 @@ class MapTab(QWidget):
         path, cost = self._find_path_astar(start_node_key, goal_node_key)
         
         if path:
-            self.current_segment_path = path
+            # --- [새로운 부분 시작: 경로 가지치기 로직] ---
+            # 경로의 첫 노드가 경유할 필요 없는 웨이포인트인지 확인
+            if len(path) > 1 and path[0].startswith("wp_"):
+                # 시작 노드(path[0])가 최종 목적지(goal_node_key)가 아닌 경우에만 가지치기
+                if path[0] != goal_node_key:
+                    print(f"[Path Pruning] 불필요한 시작 웨이포인트('{self.nav_nodes.get(path[0], {}).get('name')}')를 경로에서 제거합니다.")
+                    self.current_segment_path = path[1:] # 첫 번째 웨이포인트를 건너뛰고 경로 설정
+                else:
+                    self.current_segment_path = path # 시작점이 곧 목적지이므로 그대로 사용
+            else:
+                 self.current_segment_path = path # 웨이포인트가 아니거나 경로가 하나뿐인 경우 그대로 사용
+            # --- [새로운 부분 끝] ---
+
             self.current_segment_index = 0
             
             # 실제 총 비용 = (현재 위치에서 프록시 시작점까지의 거리) + (A* 경로 비용)
@@ -5844,7 +5856,8 @@ class MapTab(QWidget):
             start_name = self.nav_nodes.get(start_node_key, {}).get('name', '???')
             goal_name = self.nav_nodes.get(goal_node_key, {}).get('name', '??')
             log_msg = f"[경로 탐색 성공] '{start_name}' -> '{goal_name}' (총 비용: {realistic_cost:.1f})"
-            path_str = " -> ".join([self.nav_nodes.get(p, {}).get('name', '??') for p in path])
+            # --- [수정] 가지치기 후의 최종 경로를 로그에 표시 ---
+            path_str = " -> ".join([self.nav_nodes.get(p, {}).get('name', '??') for p in self.current_segment_path])
             log_msg += f"\n[상세 경로] {path_str}"
             print(log_msg)
             self.update_general_log(log_msg.replace('\n', '<br>'), 'SaddleBrown')
@@ -6651,10 +6664,10 @@ class MapTab(QWidget):
             terrain_lines = self.geometry_data.get("terrain_lines", [])
 
             FLOOR_CHANGE_PENALTY = 300.0
-            CLIMB_UP_COST_MULTIPLIER = 2.0
-            CLIMB_DOWN_COST_MULTIPLIER = 1.5
+            CLIMB_UP_COST_MULTIPLIER = 1.5
+            CLIMB_DOWN_COST_MULTIPLIER = 5.0
             JUMP_COST_MULTIPLIER = 1.2
-            FALL_COST_MULTIPLIER = 1.8
+            FALL_COST_MULTIPLIER = 1.5
 
             # --- 1. 모든 잠재적 노드 생성 및 역할(walkable) 부여 ---
             for wp in self.geometry_data.get("waypoints", []):
