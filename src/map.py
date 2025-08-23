@@ -3489,8 +3489,6 @@ class RealtimeMinimapView(QLabel):
                 # 목표 웨이포인트 ID 찾기
                 target_wp_id_for_render = self.target_waypoint_id
                 if self.navigation_action.startswith('prepare_to_') or self.navigation_action.endswith('_in_progress'):
-                    # 행동 중일 때는 intermediate_target이 최종 목표가 아닐 수 있음
-                    # 이 경우 target_waypoint_id가 최종 목표임
                     pass
                 else: # move_to_target
                     target_wp_id_for_render = self.target_waypoint_id
@@ -5834,7 +5832,7 @@ class MapTab(QWidget):
 
     def _transition_to_action_state(self, new_action_state, prev_node_key):
         """주어진 액션 준비 상태로 전환합니다."""
-        if self.navigation_action == new_action_state: return # 이미 해당 상태이면 변경 안함
+        if self.navigation_action == new_action_state: return
         self.navigation_action = new_action_state
         self.prepare_timeout_start = time.time()
         prev_node_name = self.nav_nodes.get(prev_node_key, {}).get('name', '??')
@@ -5843,10 +5841,8 @@ class MapTab(QWidget):
 
     def _process_action_preparation(self, final_player_pos):
         """'prepare_to_...' 상태일 때, 이탈 또는 액션 시작을 판정합니다."""
-        action_node_key_index = self.current_segment_index - 1
-        if action_node_key_index < 0: return
-
-        action_node_key = self.current_segment_path[action_node_key_index]
+        # 액션 시작점은 항상 현재 세그먼트 인덱스
+        action_node_key = self.current_segment_path[self.current_segment_index]
         action_node = self.nav_nodes.get(action_node_key, {})
         action_node_pos = action_node.get('pos')
         if not action_node_pos: return
@@ -5899,19 +5895,21 @@ class MapTab(QWidget):
         action_completed = False
         action_failed = False
         
+        # 예상 도착 지형 그룹 찾기
         expected_group = None
-        if self.current_segment_index > 0:
-            prev_node_key = self.current_segment_path[self.current_segment_index - 1]
-            next_node_key = self.current_segment_path[self.current_segment_index]
+        if self.current_segment_index < len(self.current_segment_path):
+            current_node_key = self.current_segment_path[self.current_segment_index]
             
-            edge_data = self.nav_graph.get(prev_node_key, {}).get(next_node_key, {})
-            if not edge_data: # 액션 노드인 경우
-                 for key, data in self.nav_graph.get(prev_node_key, {}).items():
-                    if 'target_group' in data:
-                        expected_group = data['target_group']
+            # 액션 간선을 찾아 target_group을 가져옴
+            if 'action' in self.navigation_action:
+                for edge_data in self.nav_graph.get(current_node_key, {}).values():
+                    if 'target_group' in edge_data:
+                        expected_group = edge_data['target_group']
                         break
-            else: # 일반 노드인 경우
-                expected_group = self.nav_nodes.get(next_node_key, {}).get('group')
+            # 일반 점프/사다리는 다음 노드의 그룹이 목표 그룹
+            elif self.current_segment_index + 1 < len(self.current_segment_path):
+                 next_node_key = self.current_segment_path[self.current_segment_index + 1]
+                 expected_group = self.nav_nodes.get(next_node_key, {}).get('group')
 
         if expected_group and contact_terrain and contact_terrain.get('dynamic_name') != expected_group:
             action_failed = True
@@ -5937,223 +5935,77 @@ class MapTab(QWidget):
             print(f"[INFO] 행동 완료: {self.navigation_action}")
             self.navigation_action = 'move_to_target'
             self.navigation_state_locked = False
+            self.current_segment_index += 1 # 액션이 성공적으로 끝나면 다음 단계로 진행
 
     def _update_player_state_and_navigation(self, final_player_pos):
             """
-            v12.3.7: A* 경로 계획을 기반으로 플레이어 상태를 판정하고 다음 행동을 결정합니다.
+            v12.4.0: A* 경로 계획을 기반으로 플레이어 상태를 판정하고 다음 행동을 결정합니다.
+            상태 머신 로직을 리팩토링하여 안정성을 강화했습니다.
             """
             current_terrain_name = ""
             contact_terrain = self._get_contact_terrain(final_player_pos)
-            terrain_lines = self.geometry_data.get("terrain_lines", [])
-
+            
             if contact_terrain:
                 self.current_player_floor = contact_terrain.get('floor')
                 current_terrain_name = contact_terrain.get('dynamic_name', '')
-                self.last_terrain_line_id = contact_terrain.get('id')
             
             if final_player_pos is None or self.current_player_floor is None:
                 self.navigator_display.update_data("N/A", "", "없음", "", "", "-", 0, [], None, None, self.is_forward, 'walk', "대기 중", "오류: 위치/층 정보 없음")
                 return
             
             # Phase 0: 타임아웃
-            if self.navigation_state_locked and (time.time() - self.lock_timeout_start > MAX_LOCK_DURATION):
-                self.update_general_log(f"경고: 행동 잠금({self.navigation_action})이 {MAX_LOCK_DURATION}초를 초과하여 강제 해제됩니다.", "orange")
+            if (self.navigation_state_locked and (time.time() - self.lock_timeout_start > MAX_LOCK_DURATION)) or \
+               (self.navigation_action.startswith('prepare_to_') and (time.time() - self.prepare_timeout_start > PREPARE_TIMEOUT)):
+                self.update_general_log(f"경고: 행동({self.navigation_action}) 시간 초과. 경로를 재탐색합니다.", "orange")
+                self.navigation_action = 'move_to_target'
                 self.navigation_state_locked = False
-                self.navigation_action = 'move_to_target'
-                self.current_segment_path = []
-
-            if self.navigation_action.startswith('prepare_to_') and (time.time() - self.prepare_timeout_start > PREPARE_TIMEOUT):
-                self.update_general_log(f"경고: 행동 준비({self.navigation_action})가 {PREPARE_TIMEOUT}초를 초과하여 경로를 재탐색합니다.", "orange")
-                self.navigation_action = 'move_to_target'
                 self.current_segment_path = []
             
             # Phase 1: 물리적 상태 판정
             self.player_state = self._determine_player_physical_state(final_player_pos, contact_terrain)
 
-            # Phase 2: 행동 완료 및 실패 판정
+            # Phase 2: 행동 완료/실패 판정 (잠금 상태일 때만)
             if self.navigation_state_locked and self.player_state == 'on_terrain':
                 self._process_action_completion(final_player_pos, contact_terrain)
 
-            # Phase 3: 경로 계획
+            # Phase 3: 경로 계획 (필요 시)
             active_route = self.route_profiles.get(self.active_route_profile_name)
-            if not active_route:
-                self.last_player_pos = final_player_pos
-                return
+            if not active_route: self.last_player_pos = final_player_pos; return
 
             if not self.journey_plan or self.current_journey_index >= len(self.journey_plan):
                 self._plan_next_journey(active_route)
-
             if self.journey_plan and not self.start_waypoint_found:
                 self._find_start_waypoint(final_player_pos)
-            
             if self.start_waypoint_found and not self.current_segment_path:
                 self._calculate_segment_path(final_player_pos)
 
-            # Phase 4: 중간 목표 설정 및 상태 관리
-            self._update_intermediate_target_and_state(final_player_pos, terrain_lines)
+            # Phase 4: 상태에 따른 핵심 로직 처리
+            if self.navigation_state_locked:
+                self._handle_action_in_progress(final_player_pos)
+            elif self.navigation_action.startswith('prepare_to_'):
+                self._handle_action_preparation(final_player_pos)
+            else: # move_to_target
+                self._handle_move_to_target(final_player_pos)
 
             # Phase 5: UI 업데이트
             self._update_navigator_and_view(final_player_pos, current_terrain_name)
-            
             self.last_player_pos = final_player_pos
-            
-    def _update_intermediate_target_and_state(self, final_player_pos, terrain_lines):
-        """
-        [v12.3.7] 현재 경로 단계에 따라 중간 목표를 설정하고, 필요 시 네비게이션 상태를 전환합니다.
-        """
-        if not (self.current_segment_path and self.current_segment_index < len(self.current_segment_path)):
-            self.intermediate_target_pos = None
-            return
-
-        current_node_key = self.current_segment_path[self.current_segment_index]
-        current_node = self.nav_nodes.get(current_node_key, {})
-        
-        # 1. 기본 중간 목표 설정
-        self.intermediate_target_pos = current_node.get('pos')
-        self.guidance_text = current_node.get('name', '')
-
-        # 2. 상태가 잠겨있으면 더 이상 진행하지 않음
-        if self.navigation_state_locked:
-            return
-
-        # 3. 'prepare_to_...' 상태일 때의 처리
-        if self.navigation_action.startswith('prepare_to_'):
-            # "아래 점프" 시 안내선 목표 동적 업데이트
-            if self.navigation_action == 'prepare_to_down_jump':
-                action_node_key = self.current_segment_path[self.current_segment_index - 1]
-                action_key_part = f"{action_node_key.split('_', 1)[1]}"
-                action_key = f"djump_action_{action_key_part}"
-                target_group = self.nav_graph.get(action_node_key, {}).get(action_key, {}).get('target_group')
-                if target_group:
-                    target_floor_line = next((line for line in terrain_lines if line.get('dynamic_name') == target_group), None)
-                    if target_floor_line:
-                        target_y = target_floor_line['points'][0][1]
-                        self.intermediate_target_pos = QPointF(final_player_pos.x(), target_y)
-
-            self._process_action_preparation(final_player_pos)
-            return
-
-        # 4. 'move_to_target' 상태일 때의 처리
-        # 4a. '아래 점프' 구간 특별 처리
-        if current_node.get('type') == 'djump_area':
-            x_range = current_node.get('x_range')
-            if x_range and x_range[0] <= final_player_pos.x() <= x_range[1]:
-                self._transition_to_action_state('prepare_to_down_jump', current_node_key)
-                return
-        
-        # 4b. 일반 도착 판정
-        arrival_threshold = self._get_arrival_threshold(current_node.get('type'))
-        target_floor = self._get_floor_from_closest_terrain_data(self.intermediate_target_pos, terrain_lines)
-        floor_matches = abs(self.current_player_floor - target_floor) < 0.1
-        distance_to_target = abs(final_player_pos.x() - self.intermediate_target_pos.x())
-
-        if distance_to_target < arrival_threshold and floor_matches:
-            # 4c. 도착 후 다음 단계로 전환
-            next_index = self.current_segment_index + 1
-            if next_index >= len(self.current_segment_path):
-                self.last_reached_wp_id = self.journey_plan[self.current_journey_index]
-                self.current_journey_index += 1
-                self.current_segment_path = []
-                wp_name = self.nav_nodes.get(f"wp_{self.last_reached_wp_id}", {}).get('name')
-                self.update_general_log(f"'{wp_name}' 도착. 다음 구간으로 진행합니다.", "green")
-            else:
-                next_node_key = self.current_segment_path[next_index]
-                edge_data = self.nav_graph.get(current_node_key, {}).get(next_node_key, {})
-                action = edge_data.get('action') if edge_data else None
-                
-                next_action_state = None
-                if action == 'climb': next_action_state = 'prepare_to_climb'
-                elif action == 'jump': next_action_state = 'prepare_to_jump'
-                elif action == 'fall': next_action_state = 'prepare_to_fall'
-                elif action == 'down_jump': next_action_state = 'prepare_to_down_jump'
-
-                if next_action_state:
-                    self.current_segment_index += 1
-                    self._transition_to_action_state(next_action_state, current_node_key)
-                else:
-                    self.current_segment_index += 1
-
-    def _update_intermediate_target_and_state(self, final_player_pos, terrain_lines):
-        """
-        [v12.3.6] 현재 경로 단계에 따라 중간 목표를 설정하고, 필요 시 네비게이션 상태를 전환합니다.
-        """
-        if not (self.current_segment_path and self.current_segment_index < len(self.current_segment_path)):
-            self.intermediate_target_pos = None
-            return
-
-        current_node_key = self.current_segment_path[self.current_segment_index]
-        current_node = self.nav_nodes.get(current_node_key, {})
-        
-        # 1. 기본 중간 목표 설정
-        self.intermediate_target_pos = current_node.get('pos')
-        self.guidance_text = current_node.get('name', '')
-
-        # 2. 상태가 잠겨있으면 더 이상 진행하지 않음
-        if self.navigation_state_locked:
-            return
-
-        # 3. 'prepare_to_...' 상태일 때의 처리 (이탈 또는 액션 시작)
-        if self.navigation_action.startswith('prepare_to_'):
-            self._process_action_preparation(final_player_pos)
-            return
-
-        # 4. 'move_to_target' 상태일 때의 처리 (도착 또는 상태 전환)
-        if self.navigation_action == 'move_to_target':
-            # 4a. '아래 점프' 구간 특별 처리
-            if current_node.get('type') == 'djump_area':
-                x_range = current_node.get('x_range')
-                if x_range and x_range[0] <= final_player_pos.x() <= x_range[1]:
-                    self._transition_to_action_state('prepare_to_down_jump', current_node_key)
-                    return
-            
-            # 4b. 일반 도착 판정
-            arrival_threshold = self._get_arrival_threshold(current_node.get('type'))
-            target_floor = self._get_floor_from_closest_terrain_data(self.intermediate_target_pos, terrain_lines)
-            floor_matches = abs(self.current_player_floor - target_floor) < 0.1
-            distance_to_target = abs(final_player_pos.x() - self.intermediate_target_pos.x())
-
-            if distance_to_target < arrival_threshold and floor_matches:
-                print(f"[INFO] 중간 목표 '{self.guidance_text}' 도착.")
-                
-                # 4c. 도착 후 다음 단계로 전환
-                next_index = self.current_segment_index + 1
-                if next_index >= len(self.current_segment_path):
-                    # 구간 완료
-                    self.last_reached_wp_id = self.journey_plan[self.current_journey_index]
-                    self.current_journey_index += 1
-                    self.current_segment_path = []
-                    wp_name = self.nav_nodes.get(f"wp_{self.last_reached_wp_id}", {}).get('name')
-                    self.update_general_log(f"'{wp_name}' 도착. 다음 구간으로 진행합니다.", "green")
-                else:
-                    # 다음 단계가 액션인지 확인하고 상태 전환
-                    next_node_key = self.current_segment_path[next_index]
-                    edge_data = self.nav_graph.get(current_node_key, {}).get(next_node_key, {})
-                    action = edge_data.get('action') if edge_data else None
-
-                    next_action_state = None
-                    if action == 'climb': next_action_state = 'prepare_to_climb'
-                    elif action == 'jump': next_action_state = 'prepare_to_jump'
-                    elif action == 'fall': next_action_state = 'prepare_to_fall'
-
-                    if next_action_state:
-                        self.current_segment_index += 1
-                        self._transition_to_action_state(next_action_state, current_node_key)
-                    else: # 다음도 걷기라면 인덱스만 증가
-                        self.current_segment_index += 1
 
     def _update_navigator_and_view(self, final_player_pos, current_terrain_name):
-        """계산된 모든 상태를 기반으로 UI 위젯들을 업데이트합니다."""
+        """
+        [v12.4.5] 계산된 모든 상태를 기반으로 UI 위젯들을 업데이트합니다.
+        목표가 실제 웨이포인트인지 경유지인지 구분하여 안내 정확도를 높입니다.
+        """
         all_waypoints_map = {wp['id']: wp for wp in self.geometry_data.get("waypoints", [])}
         prev_name, next_name, direction, distance = "", "", "-", 0
         
         if self.intermediate_target_pos:
-                    # [v12.3.2] 아래 점프 시 거리/방향을 y축 기준으로 표시
-                    if self.navigation_action == 'prepare_to_down_jump':
-                        distance = abs(final_player_pos.y() - self.intermediate_target_pos.y())
-                        direction = "↓"
-                    else:
-                        distance = abs(final_player_pos.x() - self.intermediate_target_pos.x())
-                        direction = "→" if final_player_pos.x() < self.intermediate_target_pos.x() else "←"
+            if self.navigation_action == 'prepare_to_down_jump':
+                distance = abs(final_player_pos.y() - self.intermediate_target_pos.y())
+                direction = "↓"
+            else:
+                distance = abs(final_player_pos.x() - self.intermediate_target_pos.x())
+                direction = "→" if final_player_pos.x() < self.intermediate_target_pos.x() else "←"
 
         if self.start_waypoint_found and self.journey_plan:
             if self.current_journey_index > 0:
@@ -6177,13 +6029,22 @@ class MapTab(QWidget):
         player_state_text = state_text_map.get(self.player_state, '알 수 없음')
         nav_action_text = action_text_map.get(self.navigation_action, '대기 중')
         
-        # 중간 목표 타입 결정 (UI 표시용)
-        self.intermediate_target_type = 'walk'
-        if self.navigation_action == 'prepare_to_climb' or self.navigation_action == 'climb_in_progress': self.intermediate_target_type = 'climb'
-        elif self.navigation_action == 'prepare_to_jump' or self.navigation_action == 'jump_in_progress': self.intermediate_target_type = 'jump'
-        elif self.navigation_action == 'prepare_to_fall' or self.navigation_action == 'fall_in_progress': self.intermediate_target_type = 'fall'
-        elif self.navigation_action == 'prepare_to_down_jump': self.intermediate_target_type = 'fall' # 아래점프도 fall 아이콘 사용
+        # [v12.4.5] 중간 목표 타입 결정 로직 수정
+        final_intermediate_type = 'walk' # 기본값
+        if self.current_segment_path and self.current_segment_index < len(self.current_segment_path):
+            current_node_key = self.current_segment_path[self.current_segment_index]
+            current_node_type = self.nav_nodes.get(current_node_key, {}).get('type')
+
+            if self.navigation_action.startswith('prepare_to_') or self.navigation_action.endswith('_in_progress'):
+                if 'climb' in self.navigation_action: final_intermediate_type = 'climb'
+                elif 'jump' in self.navigation_action: final_intermediate_type = 'jump'
+                elif 'fall' in self.navigation_action or 'down_jump' in self.navigation_action: final_intermediate_type = 'fall'
+            elif current_node_type != 'waypoint':
+                # 걷기 상태이지만, 목표가 WP가 아닌 경유지(사다리 입구 등)인 경우
+                final_intermediate_type = 'via_point'
         
+        self.intermediate_target_type = final_intermediate_type # 내부 상태도 갱신
+
         self.navigator_display.update_data(
             floor=self.current_player_floor if self.current_player_floor is not None else "N/A",
             terrain_name=current_terrain_name,
@@ -6202,8 +6063,118 @@ class MapTab(QWidget):
             target_wp_id=self.target_waypoint_id, reached_wp_id=self.last_reached_wp_id,
             final_player_pos=final_player_pos, is_forward=self.is_forward,
             intermediate_pos=self.intermediate_target_pos,
-            intermediate_type=self.intermediate_target_type, nav_action=self.navigation_action
+            intermediate_type=self.intermediate_target_type, # 수정된 타입을 전달
+            nav_action=self.navigation_action
         )
+        
+    def _handle_move_to_target(self, final_player_pos):
+        """'move_to_target' 상태일 때의 도착 판정, 상태 전환, 이탈 판정을 처리합니다."""
+        if not (self.current_segment_path and self.current_segment_index < len(self.current_segment_path)):
+            return
+
+        current_node_key = self.current_segment_path[self.current_segment_index]
+        current_node = self.nav_nodes.get(current_node_key, {})
+        self.intermediate_target_pos = current_node.get('pos')
+        self.guidance_text = current_node.get('name', '')
+
+        if not self.intermediate_target_pos: return
+
+        # '아래 점프' 구간 특별 처리
+        if current_node.get('type') == 'djump_area':
+            x_range = current_node.get('x_range')
+            representative_pos = current_node.get('pos')
+            
+            is_in_x_range = x_range and x_range[0] <= final_player_pos.x() <= x_range[1]
+            distance_to_reppoint = abs(final_player_pos.x() - representative_pos.x())
+            is_near_enough = distance_to_reppoint < self._get_arrival_threshold('djump_area') * 2.5 # 임계값의 2.5배 이내 근접 시
+            
+            if is_in_x_range and is_near_enough:
+                self._transition_to_action_state('prepare_to_down_jump', current_node_key)
+                return
+        
+        # 일반 도착 판정
+        arrival_threshold = self._get_arrival_threshold(current_node.get('type'))
+        target_floor = self._get_floor_from_closest_terrain_data(self.intermediate_target_pos, self.geometry_data.get("terrain_lines", []))
+        floor_matches = abs(self.current_player_floor - target_floor) < 0.1
+        distance_to_target = abs(final_player_pos.x() - self.intermediate_target_pos.x())
+
+        if distance_to_target < arrival_threshold and floor_matches:
+            print(f"[INFO] 중간 목표 '{self.guidance_text}' 도착.")
+            
+            next_index = self.current_segment_index + 1
+            if next_index >= len(self.current_segment_path):
+                # 구간 완료
+                self.last_reached_wp_id = self.journey_plan[self.current_journey_index]
+                self.current_journey_index += 1
+                self.current_segment_path = []
+                wp_name = self.nav_nodes.get(f"wp_{self.last_reached_wp_id}", {}).get('name')
+                self.update_general_log(f"'{wp_name}' 도착. 다음 구간으로 진행합니다.", "green")
+            else:
+                # 다음 단계가 액션인지 확인하고 상태 전환
+                next_node_key = self.current_segment_path[next_index]
+                edge_data = self.nav_graph.get(current_node_key, {}).get(next_node_key, {})
+                action = edge_data.get('action') if edge_data else None
+                
+                next_action_state = None
+                if action == 'climb': next_action_state = 'prepare_to_climb'
+                elif action == 'jump': next_action_state = 'prepare_to_jump'
+                elif action == 'fall': next_action_state = 'prepare_to_fall'
+
+                if next_action_state:
+                    self._transition_to_action_state(next_action_state, current_node_key)
+                
+                self.current_segment_index = next_index
+            return
+        
+        # 걷기 중 이탈 판정
+        recalc_cooldown = 1.0
+        if time.time() - self.last_path_recalculation_time > recalc_cooldown:
+            current_terrain = self._get_contact_terrain(final_player_pos)
+            current_group = current_terrain.get('dynamic_name') if current_terrain else None
+            target_node_group = current_node.get('group')
+            
+            if current_group and target_node_group and current_group != target_node_group:
+                self.update_general_log(f"[경로 이탈 감지] 다른 지형 그룹으로 이동했습니다. 경로를 다시 계산합니다.", "orange")
+                print(f"[INFO] 경로 이탈 감지 (걷기 중). 목표 그룹: {target_node_group}, 현재 그룹: {current_group}")
+                self.current_segment_path = []
+                self.last_path_recalculation_time = time.time()
+
+    def _handle_action_preparation(self, final_player_pos):
+        """'prepare_to_...' 상태일 때의 모든 로직을 담당합니다."""
+        # [v12.4.3] 목표 설정 로직을 맨 위로 이동 및 강화
+        action_node_key = self.current_segment_path[self.current_segment_index]
+        
+        if self.navigation_action == 'prepare_to_down_jump':
+            self.guidance_text = "아래로 점프하세요"
+            action_key_part = f"{action_node_key.split('_', 1)[1]}"
+            action_key = f"djump_action_{action_key_part}"
+            target_group = self.nav_graph.get(action_node_key, {}).get(action_key, {}).get('target_group')
+            if target_group:
+                target_line = next((line for line in self.geometry_data.get("terrain_lines", []) if line.get('dynamic_name') == target_group), None)
+                if target_line:
+                    # 아래층 지형의 정확한 y좌표 계산
+                    p1, p2 = target_line['points'][0], target_line['points'][-1]
+                    target_y = p1[1] + (p2[1] - p1[1]) * ((final_player_pos.x() - p1[0]) / (p2[0] - p1[0])) if (p2[0] - p1[0]) != 0 else p1[1]
+                    self.intermediate_target_pos = QPointF(final_player_pos.x(), target_y)
+        
+        elif self.current_segment_index + 1 < len(self.current_segment_path):
+            next_node_key = self.current_segment_path[self.current_segment_index + 1]
+            next_node = self.nav_nodes.get(next_node_key)
+            if next_node:
+                self.intermediate_target_pos = next_node.get('pos')
+                self.guidance_text = next_node.get('name', '')
+        
+        # 이하 액션 시작 및 이탈 판정 로직은 기존과 동일
+        self._process_action_preparation(final_player_pos)
+
+    def _handle_action_in_progress(self, final_player_pos):
+        """'..._in_progress' 상태일 때의 로직을 담당합니다."""
+        # 목표는 액션의 출구 또는 가상 착지 지점을 계속 유지
+        if self.current_segment_index + 1 < len(self.current_segment_path):
+            next_node_key = self.current_segment_path[self.current_segment_index + 1]
+            if next_node_key in self.nav_nodes:
+                self.intermediate_target_pos = self.nav_nodes[next_node_key]['pos']
+                self.guidance_text = self.nav_nodes[next_node_key]['name']
 
     def _get_terrain_id_from_vertex(self, vertex_pos):
         """주어진 꼭짓점(vertex) 좌표에 연결된 지형선 ID를 반환합니다."""
