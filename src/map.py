@@ -6104,7 +6104,10 @@ class MapTab(QWidget):
         )
         
     def _handle_move_to_target(self, final_player_pos):
-        """'move_to_target' 상태일 때의 도착 판정, 상태 전환, 이탈 판정을 처리합니다."""
+        """
+        v12.8.4: [수정] '낭떠러지'나 '아래 점프' 지점 도착 시, 다음 경로를 확인하기 전에 먼저 해당 노드가 유발하는 액션을 확인하고 상태를 전환하도록 수정하여 경로 실행 오류를 해결합니다.
+        'move_to_target' 상태일 때의 도착 판정, 상태 전환, 이탈 판정을 처리합니다.
+        """
         if not (self.current_segment_path and self.current_segment_index < len(self.current_segment_path)):
             self.expected_terrain_group = None
             return
@@ -6132,13 +6135,35 @@ class MapTab(QWidget):
         
         # 일반 도착 판정
         arrival_threshold = self._get_arrival_threshold(current_node.get('type'))
-        # --- [수정] 목표 층 계산 로직을 _get_contact_terrain 대신 nav_nodes에서 직접 가져오도록 변경하여 안정성 향상 ---
         target_floor = current_node.get('floor')
         floor_matches = target_floor is None or abs(self.current_player_floor - target_floor) < 0.1
         distance_to_target = abs(final_player_pos.x() - self.intermediate_target_pos.x())
 
         if distance_to_target < arrival_threshold and floor_matches:
             print(f"[INFO] 중간 목표 '{self.guidance_text}' 도착.")
+
+            # --- [v12.8.4 수정] 도착한 노드가 액션(낙하 등)을 유발하는지 먼저 확인 ---
+            found_action = None
+            # 현재 노드에서 나가는 모든 간선을 검사
+            for neighbor_key, edge_data in self.nav_graph.get(current_node_key, {}).items():
+                # 이웃 노드가 nav_nodes에 없다면, 'fall_action_...', 'djump_action_...' 같은 가상 액션 노드임
+                if neighbor_key not in self.nav_nodes:
+                    action = edge_data.get('action')
+                    if action in ['fall', 'down_jump']:
+                        found_action = action
+                        break # 첫 번째 발견된 액션을 사용
+
+            if found_action:
+                next_action_state = None
+                # 'down_jump'도 'fall'과 동일하게 'prepare_to_fall' 상태로 처리
+                if found_action == 'fall' or found_action == 'down_jump':
+                    next_action_state = 'prepare_to_fall'
+                
+                if next_action_state:
+                    self._transition_to_action_state(next_action_state, current_node_key)
+                    # 액션 상태로 전환했으므로, 여기서 처리를 종료하고 다음 프레임을 기다림
+                    return
+            # --- 수정 끝 ---
             
             next_index = self.current_segment_index + 1
             if next_index >= len(self.current_segment_path):
@@ -6158,12 +6183,11 @@ class MapTab(QWidget):
                 next_action_state = None
                 if action == 'climb': next_action_state = 'prepare_to_climb'
                 elif action == 'jump': next_action_state = 'prepare_to_jump'
-                elif action == 'fall' or action == 'climb_down': next_action_state = 'prepare_to_fall'
+                elif action == 'climb_down': next_action_state = 'prepare_to_fall'
 
                 if next_action_state:
                     self._transition_to_action_state(next_action_state, current_node_key)
                 else:
-                    # [수정] 다음 노드가 액션이 아닌 일반 '걷기' 노드일 경우에만 인덱스를 즉시 증가
                     self.current_segment_index = next_index
             return
 
@@ -6613,136 +6637,153 @@ class MapTab(QWidget):
         return closest_node_key, math.sqrt(min_dist_sq) if closest_node_key else float('inf')
     
     def _build_navigation_graph(self, waypoint_ids_in_route=None):
-            """
-            v12.8.2: [수정] 사다리 노드(ladder_entry, ladder_exit) 생성 시, 연결된 지형의 층(floor) 정보를 명시적으로 추가하여 도착 판정 오류를 해결합니다.
-            v12.6.1: [수정] 누락되었던 is_obstructed 충돌 검사 로직을 복원하여 프로필 로드 오류를 해결합니다.
-            """
-            self.nav_nodes.clear()
-            self.nav_graph = defaultdict(dict)
+        """
+        v12.8.3: [수정] '낭떠러지' 및 '아래 점프' 노드가 경로 탐색에 포함되도록, walkable 노드와의 연결(간선)을 자동으로 생성하는 로직을 추가합니다.
+        v12.8.2: [수정] 사다리 노드(ladder_entry, ladder_exit) 생성 시, 연결된 지형의 층(floor) 정보를 명시적으로 추가하여 도착 판정 오류를 해결합니다.
+        v12.6.1: [수정] 누락되었던 is_obstructed 충돌 검사 로직을 복원하여 프로필 로드 오류를 해결합니다.
+        """
+        self.nav_nodes.clear()
+        self.nav_graph = defaultdict(dict)
 
-            if not self.geometry_data: return
-            if waypoint_ids_in_route is None:
-                waypoint_ids_in_route = [wp['id'] for wp in self.geometry_data.get("waypoints", [])]
+        if not self.geometry_data: return
+        if waypoint_ids_in_route is None:
+            waypoint_ids_in_route = [wp['id'] for wp in self.geometry_data.get("waypoints", [])]
 
-            terrain_lines = self.geometry_data.get("terrain_lines", [])
+        terrain_lines = self.geometry_data.get("terrain_lines", [])
 
-            FLOOR_CHANGE_PENALTY = 5.0
-            CLIMB_UP_COST_MULTIPLIER = 1.5
-            CLIMB_DOWN_COST_MULTIPLIER = 10.0
-            JUMP_COST_MULTIPLIER = 1.2
-            FALL_COST_MULTIPLIER = 1.5
+        FLOOR_CHANGE_PENALTY = 5.0
+        CLIMB_UP_COST_MULTIPLIER = 1.5
+        CLIMB_DOWN_COST_MULTIPLIER = 5.0
+        JUMP_COST_MULTIPLIER = 1.2
+        FALL_COST_MULTIPLIER = 1.5
 
-            # --- 1. 모든 잠재적 노드 생성 및 역할(walkable) 부여 ---
-            for wp in self.geometry_data.get("waypoints", []):
-                if wp['id'] in waypoint_ids_in_route:
-                    key = f"wp_{wp['id']}"
-                    contact_terrain = self._get_contact_terrain(QPointF(*wp['pos']))
-                    group = contact_terrain.get('dynamic_name') if contact_terrain else None
-                    self.nav_nodes[key] = {'type': 'waypoint', 'pos': QPointF(*wp['pos']), 'floor': wp.get('floor'), 'name': wp.get('name'), 'id': wp['id'], 'group': group, 'walkable': True}
+        # --- 1. 모든 잠재적 노드 생성 및 역할(walkable) 부여 ---
+        for wp in self.geometry_data.get("waypoints", []):
+            if wp['id'] in waypoint_ids_in_route:
+                key = f"wp_{wp['id']}"
+                contact_terrain = self._get_contact_terrain(QPointF(*wp['pos']))
+                group = contact_terrain.get('dynamic_name') if contact_terrain else None
+                self.nav_nodes[key] = {'type': 'waypoint', 'pos': QPointF(*wp['pos']), 'floor': wp.get('floor'), 'name': wp.get('name'), 'id': wp['id'], 'group': group, 'walkable': True}
 
-            for obj in self.geometry_data.get("transition_objects", []):
-                p1, p2 = QPointF(*obj['points'][0]), QPointF(*obj['points'][1])
-                entry_pos, exit_pos = (p1, p2) if p1.y() > p2.y() else (p2, p1)
-                entry_key, exit_key = f"ladder_entry_{obj['id']}", f"ladder_exit_{obj['id']}"
-                
-                # [v12.8.2 수정] 각 지점의 지형 정보를 가져와 층(floor)과 그룹(group) 정보를 추출
-                entry_terrain, exit_terrain = self._get_contact_terrain(entry_pos), self._get_contact_terrain(exit_pos)
-                entry_group = entry_terrain.get('dynamic_name') if entry_terrain else None
-                exit_group = exit_terrain.get('dynamic_name') if exit_terrain else None
-                entry_floor = entry_terrain.get('floor') if entry_terrain else None
-                exit_floor = exit_terrain.get('floor') if exit_terrain else None
-                
-                base_name = obj.get('dynamic_name', obj['id'])
-                
-                # [v12.8.2 수정] 노드 정보에 'floor' 키 추가
-                self.nav_nodes[entry_key] = {'type': 'ladder_entry', 'pos': entry_pos, 'obj_id': obj['id'], 'name': f"{base_name} (입구)", 'group': entry_group, 'walkable': True, 'floor': entry_floor}
-                self.nav_nodes[exit_key] = {'type': 'ladder_exit', 'pos': exit_pos, 'obj_id': obj['id'], 'name': f"{base_name} (출구)", 'group': exit_group, 'walkable': True, 'floor': exit_floor}
-                
-                y_diff = abs(entry_pos.y() - exit_pos.y())
-                cost_up, cost_down = (y_diff * CLIMB_UP_COST_MULTIPLIER) + FLOOR_CHANGE_PENALTY, (y_diff * CLIMB_DOWN_COST_MULTIPLIER) + FLOOR_CHANGE_PENALTY
-                self.nav_graph[entry_key][exit_key] = {'cost': cost_up, 'action': 'climb'}
-                self.nav_graph[exit_key][entry_key] = {'cost': cost_down, 'action': 'climb_down'}
+        for obj in self.geometry_data.get("transition_objects", []):
+            p1, p2 = QPointF(*obj['points'][0]), QPointF(*obj['points'][1])
+            entry_pos, exit_pos = (p1, p2) if p1.y() > p2.y() else (p2, p1)
+            entry_key, exit_key = f"ladder_entry_{obj['id']}", f"ladder_exit_{obj['id']}"
+            
+            entry_terrain, exit_terrain = self._get_contact_terrain(entry_pos), self._get_contact_terrain(exit_pos)
+            entry_group = entry_terrain.get('dynamic_name') if entry_terrain else None
+            exit_group = exit_terrain.get('dynamic_name') if exit_terrain else None
+            entry_floor = entry_terrain.get('floor') if entry_terrain else None
+            exit_floor = exit_terrain.get('floor') if exit_terrain else None
+            
+            base_name = obj.get('dynamic_name', obj['id'])
+            
+            self.nav_nodes[entry_key] = {'type': 'ladder_entry', 'pos': entry_pos, 'obj_id': obj['id'], 'name': f"{base_name} (입구)", 'group': entry_group, 'walkable': True, 'floor': entry_floor}
+            self.nav_nodes[exit_key] = {'type': 'ladder_exit', 'pos': exit_pos, 'obj_id': obj['id'], 'name': f"{base_name} (출구)", 'group': exit_group, 'walkable': True, 'floor': exit_floor}
+            
+            y_diff = abs(entry_pos.y() - exit_pos.y())
+            cost_up, cost_down = (y_diff * CLIMB_UP_COST_MULTIPLIER) + FLOOR_CHANGE_PENALTY, (y_diff * CLIMB_DOWN_COST_MULTIPLIER) + FLOOR_CHANGE_PENALTY
+            self.nav_graph[entry_key][exit_key] = {'cost': cost_up, 'action': 'climb'}
+            self.nav_graph[exit_key][entry_key] = {'cost': cost_down, 'action': 'climb_down'}
 
-            for link in self.geometry_data.get("jump_links", []):
-                start_pos, end_pos = QPointF(*link['start_vertex_pos']), QPointF(*link['end_vertex_pos'])
-                key1, key2 = f"jump_{link['id']}_p1", f"jump_{link['id']}_p2"
-                start_terrain, end_terrain = self._get_contact_terrain(start_pos), self._get_contact_terrain(end_pos)
-                start_group, end_group = (start_terrain.get('dynamic_name') if start_terrain else None), (end_terrain.get('dynamic_name') if end_terrain else None)
-                base_name = link.get('dynamic_name', link['id'])
-                self.nav_nodes[key1] = {'type': 'jump_vertex', 'pos': start_pos, 'link_id': link['id'], 'name': f"{base_name} (시작점)", 'group': start_group, 'walkable': True}
-                self.nav_nodes[key2] = {'type': 'jump_vertex', 'pos': end_pos, 'link_id': link['id'], 'name': f"{base_name} (도착점)", 'group': end_group, 'walkable': True}
-                cost = math.hypot(start_pos.x() - end_pos.x(), start_pos.y() - end_pos.y()) * JUMP_COST_MULTIPLIER
-                if start_terrain and end_terrain and start_terrain.get('floor') != end_terrain.get('floor'):
-                    cost += FLOOR_CHANGE_PENALTY
-                self.nav_graph[key1][key2], self.nav_graph[key2][key1] = {'cost': cost, 'action': 'jump'}, {'cost': cost, 'action': 'jump'}
+        for link in self.geometry_data.get("jump_links", []):
+            start_pos, end_pos = QPointF(*link['start_vertex_pos']), QPointF(*link['end_vertex_pos'])
+            key1, key2 = f"jump_{link['id']}_p1", f"jump_{link['id']}_p2"
+            start_terrain, end_terrain = self._get_contact_terrain(start_pos), self._get_contact_terrain(end_pos)
+            start_group, end_group = (start_terrain.get('dynamic_name') if start_terrain else None), (end_terrain.get('dynamic_name') if end_terrain else None)
+            base_name = link.get('dynamic_name', link['id'])
+            self.nav_nodes[key1] = {'type': 'jump_vertex', 'pos': start_pos, 'link_id': link['id'], 'name': f"{base_name} (시작점)", 'group': start_group, 'walkable': True}
+            self.nav_nodes[key2] = {'type': 'jump_vertex', 'pos': end_pos, 'link_id': link['id'], 'name': f"{base_name} (도착점)", 'group': end_group, 'walkable': True}
+            cost = math.hypot(start_pos.x() - end_pos.x(), start_pos.y() - end_pos.y()) * JUMP_COST_MULTIPLIER
+            if start_terrain and end_terrain and start_terrain.get('floor') != end_terrain.get('floor'):
+                cost += FLOOR_CHANGE_PENALTY
+            self.nav_graph[key1][key2], self.nav_graph[key2][key1] = {'cost': cost, 'action': 'jump'}, {'cost': cost, 'action': 'jump'}
 
-            for line_above in terrain_lines:
-                group_above = line_above.get('dynamic_name')
-                for v_idx, vertex in enumerate([line_above['points'][0], line_above['points'][-1]]):
-                    for line_below in terrain_lines:
-                        if line_above['id'] == line_below['id'] or line_above['floor'] <= line_below['floor']: continue
-                        min_x, max_x = min(line_below['points'][0][0], line_below['points'][-1][0]), max(line_below['points'][0][0], line_below['points'][-1][0])
-                        if min_x <= vertex[0] <= max_x:
-                            is_obstructed = False
-                            for other_line in terrain_lines:
-                                if (other_line['id'] != line_above['id'] and other_line['id'] != line_below['id'] and
-                                    line_below['floor'] < other_line['floor'] < line_above['floor']):
-                                    other_min_x, other_max_x = min(other_line['points'][0][0], other_line['points'][-1][0]), max(other_line['points'][0][0], other_line['points'][-1][0])
-                                    if other_min_x <= vertex[0] <= other_max_x:
-                                        is_obstructed = True
-                                        break
-                            if is_obstructed: continue
-                            start_key = f"fall_start_{line_above['id']}_{v_idx}"
-                            self.nav_nodes[start_key] = {'type': 'fall_start', 'pos': QPointF(*vertex), 'name': f"{group_above} 낙하 지점", 'group': group_above, 'walkable': False}
-                            cost = (abs(vertex[1] - line_below['points'][0][1]) * FALL_COST_MULTIPLIER) + FLOOR_CHANGE_PENALTY
-                            target_group, action_key = line_below.get('dynamic_name'), f"fall_action_{line_above['id']}_{v_idx}_{line_below['id']}"
-                            self.nav_graph[start_key][action_key] = {'cost': cost, 'action': 'fall', 'target_group': target_group}
-                            break
-
+        for line_above in terrain_lines:
+            group_above = line_above.get('dynamic_name')
+            for v_idx, vertex in enumerate([line_above['points'][0], line_above['points'][-1]]):
                 for line_below in terrain_lines:
                     if line_above['id'] == line_below['id'] or line_above['floor'] <= line_below['floor']: continue
-                    y_above, y_below = line_above['points'][0][1], line_below['points'][0][1]
-                    y_diff = abs(y_above - y_below)
-                    if 0 < y_diff <= 70:
-                        ax1, ax2 = min(line_above['points'][0][0], line_above['points'][-1][0]), max(line_above['points'][0][0], line_above['points'][-1][0])
-                        bx1, bx2 = min(line_below['points'][0][0], line_below['points'][-1][0]), max(line_below['points'][0][0], line_below['points'][-1][0])
-                        overlap_x1, overlap_x2 = max(ax1, bx1), min(ax2, bx2)
-                        if overlap_x1 < overlap_x2:
-                            is_obstructed = False
-                            for other_line in terrain_lines:
-                                if (other_line['id'] != line_above['id'] and other_line['id'] != line_below['id'] and
-                                    line_below['floor'] < other_line['floor'] < line_above['floor']):
-                                    other_min_x, other_max_x = min(other_line['points'][0][0], other_line['points'][-1][0]), max(other_line['points'][0][0], other_line['points'][-1][0])
-                                    if max(overlap_x1, other_min_x) < min(overlap_x2, other_max_x):
-                                        is_obstructed = True
-                                        break
-                            if is_obstructed: continue
-                            start_key = f"djump_start_{line_above['id']}_{line_below['id']}"
-                            center_x = (overlap_x1 + overlap_x2) / 2.0
-                            start_pos = QPointF(center_x, y_above)
-                            self.nav_nodes[start_key] = {'type': 'djump_area', 'pos': start_pos, 'name': f"{group_above} 아래 점프 지점", 'group': group_above, 'x_range': [overlap_x1, overlap_x2], 'walkable': False}
-                            cost = (y_diff * FALL_COST_MULTIPLIER) + FLOOR_CHANGE_PENALTY
-                            target_group, action_key = line_below.get('dynamic_name'), f"djump_action_{line_above['id']}_{line_below['id']}"
-                            self.nav_graph[start_key][action_key] = {'cost': cost, 'action': 'down_jump', 'target_group': target_group}
-            
-            # --- 2. 걷기(Walk) 간선 추가 ---
-            nodes_by_terrain_group = defaultdict(list)
-            for key, node_data in self.nav_nodes.items():
-                if node_data.get('walkable'):
-                    if node_data.get('group'):
-                        nodes_by_terrain_group[node_data['group']].append(key)
-            
-            for group_name, node_keys in nodes_by_terrain_group.items():
-                for i in range(len(node_keys)):
-                    for j in range(i + 1, len(node_keys)):
-                        key1, key2 = node_keys[i], node_keys[j]
-                        pos1, pos2 = self.nav_nodes[key1]['pos'], self.nav_nodes[key2]['pos']
-                        cost = abs(pos1.x() - pos2.x())
-                        self.nav_graph[key1][key2] = {'cost': cost, 'action': 'walk'}
-                        self.nav_graph[key2][key1] = {'cost': cost, 'action': 'walk'}
+                    min_x, max_x = min(line_below['points'][0][0], line_below['points'][-1][0]), max(line_below['points'][0][0], line_below['points'][-1][0])
+                    if min_x <= vertex[0] <= max_x:
+                        is_obstructed = False
+                        for other_line in terrain_lines:
+                            if (other_line['id'] != line_above['id'] and other_line['id'] != line_below['id'] and
+                                line_below['floor'] < other_line['floor'] < line_above['floor']):
+                                other_min_x, other_max_x = min(other_line['points'][0][0], other_line['points'][-1][0]), max(other_line['points'][0][0], other_line['points'][-1][0])
+                                if other_min_x <= vertex[0] <= other_max_x:
+                                    is_obstructed = True
+                                    break
+                        if is_obstructed: continue
+                        start_key = f"fall_start_{line_above['id']}_{v_idx}"
+                        self.nav_nodes[start_key] = {'type': 'fall_start', 'pos': QPointF(*vertex), 'name': f"{group_above} 낙하 지점", 'group': group_above, 'walkable': False}
+                        cost = (abs(vertex[1] - line_below['points'][0][1]) * FALL_COST_MULTIPLIER) + FLOOR_CHANGE_PENALTY
+                        target_group, action_key = line_below.get('dynamic_name'), f"fall_action_{line_above['id']}_{v_idx}_{line_below['id']}"
+                        self.nav_graph[start_key][action_key] = {'cost': cost, 'action': 'fall', 'target_group': target_group}
+                        break
 
-            self.update_general_log(f"내비게이션 그래프 생성 완료. (노드: {len(self.nav_nodes)}개)", "purple")
-            
+            for line_below in terrain_lines:
+                if line_above['id'] == line_below['id'] or line_above['floor'] <= line_below['floor']: continue
+                y_above, y_below = line_above['points'][0][1], line_below['points'][0][1]
+                y_diff = abs(y_above - y_below)
+                if 0 < y_diff <= 70:
+                    ax1, ax2 = min(line_above['points'][0][0], line_above['points'][-1][0]), max(line_above['points'][0][0], line_above['points'][-1][0])
+                    bx1, bx2 = min(line_below['points'][0][0], line_below['points'][-1][0]), max(line_below['points'][0][0], line_below['points'][-1][0])
+                    overlap_x1, overlap_x2 = max(ax1, bx1), min(ax2, bx2)
+                    if overlap_x1 < overlap_x2:
+                        is_obstructed = False
+                        for other_line in terrain_lines:
+                            if (other_line['id'] != line_above['id'] and other_line['id'] != line_below['id'] and
+                                line_below['floor'] < other_line['floor'] < line_above['floor']):
+                                other_min_x, other_max_x = min(other_line['points'][0][0], other_line['points'][-1][0]), max(other_line['points'][0][0], other_line['points'][-1][0])
+                                if max(overlap_x1, other_min_x) < min(overlap_x2, other_max_x):
+                                    is_obstructed = True
+                                    break
+                        if is_obstructed: continue
+                        start_key = f"djump_start_{line_above['id']}_{line_below['id']}"
+                        center_x = (overlap_x1 + overlap_x2) / 2.0
+                        start_pos = QPointF(center_x, y_above)
+                        self.nav_nodes[start_key] = {'type': 'djump_area', 'pos': start_pos, 'name': f"{group_above} 아래 점프 지점", 'group': group_above, 'x_range': [overlap_x1, overlap_x2], 'walkable': False}
+                        cost = (y_diff * FALL_COST_MULTIPLIER) + FLOOR_CHANGE_PENALTY
+                        target_group, action_key = line_below.get('dynamic_name'), f"djump_action_{line_above['id']}_{line_below['id']}"
+                        self.nav_graph[start_key][action_key] = {'cost': cost, 'action': 'down_jump', 'target_group': target_group}
+        
+        # --- 2. 걷기(Walk) 간선 추가 ---
+        nodes_by_terrain_group = defaultdict(list)
+        for key, node_data in self.nav_nodes.items():
+            if node_data.get('walkable'):
+                if node_data.get('group'):
+                    nodes_by_terrain_group[node_data['group']].append(key)
+        
+        for group_name, node_keys in nodes_by_terrain_group.items():
+            for i in range(len(node_keys)):
+                for j in range(i + 1, len(node_keys)):
+                    key1, key2 = node_keys[i], node_keys[j]
+                    pos1, pos2 = self.nav_nodes[key1]['pos'], self.nav_nodes[key2]['pos']
+                    cost = abs(pos1.x() - pos2.x())
+                    self.nav_graph[key1][key2] = {'cost': cost, 'action': 'walk'}
+                    self.nav_graph[key2][key1] = {'cost': cost, 'action': 'walk'}
+
+        # --- 3. 행동 유발(Action Trigger) 노드 연결 ---
+        # 'walkable: False'인 노드(낭떠러지 등)와 'walkable: True'인 노드(웨이포인트 등)를 연결합니다.
+        action_trigger_nodes = {key: data for key, data in self.nav_nodes.items() if not data.get('walkable')}
+        walkable_nodes = {key: data for key, data in self.nav_nodes.items() if data.get('walkable')}
+
+        for trigger_key, trigger_data in action_trigger_nodes.items():
+            trigger_group = trigger_data.get('group')
+            if not trigger_group: continue
+
+            for walkable_key, walkable_data in walkable_nodes.items():
+                if walkable_data.get('group') == trigger_group:
+                    # walkable 노드 -> action_trigger 노드로 가는 단방향 '걷기' 경로를 추가합니다.
+                    pos1 = walkable_data['pos']
+                    pos2 = trigger_data['pos']
+                    cost = abs(pos1.x() - pos2.x())
+                    self.nav_graph[walkable_key][trigger_key] = {'cost': cost, 'action': 'walk'}
+
+        self.update_general_log(f"내비게이션 그래프 생성 완료. (노드: {len(self.nav_nodes)}개)", "purple")
+
+    
     def _reconstruct_path(self, came_from, current_key, start_key):
         """
         v12.8.1: A* 탐색 결과를 바탕으로 최종 경로 리스트를 재구성합니다.
