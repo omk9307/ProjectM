@@ -5192,27 +5192,31 @@ class MapTab(QWidget):
                 self.detection_log_viewer.clear()
                 self.update_general_log("탐지를 시작합니다...", "SaddleBrown")
 
-                #내비게이션 상태 초기화
-                self.player_nav_state = 'on_terrain'
-                self.current_player_floor = None
-                self.last_terrain_line_id = None
-                self.target_waypoint_id = None
-                self.last_reached_wp_id = None
-                self.current_path_index = -1
-                self.is_forward = True
+                # --- [v12.3.1] 모든 내비게이션 상태 변수 완벽 초기화 ---
+                self.journey_plan = []
+                self.current_journey_index = 0
+                self.current_segment_path = []
+                self.current_segment_index = 0
                 self.start_waypoint_found = False
+                self.navigation_action = 'move_to_target'
+                self.navigation_state_locked = False
+                self.last_reached_wp_id = None
+                self.target_waypoint_id = None
+                self.is_forward = True # 정방향으로 시작
+                self.smoothed_player_pos = None
+                self.last_player_pos = QPointF(0, 0)
+                self.player_state = 'on_terrain'
+                self.current_player_floor = None
+                # --- 초기화 끝 ---
 
                 if self.debug_view_checkbox.isChecked():
                     if not self.debug_dialog:
                         self.debug_dialog = DebugViewDialog(self)
                     self.debug_dialog.show()
 
-                # [v11.0.0] 캡처 및 탐지 스레드 분리 실행
                 self.capture_thread = MinimapCaptureThread(self.minimap_region)
                 self.capture_thread.start()
 
-                # [v11.0.1] 생성자 인자 순서 수정
-                # [MODIFIED] parent_tab=self 추가
                 self.detection_thread = AnchorDetectionThread(self.key_features, capture_thread=self.capture_thread, parent_tab=self)
                 self.detection_thread.detection_ready.connect(self.on_detection_ready)
                 self.detection_thread.status_updated.connect(self.update_detection_log_message)
@@ -5220,7 +5224,6 @@ class MapTab(QWidget):
 
                 self.detect_anchor_btn.setText("탐지 중단")
             else:
-                # [v11.0.0] 두 스레드 모두 안전하게 중지
                 if self.detection_thread and self.detection_thread.isRunning():
                     self.detection_thread.stop()
                     self.detection_thread.wait()
@@ -5236,9 +5239,21 @@ class MapTab(QWidget):
                 self.detection_thread = None
                 self.capture_thread = None
 
+                # --- [v12.3.1] 탐지 중지 시에도 상태 초기화 ---
+                self.journey_plan = []
+                self.current_journey_index = 0
+                self.current_segment_path = []
+                self.current_segment_index = 0
+                self.start_waypoint_found = False
+                self.navigation_action = 'move_to_target'
+                self.navigation_state_locked = False
+                self.last_reached_wp_id = None
+                self.target_waypoint_id = None
+                # --- 초기화 끝 ---
+
                 if self.debug_dialog:
                     self.debug_dialog.close()
-
+                    
     def _open_state_config_dialog(self):
         # 현재 설정값들을 딕셔너리로 만듦
         current_config = {
@@ -5373,7 +5388,6 @@ class MapTab(QWidget):
                 avg_player_global_pos = QPointF(w_sum_x / total_conf, w_sum_y / total_conf)
 
         if avg_player_global_pos is None:
-            # 모든 방법 실패 시, 이전 위치 유지 (안전장치)
             if self.smoothed_player_pos is not None:
                 avg_player_global_pos = self.smoothed_player_pos
             else:
@@ -5381,7 +5395,7 @@ class MapTab(QWidget):
                 return
 
         # --- 스무딩 ---
-        alpha = 0.3 # 고정 알파값으로 단순화하여 안정성 확보
+        alpha = 0.3
         if self.smoothed_player_pos is None:
             self.smoothed_player_pos = avg_player_global_pos
         else:
@@ -5397,8 +5411,8 @@ class MapTab(QWidget):
                 corners = np.float32([[rect.left(), rect.top()], [rect.right(), rect.bottom()]]).reshape(-1, 1, 2)
                 t_corners = cv2.transform(corners, matrix).reshape(2, 2)
                 return QRectF(QPointF(t_corners[0,0], t_corners[0,1]), QPointF(t_corners[1,0], t_corners[1,1])).normalized()
-            else: # 폴백
-                center_local = QPointF(rect.center()) # [MODIFIED] QPoint를 QPointF로 형 변환
+            else:
+                center_local = QPointF(rect.center())
                 sum_pos, sum_conf = QPointF(0, 0), 0
                 for f in fallback_features:
                     offset = center_local - (f['local_pos'] + QPointF(f['size'].width()/2, f['size'].height()/2))
@@ -5412,14 +5426,13 @@ class MapTab(QWidget):
                     center_global = sum_pos / sum_conf
                     # [v12.2.0 BUGFIX] QSize를 QSizeF로 명시적으로 변환하여 TypeError 방지
                     return QRectF(center_global - QPointF(rect.width()/2, rect.height()/2), QSizeF(rect.size()))
-                return QRectF() # 계산 실패 시 빈 사각형 반환
+                return QRectF()
 
         for rect in my_player_rects:
             my_player_global_rects.append(transform_rect_safe(rect, transform_matrix, inlier_features))
         for rect in other_player_rects:
             other_player_global_rects.append(transform_rect_safe(rect, transform_matrix, inlier_features))
         
-        # [MODIFIED] 활성 지형 정보를 self.active_feature_info에 명확히 저장
         self.active_feature_info = inlier_features
 
         # --- 상태 및 뷰 업데이트 ---
@@ -5435,7 +5448,7 @@ class MapTab(QWidget):
         
         self.minimap_view_label.update_view_data(
             camera_center=camera_pos_to_send,
-            active_features=self.active_feature_info, # [MODIFIED] 명확한 변수 사용
+            active_features=self.active_feature_info,
             my_players=my_player_global_rects,
             other_players=other_player_global_rects,
             target_wp_id=self.target_waypoint_id,
@@ -5762,9 +5775,11 @@ class MapTab(QWidget):
 
     def _find_start_waypoint(self, final_player_pos):
         """여정 시작 시, 비용 기반으로 가장 가까운 웨이포인트를 찾습니다."""
-        start_node_key, _ = self._get_closest_node_to_point(final_player_pos)
-        best_wp_id, min_cost = None, float('inf')
+        current_group = self._get_contact_terrain(final_player_pos).get('dynamic_name') if self._get_contact_terrain(final_player_pos) else None
+        start_node_key, _ = self._get_closest_node_to_point(final_player_pos, current_group)
+        if not start_node_key: start_node_key, _ = self._get_closest_node_to_point(final_player_pos)
 
+        best_wp_id, min_cost = None, float('inf')
         for wp_id in self.journey_plan:
             wp_key = f"wp_{wp_id}"
             _, cost = self._find_path_astar(start_node_key, wp_key)
@@ -5779,17 +5794,10 @@ class MapTab(QWidget):
 
     def _calculate_segment_path(self, final_player_pos):
         """현재 구간(Segment)의 상세 경로를 A*로 계산합니다."""
-        # [v12.3.0] 시작점을 현재 지형 그룹 내에서 우선적으로 탐색
-        current_group = None
-        contact_terrain = self._get_contact_terrain(final_player_pos)
-        if contact_terrain:
-            current_group = contact_terrain.get('dynamic_name')
-
+        current_group = self._get_contact_terrain(final_player_pos).get('dynamic_name') if self._get_contact_terrain(final_player_pos) else None
         start_node_key, _ = self._get_closest_node_to_point(final_player_pos, current_group)
+        if not start_node_key: start_node_key, _ = self._get_closest_node_to_point(final_player_pos)
         
-        if not start_node_key: # 현재 그룹에서 못찾으면 전체에서 다시 탐색
-            start_node_key, _ = self._get_closest_node_to_point(final_player_pos)
-
         goal_wp_id = self.journey_plan[self.current_journey_index]
         self.target_waypoint_id = goal_wp_id
         goal_node_key = f"wp_{goal_wp_id}"
@@ -5816,153 +5824,123 @@ class MapTab(QWidget):
             self.update_general_log(log_msg.replace('\n', '<br>'), 'red')
             self.journey_plan = []
 
-    def _update_intermediate_target(self):
-        """현재 상세 경로에 따라 중간 목표를 설정합니다."""
-        self.intermediate_target_pos = None
-        if self.current_segment_path and self.current_segment_index < len(self.current_segment_path):
-            current_node_key = self.current_segment_path[self.current_segment_index]
-            current_node = self.nav_nodes.get(current_node_key)
-            if current_node:
-                self.intermediate_target_pos = current_node['pos']
-                self.guidance_text = current_node.get('name', '')
-    
-    def _process_arrival_and_transition(self, final_player_pos, terrain_lines):
-        """도착을 판정하고, 상태를 전환하며, 경로 이탈을 감지합니다."""
-        current_node_key = self.current_segment_path[self.current_segment_index]
-        current_node = self.nav_nodes.get(current_node_key, {})
-        current_node_type = current_node.get('type')
+    def _get_arrival_threshold(self, node_type):
+        """노드 타입에 맞는 도착 판정 임계값을 반환합니다."""
+        if node_type == 'ladder_entry':
+            return self.cfg_ladder_arrival_x_threshold
+        elif node_type in ['jump_vertex', 'fall_start', 'djump_area']:
+            return self.cfg_jump_link_arrival_x_threshold
+        return self.cfg_waypoint_arrival_x_threshold
+
+    def _transition_to_action_state(self, new_action_state, prev_node_key):
+        """주어진 액션 준비 상태로 전환합니다."""
+        if self.navigation_action == new_action_state: return # 이미 해당 상태이면 변경 안함
+        self.navigation_action = new_action_state
+        self.prepare_timeout_start = time.time()
+        prev_node_name = self.nav_nodes.get(prev_node_key, {}).get('name', '??')
+        print(f"[상태 변경] '{prev_node_name}' 도착 -> {self.navigation_action}")
+        self.update_general_log(f"'{prev_node_name}' 도착. 다음 행동 준비.", "blue")
+
+    def _process_action_preparation(self, final_player_pos):
+        """'prepare_to_...' 상태일 때, 이탈 또는 액션 시작을 판정합니다."""
+        action_node_key_index = self.current_segment_index - 1
+        if action_node_key_index < 0: return
+
+        action_node_key = self.current_segment_path[action_node_key_index]
+        action_node = self.nav_nodes.get(action_node_key, {})
+        action_node_pos = action_node.get('pos')
+        if not action_node_pos: return
+
+        # 1. 액션 시작 판정
+        action_started = False
+        if self.navigation_action == 'prepare_to_climb' and self.player_state == 'climbing': action_started = True
+        elif self.navigation_action == 'prepare_to_jump' and self.player_state == 'jumping': action_started = True
+        elif self.navigation_action == 'prepare_to_fall' and self.player_state == 'falling': action_started = True
+        elif self.navigation_action == 'prepare_to_down_jump' and self.player_state in ['jumping', 'falling']:
+            if final_player_pos.y() > self.last_on_terrain_y + self.cfg_y_movement_deadzone:
+                action_started = True
         
-        distance_to_target = abs(final_player_pos.x() - self.intermediate_target_pos.x())
-        target_floor = self._get_floor_from_closest_terrain_data(self.intermediate_target_pos, terrain_lines)
-        floor_matches = abs(self.current_player_floor - target_floor) < 0.1
+        if action_started:
+            self.navigation_action = self.navigation_action.replace('prepare_to_', '') + '_in_progress'
+            self.navigation_state_locked = True
+            self.lock_timeout_start = time.time()
+            print(f"[INFO] 행동 시작 감지. 상태 잠금 -> {self.navigation_action}")
+            return
 
-        # 1. 도착 판정 임계값 설정
-        arrival_threshold = self.cfg_waypoint_arrival_x_threshold
-        if current_node_type == 'ladder_entry': arrival_threshold = self.cfg_ladder_arrival_x_threshold
-        elif current_node_type in ['jump_vertex', 'fall_start', 'djump_area']: 
-            arrival_threshold = self.cfg_jump_link_arrival_x_threshold
-        
-        # 2. 도착 처리
-        if distance_to_target < arrival_threshold and floor_matches:
-            print(f"[INFO] 중간 목표 '{self.guidance_text}' 도착. 다음 단계 준비.")
-            self.current_segment_index += 1
-            # 구간 완료 시
-            if self.current_segment_index >= len(self.current_segment_path):
-                self.last_reached_wp_id = self.journey_plan[self.current_journey_index]
-                self.current_journey_index += 1
-                self.current_segment_path = []
-                wp_name = self.nav_nodes.get(f"wp_{self.last_reached_wp_id}", {}).get('name')
-                self.update_general_log(f"'{wp_name}' 도착. 다음 구간으로 진행합니다.", "green")
-                self.navigation_action = 'move_to_target' # 다음 구간 시작을 위해 상태 초기화
-            # 도착은 했지만 아직 구간이 끝나지 않았으면, 다음 프레임에 상태 전환 로직이 처리하도록 둠
-            return # 도착했으므로 이탈 판정은 건너뜀
-
-        # 3. 상태 전환 (걷기 -> 액션 준비)
-        # 조건: 걷기 상태이고, 아직 액션을 시작 안했으며, 다음 목표가 있고, 플레이어는 액션 시작점 근처에 있을 때
-        if self.navigation_action == 'move_to_target' and self.current_segment_index > 0:
-            prev_node_key = self.current_segment_path[self.current_segment_index - 1]
-            prev_node = self.nav_nodes.get(prev_node_key, {})
-            
-            # 이전 노드(액션 시작점) 근처에 있는지 확인
-            if prev_node.get('pos') and abs(final_player_pos.x() - prev_node['pos'].x()) < arrival_threshold * 1.5:
-                edge_data = self.nav_graph.get(prev_node_key, {}).get(current_node_key, {})
-                action = edge_data.get('action')
-                
-                next_action = None
-                if action == 'climb': next_action = 'prepare_to_climb'
-                elif action == 'jump': next_action = 'prepare_to_jump'
-                
-                # 'target_group'이 있는 액션(낙하, 아래점프) 처리
-                if not next_action:
-                    for key, data in self.nav_graph.get(prev_node_key, {}).items():
-                        if data.get('target_group'):
-                            action = data['action']
-                            if action == 'fall': next_action = 'prepare_to_fall'; break
-                            elif action == 'down_jump': next_action = 'prepare_to_down_jump'; break
-                
-                if next_action:
-                    self.navigation_action = next_action
-                    self.prepare_timeout_start = time.time()
-                    print(f"[상태 변경] -> {self.navigation_action}")
-                    self.update_general_log(f"'{prev_node.get('name')}' 도착. 다음 행동 준비.", "blue")
-
-        # 4. 경로 이탈 판정
-        exit_threshold = arrival_threshold + HYSTERESIS_EXIT_OFFSET
+        # 2. 이탈 판정
         recalc_cooldown = 1.0
-        if (self.navigation_action != 'move_to_target' and
-                time.time() - self.last_path_recalculation_time > recalc_cooldown):
-            
+        if time.time() - self.last_path_recalculation_time > recalc_cooldown:
             is_off_course = False
-            if distance_to_target > exit_threshold:
-                is_off_course = True
-            
-            if self.navigation_action == 'prepare_to_jump':
-                 prev_node_pos = self.nav_nodes.get(self.current_segment_path[self.current_segment_index - 1], {}).get('pos')
-                 if prev_node_pos and abs(final_player_pos.y() - prev_node_pos.y()) > 20.0:
-                     is_off_course = True
+            arrival_threshold = self._get_arrival_threshold(action_node.get('type'))
+            exit_threshold = arrival_threshold + HYSTERESIS_EXIT_OFFSET
+
+            if self.navigation_action == 'prepare_to_down_jump':
+                x_range = action_node.get('x_range')
+                if x_range and not (x_range[0] - exit_threshold <= final_player_pos.x() <= x_range[1] + exit_threshold):
+                    is_off_course = True
+            elif self.navigation_action == 'prepare_to_jump':
+                dist_x = abs(final_player_pos.x() - action_node_pos.x())
+                dist_y = abs(final_player_pos.y() - action_node_pos.y())
+                if dist_x > exit_threshold or dist_y > 20.0:
+                    is_off_course = True
+            else: # climb, fall
+                dist_x = abs(final_player_pos.x() - action_node_pos.x())
+                if dist_x > exit_threshold:
+                    is_off_course = True
             
             if is_off_course:
                 self.update_general_log(f"[경로 이탈 감지] 행동 준비 중 목표에서 벗어났습니다. 경로를 다시 계산합니다.", "orange")
                 print(f"[INFO] 경로 이탈 감지. 목표: {self.guidance_text}")
                 self.current_segment_path = []
                 self.navigation_action = 'move_to_target'
-
-    def _update_navigator_and_view(self, final_player_pos, current_terrain_name):
-        """계산된 모든 상태를 기반으로 UI 위젯들을 업데이트합니다."""
-        all_waypoints_map = {wp['id']: wp for wp in self.geometry_data.get("waypoints", [])}
-        prev_name, next_name, direction, distance = "", "", "-", 0
+    
+    def _process_action_completion(self, final_player_pos, contact_terrain):
+        """액션의 완료 또는 실패를 판정하고 상태를 처리합니다."""
+        action_completed = False
+        action_failed = False
         
-        if self.intermediate_target_pos:
-            distance = abs(final_player_pos.x() - self.intermediate_target_pos.x())
-            direction = "→" if final_player_pos.x() < self.intermediate_target_pos.x() else "←"
+        expected_group = None
+        if self.current_segment_index > 0:
+            prev_node_key = self.current_segment_path[self.current_segment_index - 1]
+            next_node_key = self.current_segment_path[self.current_segment_index]
+            
+            edge_data = self.nav_graph.get(prev_node_key, {}).get(next_node_key, {})
+            if not edge_data: # 액션 노드인 경우
+                 for key, data in self.nav_graph.get(prev_node_key, {}).items():
+                    if 'target_group' in data:
+                        expected_group = data['target_group']
+                        break
+            else: # 일반 노드인 경우
+                expected_group = self.nav_nodes.get(next_node_key, {}).get('group')
 
-        if self.start_waypoint_found and self.journey_plan:
-            if self.current_journey_index > 0:
-                prev_wp_id = self.journey_plan[self.current_journey_index - 1]
-                prev_name = all_waypoints_map.get(prev_wp_id, {}).get('name', '')
-            if self.current_journey_index < len(self.journey_plan) - 1:
-                next_wp_id = self.journey_plan[self.current_journey_index + 1]
-                next_name = all_waypoints_map.get(next_wp_id, {}).get('name', '')
+        if expected_group and contact_terrain and contact_terrain.get('dynamic_name') != expected_group:
+            action_failed = True
+        
+        elif self.navigation_action == 'climb_in_progress':
+            if self.intermediate_target_pos:
+                dist_x = abs(final_player_pos.x() - self.intermediate_target_pos.x())
+                dist_y = abs(final_player_pos.y() - self.intermediate_target_pos.y())
+                if dist_y < self.cfg_on_terrain_y_threshold * 2 and dist_x < self.cfg_ladder_arrival_x_threshold:
+                    action_completed = True
+        else:
+            action_completed = True
 
-        state_text_map = {'idle': '정지', 'on_terrain': '걷기', 'climbing': '오르기', 'falling': '내려가기', 'jumping': '점프 중'}
-        action_text_map = {
-            'move_to_target': "다음 목표로 이동",
-            'prepare_to_climb': "점프+↑+방향키를 눌러 오르세요",
-            'prepare_to_fall': "낭떠러지로 떨어지세요",
-            'prepare_to_down_jump': "아래로 점프하세요",
-            'prepare_to_jump': "점프하세요",
-            'climb_in_progress': "오르는 중...",
-            'fall_in_progress': "낙하 중...",
-            'jump_in_progress': "점프 중...",
-        }
-        player_state_text = state_text_map.get(self.player_state, '알 수 없음')
-        nav_action_text = action_text_map.get(self.navigation_action, '대기 중')
-        
-        self.navigator_display.update_data(
-            floor=self.current_player_floor if self.current_player_floor is not None else "N/A",
-            terrain_name=current_terrain_name,
-            target_name=self.guidance_text,
-            prev_name=prev_name, next_name=next_name, direction=direction, distance=distance,
-            full_path=self.journey_plan, last_reached_id=self.last_reached_wp_id,
-            target_id=self.target_waypoint_id, is_forward=self.is_forward,
-            intermediate_type=self.intermediate_target_type, player_state=player_state_text,
-            nav_action=nav_action_text
-        )
-        
-        camera_pos_to_send = final_player_pos if self.center_on_player_checkbox.isChecked() else self.minimap_view_label.camera_center_global
-        self.minimap_view_label.update_view_data(
-            camera_center=camera_pos_to_send, active_features=self.active_feature_info,
-            my_players=self.my_player_global_rects, other_players=self.other_player_global_rects,
-            target_wp_id=self.target_waypoint_id, reached_wp_id=self.last_reached_wp_id,
-            final_player_pos=final_player_pos, is_forward=self.is_forward,
-            intermediate_pos=self.intermediate_target_pos,
-            intermediate_type=self.intermediate_target_type, nav_action=self.navigation_action
-        )
+        if action_failed:
+            self.update_general_log(f"행동({self.navigation_action}) 실패. 예상 경로를 벗어났습니다. 경로를 재탐색합니다.", "orange")
+            print(f"[INFO] 행동 실패: {self.navigation_action}, 예상 그룹: {expected_group}, 현재 그룹: {contact_terrain.get('dynamic_name')}")
+            self.navigation_action = 'move_to_target'
+            self.navigation_state_locked = False
+            self.current_segment_path = []
+
+        elif action_completed:
+            self.update_general_log(f"행동({self.navigation_action}) 완료. 지상 착지 확인.", "green")
+            print(f"[INFO] 행동 완료: {self.navigation_action}")
+            self.navigation_action = 'move_to_target'
+            self.navigation_state_locked = False
 
     def _update_player_state_and_navigation(self, final_player_pos):
             """
-            v12.2.0: A* 경로 계획을 기반으로 플레이어 상태를 판정하고 다음 행동을 결정합니다.
-            착지 노드를 제거하고, 안내 시점 및 경로 이탈 판정 로직을 개선했습니다.
+            v12.3.7: A* 경로 계획을 기반으로 플레이어 상태를 판정하고 다음 행동을 결정합니다.
             """
             current_terrain_name = ""
             contact_terrain = self._get_contact_terrain(final_player_pos)
@@ -5989,46 +5967,243 @@ class MapTab(QWidget):
                 self.navigation_action = 'move_to_target'
                 self.current_segment_path = []
             
-            # Phase 1: 물리적 상태 판정 (기존과 동일)
+            # Phase 1: 물리적 상태 판정
             self.player_state = self._determine_player_physical_state(final_player_pos, contact_terrain)
 
-            # Phase 2: 행동 완료 판정
+            # Phase 2: 행동 완료 및 실패 판정
             if self.navigation_state_locked and self.player_state == 'on_terrain':
-                self.update_general_log(f"행동({self.navigation_action}) 완료. 지상 착지 확인.", "green")
-                print(f"[INFO] 행동 완료: {self.navigation_action}")
-                self.navigation_action = 'move_to_target'
-                self.navigation_state_locked = False
-                self.current_segment_index += 1
+                self._process_action_completion(final_player_pos, contact_terrain)
 
-            # Phase 3: 경로 계획 및 중간 목표 설정
+            # Phase 3: 경로 계획
             active_route = self.route_profiles.get(self.active_route_profile_name)
             if not active_route:
                 self.last_player_pos = final_player_pos
                 return
 
-            # 3a. 전체 여정(Journey) 계획
             if not self.journey_plan or self.current_journey_index >= len(self.journey_plan):
                 self._plan_next_journey(active_route)
 
-            # 3b. 시작점(가장 가까운 WP) 찾기
             if self.journey_plan and not self.start_waypoint_found:
                 self._find_start_waypoint(final_player_pos)
             
-            # 3c. 구간(Segment) 상세 경로 계산
             if self.start_waypoint_found and not self.current_segment_path:
                 self._calculate_segment_path(final_player_pos)
 
-            # 3d. 중간 목표(Intermediate Target) 설정
-            self._update_intermediate_target()
-
-            # Phase 4: 도착 판정 및 상태 전이
-            if self.intermediate_target_pos is not None and not self.navigation_state_locked:
-                self._process_arrival_and_transition(final_player_pos, terrain_lines)
+            # Phase 4: 중간 목표 설정 및 상태 관리
+            self._update_intermediate_target_and_state(final_player_pos, terrain_lines)
 
             # Phase 5: UI 업데이트
             self._update_navigator_and_view(final_player_pos, current_terrain_name)
             
             self.last_player_pos = final_player_pos
+            
+    def _update_intermediate_target_and_state(self, final_player_pos, terrain_lines):
+        """
+        [v12.3.7] 현재 경로 단계에 따라 중간 목표를 설정하고, 필요 시 네비게이션 상태를 전환합니다.
+        """
+        if not (self.current_segment_path and self.current_segment_index < len(self.current_segment_path)):
+            self.intermediate_target_pos = None
+            return
+
+        current_node_key = self.current_segment_path[self.current_segment_index]
+        current_node = self.nav_nodes.get(current_node_key, {})
+        
+        # 1. 기본 중간 목표 설정
+        self.intermediate_target_pos = current_node.get('pos')
+        self.guidance_text = current_node.get('name', '')
+
+        # 2. 상태가 잠겨있으면 더 이상 진행하지 않음
+        if self.navigation_state_locked:
+            return
+
+        # 3. 'prepare_to_...' 상태일 때의 처리
+        if self.navigation_action.startswith('prepare_to_'):
+            # "아래 점프" 시 안내선 목표 동적 업데이트
+            if self.navigation_action == 'prepare_to_down_jump':
+                action_node_key = self.current_segment_path[self.current_segment_index - 1]
+                action_key_part = f"{action_node_key.split('_', 1)[1]}"
+                action_key = f"djump_action_{action_key_part}"
+                target_group = self.nav_graph.get(action_node_key, {}).get(action_key, {}).get('target_group')
+                if target_group:
+                    target_floor_line = next((line for line in terrain_lines if line.get('dynamic_name') == target_group), None)
+                    if target_floor_line:
+                        target_y = target_floor_line['points'][0][1]
+                        self.intermediate_target_pos = QPointF(final_player_pos.x(), target_y)
+
+            self._process_action_preparation(final_player_pos)
+            return
+
+        # 4. 'move_to_target' 상태일 때의 처리
+        # 4a. '아래 점프' 구간 특별 처리
+        if current_node.get('type') == 'djump_area':
+            x_range = current_node.get('x_range')
+            if x_range and x_range[0] <= final_player_pos.x() <= x_range[1]:
+                self._transition_to_action_state('prepare_to_down_jump', current_node_key)
+                return
+        
+        # 4b. 일반 도착 판정
+        arrival_threshold = self._get_arrival_threshold(current_node.get('type'))
+        target_floor = self._get_floor_from_closest_terrain_data(self.intermediate_target_pos, terrain_lines)
+        floor_matches = abs(self.current_player_floor - target_floor) < 0.1
+        distance_to_target = abs(final_player_pos.x() - self.intermediate_target_pos.x())
+
+        if distance_to_target < arrival_threshold and floor_matches:
+            # 4c. 도착 후 다음 단계로 전환
+            next_index = self.current_segment_index + 1
+            if next_index >= len(self.current_segment_path):
+                self.last_reached_wp_id = self.journey_plan[self.current_journey_index]
+                self.current_journey_index += 1
+                self.current_segment_path = []
+                wp_name = self.nav_nodes.get(f"wp_{self.last_reached_wp_id}", {}).get('name')
+                self.update_general_log(f"'{wp_name}' 도착. 다음 구간으로 진행합니다.", "green")
+            else:
+                next_node_key = self.current_segment_path[next_index]
+                edge_data = self.nav_graph.get(current_node_key, {}).get(next_node_key, {})
+                action = edge_data.get('action') if edge_data else None
+                
+                next_action_state = None
+                if action == 'climb': next_action_state = 'prepare_to_climb'
+                elif action == 'jump': next_action_state = 'prepare_to_jump'
+                elif action == 'fall': next_action_state = 'prepare_to_fall'
+                elif action == 'down_jump': next_action_state = 'prepare_to_down_jump'
+
+                if next_action_state:
+                    self.current_segment_index += 1
+                    self._transition_to_action_state(next_action_state, current_node_key)
+                else:
+                    self.current_segment_index += 1
+
+    def _update_intermediate_target_and_state(self, final_player_pos, terrain_lines):
+        """
+        [v12.3.6] 현재 경로 단계에 따라 중간 목표를 설정하고, 필요 시 네비게이션 상태를 전환합니다.
+        """
+        if not (self.current_segment_path and self.current_segment_index < len(self.current_segment_path)):
+            self.intermediate_target_pos = None
+            return
+
+        current_node_key = self.current_segment_path[self.current_segment_index]
+        current_node = self.nav_nodes.get(current_node_key, {})
+        
+        # 1. 기본 중간 목표 설정
+        self.intermediate_target_pos = current_node.get('pos')
+        self.guidance_text = current_node.get('name', '')
+
+        # 2. 상태가 잠겨있으면 더 이상 진행하지 않음
+        if self.navigation_state_locked:
+            return
+
+        # 3. 'prepare_to_...' 상태일 때의 처리 (이탈 또는 액션 시작)
+        if self.navigation_action.startswith('prepare_to_'):
+            self._process_action_preparation(final_player_pos)
+            return
+
+        # 4. 'move_to_target' 상태일 때의 처리 (도착 또는 상태 전환)
+        if self.navigation_action == 'move_to_target':
+            # 4a. '아래 점프' 구간 특별 처리
+            if current_node.get('type') == 'djump_area':
+                x_range = current_node.get('x_range')
+                if x_range and x_range[0] <= final_player_pos.x() <= x_range[1]:
+                    self._transition_to_action_state('prepare_to_down_jump', current_node_key)
+                    return
+            
+            # 4b. 일반 도착 판정
+            arrival_threshold = self._get_arrival_threshold(current_node.get('type'))
+            target_floor = self._get_floor_from_closest_terrain_data(self.intermediate_target_pos, terrain_lines)
+            floor_matches = abs(self.current_player_floor - target_floor) < 0.1
+            distance_to_target = abs(final_player_pos.x() - self.intermediate_target_pos.x())
+
+            if distance_to_target < arrival_threshold and floor_matches:
+                print(f"[INFO] 중간 목표 '{self.guidance_text}' 도착.")
+                
+                # 4c. 도착 후 다음 단계로 전환
+                next_index = self.current_segment_index + 1
+                if next_index >= len(self.current_segment_path):
+                    # 구간 완료
+                    self.last_reached_wp_id = self.journey_plan[self.current_journey_index]
+                    self.current_journey_index += 1
+                    self.current_segment_path = []
+                    wp_name = self.nav_nodes.get(f"wp_{self.last_reached_wp_id}", {}).get('name')
+                    self.update_general_log(f"'{wp_name}' 도착. 다음 구간으로 진행합니다.", "green")
+                else:
+                    # 다음 단계가 액션인지 확인하고 상태 전환
+                    next_node_key = self.current_segment_path[next_index]
+                    edge_data = self.nav_graph.get(current_node_key, {}).get(next_node_key, {})
+                    action = edge_data.get('action') if edge_data else None
+
+                    next_action_state = None
+                    if action == 'climb': next_action_state = 'prepare_to_climb'
+                    elif action == 'jump': next_action_state = 'prepare_to_jump'
+                    elif action == 'fall': next_action_state = 'prepare_to_fall'
+
+                    if next_action_state:
+                        self.current_segment_index += 1
+                        self._transition_to_action_state(next_action_state, current_node_key)
+                    else: # 다음도 걷기라면 인덱스만 증가
+                        self.current_segment_index += 1
+
+    def _update_navigator_and_view(self, final_player_pos, current_terrain_name):
+        """계산된 모든 상태를 기반으로 UI 위젯들을 업데이트합니다."""
+        all_waypoints_map = {wp['id']: wp for wp in self.geometry_data.get("waypoints", [])}
+        prev_name, next_name, direction, distance = "", "", "-", 0
+        
+        if self.intermediate_target_pos:
+                    # [v12.3.2] 아래 점프 시 거리/방향을 y축 기준으로 표시
+                    if self.navigation_action == 'prepare_to_down_jump':
+                        distance = abs(final_player_pos.y() - self.intermediate_target_pos.y())
+                        direction = "↓"
+                    else:
+                        distance = abs(final_player_pos.x() - self.intermediate_target_pos.x())
+                        direction = "→" if final_player_pos.x() < self.intermediate_target_pos.x() else "←"
+
+        if self.start_waypoint_found and self.journey_plan:
+            if self.current_journey_index > 0:
+                prev_wp_id = self.journey_plan[self.current_journey_index - 1]
+                prev_name = all_waypoints_map.get(prev_wp_id, {}).get('name', '')
+            if self.current_journey_index < len(self.journey_plan) - 1:
+                next_wp_id = self.journey_plan[self.current_journey_index + 1]
+                next_name = all_waypoints_map.get(next_wp_id, {}).get('name', '')
+
+        state_text_map = {'idle': '정지', 'on_terrain': '걷기', 'climbing': '오르기', 'falling': '내려가기', 'jumping': '점프 중'}
+        action_text_map = {
+            'move_to_target': "다음 목표로 이동",
+            'prepare_to_climb': "점프+↑+방향키를 눌러 오르세요",
+            'prepare_to_fall': "낭떠러지로 떨어지세요",
+            'prepare_to_down_jump': "아래로 점프하세요",
+            'prepare_to_jump': "점프하세요",
+            'climb_in_progress': "오르는 중...",
+            'fall_in_progress': "낙하 중...",
+            'jump_in_progress': "점프 중...",
+        }
+        player_state_text = state_text_map.get(self.player_state, '알 수 없음')
+        nav_action_text = action_text_map.get(self.navigation_action, '대기 중')
+        
+        # 중간 목표 타입 결정 (UI 표시용)
+        self.intermediate_target_type = 'walk'
+        if self.navigation_action == 'prepare_to_climb' or self.navigation_action == 'climb_in_progress': self.intermediate_target_type = 'climb'
+        elif self.navigation_action == 'prepare_to_jump' or self.navigation_action == 'jump_in_progress': self.intermediate_target_type = 'jump'
+        elif self.navigation_action == 'prepare_to_fall' or self.navigation_action == 'fall_in_progress': self.intermediate_target_type = 'fall'
+        elif self.navigation_action == 'prepare_to_down_jump': self.intermediate_target_type = 'fall' # 아래점프도 fall 아이콘 사용
+        
+        self.navigator_display.update_data(
+            floor=self.current_player_floor if self.current_player_floor is not None else "N/A",
+            terrain_name=current_terrain_name,
+            target_name=self.guidance_text,
+            prev_name=prev_name, next_name=next_name, direction=direction, distance=distance,
+            full_path=self.journey_plan, last_reached_id=self.last_reached_wp_id,
+            target_id=self.target_waypoint_id, is_forward=self.is_forward,
+            intermediate_type=self.intermediate_target_type, player_state=player_state_text,
+            nav_action=nav_action_text
+        )
+        
+        camera_pos_to_send = final_player_pos if self.center_on_player_checkbox.isChecked() else self.minimap_view_label.camera_center_global
+        self.minimap_view_label.update_view_data(
+            camera_center=camera_pos_to_send, active_features=self.active_feature_info,
+            my_players=self.my_player_global_rects, other_players=self.other_player_global_rects,
+            target_wp_id=self.target_waypoint_id, reached_wp_id=self.last_reached_wp_id,
+            final_player_pos=final_player_pos, is_forward=self.is_forward,
+            intermediate_pos=self.intermediate_target_pos,
+            intermediate_type=self.intermediate_target_type, nav_action=self.navigation_action
+        )
 
     def _get_terrain_id_from_vertex(self, vertex_pos):
         """주어진 꼭짓점(vertex) 좌표에 연결된 지형선 ID를 반환합니다."""
@@ -6415,134 +6590,153 @@ class MapTab(QWidget):
         return closest_node_key, math.sqrt(min_dist_sq)
 
     def _build_navigation_graph(self, waypoint_ids_in_route=None):
-        """
-        v12.2.0: 맵의 지오메트리 데이터와 현재 경로의 WP 목록을 기반으로 A* 탐색용 그래프를 생성합니다.
-        '착지' 노드를 제거하고, 액션 간선에 목표 지형 그룹 정보를 포함합니다.
-        """
-        self.nav_nodes.clear()
-        self.nav_graph = defaultdict(dict)
+            """
+            v12.3.4: 맵의 지오메트리 데이터와 현재 경로의 WP 목록을 기반으로 A* 탐색용 그래프를 생성합니다.
+            낙하/아래점프 시 중간 지형 충돌 검사를 추가합니다.
+            """
+            self.nav_nodes.clear()
+            self.nav_graph = defaultdict(dict)
 
-        if not self.geometry_data:
-            return
+            if not self.geometry_data:
+                return
 
-        if waypoint_ids_in_route is None:
-            waypoint_ids_in_route = [wp['id'] for wp in self.geometry_data.get("waypoints", [])]
+            if waypoint_ids_in_route is None:
+                waypoint_ids_in_route = [wp['id'] for wp in self.geometry_data.get("waypoints", [])]
 
-        terrain_lines = self.geometry_data.get("terrain_lines", [])
+            terrain_lines = self.geometry_data.get("terrain_lines", [])
 
-        # --- 1. 모든 잠재적 노드 생성 ---
-        # 1a. 웨이포인트 노드 (경로에 포함된 것만)
-        for wp in self.geometry_data.get("waypoints", []):
-            if wp['id'] in waypoint_ids_in_route:
-                key = f"wp_{wp['id']}"
-                contact_terrain = self._get_contact_terrain(QPointF(*wp['pos']))
-                group = contact_terrain.get('dynamic_name') if contact_terrain else None
-                self.nav_nodes[key] = {'type': 'waypoint', 'pos': QPointF(*wp['pos']), 'floor': wp.get('floor'), 'name': wp.get('name'), 'id': wp['id'], 'group': group}
+            # --- 1. 모든 잠재적 노드 생성 ---
+            # 1a. 웨이포인트 노드 (경로에 포함된 것만)
+            for wp in self.geometry_data.get("waypoints", []):
+                if wp['id'] in waypoint_ids_in_route:
+                    key = f"wp_{wp['id']}"
+                    contact_terrain = self._get_contact_terrain(QPointF(*wp['pos']))
+                    group = contact_terrain.get('dynamic_name') if contact_terrain else None
+                    self.nav_nodes[key] = {'type': 'waypoint', 'pos': QPointF(*wp['pos']), 'floor': wp.get('floor'), 'name': wp.get('name'), 'id': wp['id'], 'group': group}
 
-        # 1b. 사다리 노드
-        for obj in self.geometry_data.get("transition_objects", []):
-            p1 = QPointF(*obj['points'][0])
-            p2 = QPointF(*obj['points'][1])
-            entry_pos, exit_pos = (p1, p2) if p1.y() > p2.y() else (p2, p1)
-            
-            entry_key = f"ladder_entry_{obj['id']}"
-            exit_key = f"ladder_exit_{obj['id']}"
-            
-            entry_terrain = self._get_contact_terrain(entry_pos)
-            exit_terrain = self._get_contact_terrain(exit_pos)
-            entry_group = entry_terrain.get('dynamic_name') if entry_terrain else None
-            exit_group = exit_terrain.get('dynamic_name') if exit_terrain else None
+            # 1b. 사다리 노드
+            for obj in self.geometry_data.get("transition_objects", []):
+                p1 = QPointF(*obj['points'][0])
+                p2 = QPointF(*obj['points'][1])
+                entry_pos, exit_pos = (p1, p2) if p1.y() > p2.y() else (p2, p1)
+                
+                entry_key = f"ladder_entry_{obj['id']}"
+                exit_key = f"ladder_exit_{obj['id']}"
+                
+                entry_terrain = self._get_contact_terrain(entry_pos)
+                exit_terrain = self._get_contact_terrain(exit_pos)
+                entry_group = entry_terrain.get('dynamic_name') if entry_terrain else None
+                exit_group = exit_terrain.get('dynamic_name') if exit_terrain else None
 
-            self.nav_nodes[entry_key] = {'type': 'ladder_entry', 'pos': entry_pos, 'obj_id': obj['id'], 'name': obj.get('dynamic_name'), 'group': entry_group}
-            self.nav_nodes[exit_key] = {'type': 'ladder_exit', 'pos': exit_pos, 'obj_id': obj['id'], 'name': obj.get('dynamic_name'), 'group': exit_group}
-            
-            cost_up = abs(entry_pos.y() - exit_pos.y()) * 1.5
-            cost_down = abs(entry_pos.y() - exit_pos.y()) * 5.0
-            self.nav_graph[entry_key][exit_key] = {'cost': cost_up, 'action': 'climb'}
-            self.nav_graph[exit_key][entry_key] = {'cost': cost_down, 'action': 'climb_down'}
+                self.nav_nodes[entry_key] = {'type': 'ladder_entry', 'pos': entry_pos, 'obj_id': obj['id'], 'name': obj.get('dynamic_name'), 'group': entry_group}
+                self.nav_nodes[exit_key] = {'type': 'ladder_exit', 'pos': exit_pos, 'obj_id': obj['id'], 'name': obj.get('dynamic_name'), 'group': exit_group}
+                
+                cost_up = abs(entry_pos.y() - exit_pos.y()) * 1.5
+                cost_down = abs(entry_pos.y() - exit_pos.y()) * 5.0
+                self.nav_graph[entry_key][exit_key] = {'cost': cost_up, 'action': 'climb'}
+                self.nav_graph[exit_key][entry_key] = {'cost': cost_down, 'action': 'climb_down'}
 
-        # 1c. 점프 링크 노드
-        for link in self.geometry_data.get("jump_links", []):
-            start_pos = QPointF(*link['start_vertex_pos'])
-            end_pos = QPointF(*link['end_vertex_pos'])
-            
-            key1 = f"jump_{link['id']}_p1"
-            key2 = f"jump_{link['id']}_p2"
+            # 1c. 점프 링크 노드
+            for link in self.geometry_data.get("jump_links", []):
+                start_pos = QPointF(*link['start_vertex_pos'])
+                end_pos = QPointF(*link['end_vertex_pos'])
+                
+                key1 = f"jump_{link['id']}_p1"
+                key2 = f"jump_{link['id']}_p2"
 
-            start_terrain = self._get_contact_terrain(start_pos)
-            end_terrain = self._get_contact_terrain(end_pos)
-            start_group = start_terrain.get('dynamic_name') if start_terrain else None
-            end_group = end_terrain.get('dynamic_name') if end_terrain else None
+                start_terrain = self._get_contact_terrain(start_pos)
+                end_terrain = self._get_contact_terrain(end_pos)
+                start_group = start_terrain.get('dynamic_name') if start_terrain else None
+                end_group = end_terrain.get('dynamic_name') if end_terrain else None
 
-            self.nav_nodes[key1] = {'type': 'jump_vertex', 'pos': start_pos, 'link_id': link['id'], 'name': link.get('dynamic_name'), 'group': start_group}
-            self.nav_nodes[key2] = {'type': 'jump_vertex', 'pos': end_pos, 'link_id': link['id'], 'name': link.get('dynamic_name'), 'group': end_group}
-            
-            cost = math.hypot(start_pos.x() - end_pos.x(), start_pos.y() - end_pos.y())
-            self.nav_graph[key1][key2] = {'cost': cost, 'action': 'jump'}
-            self.nav_graph[key2][key1] = {'cost': cost, 'action': 'jump'}
+                self.nav_nodes[key1] = {'type': 'jump_vertex', 'pos': start_pos, 'link_id': link['id'], 'name': link.get('dynamic_name'), 'group': start_group}
+                self.nav_nodes[key2] = {'type': 'jump_vertex', 'pos': end_pos, 'link_id': link['id'], 'name': link.get('dynamic_name'), 'group': end_group}
+                
+                cost = math.hypot(start_pos.x() - end_pos.x(), start_pos.y() - end_pos.y())
+                self.nav_graph[key1][key2] = {'cost': cost, 'action': 'jump'}
+                self.nav_graph[key2][key1] = {'cost': cost, 'action': 'jump'}
 
-        # 1d. 낙하(Fall) 및 아래 점프(Down Jump) 노드 (착지 노드 제거)
-        for line_above in terrain_lines:
-            group_above = line_above.get('dynamic_name')
-            # 낙하 노드
-            for v_idx, vertex in enumerate([line_above['points'][0], line_above['points'][-1]]):
+            # 1d. 낙하(Fall) 및 아래 점프(Down Jump) 노드
+            for line_above in terrain_lines:
+                group_above = line_above.get('dynamic_name')
+                # 낙하 노드
+                for v_idx, vertex in enumerate([line_above['points'][0], line_above['points'][-1]]):
+                    for line_below in terrain_lines:
+                        if line_above['id'] == line_below['id'] or line_above['floor'] <= line_below['floor']: continue
+                        
+                        min_x, max_x = min(line_below['points'][0][0], line_below['points'][-1][0]), max(line_below['points'][0][0], line_below['points'][-1][0])
+                        if min_x <= vertex[0] <= max_x:
+                            # [v12.3.4] 중간 지형 충돌 검사
+                            is_obstructed = False
+                            for other_line in terrain_lines:
+                                if (other_line['id'] != line_above['id'] and other_line['id'] != line_below['id'] and
+                                    line_below['floor'] < other_line['floor'] < line_above['floor']):
+                                    other_min_x = min(other_line['points'][0][0], other_line['points'][-1][0])
+                                    other_max_x = max(other_line['points'][0][0], other_line['points'][-1][0])
+                                    if other_min_x <= vertex[0] <= other_max_x:
+                                        is_obstructed = True
+                                        break
+                            if is_obstructed: continue
+
+                            start_key = f"fall_start_{line_above['id']}_{v_idx}"
+                            self.nav_nodes[start_key] = {'type': 'fall_start', 'pos': QPointF(*vertex), 'name': f"{group_above} 낙하", 'group': group_above}
+                            cost = abs(vertex[1] - line_below['points'][0][1]) * 0.6
+                            target_group = line_below.get('dynamic_name')
+                            action_key = f"fall_action_{line_above['id']}_{v_idx}_{line_below['id']}"
+                            self.nav_graph[start_key][action_key] = {'cost': cost, 'action': 'fall', 'target_group': target_group}
+                            break
+
+                # 아래 점프 노드
                 for line_below in terrain_lines:
                     if line_above['id'] == line_below['id'] or line_above['floor'] <= line_below['floor']: continue
-                    
-                    min_x, max_x = min(line_below['points'][0][0], line_below['points'][-1][0]), max(line_below['points'][0][0], line_below['points'][-1][0])
-                    if min_x <= vertex[0] <= max_x:
-                        start_key = f"fall_start_{line_above['id']}_{v_idx}"
-                        self.nav_nodes[start_key] = {'type': 'fall_start', 'pos': QPointF(*vertex), 'name': f"{group_above} 낙하", 'group': group_above}
+                    y_above, y_below = line_above['points'][0][1], line_below['points'][0][1]
+                    y_diff = abs(y_above - y_below)
+
+                    if 0 < y_diff <= 70:
+                        ax1, ax2 = min(line_above['points'][0][0], line_above['points'][-1][0]), max(line_above['points'][0][0], line_above['points'][-1][0])
+                        bx1, bx2 = min(line_below['points'][0][0], line_below['points'][-1][0]), max(line_below['points'][0][0], line_below['points'][-1][0])
+                        overlap_x1, overlap_x2 = max(ax1, bx1), min(ax2, bx2)
                         
-                        cost = abs(vertex[1] - line_below['points'][0][1]) * 0.6
-                        target_group = line_below.get('dynamic_name')
-                        # 액션 자체를 노드로 생각하고 연결
-                        action_key = f"fall_action_{line_above['id']}_{v_idx}_{line_below['id']}"
-                        self.nav_graph[start_key][action_key] = {'cost': cost, 'action': 'fall', 'target_group': target_group}
-                        break
+                        if overlap_x1 < overlap_x2:
+                            # [v12.3.4] 중간 지형 충돌 검사
+                            is_obstructed = False
+                            for other_line in terrain_lines:
+                                if (other_line['id'] != line_above['id'] and other_line['id'] != line_below['id'] and
+                                    line_below['floor'] < other_line['floor'] < line_above['floor']):
+                                    other_min_x = min(other_line['points'][0][0], other_line['points'][-1][0])
+                                    other_max_x = max(other_line['points'][0][0], other_line['points'][-1][0])
+                                    if max(overlap_x1, other_min_x) < min(overlap_x2, other_max_x):
+                                        is_obstructed = True
+                                        break
+                            if is_obstructed: continue
 
-            # 아래 점프 노드
-            for line_below in terrain_lines:
-                if line_above['id'] == line_below['id'] or line_above['floor'] <= line_below['floor']: continue
-                y_diff = abs(line_above['points'][0][1] - line_below['points'][0][1])
-                if 0 < y_diff <= 70:
-                    ax1, ax2 = min(line_above['points'][0][0], line_above['points'][-1][0]), max(line_above['points'][0][0], line_above['points'][-1][0])
-                    bx1, bx2 = min(line_below['points'][0][0], line_below['points'][-1][0]), max(line_below['points'][0][0], line_below['points'][-1][0])
-                    overlap_x1, overlap_x2 = max(ax1, bx1), min(ax2, bx2)
-                    
-                    if overlap_x1 < overlap_x2:
-                        start_key = f"djump_start_{line_above['id']}_{line_below['id']}"
-                        center_x = (overlap_x1 + overlap_x2) / 2.0
-                        start_pos = QPointF(center_x, line_above['points'][0][1])
-                        self.nav_nodes[start_key] = {'type': 'djump_area', 'pos': start_pos, 'name': f"{group_above} 아래 점프", 'group': group_above}
-                        
-                        cost = y_diff * 0.5
-                        target_group = line_below.get('dynamic_name')
-                        action_key = f"djump_action_{line_above['id']}_{line_below['id']}"
-                        self.nav_graph[start_key][action_key] = {'cost': cost, 'action': 'down_jump', 'target_group': target_group}
+                            start_key = f"djump_start_{line_above['id']}_{line_below['id']}"
+                            center_x = (overlap_x1 + overlap_x2) / 2.0
+                            start_pos = QPointF(center_x, y_above)
+                            self.nav_nodes[start_key] = {'type': 'djump_area', 'pos': start_pos, 'name': f"{group_above} 아래 점프", 'group': group_above, 'x_range': [overlap_x1, overlap_x2]}
+                            cost = y_diff * 0.5
+                            target_group = line_below.get('dynamic_name')
+                            action_key = f"djump_action_{line_above['id']}_{line_below['id']}"
+                            self.nav_graph[start_key][action_key] = {'cost': cost, 'action': 'down_jump', 'target_group': target_group}
 
-# --- 2. 걷기(Walk) 간선 추가 ---
-        nodes_by_terrain_group = defaultdict(list)
-        for key, node_data in self.nav_nodes.items():
-            if node_data.get('group'):
-                nodes_by_terrain_group[node_data['group']].append(key)
-        
-        for group_name, node_keys in nodes_by_terrain_group.items():
-            for i in range(len(node_keys)):
-                for j in range(i + 1, len(node_keys)):
-                    key1, key2 = node_keys[i], node_keys[j]
-                    
-                    # [v12.3.0] 동일 지형 그룹인지 한 번 더 확실하게 확인
-                    group1 = self.nav_nodes[key1].get('group')
-                    group2 = self.nav_nodes[key2].get('group')
+            # --- 2. 걷기(Walk) 간선 추가 ---
+            nodes_by_terrain_group = defaultdict(list)
+            for key, node_data in self.nav_nodes.items():
+                if node_data.get('group'):
+                    nodes_by_terrain_group[node_data['group']].append(key)
+            
+            for group_name, node_keys in nodes_by_terrain_group.items():
+                for i in range(len(node_keys)):
+                    for j in range(i + 1, len(node_keys)):
+                        key1, key2 = node_keys[i], node_keys[j]
+                        group1, group2 = self.nav_nodes[key1].get('group'), self.nav_nodes[key2].get('group')
+                        if group1 and group2 and group1 == group2:
+                            pos1, pos2 = self.nav_nodes[key1]['pos'], self.nav_nodes[key2]['pos']
+                            cost = abs(pos1.x() - pos2.x())
+                            self.nav_graph[key1][key2] = {'cost': cost, 'action': 'walk'}
+                            self.nav_graph[key2][key1] = {'cost': cost, 'action': 'walk'}
 
-                    if group1 and group2 and group1 == group2:
-                        pos1, pos2 = self.nav_nodes[key1]['pos'], self.nav_nodes[key2]['pos']
-                        cost = abs(pos1.x() - pos2.x())
-                        self.nav_graph[key1][key2] = {'cost': cost, 'action': 'walk'}
-                        self.nav_graph[key2][key1] = {'cost': cost, 'action': 'walk'}
-
-        self.update_general_log(f"내비게이션 그래프 생성 완료. (노드: {len(self.nav_nodes)}개)", "purple")
+            self.update_general_log(f"내비게이션 그래프 생성 완료. (노드: {len(self.nav_nodes)}개)", "purple")
 
     def _find_path_astar(self, start_key, goal_key):
         """v12.2.0: A* 알고리즘을 수정하여 새로운 그래프 구조를 지원합니다."""
