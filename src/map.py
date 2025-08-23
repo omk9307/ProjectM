@@ -6580,8 +6580,8 @@ class MapTab(QWidget):
 
     def _build_navigation_graph(self, waypoint_ids_in_route=None):
             """
-            v12.5.2: 맵의 지오메트리 데이터와 현재 경로의 WP 목록을 기반으로 A* 탐색용 그래프를 생성합니다.
-            [수정] 층 변경 페널티를 도입하고 액션 비용을 재조정하여 비논리적 경로 생성을 방지합니다.
+            v12.5.3: 맵의 지오메트리 데이터와 현재 경로의 WP 목록을 기반으로 A* 탐색용 그래프를 생성합니다.
+            [수정] 노드 이름에 역할을 명시하고, 비용 모델 상수를 조정합니다.
             """
             self.nav_nodes.clear()
             self.nav_graph = defaultdict(dict)
@@ -6594,15 +6594,14 @@ class MapTab(QWidget):
 
             terrain_lines = self.geometry_data.get("terrain_lines", [])
 
-            # --- [신규] 비용 모델 상수 정의 ---
-            FLOOR_CHANGE_PENALTY = 200.0  # 층을 한 번 바꿀 때마다 부과되는 기본 페널티
-            CLIMB_UP_COST_MULTIPLIER = 1.5  # Y 이동 거리에 곱해지는 가중치 (오르기)
-            CLIMB_DOWN_COST_MULTIPLIER = 3.0 # Y 이동 거리에 곱해지는 가중치 (내려가기)
-            JUMP_COST_MULTIPLIER = 1.2     # 점프 거리에 곱해지는 가중치
-            FALL_COST_MULTIPLIER = 1.5     # 낙하 거리에 곱해지는 가중치
+            # --- 비용 모델 상수 (튜닝 가능) ---
+            FLOOR_CHANGE_PENALTY = 300.0  # 페널티를 조금 더 강화
+            CLIMB_UP_COST_MULTIPLIER = 2.0
+            CLIMB_DOWN_COST_MULTIPLIER = 1.5
+            JUMP_COST_MULTIPLIER = 1.2
+            FALL_COST_MULTIPLIER = 1.8  # 낙하 비용 증가
 
             # --- 1. 모든 잠재적 노드 생성 ---
-            # 1a. 웨이포인트 노드 (경로에 포함된 것만)
             for wp in self.geometry_data.get("waypoints", []):
                 if wp['id'] in waypoint_ids_in_route:
                     key = f"wp_{wp['id']}"
@@ -6610,22 +6609,17 @@ class MapTab(QWidget):
                     group = contact_terrain.get('dynamic_name') if contact_terrain else None
                     self.nav_nodes[key] = {'type': 'waypoint', 'pos': QPointF(*wp['pos']), 'floor': wp.get('floor'), 'name': wp.get('name'), 'id': wp['id'], 'group': group}
 
-            # 1b. 사다리 노드
             for obj in self.geometry_data.get("transition_objects", []):
                 p1 = QPointF(*obj['points'][0])
                 p2 = QPointF(*obj['points'][1])
                 entry_pos, exit_pos = (p1, p2) if p1.y() > p2.y() else (p2, p1)
+                entry_key, exit_key = f"ladder_entry_{obj['id']}", f"ladder_exit_{obj['id']}"
+                entry_terrain, exit_terrain = self._get_contact_terrain(entry_pos), self._get_contact_terrain(exit_pos)
+                entry_group, exit_group = (entry_terrain.get('dynamic_name') if entry_terrain else None), (exit_terrain.get('dynamic_name') if exit_terrain else None)
                 
-                entry_key = f"ladder_entry_{obj['id']}"
-                exit_key = f"ladder_exit_{obj['id']}"
-                
-                entry_terrain = self._get_contact_terrain(entry_pos)
-                exit_terrain = self._get_contact_terrain(exit_pos)
-                entry_group = entry_terrain.get('dynamic_name') if entry_terrain else None
-                exit_group = exit_terrain.get('dynamic_name') if exit_terrain else None
-
-                self.nav_nodes[entry_key] = {'type': 'ladder_entry', 'pos': entry_pos, 'obj_id': obj['id'], 'name': obj.get('dynamic_name'), 'group': entry_group}
-                self.nav_nodes[exit_key] = {'type': 'ladder_exit', 'pos': exit_pos, 'obj_id': obj['id'], 'name': obj.get('dynamic_name'), 'group': exit_group}
+                base_name = obj.get('dynamic_name', obj['id'])
+                self.nav_nodes[entry_key] = {'type': 'ladder_entry', 'pos': entry_pos, 'obj_id': obj['id'], 'name': f"{base_name} (입구)", 'group': entry_group}
+                self.nav_nodes[exit_key] = {'type': 'ladder_exit', 'pos': exit_pos, 'obj_id': obj['id'], 'name': f"{base_name} (출구)", 'group': exit_group}
                 
                 y_diff = abs(entry_pos.y() - exit_pos.y())
                 cost_up = (y_diff * CLIMB_UP_COST_MULTIPLIER) + FLOOR_CHANGE_PENALTY
@@ -6633,40 +6627,30 @@ class MapTab(QWidget):
                 self.nav_graph[entry_key][exit_key] = {'cost': cost_up, 'action': 'climb'}
                 self.nav_graph[exit_key][entry_key] = {'cost': cost_down, 'action': 'climb_down'}
 
-            # 1c. 점프 링크 노드
             for link in self.geometry_data.get("jump_links", []):
-                start_pos = QPointF(*link['start_vertex_pos'])
-                end_pos = QPointF(*link['end_vertex_pos'])
-                
-                key1 = f"jump_{link['id']}_p1"
-                key2 = f"jump_{link['id']}_p2"
+                start_pos, end_pos = QPointF(*link['start_vertex_pos']), QPointF(*link['end_vertex_pos'])
+                key1, key2 = f"jump_{link['id']}_p1", f"jump_{link['id']}_p2"
+                start_terrain, end_terrain = self._get_contact_terrain(start_pos), self._get_contact_terrain(end_pos)
+                start_group, end_group = (start_terrain.get('dynamic_name') if start_terrain else None), (end_terrain.get('dynamic_name') if end_terrain else None)
 
-                start_terrain = self._get_contact_terrain(start_pos)
-                end_terrain = self._get_contact_terrain(end_pos)
-                start_group = start_terrain.get('dynamic_name') if start_terrain else None
-                end_group = end_terrain.get('dynamic_name') if end_terrain else None
-
-                self.nav_nodes[key1] = {'type': 'jump_vertex', 'pos': start_pos, 'link_id': link['id'], 'name': link.get('dynamic_name'), 'group': start_group}
-                self.nav_nodes[key2] = {'type': 'jump_vertex', 'pos': end_pos, 'link_id': link['id'], 'name': link.get('dynamic_name'), 'group': end_group}
+                base_name = link.get('dynamic_name', link['id'])
+                self.nav_nodes[key1] = {'type': 'jump_vertex', 'pos': start_pos, 'link_id': link['id'], 'name': f"{base_name} (시작점)", 'group': start_group}
+                self.nav_nodes[key2] = {'type': 'jump_vertex', 'pos': end_pos, 'link_id': link['id'], 'name': f"{base_name} (도착점)", 'group': end_group}
                 
                 cost = math.hypot(start_pos.x() - end_pos.x(), start_pos.y() - end_pos.y()) * JUMP_COST_MULTIPLIER
-                # 점프가 층을 변경하는 경우 페널티 추가
                 if start_terrain and end_terrain and start_terrain.get('floor') != end_terrain.get('floor'):
                     cost += FLOOR_CHANGE_PENALTY
-
                 self.nav_graph[key1][key2] = {'cost': cost, 'action': 'jump'}
                 self.nav_graph[key2][key1] = {'cost': cost, 'action': 'jump'}
 
-            # 1d. 낙하(Fall) 및 아래 점프(Down Jump) 노드
             for line_above in terrain_lines:
                 group_above = line_above.get('dynamic_name')
-                # 낙하 노드
                 for v_idx, vertex in enumerate([line_above['points'][0], line_above['points'][-1]]):
                     for line_below in terrain_lines:
                         if line_above['id'] == line_below['id'] or line_above['floor'] <= line_below['floor']: continue
-                        
                         min_x, max_x = min(line_below['points'][0][0], line_below['points'][-1][0]), max(line_below['points'][0][0], line_below['points'][-1][0])
                         if min_x <= vertex[0] <= max_x:
+                            # ... (충돌 검사 로직은 동일) ...
                             is_obstructed = False
                             for other_line in terrain_lines:
                                 if (other_line['id'] != line_above['id'] and other_line['id'] != line_below['id'] and
@@ -6679,26 +6663,22 @@ class MapTab(QWidget):
                             if is_obstructed: continue
 
                             start_key = f"fall_start_{line_above['id']}_{v_idx}"
-                            self.nav_nodes[start_key] = {'type': 'fall_start', 'pos': QPointF(*vertex), 'name': f"{group_above} 낙하", 'group': group_above}
-                            
+                            self.nav_nodes[start_key] = {'type': 'fall_start', 'pos': QPointF(*vertex), 'name': f"{group_above} 낙하 지점", 'group': group_above}
                             cost = (abs(vertex[1] - line_below['points'][0][1]) * FALL_COST_MULTIPLIER) + FLOOR_CHANGE_PENALTY
-                            
                             target_group = line_below.get('dynamic_name')
                             action_key = f"fall_action_{line_above['id']}_{v_idx}_{line_below['id']}"
                             self.nav_graph[start_key][action_key] = {'cost': cost, 'action': 'fall', 'target_group': target_group}
                             break
 
-                # 아래 점프 노드
                 for line_below in terrain_lines:
                     if line_above['id'] == line_below['id'] or line_above['floor'] <= line_below['floor']: continue
                     y_above, y_below = line_above['points'][0][1], line_below['points'][0][1]
                     y_diff = abs(y_above - y_below)
-
                     if 0 < y_diff <= 70:
+                        # ... (겹침 및 충돌 검사 로직은 동일) ...
                         ax1, ax2 = min(line_above['points'][0][0], line_above['points'][-1][0]), max(line_above['points'][0][0], line_above['points'][-1][0])
                         bx1, bx2 = min(line_below['points'][0][0], line_below['points'][-1][0]), max(line_below['points'][0][0], line_below['points'][-1][0])
                         overlap_x1, overlap_x2 = max(ax1, bx1), min(ax2, bx2)
-                        
                         if overlap_x1 < overlap_x2:
                             is_obstructed = False
                             for other_line in terrain_lines:
@@ -6714,15 +6694,14 @@ class MapTab(QWidget):
                             start_key = f"djump_start_{line_above['id']}_{line_below['id']}"
                             center_x = (overlap_x1 + overlap_x2) / 2.0
                             start_pos = QPointF(center_x, y_above)
-                            self.nav_nodes[start_key] = {'type': 'djump_area', 'pos': start_pos, 'name': f"{group_above} 아래 점프", 'group': group_above, 'x_range': [overlap_x1, overlap_x2]}
-                            
+                            self.nav_nodes[start_key] = {'type': 'djump_area', 'pos': start_pos, 'name': f"{group_above} 아래 점프 지점", 'group': group_above, 'x_range': [overlap_x1, overlap_x2]}
                             cost = (y_diff * FALL_COST_MULTIPLIER) + FLOOR_CHANGE_PENALTY
-                            
                             target_group = line_below.get('dynamic_name')
                             action_key = f"djump_action_{line_above['id']}_{line_below['id']}"
                             self.nav_graph[start_key][action_key] = {'cost': cost, 'action': 'down_jump', 'target_group': target_group}
 
-            # --- 2. 걷기(Walk) 간선 추가 (이전 수정과 동일하게 유지) ---
+            # --- 2. 걷기(Walk) 간선 추가 (로직 동일) ---
+            # ... (이 부분은 이전과 동일하게 유지) ...
             nodes_by_terrain_group = defaultdict(list)
             for key, node_data in self.nav_nodes.items():
                 if node_data.get('type') in ['djump_area', 'fall_start']:
@@ -6748,44 +6727,34 @@ class MapTab(QWidget):
             self.update_general_log(f"내비게이션 그래프 생성 완료. (노드: {len(self.nav_nodes)}개)", "purple")
 
     def _reconstruct_path(self, came_from, current_key, start_key):
-        """A* 탐색 결과를 바탕으로 최종 경로 리스트를 재구성합니다."""
-        path = []
+        """
+        v12.5.4: A* 탐색 결과를 바탕으로 최종 경로 리스트를 재구성합니다.
+        [수정] 경로 역추적 로직을 단순화하고 중복 노드 생성 버그를 해결합니다.
+        """
+        path = [current_key]  # 최종 목표 지점부터 경로를 만들기 시작
         
-        # current_key는 목표 노드에서 시작합니다.
-        # came_from은 { 현재노드: (이전노드, 액션정보) } 형태입니다.
-        
-        while current_key in came_from:
-            prev_key, action_data = came_from[current_key]
+        # current_key가 시작점이 아니고, came_from에 정보가 있는 동안 반복
+        while current_key != start_key and current_key in came_from:
+            # came_from 딕셔너리에서 이전 노드 키만 가져옵니다.
+            # action_data는 이 단계에서는 필요 없습니다.
+            prev_key, _ = came_from[current_key]
             
-            # 액션을 통해 넘어온 경우, 액션의 시작점(prev_key)과
-            # 도착점(current_key)을 모두 경로에 추가해야 합니다.
-            # 액션 데이터가 있으면 경로에 도착점을 먼저 추가합니다.
-            if action_data:
-                path.append(current_key)
-
+            # 경로의 맨 앞에 이전 노드를 추가합니다.
+            path.insert(0, prev_key)
+            
+            # 다음 반복을 위해 current_key를 이전 노드로 업데이트합니다.
             current_key = prev_key
-            # 이전 노드를 경로에 추가합니다.
-            path.append(current_key)
+            
+        # 만약 경로가 시작점으로 시작하지 않으면(드문 경우), 시작점을 맨 앞에 추가
+        if path and path[0] != start_key:
+             path.insert(0, start_key)
 
-        # 시작점이 경로에 포함되지 않은 경우 추가 (루프가 start_key에서 멈추므로)
-        if not path or path[-1] != start_key:
-             path.append(start_key)
-
-        # 경로가 역순으로 만들어졌으므로 뒤집고, 중복을 제거합니다.
-        # (A -> B -> B -> C 와 같이 중복될 수 있음)
-        reversed_path = path[::-1]
-        
-        # 순서를 유지하면서 중복 제거
-        final_path = []
-        for node in reversed_path:
-            if not final_path or final_path[-1] != node:
-                final_path.append(node)
-        
-        return final_path
+        return path
 
     def _find_path_astar(self, start_key, goal_key):
-        """v12.5.0: A* 알고리즘을 수정하여 액션 노드 처리를 강화하고 경로 역주행을 방지합니다."""
+        """v12.5.3: A* 알고리즘에 상세 디버그 로그를 추가합니다."""
         if start_key not in self.nav_nodes or goal_key not in self.nav_nodes:
+            print(f"[A* DEBUG] 시작 또는 목표 노드가 nav_nodes에 없습니다. 시작: {start_key}, 목표: {goal_key}")
             return None, float('inf')
 
         import heapq
@@ -6793,34 +6762,54 @@ class MapTab(QWidget):
         start_pos = self.nav_nodes[start_key]['pos']
         goal_pos = self.nav_nodes[goal_key]['pos']
 
-        open_set = [(0, start_key)] # (f_cost, node_key)
-        
-        # came_from 구조 변경: { 현재노드: (이전노드, 액션정보_딕셔셔리_또는_None) }
+        open_set = [(0, start_key)]
         came_from = {}
-        
         g_score = {key: float('inf') for key in self.nav_nodes}
         g_score[start_key] = 0
-        
         f_score = {key: float('inf') for key in self.nav_nodes}
-        f_score[start_key] = math.hypot(start_pos.x() - goal_pos.x(), start_pos.y() - goal_pos.y())
+        h_start = math.hypot(start_pos.x() - goal_pos.x(), start_pos.y() - goal_pos.y())
+        f_score[start_key] = h_start
 
+        print("\n" + "="*20 + " A* 탐색 시작 " + "="*20)
+        print(f"[A* DEBUG] 시작: '{self.nav_nodes[start_key]['name']}' ({start_key})")
+        print(f"[A* DEBUG] 목표: '{self.nav_nodes[goal_key]['name']}' ({goal_key})")
+        print(f"[A* DEBUG] 시작 F_Score = g(0) + h({h_start:.1f}) = {f_score[start_key]:.1f}")
+
+        iter_count = 0
         while open_set:
+            iter_count += 1
+            if iter_count > 2000: # 무한 루프 방지
+                print("[A* DEBUG] ERROR: 탐색 반복 횟수가 2000회를 초과했습니다. 탐색을 중단합니다.")
+                break
+                
             _, current_key = heapq.heappop(open_set)
+            current_name = self.nav_nodes[current_key]['name']
+            
+            print(f"\n--- [ 반복 #{iter_count} ] ---")
+            print(f"[A* DEBUG] 현재 노드: '{current_name}' ({current_key})")
+            print(f"[A* DEBUG]   - g_score: {g_score[current_key]:.1f}, f_score: {f_score[current_key]:.1f}")
+
 
             if current_key == goal_key:
-                # 경로 재구성 헬퍼 메서드 사용
+                print("="*20 + " 목표 도달! 경로 재구성 시작 " + "="*20)
                 path = self._reconstruct_path(came_from, current_key, start_key)
                 return path, g_score[goal_key]
 
             # 이웃 노드 탐색
+            print(f"[A* DEBUG]   '{current_name}'의 이웃 노드(후보) 탐색:")
             for neighbor_key, edge_data in self.nav_graph.get(current_key, {}).items():
                 cost = edge_data.get('cost', float('inf'))
+                action = edge_data.get('action', 'unknown')
                 tentative_g_score = g_score[current_key] + cost
                 
                 # Case 1: 이웃이 실제 노드인 경우 (걷기, 점프, 사다리 등)
                 if neighbor_key in self.nav_nodes:
+                    neighbor_name = self.nav_nodes[neighbor_key]['name']
+                    print(f"[A* DEBUG]     -> 후보: '{neighbor_name}' ({neighbor_key}), 액션: {action}, 비용: {cost:.1f}")
+                    print(f"[A* DEBUG]        - 잠정 g_score: {g_score[current_key]:.1f} + {cost:.1f} = {tentative_g_score:.1f}")
+                    
                     if tentative_g_score < g_score[neighbor_key]:
-                        # came_from에 액션 정보와 함께 기록
+                        print(f"[A* DEBUG]        - [경로 갱신] 기존 g_score({g_score[neighbor_key]:.1f})보다 저렴. 경로를 업데이트합니다.")
                         came_from[neighbor_key] = (current_key, edge_data)
                         g_score[neighbor_key] = tentative_g_score
                         
@@ -6828,46 +6817,46 @@ class MapTab(QWidget):
                         h_score = math.hypot(neighbor_pos.x() - goal_pos.x(), neighbor_pos.y() - goal_pos.y())
                         f_score[neighbor_key] = tentative_g_score + h_score
                         
+                        print(f"[A* DEBUG]        - 새 f_score: g({tentative_g_score:.1f}) + h({h_score:.1f}) = {f_score[neighbor_key]:.1f}")
                         heapq.heappush(open_set, (f_score[neighbor_key], neighbor_key))
+                    else:
+                        print(f"[A* DEBUG]        - [경로 유지] 기존 g_score({g_score[neighbor_key]:.1f})가 더 저렴. 무시합니다.")
                 
                 # Case 2: 이웃이 가상 액션 노드인 경우 (낙하, 아래점프)
                 elif 'target_group' in edge_data:
                     target_group = edge_data['target_group']
-                    
-                    # 착지 그룹에서 가장 합리적인 대표 노드 하나만 찾아서 연결
-                    best_landing_node = None
-                    min_landing_cost = float('inf')
-
-                    # 낙하/아래점프 액션의 시작 위치
+                    print(f"[A* DEBUG]     -> 후보: 가상 액션 노드, 액션: {action}, 비용: {cost:.1f}, 목표 그룹: {target_group}")
+                    # ... (이하 로직은 이전과 동일) ...
+                    best_landing_node, min_landing_cost = None, float('inf')
                     action_start_pos = self.nav_nodes[current_key]['pos']
-
                     for node_key_in_group, node_data in self.nav_nodes.items():
                         if node_data.get('group') == target_group:
-                            # 착지 비용 = (수직 거리) + (수평 거리)
                             landing_pos = node_data['pos']
-                            landing_cost = abs(action_start_pos.y() - landing_pos.y()) + \
-                                           abs(action_start_pos.x() - landing_pos.x()) * 0.5 # 수평 이동 비용 감소
-
+                            landing_cost = abs(action_start_pos.y() - landing_pos.y()) + abs(action_start_pos.x() - landing_pos.x()) * 0.5
                             if landing_cost < min_landing_cost:
                                 min_landing_cost = landing_cost
                                 best_landing_node = node_key_in_group
-
                     if best_landing_node:
-                        # 총 비용 = (현재까지 비용) + (액션 비용) + (착지 비용)
+                        landing_name = self.nav_nodes[best_landing_node]['name']
+                        print(f"[A* DEBUG]        - 최적 착지 지점: '{landing_name}' (추가 비용: {min_landing_cost:.1f})")
                         final_tentative_g_score = tentative_g_score + min_landing_cost
-                        
+                        print(f"[A* DEBUG]        - 잠정 g_score (착지 포함): {tentative_g_score:.1f} + {min_landing_cost:.1f} = {final_tentative_g_score:.1f}")
                         if final_tentative_g_score < g_score[best_landing_node]:
+                            print(f"[A* DEBUG]        - [경로 갱신] 기존 g_score({g_score[best_landing_node]:.1f})보다 저렴. 경로를 업데이트합니다.")
                             came_from[best_landing_node] = (current_key, edge_data)
                             g_score[best_landing_node] = final_tentative_g_score
-
                             landing_node_pos = self.nav_nodes[best_landing_node]['pos']
                             h_score = math.hypot(landing_node_pos.x() - goal_pos.x(), landing_node_pos.y() - goal_pos.y())
                             f_score[best_landing_node] = final_tentative_g_score + h_score
-                            
+                            print(f"[A* DEBUG]        - 새 f_score: g({final_tentative_g_score:.1f}) + h({h_score:.1f}) = {f_score[best_landing_node]:.1f}")
                             heapq.heappush(open_set, (f_score[best_landing_node], best_landing_node))
+                        else:
+                            print(f"[A* DEBUG]        - [경로 유지] 기존 g_score({g_score[best_landing_node]:.1f})가 더 저렴. 무시합니다.")
 
-        return None, float('inf') # 경로 없음
-    
+        print("="*20 + " 탐색 종료 (경로 없음) " + "="*20)
+        return None, float('inf')
+
+
     # === v12.0.0: 추가 끝 ===
 
     def _assign_dynamic_names(self):
