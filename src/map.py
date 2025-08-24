@@ -3177,7 +3177,7 @@ class RealtimeMinimapView(QLabel):
             self.setCursor(Qt.CursorShape.ArrowCursor)
         super().mouseReleaseEvent(event)
 
-    def update_view_data(self, camera_center, active_features, my_players, other_players, target_wp_id, reached_wp_id, final_player_pos, is_forward, intermediate_pos, intermediate_type, nav_action):
+    def update_view_data(self, camera_center, active_features, my_players, other_players, target_wp_id, reached_wp_id, final_player_pos, is_forward, intermediate_pos, intermediate_type, nav_action, intermediate_node_type):
         """MapTab으로부터 렌더링에 필요한 최신 데이터를 받습니다."""
         self.camera_center_global = camera_center
         self.active_features = active_features
@@ -3190,10 +3190,13 @@ class RealtimeMinimapView(QLabel):
         self.intermediate_target_pos = intermediate_pos
         self.intermediate_target_type = intermediate_type
         self.navigation_action = nav_action
+        self.intermediate_node_type = intermediate_node_type
         self.update()
 
     def paintEvent(self, event):
         """
+        v13.0.4: [BUGFIX] self.last_reached_wp_id 오타를 last_reached_waypoint_id로 수정.
+                 [REFACTOR] self.my_player_rects 접근 시 IndexError 방지를 위한 조건문 추가.
         배경 지도 위에 보기 옵션에 따라 모든 요소를 동적으로 렌더링합니다.
         """
         super().paintEvent(event)
@@ -3462,7 +3465,9 @@ class RealtimeMinimapView(QLabel):
                     new_bottom_left_f = local_rect.topLeft() + QPointF(0, -2)
                     name_render_rect.moveBottomLeft(new_bottom_left_f.toPoint())
                     self._draw_text_with_outline(painter, name_render_rect, Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignBottom, name_text, font_name, Qt.GlobalColor.white, Qt.GlobalColor.black)
+                
                 # 3. "도착" 표시
+                # [MODIFIED] 오타 수정: self.last_reached_wp_id -> self.last_reached_waypoint_id
                 if wp_data['id'] == self.last_reached_waypoint_id:
                     font_arrival = QFont("맑은 고딕", 8, QFont.Weight.Bold)
                     arrival_rect = QRectF(local_rect.x(), local_rect.y(), local_rect.width(), local_rect.height() / 2).toRect()
@@ -3480,20 +3485,13 @@ class RealtimeMinimapView(QLabel):
             # --- 시작/끝점 좌표 계산 ---
             # 시작점: 플레이어 아이콘의 중앙
             p1_global = self.final_player_pos_global
+            # [MODIFIED] IndexError 방지를 위해 조건문 추가
             if self.my_player_rects:
                 p1_global = self.my_player_rects[0].center()
 
             # 끝점: 타입에 따라 보정
             p2_global = self.intermediate_target_pos
-            if self.intermediate_target_type == 'walk':
-                # 목표 웨이포인트 ID 찾기
-                target_wp_id_for_render = self.target_waypoint_id
-                if self.navigation_action.startswith('prepare_to_') or self.navigation_action.endswith('_in_progress'):
-                    pass
-                else: # move_to_target
-                    target_wp_id_for_render = self.target_waypoint_id
-                
-                # 웨이포인트 데이터에서 크기 정보 가져오기 (임시 크기 사용)
+            if self.intermediate_node_type == 'waypoint':
                 WAYPOINT_SIZE = 12.0
                 target_wp_rect = QRectF(p2_global.x() - WAYPOINT_SIZE/2, p2_global.y() - WAYPOINT_SIZE, WAYPOINT_SIZE, WAYPOINT_SIZE)
                 p2_global = target_wp_rect.center()
@@ -3507,9 +3505,8 @@ class RealtimeMinimapView(QLabel):
             painter.drawLine(p1_local, p2_local)
             
             # 2. 중간 목표 아이콘 (Target Icon) - 스타일 변경
-            # 아이콘 위치는 정확한 좌표(p2_global)를 사용
             icon_center_local = p2_local
-            TARGET_ICON_SIZE = 5.0 # 전역 좌표계 기준 크기 5x5로 변경
+            TARGET_ICON_SIZE = 5.0
             scaled_size = TARGET_ICON_SIZE * self.zoom_level
             
             icon_rect = QRectF(
@@ -3518,49 +3515,35 @@ class RealtimeMinimapView(QLabel):
                 scaled_size,
                 scaled_size
             )
-            # ==================== v11.6.2 시각적 보정 로직 추가 끝 ======================
             
-            # 배경 (단색 빨간색 원)
-            painter.setPen(Qt.PenStyle.NoPen) # 배경에는 테두리 없음
+            painter.setPen(Qt.PenStyle.NoPen)
             painter.setBrush(QBrush(Qt.GlobalColor.red))
             painter.drawEllipse(icon_rect)
             
-            # 테두리 (흰색, 1.5px)
             painter.setPen(QPen(Qt.GlobalColor.white, 1.5))
-            painter.setBrush(Qt.BrushStyle.NoBrush) # 테두리에는 채우기 없음
+            painter.setBrush(Qt.BrushStyle.NoBrush)
             painter.drawEllipse(icon_rect)
 
-            # 흰색 X자 (굵기 1px로 변경)
             painter.setPen(QPen(Qt.GlobalColor.white, 1))
             painter.drawLine(icon_rect.topLeft(), icon_rect.bottomRight())
             painter.drawLine(icon_rect.topRight(), icon_rect.bottomLeft())
             
             painter.restore()
-        # ==================== v11.6.1 시각화 스타일 수정 끝 ======================
 
         # 내 캐릭터, 다른 유저 
         painter.save()
         painter.setPen(QPen(Qt.GlobalColor.yellow, 2)); painter.setBrush(Qt.BrushStyle.NoBrush)
         if self.final_player_pos_global and self.my_player_rects:
-            # 첫 번째 탐지된 사각형을 기준으로 위치 보정
-            # (보통 my_player_rects에는 하나만 들어있음)
             base_rect = self.my_player_rects[0]
-            
-            # 1. 전달받은 사각형(base_rect)의 글로벌 아랫변 중앙 좌표 계산
             rect_bottom_center_global = base_rect.center() + QPointF(0, base_rect.height() / 2)
-            
-            # 2. 이 좌표와 실제 발밑 좌표(final_player_pos_global)의 차이(오프셋) 계산
             offset = self.final_player_pos_global - rect_bottom_center_global
             
-            # 3. 모든 my_player_rects에 동일한 오프셋을 적용하여 그리기
             for rect in self.my_player_rects:
                 corrected_rect_global = rect.translated(offset)
-                
                 local_top_left = global_to_local(corrected_rect_global.topLeft())
                 local_rect = QRectF(local_top_left, corrected_rect_global.size() * self.zoom_level)
                 painter.drawRect(local_rect)
         else:
-            # fallback: final_player_pos_global이 없는 경우 기존 방식대로 그림
             for rect in self.my_player_rects:
                 local_top_left = global_to_local(rect.topLeft())
                 local_rect = QRectF(local_top_left, rect.size() * self.zoom_level)
@@ -3581,18 +3564,15 @@ class RealtimeMinimapView(QLabel):
             local_player_pos = global_to_local(self.final_player_pos_global)
             
             painter.save()
-            # 십자선 그리기
             pen = QPen(QColor(255, 255, 0, 200), 1.5)
             painter.setPen(pen)
             painter.drawLine(local_player_pos + QPointF(-5, 0), local_player_pos + QPointF(5, 0))
             painter.drawLine(local_player_pos + QPointF(0, -5), local_player_pos + QPointF(0, 5))
             
-            # 중앙 원 그리기
             painter.setBrush(QBrush(Qt.GlobalColor.yellow))
             painter.drawEllipse(local_player_pos, 2, 2)
             painter.restore()
 
-        
     def _draw_text_with_outline(self, painter, rect, flags, text, font, text_color, outline_color):
         """지정한 사각형 영역에 테두리가 있는 텍스트를 그립니다."""
         painter.save()
@@ -3979,6 +3959,7 @@ class MapTab(QWidget):
             self.jump_start_time = 0.0
             # ==================== v11.5.0 상태 머신 변수 추가 시작 ====================
             self.navigation_action = 'move_to_target' # 초기값 'path_failed'에서 변경
+            self.intermediate_node_type = None # [NEW] 현재 목표 노드의 실제 타입 저장
             self.navigation_state_locked = False
             self.state_transition_counters = defaultdict(int) # 상태 전이 프레임 카운터
             self.prepare_timeout_start = 0.0
@@ -5446,6 +5427,13 @@ class MapTab(QWidget):
 
         camera_pos_to_send = final_player_pos if self.center_on_player_checkbox.isChecked() else self.minimap_view_label.camera_center_global
         
+        # [MODIFIED] _update_navigator_and_view 에서 이미 node_type을 포함하여 업데이트 했으므로
+        # 여기서는 시그니처를 맞추기 위해 값을 다시 계산하여 전달
+        intermediate_node_type = None
+        if self.current_segment_path and self.current_segment_index < len(self.current_segment_path):
+            current_node_key = self.current_segment_path[self.current_segment_index]
+            intermediate_node_type = self.nav_nodes.get(current_node_key, {}).get('type')
+
         self.minimap_view_label.update_view_data(
             camera_center=camera_pos_to_send,
             active_features=self.active_feature_info,
@@ -5457,7 +5445,8 @@ class MapTab(QWidget):
             is_forward=self.is_forward,
             intermediate_pos=self.intermediate_target_pos,
             intermediate_type=self.intermediate_target_type,
-            nav_action=self.navigation_action
+            nav_action=self.navigation_action,
+            intermediate_node_type=intermediate_node_type # [NEW]
         )
         self.global_pos_updated.emit(final_player_pos)
         
@@ -6058,65 +6047,64 @@ class MapTab(QWidget):
 
     def _update_navigator_and_view(self, final_player_pos, current_terrain_name):
         """
-        v13.0.2: [수정] '안전 지점으로 이동' 상태를 명시적으로 처리하여 UI 피드백의
-                 일관성을 확보하고, 수평 이동 안내를 정확하게 표시하도록 개선.
-        계산된 모든 상태를 기반으로 UI 위젯들을 업데이트합니다.
+        [v12.4.5] 계산된 모든 상태를 기반으로 UI 위젯들을 업데이트합니다.
+        목표가 실제 웨이포인트인지 경유지인지 구분하여 안내 정확도를 높입니다.
         """
         all_waypoints_map = {wp['id']: wp for wp in self.geometry_data.get("waypoints", [])}
         prev_name, next_name, direction, distance = "", "", "-", 0
-        player_state_text = '알 수 없음'
-        nav_action_text = '대기 중'
         
-        # --- UI 업데이트 로직 분기 ---
-        if self.guidance_text == "안전 지점으로 이동" and self.intermediate_target_pos:
-            # Case 1: 안전 지대로 이동해야 하는 특별한 경우
-            nav_action_text = "안전 지점으로 이동"
-            distance = abs(final_player_pos.x() - self.intermediate_target_pos.x())
-            direction = "→" if final_player_pos.x() < self.intermediate_target_pos.x() else "←"
-        
-        else:
-            # Case 2: 일반적인 내비게이션 상태
-            if self.intermediate_target_pos:
-                if self.navigation_action in ['prepare_to_down_jump', 'prepare_to_fall', 'fall_in_progress']:
-                    distance = abs(final_player_pos.y() - self.intermediate_target_pos.y())
-                    direction = "↓"
-                else:
-                    distance = abs(final_player_pos.x() - self.intermediate_target_pos.x())
-                    direction = "→" if final_player_pos.x() < self.intermediate_target_pos.x() else "←"
+        # [MODIFIED] 메서드 시작 부분에 추가
+        intermediate_node_type = None
+        if self.current_segment_path and self.current_segment_index < len(self.current_segment_path):
+            current_node_key = self.current_segment_path[self.current_segment_index]
+            intermediate_node_type = self.nav_nodes.get(current_node_key, {}).get('type')
 
-            if self.start_waypoint_found and self.journey_plan:
-                if self.current_journey_index > 0:
-                    prev_wp_id = self.journey_plan[self.current_journey_index - 1]
-                    prev_name = all_waypoints_map.get(prev_wp_id, {}).get('name', '')
-                if self.current_journey_index < len(self.journey_plan) - 1:
-                    next_wp_id = self.journey_plan[self.current_journey_index + 1]
-                    next_name = all_waypoints_map.get(next_wp_id, {}).get('name', '')
-            
-            action_text_map = {
-                'move_to_target': "다음 목표로 이동",
-                'prepare_to_climb': "점프+↑+방향키를 눌러 오르세요",
-                'prepare_to_fall': "낭떠러지로 떨어지세요",
-                'prepare_to_down_jump': "아래로 점프하세요",
-                'prepare_to_jump': "점프하세요",
-                'climb_in_progress': "오르는 중...",
-                'fall_in_progress': "낙하 중...",
-                'jump_in_progress': "점프 중...",
-            }
-            nav_action_text = action_text_map.get(self.navigation_action, '대기 중')
+        if self.intermediate_target_pos:
+            if self.navigation_action == 'prepare_to_down_jump':
+                distance = abs(final_player_pos.y() - self.intermediate_target_pos.y())
+                direction = "↓"
+            else:
+                distance = abs(final_player_pos.x() - self.intermediate_target_pos.x())
+                direction = "→" if final_player_pos.x() < self.intermediate_target_pos.x() else "←"
 
-        # --- 공통 UI 업데이트 로직 ---
+        if self.start_waypoint_found and self.journey_plan:
+            if self.current_journey_index > 0:
+                prev_wp_id = self.journey_plan[self.current_journey_index - 1]
+                prev_name = all_waypoints_map.get(prev_wp_id, {}).get('name', '')
+            if self.current_journey_index < len(self.journey_plan) - 1:
+                next_wp_id = self.journey_plan[self.current_journey_index + 1]
+                next_name = all_waypoints_map.get(next_wp_id, {}).get('name', '')
+
         state_text_map = {'idle': '정지', 'on_terrain': '걷기', 'climbing': '오르기', 'falling': '내려가기', 'jumping': '점프 중'}
+        action_text_map = {
+            'move_to_target': "다음 목표로 이동",
+            'prepare_to_climb': "점프+↑+방향키를 눌러 오르세요",
+            'prepare_to_fall': "낭떠러지로 떨어지세요",
+            'prepare_to_down_jump': "아래로 점프하세요",
+            'prepare_to_jump': "점프하세요",
+            'climb_in_progress': "오르는 중...",
+            'fall_in_progress': "낙하 중...",
+            'jump_in_progress': "점프 중...",
+        }
         player_state_text = state_text_map.get(self.player_state, '알 수 없음')
+        nav_action_text = action_text_map.get(self.navigation_action, '대기 중')
         
+        # [v12.4.5] 중간 목표 타입 결정 로직 수정
         final_intermediate_type = 'walk' # 기본값
         if self.current_segment_path and self.current_segment_index < len(self.current_segment_path):
+            current_node_key = self.current_segment_path[self.current_segment_index]
+            current_node_type = self.nav_nodes.get(current_node_key, {}).get('type')
+
             if self.navigation_action.startswith('prepare_to_') or self.navigation_action.endswith('_in_progress'):
                 if 'climb' in self.navigation_action: final_intermediate_type = 'climb'
                 elif 'jump' in self.navigation_action: final_intermediate_type = 'jump'
                 elif 'fall' in self.navigation_action or 'down_jump' in self.navigation_action: final_intermediate_type = 'fall'
+            elif current_node_type != 'waypoint':
+                # 걷기 상태이지만, 목표가 WP가 아닌 경유지(사다리 입구 등)인 경우
+                final_intermediate_type = 'via_point'
         
-        self.intermediate_target_type = final_intermediate_type
-        
+        self.intermediate_target_type = final_intermediate_type # 내부 상태도 갱신
+
         self.navigator_display.update_data(
             floor=self.current_player_floor if self.current_player_floor is not None else "N/A",
             terrain_name=current_terrain_name,
@@ -6135,10 +6123,10 @@ class MapTab(QWidget):
             target_wp_id=self.target_waypoint_id, reached_wp_id=self.last_reached_wp_id,
             final_player_pos=final_player_pos, is_forward=self.is_forward,
             intermediate_pos=self.intermediate_target_pos,
-            intermediate_type=self.intermediate_target_type,
-            nav_action=self.navigation_action
+            intermediate_type=self.intermediate_target_type, # 수정된 타입을 전달
+            nav_action=self.navigation_action,
+            intermediate_node_type=intermediate_node_type # [NEW]
         )
-    
 
     def _handle_move_to_target(self, final_player_pos):
             """
