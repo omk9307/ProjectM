@@ -5841,11 +5841,23 @@ class MapTab(QWidget):
 
     def _process_action_preparation(self, final_player_pos):
         """'prepare_to_...' 상태일 때, 이탈 또는 액션 시작을 판정합니다."""
-        # 액션 시작점은 항상 현재 세그먼트 인덱스
         action_node_key = self.current_segment_path[self.current_segment_index]
         action_node = self.nav_nodes.get(action_node_key, {})
         action_node_pos = action_node.get('pos')
         if not action_node_pos: return
+
+        # --- [v12.9.9 신규 로직] 층(Floor) 검사 ---
+        # 의도: 행동을 준비하는 동안 플레이어가 엉뚱한 층으로 이동하면 즉시 경로를 이탈한 것으로 간주합니다.
+        action_node_floor = action_node.get('floor')
+        if (action_node_floor is not None and 
+            self.current_player_floor is not None and 
+            abs(action_node_floor - self.current_player_floor) > 0.1):
+            
+            self.update_general_log(f"[경로 이탈 감지] 행동 준비 중 층을 벗어났습니다. (예상: {action_node_floor}층, 현재: {self.current_player_floor}층)", "orange")
+            self.current_segment_path = []
+            self.navigation_action = 'move_to_target'
+            return # 즉시 함수를 종료하여 아래 로직을 실행하지 않음
+        # --- 로직 끝 ---
 
         # 1. 액션 시작 판정
         action_started = False
@@ -5863,7 +5875,7 @@ class MapTab(QWidget):
             print(f"[INFO] 행동 시작 감지. 상태 잠금 -> {self.navigation_action}")
             return
 
-        # 2. 이탈 판정
+        # 2. 이탈 판정 (X축 기준)
         recalc_cooldown = 1.0
         if time.time() - self.last_path_recalculation_time > recalc_cooldown:
             is_off_course = False
@@ -6197,16 +6209,14 @@ class MapTab(QWidget):
 
     def _handle_action_preparation(self, final_player_pos):
         """
-        v12.9.6: [수정] 'prepare_to_down_jump'와 'prepare_to_fall' 상태에서, 매 프레임마다 플레이어의 현재 X좌표를 기준으로 착지 지점을 동적으로 계산하여 안내선(intermediate_target_pos)을 갱신합니다.
+        v12.9.9: [수정] '아래 점프/낙하' 안내선 목표 지점의 X좌표를 플레이어의 현재 X좌표로 고정하여 항상 수직으로 표시되도록 수정합니다.
         'prepare_to_...' 상태일 때의 모든 로직을 담당합니다.
         """
         action_node_key = self.current_segment_path[self.current_segment_index]
         
-        # --- [v12.9.6] 동적 안내선 계산 로직 ---
         if self.navigation_action in ['prepare_to_down_jump', 'prepare_to_fall']:
             self.guidance_text = "아래로 점프하세요" if self.navigation_action == 'prepare_to_down_jump' else "낭떠러지로 떨어지세요"
             
-            # 현재 액션 노드에서 연결된 유일한 이웃(착지 지점)을 찾음
             neighbors = self.nav_graph.get(action_node_key, {})
             if len(neighbors) == 1:
                 landing_key = list(neighbors.keys())[0]
@@ -6214,20 +6224,23 @@ class MapTab(QWidget):
                 
                 if landing_node:
                     target_group = landing_node.get('group')
-                    # 착지 지형(line) 데이터를 찾음
                     target_line = next((line for line in self.geometry_data.get("terrain_lines", []) if line.get('dynamic_name') == target_group), None)
                     
                     if target_line:
-                        # 플레이어의 현재 X좌표 바로 아래에 있는 착지 지형의 Y좌표를 계산
                         p1, p2 = target_line['points'][0], target_line['points'][-1]
-                        # 선분의 x 범위 내에 있는지 확인하여 안정성 확보
                         min_x, max_x = min(p1[0], p2[0]), max(p1[0], p2[0])
+                        
+                        # --- [v12.9.9 핵심 수정] 안내선 수직 고정 로직 ---
+                        # 1. 착지 지형의 Y좌표를 계산하기 위해, 플레이어의 X를 지형 범위 내로 제한(clamping)
                         clamped_x = max(min_x, min(final_player_pos.x(), max_x))
-
+                        
+                        # 2. 제한된 X좌표를 이용해 정확한 착지 Y좌표 계산
                         target_y = p1[1] + (p2[1] - p1[1]) * ((clamped_x - p1[0]) / (p2[0] - p1[0])) if (p2[0] - p1[0]) != 0 else p1[1]
                         
-                        # 안내선 목표를 실시간으로 갱신
-                        self.intermediate_target_pos = QPointF(clamped_x, target_y)
+                        # 3. 안내선 목표 지점(intermediate_target_pos)의 X좌표는 플레이어의 현재 X좌표를 그대로 사용
+                        #    이를 통해 안내선이 항상 수직을 유지하게 됨
+                        self.intermediate_target_pos = QPointF(final_player_pos.x(), target_y)
+                        # --- 수정 끝 ---
 
         # 다른 액션 준비 상태(climb, jump)는 기존 로직 유지
         elif self.current_segment_index + 1 < len(self.current_segment_path):
@@ -6830,7 +6843,8 @@ class MapTab(QWidget):
                                     'name': f"{group_above} 아래 점프 지점", 
                                     'group': group_above, 
                                     'x_range': [overlap_x1, overlap_x2],
-                                    'walkable': False
+                                    'walkable': False,
+                                    'floor': line_above.get('floor') # <<< 'floor' 추가
                                 }
                                 
                                 # [v12.9.5] 착지 지점의 x좌표는 점프 지점과 반드시 동일하게 설정
