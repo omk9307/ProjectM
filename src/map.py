@@ -6865,11 +6865,10 @@ class MapTab(QWidget):
 
             self.update_general_log(f"내비게이션 그래프 생성 완료. (노드: {len(self.nav_nodes)}개)", "purple")
 
-    
     def _find_path_astar(self, start_pos, start_group, goal_key):
         """
-        v12.9.3: [수정] 그래프 생성 로직이 '점프->착지'를 직접 연결하도록 변경됨에 따라, 이 함수에서 착지 지점을 추측하던 복잡한 로직을 제거하고 단순화합니다.
-        v12.8.8: [수정] '아래 점프' 또는 '낙하' 이후의 착지 지점을 계산할 때, '사다리 입/출구'를 후보에서 제외하여 비현실적인 경로 생성을 방지합니다.
+        v12.9.8: [수정] A* 탐색 중 '착지 지점'으로 '걷기' 이동을 시도하는 경로를 차단합니다.
+        v12.9.7: [수정] 경로 탐색 시작 시, '착지 지점' 역할을 하는 노드를 출발점 후보에서 제외합니다.
         v12.8.1: A* 알고리즘을 수정하여, 플레이어의 실제 위치(가상 노드)에서 탐색을 시작합니다.
         """
         if goal_key not in self.nav_nodes:
@@ -6885,13 +6884,17 @@ class MapTab(QWidget):
         g_score = {key: float('inf') for key in self.nav_nodes}
         f_score = {key: float('inf') for key in self.nav_nodes}
 
+        # --- [v12.9.7 수정] 시작 단계: start_pos에서 연결된 모든 walkable 노드를 open_set에 추가 ---
+        # '착지' 타입의 노드는 출발점 후보에서 제외하여 비논리적 경로 생성 방지
         nodes_in_start_group = [
             key for key, data in self.nav_nodes.items()
-            if data.get('walkable', False) and data.get('group') == start_group
+            if (data.get('walkable', False) and
+                data.get('group') == start_group and
+                data.get('type') not in ['fall_landing', 'djump_landing'])
         ]
 
         if not nodes_in_start_group:
-            print(f"[A* DEBUG] 시작 그룹 '{start_group}' 내에 walkable 노드가 없습니다.")
+            print(f"[A* DEBUG] 시작 그룹 '{start_group}' 내에 유효한 출발 노드가 없습니다.")
             return None, float('inf')
         
         print("\n" + "="*20 + " A* 탐색 시작 (동적 확장) " + "="*20)
@@ -6924,10 +6927,19 @@ class MapTab(QWidget):
                 return path, g_score[goal_key]
 
             for neighbor_key, edge_data in self.nav_graph.get(current_key, {}).items():
+                # --- [v12.9.8 신규 로직] 역할 기반 경로 필터링 ---
+                # 의도: '착지 지점'은 '걷기'로 도달할 수 없도록 하여, 비논리적인 경로 경유를 방지합니다.
+                #      착지 지점은 오직 'fall'이나 'jump' 같은 액션의 결과로만 도달해야 합니다.
+                neighbor_node_type = self.nav_nodes.get(neighbor_key, {}).get('type')
+                action_to_neighbor = edge_data.get('action')
+
+                if neighbor_node_type in ['fall_landing', 'djump_landing'] and action_to_neighbor == 'walk':
+                    continue # 이 이웃은 건너뛰고 다음 이웃을 탐색합니다.
+                # --- 로직 끝 ---
+
                 cost = edge_data.get('cost', float('inf'))
                 tentative_g_score = g_score[current_key] + cost
                 
-                # [v12.9.3 수정] 모든 이웃은 self.nav_nodes에 존재해야 하므로, 'target_group'을 이용한 복잡한 추측 로직을 제거.
                 if neighbor_key in self.nav_nodes:
                     if tentative_g_score < g_score[neighbor_key]:
                         came_from[neighbor_key] = (current_key, edge_data)
@@ -6936,6 +6948,27 @@ class MapTab(QWidget):
                         h_score = math.hypot(neighbor_pos.x() - goal_pos.x(), neighbor_pos.y() - goal_pos.y())
                         f_score[neighbor_key] = tentative_g_score + h_score
                         heapq.heappush(open_set, (f_score[neighbor_key], neighbor_key))
+                
+                elif 'target_group' in edge_data:
+                    target_group = edge_data['target_group']
+                    best_landing_node, min_landing_cost = None, float('inf')
+                    action_start_pos = self.nav_nodes[current_key]['pos']
+                    for node_key_in_group, node_data in self.nav_nodes.items():
+                        if node_data.get('group') == target_group:
+                            landing_pos = node_data['pos']
+                            landing_cost = abs(action_start_pos.y() - landing_pos.y()) + abs(action_start_pos.x() - landing_pos.x()) * 0.5
+                            if landing_cost < min_landing_cost:
+                                min_landing_cost = landing_cost
+                                best_landing_node = node_key_in_group
+                    if best_landing_node:
+                        final_tentative_g_score = tentative_g_score + min_landing_cost
+                        if final_tentative_g_score < g_score[best_landing_node]:
+                            came_from[best_landing_node] = (current_key, edge_data)
+                            g_score[best_landing_node] = final_tentative_g_score
+                            landing_node_pos = self.nav_nodes[best_landing_node]['pos']
+                            h_score = math.hypot(landing_node_pos.x() - goal_pos.x(), landing_node_pos.y() - goal_pos.y())
+                            f_score[best_landing_node] = final_tentative_g_score + h_score
+                            heapq.heappush(open_set, (f_score[best_landing_node], best_landing_node))
 
         return None, float('inf')
 
