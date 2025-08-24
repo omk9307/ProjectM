@@ -6047,7 +6047,8 @@ class MapTab(QWidget):
         if self.navigation_state_locked:
             self._handle_action_in_progress(final_player_pos)
         elif self.navigation_action.startswith('prepare_to_'):
-            self._handle_action_preparation(final_player_pos)
+            departure_terrain_group = contact_terrain.get('dynamic_name') if contact_terrain else None
+            self._handle_action_preparation(final_player_pos, departure_terrain_group)
         else: # move_to_target
             self._handle_move_to_target(final_player_pos)
 
@@ -6057,58 +6058,65 @@ class MapTab(QWidget):
 
     def _update_navigator_and_view(self, final_player_pos, current_terrain_name):
         """
-        [v12.4.5] 계산된 모든 상태를 기반으로 UI 위젯들을 업데이트합니다.
-        목표가 실제 웨이포인트인지 경유지인지 구분하여 안내 정확도를 높입니다.
+        v13.0.2: [수정] '안전 지점으로 이동' 상태를 명시적으로 처리하여 UI 피드백의
+                 일관성을 확보하고, 수평 이동 안내를 정확하게 표시하도록 개선.
+        계산된 모든 상태를 기반으로 UI 위젯들을 업데이트합니다.
         """
         all_waypoints_map = {wp['id']: wp for wp in self.geometry_data.get("waypoints", [])}
         prev_name, next_name, direction, distance = "", "", "-", 0
+        player_state_text = '알 수 없음'
+        nav_action_text = '대기 중'
         
-        if self.intermediate_target_pos:
-            if self.navigation_action == 'prepare_to_down_jump':
-                distance = abs(final_player_pos.y() - self.intermediate_target_pos.y())
-                direction = "↓"
-            else:
-                distance = abs(final_player_pos.x() - self.intermediate_target_pos.x())
-                direction = "→" if final_player_pos.x() < self.intermediate_target_pos.x() else "←"
+        # --- UI 업데이트 로직 분기 ---
+        if self.guidance_text == "안전 지점으로 이동" and self.intermediate_target_pos:
+            # Case 1: 안전 지대로 이동해야 하는 특별한 경우
+            nav_action_text = "안전 지점으로 이동"
+            distance = abs(final_player_pos.x() - self.intermediate_target_pos.x())
+            direction = "→" if final_player_pos.x() < self.intermediate_target_pos.x() else "←"
+        
+        else:
+            # Case 2: 일반적인 내비게이션 상태
+            if self.intermediate_target_pos:
+                if self.navigation_action in ['prepare_to_down_jump', 'prepare_to_fall', 'fall_in_progress']:
+                    distance = abs(final_player_pos.y() - self.intermediate_target_pos.y())
+                    direction = "↓"
+                else:
+                    distance = abs(final_player_pos.x() - self.intermediate_target_pos.x())
+                    direction = "→" if final_player_pos.x() < self.intermediate_target_pos.x() else "←"
 
-        if self.start_waypoint_found and self.journey_plan:
-            if self.current_journey_index > 0:
-                prev_wp_id = self.journey_plan[self.current_journey_index - 1]
-                prev_name = all_waypoints_map.get(prev_wp_id, {}).get('name', '')
-            if self.current_journey_index < len(self.journey_plan) - 1:
-                next_wp_id = self.journey_plan[self.current_journey_index + 1]
-                next_name = all_waypoints_map.get(next_wp_id, {}).get('name', '')
+            if self.start_waypoint_found and self.journey_plan:
+                if self.current_journey_index > 0:
+                    prev_wp_id = self.journey_plan[self.current_journey_index - 1]
+                    prev_name = all_waypoints_map.get(prev_wp_id, {}).get('name', '')
+                if self.current_journey_index < len(self.journey_plan) - 1:
+                    next_wp_id = self.journey_plan[self.current_journey_index + 1]
+                    next_name = all_waypoints_map.get(next_wp_id, {}).get('name', '')
+            
+            action_text_map = {
+                'move_to_target': "다음 목표로 이동",
+                'prepare_to_climb': "점프+↑+방향키를 눌러 오르세요",
+                'prepare_to_fall': "낭떠러지로 떨어지세요",
+                'prepare_to_down_jump': "아래로 점프하세요",
+                'prepare_to_jump': "점프하세요",
+                'climb_in_progress': "오르는 중...",
+                'fall_in_progress': "낙하 중...",
+                'jump_in_progress': "점프 중...",
+            }
+            nav_action_text = action_text_map.get(self.navigation_action, '대기 중')
 
+        # --- 공통 UI 업데이트 로직 ---
         state_text_map = {'idle': '정지', 'on_terrain': '걷기', 'climbing': '오르기', 'falling': '내려가기', 'jumping': '점프 중'}
-        action_text_map = {
-            'move_to_target': "다음 목표로 이동",
-            'prepare_to_climb': "점프+↑+방향키를 눌러 오르세요",
-            'prepare_to_fall': "낭떠러지로 떨어지세요",
-            'prepare_to_down_jump': "아래로 점프하세요",
-            'prepare_to_jump': "점프하세요",
-            'climb_in_progress': "오르는 중...",
-            'fall_in_progress': "낙하 중...",
-            'jump_in_progress': "점프 중...",
-        }
         player_state_text = state_text_map.get(self.player_state, '알 수 없음')
-        nav_action_text = action_text_map.get(self.navigation_action, '대기 중')
         
-        # [v12.4.5] 중간 목표 타입 결정 로직 수정
         final_intermediate_type = 'walk' # 기본값
         if self.current_segment_path and self.current_segment_index < len(self.current_segment_path):
-            current_node_key = self.current_segment_path[self.current_segment_index]
-            current_node_type = self.nav_nodes.get(current_node_key, {}).get('type')
-
             if self.navigation_action.startswith('prepare_to_') or self.navigation_action.endswith('_in_progress'):
                 if 'climb' in self.navigation_action: final_intermediate_type = 'climb'
                 elif 'jump' in self.navigation_action: final_intermediate_type = 'jump'
                 elif 'fall' in self.navigation_action or 'down_jump' in self.navigation_action: final_intermediate_type = 'fall'
-            elif current_node_type != 'waypoint':
-                # 걷기 상태이지만, 목표가 WP가 아닌 경유지(사다리 입구 등)인 경우
-                final_intermediate_type = 'via_point'
         
-        self.intermediate_target_type = final_intermediate_type # 내부 상태도 갱신
-
+        self.intermediate_target_type = final_intermediate_type
+        
         self.navigator_display.update_data(
             floor=self.current_player_floor if self.current_player_floor is not None else "N/A",
             terrain_name=current_terrain_name,
@@ -6127,7 +6135,7 @@ class MapTab(QWidget):
             target_wp_id=self.target_waypoint_id, reached_wp_id=self.last_reached_wp_id,
             final_player_pos=final_player_pos, is_forward=self.is_forward,
             intermediate_pos=self.intermediate_target_pos,
-            intermediate_type=self.intermediate_target_type, # 수정된 타입을 전달
+            intermediate_type=self.intermediate_target_type,
             nav_action=self.navigation_action
         )
     
@@ -6207,14 +6215,17 @@ class MapTab(QWidget):
                         self.current_segment_index = next_index
                 return
 
-    def _find_safe_landing_zones(self, landing_terrain_group):
+    def _find_safe_landing_zones(self, landing_terrain_group, departure_terrain_group):
         """
-        주어진 착지 지형 그룹 정보를 바탕으로, 위험 지역(점프 링크, 사다리)을 제외한
+        v13.0.2: [수정] 출발 지형 그룹 정보를 인자로 추가하여, 현재 위치에서 '내려가는'
+                 사다리만 위험 지역으로 정확히 식별하도록 로직 개선.
+        주어진 착지/출발 지형 그룹 정보를 바탕으로, 위험 지역(점프 링크, 사다리)을 제외한
         안전하게 착지 가능한 X축 구간들의 리스트를 반환합니다.
         
         :param landing_terrain_group: 착지할 지형의 동적 이름 (e.g., "1층_A")
+        :param departure_terrain_group: 현재 플레이어가 있는 출발 지형의 동적 이름
         :return: (safe_zones, landing_y)
-                 safe_zones: [(start_x1, end_x1), (start_x2, end_x2), ...] 형태의 리스트
+                 safe_zones: [(start_x1, end_x1), ...] 형태의 리스트
                  landing_y: 해당 지형의 Y좌표
         """
         if not landing_terrain_group:
@@ -6229,7 +6240,6 @@ class MapTab(QWidget):
         if len(points) < 2:
             return [], None
 
-        # 지형이 수평이라고 가정하고 Y좌표와 X범위를 계산
         landing_y = points[0][1]
         min_x = min(p[0] for p in points)
         max_x = max(p[0] for p in points)
@@ -6238,47 +6248,18 @@ class MapTab(QWidget):
 
         # 2. 위험 지역 (Hazard Zones) 정의 및 안전 지역에서 제외
         
-        # 2a. 점프 링크 제외
+        # 2a. 점프 링크 제외 (기존 로직 유지)
         jump_links = self.geometry_data.get("jump_links", [])
         for link in jump_links:
             start_terrain = self._get_contact_terrain(QPointF(*link['start_vertex_pos']))
             end_terrain = self._get_contact_terrain(QPointF(*link['end_vertex_pos']))
             
-            # 점프 링크의 양 끝 중 하나라도 착지 지형에 있다면, 해당 X구간을 위험 지역으로 간주
             if (start_terrain and start_terrain.get('dynamic_name') == landing_terrain_group) or \
                (end_terrain and end_terrain.get('dynamic_name') == landing_terrain_group):
                 
                 hazard_start_x = min(link['start_vertex_pos'][0], link['end_vertex_pos'][0])
                 hazard_end_x = max(link['start_vertex_pos'][0], link['end_vertex_pos'][0])
                 
-                new_safe_zones = []
-                for sz_start, sz_end in safe_zones:
-                    # 기존 안전지역과 위험지역의 겹치는 부분 계산
-                    overlap_start = max(sz_start, hazard_start_x)
-                    overlap_end = min(sz_end, hazard_end_x)
-                    
-                    if overlap_start < overlap_end: # 겹치는 경우
-                        # 위험지역 왼쪽 부분
-                        if sz_start < overlap_start:
-                            new_safe_zones.append((sz_start, overlap_start))
-                        # 위험지역 오른쪽 부분
-                        if overlap_end < sz_end:
-                            new_safe_zones.append((overlap_end, sz_end))
-                    else: # 겹치지 않는 경우
-                        new_safe_zones.append((sz_start, sz_end))
-                safe_zones = new_safe_zones
-
-        # 2b. 사다리 제외 (LADDER_AVOIDANCE_WIDTH 사용)
-        LADDER_AVOIDANCE_WIDTH = 5.0 # 기존 _build_navigation_graph 에 있던 상수
-        transition_objects = self.geometry_data.get("transition_objects", [])
-        for obj in transition_objects:
-            start_terrain = self._get_contact_terrain(QPointF(*obj['points'][0]))
-            
-            if start_terrain and start_terrain.get('dynamic_name') == landing_terrain_group:
-                ladder_x = obj['points'][0][0]
-                hazard_start_x = ladder_x - LADDER_AVOIDANCE_WIDTH
-                hazard_end_x = ladder_x + LADDER_AVOIDANCE_WIDTH
-
                 new_safe_zones = []
                 for sz_start, sz_end in safe_zones:
                     overlap_start = max(sz_start, hazard_start_x)
@@ -6290,12 +6271,49 @@ class MapTab(QWidget):
                         new_safe_zones.append((sz_start, sz_end))
                 safe_zones = new_safe_zones
 
+        # 2b. 사다리 제외 (로직 수정)
+        if departure_terrain_group:
+            LADDER_AVOIDANCE_WIDTH = 5.0
+            transition_objects = self.geometry_data.get("transition_objects", [])
+            departure_line = next((line for line in self.geometry_data.get("terrain_lines", []) if line.get('dynamic_name') == departure_terrain_group), None)
+            
+            if departure_line:
+                departure_floor = departure_line.get('floor')
+                for obj in transition_objects:
+                    # 사다리가 출발 지형에 연결되어 있는지 확인
+                    is_connected_to_departure = False
+                    connected_line_id = None
+                    if obj.get('start_line_id') == departure_line.get('id'):
+                        is_connected_to_departure = True
+                        connected_line_id = obj.get('end_line_id')
+                    elif obj.get('end_line_id') == departure_line.get('id'):
+                        is_connected_to_departure = True
+                        connected_line_id = obj.get('start_line_id')
+
+                    if is_connected_to_departure:
+                        # 연결된 다른 쪽 지형의 층이 더 낮은지 확인 (내려가는 사다리)
+                        other_line_floor = self.line_id_to_floor_map.get(connected_line_id)
+                        if other_line_floor is not None and other_line_floor < departure_floor:
+                            ladder_x = obj['points'][0][0]
+                            hazard_start_x = ladder_x - LADDER_AVOIDANCE_WIDTH
+                            hazard_end_x = ladder_x + LADDER_AVOIDANCE_WIDTH
+
+                            new_safe_zones = []
+                            for sz_start, sz_end in safe_zones:
+                                overlap_start = max(sz_start, hazard_start_x)
+                                overlap_end = min(sz_end, hazard_end_x)
+                                if overlap_start < overlap_end:
+                                    if sz_start < overlap_start: new_safe_zones.append((sz_start, overlap_start))
+                                    if overlap_end < sz_end: new_safe_zones.append((overlap_end, sz_end))
+                                else:
+                                    new_safe_zones.append((sz_start, sz_end))
+                            safe_zones = new_safe_zones
+        
         return safe_zones, landing_y
 
-    def _handle_action_preparation(self, final_player_pos):
+    def _handle_action_preparation(self, final_player_pos, departure_terrain_group):
         """
-        v13.0.1: [수정] '아래 점프/낙하' 시, 아래층의 지형 구조(점프 링크, 사다리)를 분석하여
-                 안전한 착지 지점으로 이동하도록 유도하는 로직으로 전면 개편.
+        v13.0.2: [수정] 출발 지형 그룹 정보를 _find_safe_landing_zones로 전달.
         'prepare_to_...' 상태일 때의 모든 로직을 담당합니다.
         """
         action_node_key = self.current_segment_path[self.current_segment_index]
@@ -6311,14 +6329,13 @@ class MapTab(QWidget):
             landing_terrain_group = landing_node.get('group') if landing_node else None
 
             if not landing_terrain_group:
-                # 비상: 착지 지점을 찾을 수 없으면 기존 로직 유지
                 self.guidance_text = "아래로 점프하세요"
-                self.intermediate_target_pos = None # 안내선 숨김
+                self.intermediate_target_pos = None
                 self._process_action_preparation(final_player_pos)
                 return
 
-            # 2. 안전/위험 구역 분석
-            safe_zones, landing_y = self._find_safe_landing_zones(landing_terrain_group)
+            # 2. 안전/위험 구역 분석 (출발 지형 정보 전달)
+            safe_zones, landing_y = self._find_safe_landing_zones(landing_terrain_group, departure_terrain_group)
 
             if not safe_zones or landing_y is None:
                 self.guidance_text = "점프 불가: 안전 지대 없음"
@@ -6338,7 +6355,6 @@ class MapTab(QWidget):
                 # Case 2: 위험 지대에 있을 경우 -> 가장 가까운 안전 지점으로 이동 안내
                 self.guidance_text = "안전 지점으로 이동"
                 
-                # 모든 안전 지대의 경계점들 중 가장 가까운 점 찾기
                 closest_point_x = None
                 min_dist = float('inf')
                 
@@ -6350,11 +6366,9 @@ class MapTab(QWidget):
                         min_dist = abs(player_x - end)
                         closest_point_x = end
                 
-                # 플레이어의 현재 Y좌표를 유지하며 X축으로만 이동하도록 안내
                 if closest_point_x is not None:
                     self.intermediate_target_pos = QPointF(closest_point_x, final_player_pos.y())
 
-        # 다른 액션 준비 상태(climb, jump)는 기존 로직 유지
         elif self.current_segment_index + 1 < len(self.current_segment_path):
             next_node_key = self.current_segment_path[self.current_segment_index + 1]
             next_node = self.nav_nodes.get(next_node_key)
@@ -6362,7 +6376,6 @@ class MapTab(QWidget):
                 self.intermediate_target_pos = next_node.get('pos')
                 self.guidance_text = next_node.get('name', '')
         
-        # 액션 시작 및 이탈 판정 로직 호출 (공통)
         self._process_action_preparation(final_player_pos)
 
     def _handle_action_in_progress(self, final_player_pos):
