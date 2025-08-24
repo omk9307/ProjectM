@@ -5891,57 +5891,73 @@ class MapTab(QWidget):
                 self.navigation_action = 'move_to_target'
     
     def _process_action_completion(self, final_player_pos, contact_terrain):
-        """액션의 완료 또는 실패를 판정하고 상태를 처리합니다."""
+        """
+        v12.9.9: [수정] '아래 점프/낙하' 액션의 성공 기준을 '정확한 지점 도착'에서 '올바른 지형 그룹 착지'로 변경하여 유연성을 높입니다.
+        액션의 완료 또는 실패를 판정하고 상태를 처리합니다.
+        """
         action_completed = False
         action_failed = False
         
-        # 예상 도착 지형 그룹 찾기
+        # --- 1. 예상 도착 지형 그룹 찾기 (기존 로직 유지) ---
+        # 현재 경로와 액션 정보를 바탕으로, 이 액션이 성공했을 때 플레이어가 있어야 할 지형 그룹의 이름을 찾습니다.
         expected_group = None
         if self.current_segment_index < len(self.current_segment_path):
             current_node_key = self.current_segment_path[self.current_segment_index]
             
-            # 액션 간선을 찾아 target_group을 가져옴
+            # 'climb', 'fall' 등 액션 간선(edge)에 직접 목표 그룹이 명시된 경우
             if 'action' in self.navigation_action:
+                # 현재 노드에서 나가는 모든 간선을 확인
                 for edge_data in self.nav_graph.get(current_node_key, {}).values():
+                    # 간선 데이터에 'target_group' 정보가 있으면 그것을 사용
                     if 'target_group' in edge_data:
                         expected_group = edge_data['target_group']
                         break
-            # 일반 점프/사다리는 다음 노드의 그룹이 목표 그룹
+            # 일반적인 점프나 사다리 이동의 경우, 경로상의 다음 노드가 속한 그룹이 목표 그룹
             elif self.current_segment_index + 1 < len(self.current_segment_path):
                  next_node_key = self.current_segment_path[self.current_segment_index + 1]
                  expected_group = self.nav_nodes.get(next_node_key, {}).get('group')
 
-        if expected_group and contact_terrain and contact_terrain.get('dynamic_name') != expected_group:
-            action_failed = True
+        # --- 2. 액션 종류에 따른 성공/실패 판정 ---
+        # 의도: 액션의 종류에 따라 성공 판정 기준을 다르게 적용합니다.
+        #      '낙하'는 목표 지형에 닿기만 하면 성공이지만, '오르기'는 정확한 출구에 도달해야 합니다.
+
+        # [v12.9.9 신규 로직] 아래 점프 또는 낙하 액션에 대한 유연한 성공 판정
+        if self.navigation_action in ['fall_in_progress', 'down_jump_in_progress']:
+            # 플레이어가 땅에 닿았고, 그 땅이 예상했던 지형 그룹이 맞다면 성공으로 간주합니다.
+            if contact_terrain and contact_terrain.get('dynamic_name') == expected_group:
+                action_completed = True
+            # 땅에 닿았지만, 예상과 다른 지형 그룹이라면 실패로 간주합니다.
+            elif contact_terrain and contact_terrain.get('dynamic_name') != expected_group:
+                action_failed = True
         
+        # 사다리 오르기 액션은 기존과 같이 정확한 도착 지점을 요구
         elif self.navigation_action == 'climb_in_progress':
             if self.intermediate_target_pos:
                 dist_x = abs(final_player_pos.x() - self.intermediate_target_pos.x())
                 dist_y = abs(final_player_pos.y() - self.intermediate_target_pos.y())
+                # y축 오차가 거의 없고, x축 오차도 허용 범위 내일 때 성공으로 판정
                 if dist_y < self.cfg_on_terrain_y_threshold * 2 and dist_x < self.cfg_ladder_arrival_x_threshold:
                     action_completed = True
+        
+        # 그 외의 액션(예: 일반 점프)은 땅에 닿으면 일단 성공으로 간주
         else:
             action_completed = True
 
+        # --- 3. 판정 결과에 따른 후속 처리 (기존 로직 유지) ---
         if action_failed:
             self.update_general_log(f"행동({self.navigation_action}) 실패. 예상 경로를 벗어났습니다. 경로를 재탐색합니다.", "orange")
             print(f"[INFO] 행동 실패: {self.navigation_action}, 예상 그룹: {expected_group}, 현재 그룹: {contact_terrain.get('dynamic_name')}")
             self.navigation_action = 'move_to_target'
             self.navigation_state_locked = False
-            self.current_segment_path = []
-            self.expected_terrain_group = None # 실패 시 예상 그룹 초기화
+            self.current_segment_path = [] # 경로를 비워 다음 프레임에서 재탐색을 유도
+            self.expected_terrain_group = None
 
         elif action_completed:
-            action_name = self.navigation_action # 로그용으로 저장
-            # --- [새로운 부분 시작: 상태 전이 및 맥락 갱신] ---
-            # 1. 상태를 정상 '걷기' 모드로 전환
+            action_name = self.navigation_action
             self.navigation_action = 'move_to_target'
             self.navigation_state_locked = False
+            self.current_segment_index += 1 # 경로의 다음 단계로 진행
             
-            # 2. 경로의 다음 단계로 진행
-            self.current_segment_index += 1
-            
-            # 3. 다음 안내를 위한 새로운 '예상 지형 그룹'을 즉시 설정
             if self.current_segment_index < len(self.current_segment_path):
                 next_node_key = self.current_segment_path[self.current_segment_index]
                 next_node = self.nav_nodes.get(next_node_key, {})
@@ -5950,12 +5966,12 @@ class MapTab(QWidget):
                 print(f"[INFO] {log_message}")
                 self.update_general_log(log_message, "green")
             else:
-                # 현재 구간의 마지막 단계였다면 예상 그룹을 초기화
                 self.expected_terrain_group = None
                 log_message = f"행동({action_name}) 완료. 현재 구간 종료."
                 print(f"[INFO] {log_message}")
                 self.update_general_log(log_message, "green")
 
+    
     def _update_player_state_and_navigation(self, final_player_pos):
         """
         v12.7.0: [수정] 경로 이탈 판정 로직을 폐기하고,
