@@ -6103,8 +6103,10 @@ class MapTab(QWidget):
             nav_action=self.navigation_action
         )
     
+
     def _handle_move_to_target(self, final_player_pos):
             """
+            v12.9.6: [수정] '아래 점프' 또는 '낭떠러지' 도착 시, 안내선을 즉시 고정하지 않고 상태만 전환하여 다음 프레임에서 동적 안내선이 생성되도록 수정.
             v12.9.4: [수정] '낭떠러지' 또는 '아래 점프' 지점 도착 시, 경로 안내선(intermediate_target_pos)이 즉시 실제 '착지 지점'을 가리키도록 수정하여 사용자에게 명확한 시각적 피드백을 제공합니다.
             v12.8.6: [수정] '낭떠러지' 또는 '아래 점프' 지점 도착 시, 다음 경로를 확인하기 전에 먼저 해당 노드의 타입을 확인하고 즉시 행동 준비 상태로 전환하도록 수정하여 경로 실행 오류를 해결합니다.
             'move_to_target' 상태일 때의 도착 판정, 상태 전환, 이탈 판정을 처리합니다.
@@ -6141,18 +6143,8 @@ class MapTab(QWidget):
 
                 node_type = current_node.get('type')
                 
-                # --- [v12.9.4 수정] 도착한 노드가 액션을 유발하는 경우, 안내 목표를 '착지 지점'으로 즉시 변경 ---
+                # --- [v12.9.6 수정] 도착한 노드가 액션을 유발하는 경우, 안내 목표를 즉시 변경하지 않고 상태만 전환 ---
                 if node_type in ['fall_start', 'djump_area']:
-                    # 현재 노드와 직접 연결된 유일한 이웃(착지 지점)을 찾음
-                    neighbors = self.nav_graph.get(current_node_key, {})
-                    if len(neighbors) == 1:
-                        landing_key = list(neighbors.keys())[0]
-                        landing_node = self.nav_nodes.get(landing_key)
-                        if landing_node:
-                            # 안내 목표를 착지 지점의 좌표와 이름으로 갱신
-                            self.intermediate_target_pos = landing_node.get('pos')
-                            self.guidance_text = landing_node.get('name', '착지 지점')
-                    
                     # 상태 전환
                     if node_type == 'fall_start':
                         self._transition_to_action_state('prepare_to_fall', current_node_key)
@@ -6187,25 +6179,41 @@ class MapTab(QWidget):
                         self.current_segment_index = next_index
                 return
 
-    
     def _handle_action_preparation(self, final_player_pos):
-        """'prepare_to_...' 상태일 때의 모든 로직을 담당합니다."""
-        # [v12.4.3] 목표 설정 로직을 맨 위로 이동 및 강화
+        """
+        v12.9.6: [수정] 'prepare_to_down_jump'와 'prepare_to_fall' 상태에서, 매 프레임마다 플레이어의 현재 X좌표를 기준으로 착지 지점을 동적으로 계산하여 안내선(intermediate_target_pos)을 갱신합니다.
+        'prepare_to_...' 상태일 때의 모든 로직을 담당합니다.
+        """
         action_node_key = self.current_segment_path[self.current_segment_index]
         
-        if self.navigation_action == 'prepare_to_down_jump':
-            self.guidance_text = "아래로 점프하세요"
-            action_key_part = f"{action_node_key.split('_', 1)[1]}"
-            action_key = f"djump_action_{action_key_part}"
-            target_group = self.nav_graph.get(action_node_key, {}).get(action_key, {}).get('target_group')
-            if target_group:
-                target_line = next((line for line in self.geometry_data.get("terrain_lines", []) if line.get('dynamic_name') == target_group), None)
-                if target_line:
-                    # 아래층 지형의 정확한 y좌표 계산
-                    p1, p2 = target_line['points'][0], target_line['points'][-1]
-                    target_y = p1[1] + (p2[1] - p1[1]) * ((final_player_pos.x() - p1[0]) / (p2[0] - p1[0])) if (p2[0] - p1[0]) != 0 else p1[1]
-                    self.intermediate_target_pos = QPointF(final_player_pos.x(), target_y)
-        
+        # --- [v12.9.6] 동적 안내선 계산 로직 ---
+        if self.navigation_action in ['prepare_to_down_jump', 'prepare_to_fall']:
+            self.guidance_text = "아래로 점프하세요" if self.navigation_action == 'prepare_to_down_jump' else "낭떠러지로 떨어지세요"
+            
+            # 현재 액션 노드에서 연결된 유일한 이웃(착지 지점)을 찾음
+            neighbors = self.nav_graph.get(action_node_key, {})
+            if len(neighbors) == 1:
+                landing_key = list(neighbors.keys())[0]
+                landing_node = self.nav_nodes.get(landing_key)
+                
+                if landing_node:
+                    target_group = landing_node.get('group')
+                    # 착지 지형(line) 데이터를 찾음
+                    target_line = next((line for line in self.geometry_data.get("terrain_lines", []) if line.get('dynamic_name') == target_group), None)
+                    
+                    if target_line:
+                        # 플레이어의 현재 X좌표 바로 아래에 있는 착지 지형의 Y좌표를 계산
+                        p1, p2 = target_line['points'][0], target_line['points'][-1]
+                        # 선분의 x 범위 내에 있는지 확인하여 안정성 확보
+                        min_x, max_x = min(p1[0], p2[0]), max(p1[0], p2[0])
+                        clamped_x = max(min_x, min(final_player_pos.x(), max_x))
+
+                        target_y = p1[1] + (p2[1] - p1[1]) * ((clamped_x - p1[0]) / (p2[0] - p1[0])) if (p2[0] - p1[0]) != 0 else p1[1]
+                        
+                        # 안내선 목표를 실시간으로 갱신
+                        self.intermediate_target_pos = QPointF(clamped_x, target_y)
+
+        # 다른 액션 준비 상태(climb, jump)는 기존 로직 유지
         elif self.current_segment_index + 1 < len(self.current_segment_path):
             next_node_key = self.current_segment_path[self.current_segment_index + 1]
             next_node = self.nav_nodes.get(next_node_key)
@@ -6213,7 +6221,7 @@ class MapTab(QWidget):
                 self.intermediate_target_pos = next_node.get('pos')
                 self.guidance_text = next_node.get('name', '')
         
-        # 이하 액션 시작 및 이탈 판정 로직은 기존과 동일
+        # 액션 시작 및 이탈 판정 로직 호출
         self._process_action_preparation(final_player_pos)
 
     def _handle_action_in_progress(self, final_player_pos):
