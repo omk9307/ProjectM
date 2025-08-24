@@ -6671,18 +6671,9 @@ class MapTab(QWidget):
     
     def _build_navigation_graph(self, waypoint_ids_in_route=None):
             """
+            v13.0.0: [수정] '아래 점프' 노드 생성 시, 아래층에 실제 발판이 없는 허공(점프 링크 등)으로의 점프를 방지하고,
+                     현재 지형에서 '내려가는' 모든 사다리 주변을 회피하도록 로직을 전면 수정하여 안정성을 대폭 강화합니다.
             v12.9.5: [수정] '아래 점프' 노드 생성 시, 사다리 좌우 일정 범위(LADDER_AVOIDANCE_WIDTH) 내에는 노드가 생성되지 않도록 하여 키 입력 충돌을 확실히 방지합니다. 또한 착지 지점의 x좌표가 점프 지점과 항상 동일하도록 보장합니다.
-            v12.9.3: [수정] '낭떠러지' 및 '아래 점프' 노드 생성 시, 그에 짝이 되는 '착지 지점' 노드를 명시적으로 함께 생성하고 직접 연결합니다.
-            v12.9.2: [수정] '아래 점프' 노드 생성 로직을 전면 개편합니다. 
-            v12.9.1: [수정] '아래 점프' 구간 생성 시, 사다리가 차지하는 x좌표를 제외한 나머지 유효 구간에만 노드를 생성하도록 로직을 수정합니다.
-            v12.9.0: [수정] '아래 점프' 구간을 생성할 때, 해당 x축 범위에 이미 층 이동 오브젝트(사다리)가 존재하는 경우 '아래 점프' 노드를 생성하지 않도록 수정합니다.
-            v12.8.9: [수정] '아래 점프' 지점을 구간의 중앙 한 곳에만 생성하던 문제를 해결하기 위해, 구간의 왼쪽/중앙/오른쪽에 여러 개의 노드를 생성하여 경로 탐색의 유연성을 높입니다.
-            v12.8.8: [수정] 요청에 따라 경로 탐색 비용 상수를 조정합니다.
-            v12.8.7: [수정] 층 이동 오브젝트(사다리)에서 '낭떠러지'나 '아래 점프' 지점으로 직접 연결되는 비현실적인 경로가 생성되지 않도록 예외 처리 로직을 추가합니다.
-            v12.8.5: [수정] '아래 점프' 비용을 독립적으로 제어하기 위해 DOWN_JUMP_COST_MULTIPLIER를 추가하고, 중간층 방해물 확인 로직을 명시합니다.
-            v12.8.3: [수정] '낭떠러지' 및 '아래 점프' 노드가 경로 탐색에 포함되도록, walkable 노드와의 연결(간선)을 자동으로 생성하는 로직을 추가합니다.
-            v12.8.2: [수정] 사다리 노드(ladder_entry, ladder_exit) 생성 시, 연결된 지형의 층(floor) 정보를 명시적으로 추가하여 도착 판정 오류를 해결합니다.
-            v12.6.1: [수정] 누락되었던 is_obstructed 충돌 검사 로직을 복원하여 프로필 로드 오류를 해결합니다.
             """
             self.nav_nodes.clear()
             self.nav_graph = defaultdict(dict)
@@ -6700,7 +6691,6 @@ class MapTab(QWidget):
             JUMP_COST_MULTIPLIER = 1.1
             FALL_COST_MULTIPLIER = 2.0
             DOWN_JUMP_COST_MULTIPLIER = 1.2
-            # [v12.9.5 추가] 사다리 주변에 아래 점프 노드를 생성하지 않을 x축 반경
             LADDER_AVOIDANCE_WIDTH = 5.0
 
             # --- 1. 모든 잠재적 노드 생성 및 역할(walkable) 부여 ---
@@ -6764,8 +6754,8 @@ class MapTab(QWidget):
                             
                             start_key = f"fall_start_{line_above['id']}_{v_idx}"
                             start_pos = QPointF(*vertex)
-                            self.nav_nodes[start_key] = {'type': 'fall_start', 'pos': start_pos, 'name': f"{group_above} 낙하 지점", 'group': group_above, 'walkable': False}
-
+                            self.nav_nodes[start_key] = {'type': 'fall_start', 'pos': start_pos, 'name': f"{group_above} 낙하 지점", 'group': group_above, 'walkable': False, 'floor': line_above.get('floor')}
+                            
                             landing_x = start_pos.x()
                             p1, p2 = line_below['points'][0], line_below['points'][-1]
                             landing_y = p1[1] + (p2[1] - p1[1]) * ((landing_x - p1[0]) / (p2[0] - p1[0])) if (p2[0] - p1[0]) != 0 else p1[1]
@@ -6798,32 +6788,44 @@ class MapTab(QWidget):
                                         break
                             if is_obstructed: continue
 
-                            # --- [v12.9.5 수정] 전략적 노드 생성 전, 사다리 충돌 회피 로직 강화 ---
-                            
-                            # 1. 이 구간과 관련된 모든 사다리의 x좌표 및 안전 구역을 찾음
+                            # --- [v13.0.0 수정] 사다리 충돌 회피 로직 강화 ---
+                            # 1. 현재 지형(line_above)에서 '내려가는' 모든 사다리의 x좌표를 찾음
                             ladder_exclusion_zones = []
+                            line_above_floor = line_above.get('floor')
                             for obj in transition_objects:
                                 start_line_id = obj.get('start_line_id')
                                 end_line_id = obj.get('end_line_id')
-                                if {line_above['id'], line_below['id']} == {start_line_id, end_line_id}:
+                                
+                                start_terrain = next((t for t in terrain_lines if t['id'] == start_line_id), None)
+                                end_terrain = next((t for t in terrain_lines if t['id'] == end_line_id), None)
+
+                                if not (start_terrain and end_terrain): continue
+                                
+                                start_floor = start_terrain.get('floor')
+                                end_floor = end_terrain.get('floor')
+                                
+                                # line_above에서 시작하고, 더 낮은 층으로 가는 사다리인지 확인
+                                if (start_line_id == line_above['id'] and end_floor < start_floor) or \
+                                   (end_line_id == line_above['id'] and start_floor < end_floor):
                                     ladder_x = obj['points'][0][0]
                                     ladder_exclusion_zones.append((ladder_x - LADDER_AVOIDANCE_WIDTH, ladder_x + LADDER_AVOIDANCE_WIDTH))
 
                             # 2. 생성할 모든 전략적 위치 후보를 수집
                             strategic_x_positions = set()
-                            # 2a. 목적지 정렬 노드 (아래층 WP 바로 위)
                             waypoints_on_line_below = [wp for wp in self.geometry_data.get("waypoints", []) if wp.get('parent_line_id') == line_below['id']]
                             for wp in waypoints_on_line_below:
-                                wp_x = wp['pos'][0]
-                                if overlap_x1 <= wp_x <= overlap_x2:
-                                    strategic_x_positions.add(round(wp_x, 1))
-                            # 2b. 경계 노드 (겹치는 구간의 양 끝)
+                                strategic_x_positions.add(round(wp['pos'][0], 1))
                             strategic_x_positions.add(round(overlap_x1, 1))
                             strategic_x_positions.add(round(overlap_x2, 1))
 
-                            # 3. 후보 위치들 중, 사다리 안전 구역과 겹치는 위치를 제거
+                            # 3. 후보 위치들 중 유효한 위치만 필터링
                             final_x_positions = set()
                             for x_pos in strategic_x_positions:
+                                # 3a. 아래층에 실제 발판이 있는지 확인 (허공 점프 방지)
+                                if not (bx1 <= x_pos <= bx2):
+                                    continue
+                                
+                                # 3b. 사다리 안전 구역과 겹치는지 확인
                                 is_safe = True
                                 for (ex_start, ex_end) in ladder_exclusion_zones:
                                     if ex_start <= x_pos <= ex_end:
@@ -6844,10 +6846,9 @@ class MapTab(QWidget):
                                     'group': group_above, 
                                     'x_range': [overlap_x1, overlap_x2],
                                     'walkable': False,
-                                    'floor': line_above.get('floor') # <<< 'floor' 추가
+                                    'floor': line_above.get('floor')
                                 }
                                 
-                                # [v12.9.5] 착지 지점의 x좌표는 점프 지점과 반드시 동일하게 설정
                                 landing_x = start_pos.x()
                                 p1, p2 = line_below['points'][0], line_below['points'][-1]
                                 landing_y = p1[1] + (p2[1] - p1[1]) * ((landing_x - p1[0]) / (p2[0] - p1[0])) if (p2[0] - p1[0]) != 0 else p1[1]
@@ -6895,6 +6896,7 @@ class MapTab(QWidget):
 
             self.update_general_log(f"내비게이션 그래프 생성 완료. (노드: {len(self.nav_nodes)}개)", "purple")
 
+    
     def _find_path_astar(self, start_pos, start_group, goal_key):
         """
         v12.9.7: [수정] 경로 탐색 시작 시, '착지 지점' 역할을 하는 노드를 출발점 후보에서 제외합니다.
