@@ -6047,25 +6047,30 @@ class MapTab(QWidget):
 
     def _update_navigator_and_view(self, final_player_pos, current_terrain_name):
         """
-        v13.0.8: [REFACTOR] "안전 지점으로 이동" 상태일 때, '필요 행동'과 '목표 타입'을
-                 명시적으로 설정하여 UI 피드백의 일관성을 완벽하게 보장.
-        v13.0.2: [수정] UI 피드백 일관성 확보 로직 추가.
+        [MODIFIED] v13.1.1: "안전 지대로 이동" 상태 처리 로직을 강화하여,
+                 intermediate_target_pos가 유효할 때만 거리/방향을 계산하도록 수정.
+        v13.0.8: [REFACTOR] UI 피드백 일관성 확보.
         계산된 모든 상태를 기반으로 UI 위젯들을 업데이트합니다.
         """
         all_waypoints_map = {wp['id']: wp for wp in self.geometry_data.get("waypoints", [])}
         prev_name, next_name, direction, distance = "", "", "-", 0
         player_state_text = '알 수 없음'
         nav_action_text = '대기 중'
-        final_intermediate_type = 'walk' # 기본값
+        final_intermediate_type = 'walk'
         
         # --- UI 업데이트 로직 분기 ---
-        if self.guidance_text == "안전 지점으로 이동" and self.intermediate_target_pos:
-            # Case 1: 안전 지대로 이동해야 하는 특별한 경우
-            # [MODIFIED] 필요 행동과 목표 타입을 명시적으로 설정
-            nav_action_text = "안전 지점으로 이동"
-            final_intermediate_type = 'walk' # 수평 이동이므로 walk 타입으로 설정
-            distance = abs(final_player_pos.x() - self.intermediate_target_pos.x())
-            direction = "→" if final_player_pos.x() < self.intermediate_target_pos.x() else "←"
+        # "안전 지대로 이동" 또는 유사한 경고 메시지 상태를 먼저 처리
+        if self.guidance_text in ["안전 지점으로 이동", "점프 불가: 안전 지대 없음", "이동할 안전 지대 없음"]:
+            nav_action_text = self.guidance_text # 필요 행동에 메시지를 그대로 표시
+            final_intermediate_type = 'walk'
+            
+            # [MODIFIED] 목표 지점이 유효할 때만 거리와 방향 계산
+            if self.intermediate_target_pos:
+                distance = abs(final_player_pos.x() - self.intermediate_target_pos.x())
+                direction = "→" if final_player_pos.x() < self.intermediate_target_pos.x() else "←"
+            else:
+                distance = 0
+                direction = "-"
         
         else:
             # Case 2: 일반적인 내비게이션 상태
@@ -6136,7 +6141,6 @@ class MapTab(QWidget):
             nav_action=self.navigation_action,
             intermediate_node_type=intermediate_node_type
         )
-
     def _handle_move_to_target(self, final_player_pos):
             """
             v12.9.6: [수정] '아래 점프' 또는 '낭떠러지' 도착 시, 안내선을 즉시 고정하지 않고 상태만 전환하여 다음 프레임에서 동적 안내선이 생성되도록 수정.
@@ -6308,8 +6312,10 @@ class MapTab(QWidget):
         
         return safe_zones, landing_y
 
-    def _find_best_landing_terrain_at_x(self, departure_pos):
+    def _find_best_landing_terrain_at_x(self, departure_pos, max_y_diff=None):
         """
+        [MODIFIED] v13.1.0: max_y_diff 인자를 추가하여, 지정된 Y축 거리 내에 있는
+                 착지 지형만 필터링하는 기능 추가. (djump 높이 제한용)
         [NEW] v13.0.9: 주어진 출발 위치에서 수직으로 낙하할 때,
         물리적으로 가장 먼저 충돌하는(가장 높은 층에 있는) 지형 라인을 찾아 반환합니다.
         """
@@ -6318,6 +6324,7 @@ class MapTab(QWidget):
             return None
 
         departure_floor = departure_terrain.get('floor', float('inf'))
+        departure_y = departure_pos.y()
         x_pos = departure_pos.x()
         
         # 1. 현재 x좌표에서 낙하 시 만날 수 있는 모든 후보 지형 찾기
@@ -6328,7 +6335,12 @@ class MapTab(QWidget):
                 min_x = min(p[0] for p in line_below['points'])
                 max_x = max(p[0] for p in line_below['points'])
                 if min_x <= x_pos <= max_x:
-                    candidate_landings.append(line_below)
+                    # [MODIFIED] 높이 제한(max_y_diff) 필터링 로직 추가
+                    landing_y = line_below['points'][0][1]
+                    y_diff = abs(departure_y - landing_y)
+                    
+                    if max_y_diff is None or (0 < y_diff <= max_y_diff):
+                        candidate_landings.append(line_below)
         
         if not candidate_landings:
             return None
@@ -6339,43 +6351,55 @@ class MapTab(QWidget):
 
     def _handle_action_preparation(self, final_player_pos, departure_terrain_group):
         """
-        v13.0.9: [REFACTOR] 아래 점프/낙하 시, 고정된 경로 대신 플레이어의 현재 X좌표를
-                 기준으로 매 프레임 최적의 착지 지점을 동적으로 재탐색하여 안내하도록 수정.
-        v13.0.8: [REFACTOR] prepare 상태 진입 시, guidance_text가 '다음 노드'를 가리키도록 수정.
+        [MODIFIED] v13.1.2: "안전 지대" 계산 로직을 전면 재구성.
+                 A*가 계획한 이상적인 착지 지형을 기준으로 먼저 안전 구역을 정의하고,
+                 플레이어의 현재 위치가 해당 구역을 벗어났을 때 가장 가까운 안전 지점으로
+                 능동적으로 유도하도록 수정하여 0px 안내 오류를 해결.
         'prepare_to_...' 상태일 때의 모든 로직을 담당합니다.
         """
         if self.navigation_action in ['prepare_to_down_jump', 'prepare_to_fall']:
-            # [MODIFIED] 동적 착지 지점 탐색
-            # 1. 현재 플레이어 위치에서 최적의 착지 지형을 실시간으로 찾음
-            best_landing_terrain = self._find_best_landing_terrain_at_x(final_player_pos)
-            
-            if not best_landing_terrain:
-                self.guidance_text = "점프 불가: 아래 지형 없음"
+            # 1. A*가 계획한 '이상적인 착지 지형' 정보 가져오기
+            action_node_key = self.current_segment_path[self.current_segment_index]
+            landing_key = next(iter(self.nav_graph.get(action_node_key, {})), None)
+            landing_node = self.nav_nodes.get(landing_key) if landing_key else None
+            ideal_landing_group = landing_node.get('group') if landing_node else None
+
+            if not ideal_landing_group:
+                self.guidance_text = "경로 오류: 착지 지점 없음"
                 self.intermediate_target_pos = None
                 self._process_action_preparation(final_player_pos)
                 return
 
-            landing_terrain_group = best_landing_terrain.get('dynamic_name')
-            self.guidance_text = landing_terrain_group # 목표 이름을 동적으로 찾은 착지 지형 이름으로 설정
+            # 2. 이상적인 착지 지형을 기준으로 '안전 지대' 계산
+            safe_zones, ideal_landing_y = self._find_safe_landing_zones(ideal_landing_group, departure_terrain_group)
 
-            # 2. 해당 착지 지형의 안전/위험 구역 분석
-            safe_zones, landing_y = self._find_safe_landing_zones(landing_terrain_group, departure_terrain_group)
-
-            if not safe_zones or landing_y is None:
+            if not safe_zones or ideal_landing_y is None:
                 self.guidance_text = "점프 불가: 안전 지대 없음"
                 self.intermediate_target_pos = None
                 self._process_action_preparation(final_player_pos)
                 return
-
-            # 3. 플레이어 위치 판별 및 목표 설정
+            
             player_x = final_player_pos.x()
-            is_in_safe_zone = any(start <= player_x <= end for start, end in safe_zones)
+            current_safe_zone = next((zone for zone in safe_zones if zone[0] <= player_x <= zone[1]), None)
 
-            if is_in_safe_zone:
-                # 안전 지대: 수직 안내선 (착지 지점 Y좌표 사용)
-                self.intermediate_target_pos = QPointF(player_x, landing_y)
+            # 3. 플레이어 위치에 따른 동적 판단 및 안내
+            if current_safe_zone:
+                # Case A: 플레이어가 안전 지대 내에 있을 경우
+                # 현재 위치 바로 아래에 착지 가능한지 한번 더 확인 (점프 링크 등 구멍 확인)
+                real_landing_terrain = self._find_best_landing_terrain_at_x(final_player_pos, max_y_diff=70.0 if self.navigation_action == 'prepare_to_down_jump' else None)
+                
+                if real_landing_terrain and real_landing_terrain.get('dynamic_name') == ideal_landing_group:
+                    # A-1: 구멍 없음 -> 수직 점프 안내
+                    self.guidance_text = ideal_landing_group
+                    self.intermediate_target_pos = QPointF(player_x, ideal_landing_y)
+                else:
+                    # A-2: 구멍 있음 -> 현재 안전 지대의 가까운 경계로 이동 안내
+                    self.guidance_text = "안전 지점으로 이동"
+                    start, end = current_safe_zone
+                    target_x = start if abs(player_x - start) < abs(player_x - end) else end
+                    self.intermediate_target_pos = QPointF(target_x, final_player_pos.y())
             else:
-                # 위험 지대: 가장 가까운 안전 지대로 수평 이동 안내
+                # Case B: 플레이어가 안전 지대 밖에 있을 경우 -> 가장 가까운 안전 지대 경계로 이동 안내
                 self.guidance_text = "안전 지점으로 이동"
                 
                 closest_point_x = None
@@ -6391,7 +6415,10 @@ class MapTab(QWidget):
                 
                 if closest_point_x is not None:
                     self.intermediate_target_pos = QPointF(closest_point_x, final_player_pos.y())
-        
+                else:
+                    self.guidance_text = "이동할 안전 지대 없음"
+                    self.intermediate_target_pos = None
+
         else: # 일반 점프/오르기 등 다른 prepare 상태는 기존 로직 유지
             action_node_key = self.current_segment_path[self.current_segment_index]
             next_node_key = None
