@@ -6784,6 +6784,8 @@ class MapTab(QWidget):
     
     def _build_navigation_graph(self, waypoint_ids_in_route=None):
             """
+            v13.0.6: [REFACTOR] '아래 점프/낙하' 노드 생성 시, 중간 층 존재 여부가 아닌
+                     실제 물리적 충돌 여부를 기준으로 경로를 생성하도록 장애물 판정 로직 전면 수정.
             v13.0.0: [수정] '아래 점프' 노드 생성 시, 아래층에 실제 발판이 없는 허공(점프 링크 등)으로의 점프를 방지하고,
                      현재 지형에서 '내려가는' 모든 사다리 주변을 회피하도록 로직을 전면 수정하여 안정성을 대폭 강화합니다.
             v12.9.5: [수정] '아래 점프' 노드 생성 시, 사다리 좌우 일정 범위(LADDER_AVOIDANCE_WIDTH) 내에는 노드가 생성되지 않도록 하여 키 입력 충돌을 확실히 방지합니다. 또한 착지 지점의 x좌표가 점프 지점과 항상 동일하도록 보장합니다.
@@ -6848,131 +6850,117 @@ class MapTab(QWidget):
                     cost += FLOOR_CHANGE_PENALTY
                 self.nav_graph[key1][key2], self.nav_graph[key2][key1] = {'cost': cost, 'action': 'jump'}, {'cost': cost, 'action': 'jump'}
 
+            # --- [MODIFIED] fall_start (낭떠러지 낙하) 노드 생성 로직 ---
             for line_above in terrain_lines:
                 group_above = line_above.get('dynamic_name')
+                # 지형의 양 끝 꼭짓점에서 낙하 경로 탐색
                 for v_idx, vertex in enumerate([line_above['points'][0], line_above['points'][-1]]):
+                    
+                    # 1. 이 꼭짓점에서 수직으로 낙하할 때 만날 수 있는 모든 후보 지형 찾기
+                    candidate_landings = []
                     for line_below in terrain_lines:
-                        if line_above['id'] == line_below['id'] or line_above['floor'] <= line_below['floor']: continue
-                        min_x, max_x = min(line_below['points'][0][0], line_below['points'][-1][0]), max(line_below['points'][0][0], line_below['points'][-1][0])
-                        if min_x <= vertex[0] <= max_x:
-                            is_obstructed = False
-                            for other_line in terrain_lines:
-                                if (other_line['id'] != line_above['id'] and other_line['id'] != line_below['id'] and
-                                    line_below['floor'] < other_line['floor'] < line_above['floor']):
-                                    other_min_x, other_max_x = min(other_line['points'][0][0], other_line['points'][-1][0]), max(other_line['points'][0][0], other_line['points'][-1][0])
-                                    if other_min_x <= vertex[0] <= other_max_x:
-                                        is_obstructed = True
-                                        break
-                            if is_obstructed: continue
-                            
-                            start_key = f"fall_start_{line_above['id']}_{v_idx}"
-                            start_pos = QPointF(*vertex)
-                            self.nav_nodes[start_key] = {'type': 'fall_start', 'pos': start_pos, 'name': f"{group_above} 낙하 지점", 'group': group_above, 'walkable': False, 'floor': line_above.get('floor')}
-                            
-                            landing_x = start_pos.x()
-                            p1, p2 = line_below['points'][0], line_below['points'][-1]
-                            landing_y = p1[1] + (p2[1] - p1[1]) * ((landing_x - p1[0]) / (p2[0] - p1[0])) if (p2[0] - p1[0]) != 0 else p1[1]
-                            landing_pos = QPointF(landing_x, landing_y)
-                            target_group = line_below.get('dynamic_name')
-                            landing_key = f"fall_landing_{line_above['id']}_{v_idx}_{line_below['id']}"
-                            self.nav_nodes[landing_key] = {'type': 'fall_landing', 'pos': landing_pos, 'name': f"{target_group} 착지 지점", 'group': target_group, 'walkable': True}
+                        # 출발 지형보다 낮은 층에 있고, x좌표가 겹치는 지형만 후보
+                        if line_above.get('floor', 0) > line_below.get('floor', 0):
+                            min_x = min(line_below['points'][0][0], line_below['points'][-1][0])
+                            max_x = max(line_below['points'][0][0], line_below['points'][-1][0])
+                            if min_x <= vertex[0] <= max_x:
+                                candidate_landings.append(line_below)
+                    
+                    if not candidate_landings:
+                        continue
 
-                            cost = (abs(start_pos.y() - landing_pos.y()) * FALL_COST_MULTIPLIER) + FLOOR_CHANGE_PENALTY
-                            self.nav_graph[start_key][landing_key] = {'cost': cost, 'action': 'fall'}
-                            break
+                    # 2. 후보들 중 가장 먼저 물리적으로 충돌하는, 즉 가장 높은 층의 지형을 최종 도착지로 선택
+                    best_landing_line = max(candidate_landings, key=lambda line: line.get('floor', 0))
+                    
+                    # 3. 최종 선택된 도착지로 fall_start 노드 생성
+                    start_key = f"fall_start_{line_above['id']}_{v_idx}"
+                    start_pos = QPointF(*vertex)
+                    self.nav_nodes[start_key] = {'type': 'fall_start', 'pos': start_pos, 'name': f"{group_above} 낙하 지점", 'group': group_above, 'walkable': False, 'floor': line_above.get('floor')}
+                    
+                    landing_x = start_pos.x()
+                    p1, p2 = best_landing_line['points'][0], best_landing_line['points'][-1]
+                    landing_y = p1[1] + (p2[1] - p1[1]) * ((landing_x - p1[0]) / (p2[0] - p1[0])) if (p2[0] - p1[0]) != 0 else p1[1]
+                    landing_pos = QPointF(landing_x, landing_y)
+                    target_group = best_landing_line.get('dynamic_name')
+                    landing_key = f"fall_landing_{line_above['id']}_{v_idx}_{best_landing_line['id']}"
+                    self.nav_nodes[landing_key] = {'type': 'fall_landing', 'pos': landing_pos, 'name': f"{target_group} 착지 지점", 'group': target_group, 'walkable': True}
 
-                for line_below in terrain_lines:
-                    if line_above['id'] == line_below['id'] or line_above['floor'] <= line_below['floor']: continue
-                    y_above, y_below = line_above['points'][0][1], line_below['points'][0][1]
-                    y_diff = abs(y_above - y_below)
-                    if 0 < y_diff <= 70:
-                        ax1, ax2 = min(line_above['points'][0][0], line_above['points'][-1][0]), max(line_above['points'][0][0], line_above['points'][-1][0])
+                    cost = (abs(start_pos.y() - landing_pos.y()) * FALL_COST_MULTIPLIER) + FLOOR_CHANGE_PENALTY
+                    self.nav_graph[start_key][landing_key] = {'cost': cost, 'action': 'fall'}
+
+            # --- [MODIFIED] djump_area (아래 점프) 노드 생성 로직 ---
+            for line_above in terrain_lines:
+                group_above = line_above.get('dynamic_name')
+                y_above = line_above['points'][0][1]
+
+                # 1. line_above 아래에 있는 모든 지형을 잠재적 도착 후보로 선정
+                candidate_landings = [line for line in terrain_lines if line_above.get('floor', 0) > line.get('floor', 0)]
+                
+                # 2. 겹치는 X축 구간별로 최적의 착지 지형 찾기
+                ax1, ax2 = min(line_above['points'][0][0], line_above['points'][-1][0]), max(line_above['points'][0][0], line_above['points'][-1][0])
+                
+                # x축을 1px 단위로 순회하며 검사 (정밀도)
+                for x_pos in range(int(ax1), int(ax2)):
+                    
+                    # 2a. 현재 x_pos에서 수직으로 낙하할 때 만날 수 있는 모든 지형 찾기
+                    possible_landings_at_x = []
+                    for line_below in candidate_landings:
                         bx1, bx2 = min(line_below['points'][0][0], line_below['points'][-1][0]), max(line_below['points'][0][0], line_below['points'][-1][0])
-                        overlap_x1, overlap_x2 = max(ax1, bx1), min(ax2, bx2)
+                        if bx1 <= x_pos <= bx2:
+                            y_diff = abs(y_above - line_below['points'][0][1])
+                            if 0 < y_diff <= 70: # 점프 가능한 높이인지 확인
+                                possible_landings_at_x.append(line_below)
+
+                    if not possible_landings_at_x:
+                        continue
+                    
+                    # 2b. 그 중 가장 먼저 충돌하는(가장 높은) 지형을 최종 착지 지형으로 선택
+                    best_landing_line = max(possible_landings_at_x, key=lambda line: line.get('floor', 0))
+                    
+                    # 2c. 해당 착지 지형으로의 아래 점프 노드가 이미 생성되었는지 확인
+                    #    (동일한 출발-도착 쌍에 대해 중복 생성을 방지하기 위함)
+                    area_key = f"djump_area_{line_above['id']}_{best_landing_line['id']}"
+                    if area_key in self.nav_nodes:
+                        continue # 이미 이 경로에 대한 노드가 있으면 건너뛰기
+
+                    # 2d. 사다리 충돌 회피 로직 (기존 로직 유지)
+                    is_safe_from_ladders = True
+                    ladder_exclusion_zones = []
+                    line_above_floor = line_above.get('floor')
+                    for obj in transition_objects:
+                        # ... (기존 사다리 회피 로직과 동일, 생략 가능하나 명확성을 위해 포함) ...
+                        start_line_id, end_line_id = obj.get('start_line_id'), obj.get('end_line_id')
+                        if (start_line_id == line_above['id'] and self.line_id_to_floor_map.get(end_line_id, float('inf')) < line_above_floor) or \
+                           (end_line_id == line_above['id'] and self.line_id_to_floor_map.get(start_line_id, float('inf')) < line_above_floor):
+                            ladder_x = obj['points'][0][0]
+                            if abs(x_pos - ladder_x) <= LADDER_AVOIDANCE_WIDTH:
+                                is_safe_from_ladders = False
+                                break
+                    
+                    if not is_safe_from_ladders:
+                        continue
                         
-                        if overlap_x1 < overlap_x2:
-                            is_obstructed = False
-                            for other_line in terrain_lines:
-                                if (other_line['id'] != line_above['id'] and other_line['id'] != line_below['id'] and
-                                    line_below['floor'] < other_line['floor'] < line_above['floor']):
-                                    other_min_x, other_max_x = min(other_line['points'][0][0], other_line['points'][-1][0]), max(other_line['points'][0][0], other_line['points'][-1][0])
-                                    if max(overlap_x1, other_min_x) < min(overlap_x2, other_max_x):
-                                        is_obstructed = True
-                                        break
-                            if is_obstructed: continue
+                    # 2e. 새로운 djump_area 노드 생성
+                    overlap_x1, overlap_x2 = max(ax1, min(best_landing_line['points'][0][0], best_landing_line['points'][-1][0])), min(ax2, max(best_landing_line['points'][0][0], best_landing_line['points'][-1][0]))
+                    
+                    self.nav_nodes[area_key] = {
+                        'type': 'djump_area', 'pos': QPointF((overlap_x1+overlap_x2)/2, y_above), 
+                        'name': f"{group_above} 아래 점프 지점", 'group': group_above,
+                        'x_range': [overlap_x1, overlap_x2], 'walkable': False,
+                        'floor': line_above.get('floor')
+                    }
+                    
+                    landing_x = (overlap_x1+overlap_x2)/2 # 대표 x좌표
+                    p1, p2 = best_landing_line['points'][0], best_landing_line['points'][-1]
+                    landing_y = p1[1] + (p2[1] - p1[1]) * ((landing_x - p1[0]) / (p2[0] - p1[0])) if (p2[0] - p1[0]) != 0 else p1[1]
+                    landing_pos = QPointF(landing_x, landing_y)
+                    target_group = best_landing_line.get('dynamic_name')
+                    landing_key = f"djump_landing_{line_above['id']}_{best_landing_line['id']}"
+                    self.nav_nodes[landing_key] = {'type': 'djump_landing', 'pos': landing_pos, 'name': f"{target_group} 착지 지점", 'group': target_group, 'walkable': True}
 
-                            # --- [v13.0.0 수정] 사다리 충돌 회피 로직 강화 ---
-                            # 1. 현재 지형(line_above)에서 '내려가는' 모든 사다리의 x좌표를 찾음
-                            ladder_exclusion_zones = []
-                            line_above_floor = line_above.get('floor')
-                            for obj in transition_objects:
-                                start_line_id = obj.get('start_line_id')
-                                end_line_id = obj.get('end_line_id')
-                                
-                                start_terrain = next((t for t in terrain_lines if t['id'] == start_line_id), None)
-                                end_terrain = next((t for t in terrain_lines if t['id'] == end_line_id), None)
+                    cost = (abs(y_above - landing_y) * DOWN_JUMP_COST_MULTIPLIER) + FLOOR_CHANGE_PENALTY
+                    self.nav_graph[area_key][landing_key] = {'cost': cost, 'action': 'down_jump'}
 
-                                if not (start_terrain and end_terrain): continue
-                                
-                                start_floor = start_terrain.get('floor')
-                                end_floor = end_terrain.get('floor')
-                                
-                                # line_above에서 시작하고, 더 낮은 층으로 가는 사다리인지 확인
-                                if (start_line_id == line_above['id'] and end_floor < start_floor) or \
-                                   (end_line_id == line_above['id'] and start_floor < end_floor):
-                                    ladder_x = obj['points'][0][0]
-                                    ladder_exclusion_zones.append((ladder_x - LADDER_AVOIDANCE_WIDTH, ladder_x + LADDER_AVOIDANCE_WIDTH))
-
-                            # 2. 생성할 모든 전략적 위치 후보를 수집
-                            strategic_x_positions = set()
-                            waypoints_on_line_below = [wp for wp in self.geometry_data.get("waypoints", []) if wp.get('parent_line_id') == line_below['id']]
-                            for wp in waypoints_on_line_below:
-                                strategic_x_positions.add(round(wp['pos'][0], 1))
-                            strategic_x_positions.add(round(overlap_x1, 1))
-                            strategic_x_positions.add(round(overlap_x2, 1))
-
-                            # 3. 후보 위치들 중 유효한 위치만 필터링
-                            final_x_positions = set()
-                            for x_pos in strategic_x_positions:
-                                # 3a. 아래층에 실제 발판이 있는지 확인 (허공 점프 방지)
-                                if not (bx1 <= x_pos <= bx2):
-                                    continue
-                                
-                                # 3b. 사다리 안전 구역과 겹치는지 확인
-                                is_safe = True
-                                for (ex_start, ex_end) in ladder_exclusion_zones:
-                                    if ex_start <= x_pos <= ex_end:
-                                        is_safe = False
-                                        break
-                                if is_safe:
-                                    final_x_positions.add(x_pos)
-
-                            # 4. 최종적으로 안전이 확인된 위치에만 노드를 생성
-                            for i, x_pos in enumerate(sorted(list(final_x_positions))):
-                                start_key = f"djump_start_{line_above['id']}_{line_below['id']}_{i}"
-                                start_pos = QPointF(x_pos, y_above)
-                                
-                                self.nav_nodes[start_key] = {
-                                    'type': 'djump_area', 
-                                    'pos': start_pos, 
-                                    'name': f"{group_above} 아래 점프 지점", 
-                                    'group': group_above, 
-                                    'x_range': [overlap_x1, overlap_x2],
-                                    'walkable': False,
-                                    'floor': line_above.get('floor')
-                                }
-                                
-                                landing_x = start_pos.x()
-                                p1, p2 = line_below['points'][0], line_below['points'][-1]
-                                landing_y = p1[1] + (p2[1] - p1[1]) * ((landing_x - p1[0]) / (p2[0] - p1[0])) if (p2[0] - p1[0]) != 0 else p1[1]
-                                landing_pos = QPointF(landing_x, landing_y)
-                                target_group = line_below.get('dynamic_name')
-                                landing_key = f"djump_landing_{line_above['id']}_{line_below['id']}_{i}"
-                                self.nav_nodes[landing_key] = {'type': 'djump_landing', 'pos': landing_pos, 'name': f"{target_group} 착지 지점", 'group': target_group, 'walkable': True}
-
-                                cost = (y_diff * DOWN_JUMP_COST_MULTIPLIER) + FLOOR_CHANGE_PENALTY
-                                self.nav_graph[start_key][landing_key] = {'cost': cost, 'action': 'down_jump'}
-            
             # --- 2. 걷기(Walk) 간선 추가 ---
             nodes_by_terrain_group = defaultdict(list)
             for key, node_data in self.nav_nodes.items():
@@ -7008,7 +6996,6 @@ class MapTab(QWidget):
                         self.nav_graph[walkable_key][trigger_key] = {'cost': cost, 'action': 'walk'}
 
             self.update_general_log(f"내비게이션 그래프 생성 완료. (노드: {len(self.nav_nodes)}개)", "purple")
-
     
     def _find_path_astar(self, start_pos, start_group, goal_key):
         """
