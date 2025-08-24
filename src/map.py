@@ -6301,12 +6301,18 @@ class MapTab(QWidget):
 
     def _handle_action_preparation(self, final_player_pos, departure_terrain_group):
         """
+        v13.0.7: [REFACTOR] UI 안내 일관성 확보. guidance_text가 '목표 이름'을,
+                 navigation_action이 '필요 행동'을 담당하도록 역할을 명확히 분리.
         v13.0.2: [수정] 출발 지형 그룹 정보를 _find_safe_landing_zones로 전달.
         'prepare_to_...' 상태일 때의 모든 로직을 담당합니다.
         """
         action_node_key = self.current_segment_path[self.current_segment_index]
+        action_node = self.nav_nodes.get(action_node_key, {})
         
         if self.navigation_action in ['prepare_to_down_jump', 'prepare_to_fall']:
+            # [MODIFIED] guidance_text에 행동이 아닌 '목표 이름'을 할당
+            self.guidance_text = action_node.get('name', '알 수 없는 낙하 지점')
+            
             # 1. 착지할 지형 그룹 정보 찾기
             landing_key = None
             neighbors = self.nav_graph.get(action_node_key, {})
@@ -6317,8 +6323,7 @@ class MapTab(QWidget):
             landing_terrain_group = landing_node.get('group') if landing_node else None
 
             if not landing_terrain_group:
-                self.guidance_text = "아래로 점프하세요"
-                self.intermediate_target_pos = None
+                self.intermediate_target_pos = None # 안내선 숨김
                 self._process_action_preparation(final_player_pos)
                 return
 
@@ -6326,7 +6331,7 @@ class MapTab(QWidget):
             safe_zones, landing_y = self._find_safe_landing_zones(landing_terrain_group, departure_terrain_group)
 
             if not safe_zones or landing_y is None:
-                self.guidance_text = "점프 불가: 안전 지대 없음"
+                # 안전 지대가 없을 때도 목표 이름은 유지하되, 안내선만 제거
                 self.intermediate_target_pos = None
                 self._process_action_preparation(final_player_pos)
                 return
@@ -6337,10 +6342,11 @@ class MapTab(QWidget):
 
             if is_in_safe_zone:
                 # Case 1: 안전 지대에 있을 경우 -> 수직 점프 안내
-                self.guidance_text = "아래로 점프하세요"
                 self.intermediate_target_pos = QPointF(player_x, landing_y)
             else:
                 # Case 2: 위험 지대에 있을 경우 -> 가장 가까운 안전 지점으로 이동 안내
+                # 이 경우, guidance_text를 "안전 지점으로 이동"으로 임시 변경하여
+                # _update_navigator_and_view에서 특별 처리하도록 함.
                 self.guidance_text = "안전 지점으로 이동"
                 
                 closest_point_x = None
@@ -6357,6 +6363,7 @@ class MapTab(QWidget):
                 if closest_point_x is not None:
                     self.intermediate_target_pos = QPointF(closest_point_x, final_player_pos.y())
 
+        # 다른 액션 준비 상태(climb, jump)는 기존 로직 유지
         elif self.current_segment_index + 1 < len(self.current_segment_path):
             next_node_key = self.current_segment_path[self.current_segment_index + 1]
             next_node = self.nav_nodes.get(next_node_key)
@@ -6364,6 +6371,7 @@ class MapTab(QWidget):
                 self.intermediate_target_pos = next_node.get('pos')
                 self.guidance_text = next_node.get('name', '')
         
+        # 액션 시작 및 이탈 판정 로직 호출 (공통)
         self._process_action_preparation(final_player_pos)
 
     def _handle_action_in_progress(self, final_player_pos):
