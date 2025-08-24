@@ -6883,7 +6883,6 @@ class MapTab(QWidget):
 
     def _find_path_astar(self, start_pos, start_group, goal_key):
         """
-        v12.9.8: [수정] A* 탐색 중 '착지 지점'으로 '걷기' 이동을 시도하는 경로를 차단합니다.
         v12.9.7: [수정] 경로 탐색 시작 시, '착지 지점' 역할을 하는 노드를 출발점 후보에서 제외합니다.
         v12.8.1: A* 알고리즘을 수정하여, 플레이어의 실제 위치(가상 노드)에서 탐색을 시작합니다.
         """
@@ -6944,13 +6943,12 @@ class MapTab(QWidget):
 
             for neighbor_key, edge_data in self.nav_graph.get(current_key, {}).items():
                 # --- [v12.9.8 신규 로직] 역할 기반 경로 필터링 ---
-                # 의도: '착지 지점'은 '걷기'로 도달할 수 없도록 하여, 비논리적인 경로 경유를 방지합니다.
-                #      착지 지점은 오직 'fall'이나 'jump' 같은 액션의 결과로만 도달해야 합니다.
+                # (이전 수정에서 추가된 부분으로, 그대로 유지됩니다)
                 neighbor_node_type = self.nav_nodes.get(neighbor_key, {}).get('type')
                 action_to_neighbor = edge_data.get('action')
 
                 if neighbor_node_type in ['fall_landing', 'djump_landing'] and action_to_neighbor == 'walk':
-                    continue # 이 이웃은 건너뛰고 다음 이웃을 탐색합니다.
+                    continue
                 # --- 로직 끝 ---
 
                 cost = edge_data.get('cost', float('inf'))
@@ -6988,7 +6986,6 @@ class MapTab(QWidget):
 
         return None, float('inf')
 
-
     def _reconstruct_path(self, came_from, current_key, start_key):
         """
         v12.8.1: A* 탐색 결과를 바탕으로 최종 경로 리스트를 재구성합니다.
@@ -7007,102 +7004,6 @@ class MapTab(QWidget):
             current_key = prev_key
             
         return path
-
-    def _find_path_astar(self, start_pos, start_group, goal_key):
-        """v12.8.1: A* 알고리즘을 수정하여, 플레이어의 실제 위치(가상 노드)에서 탐색을 시작합니다."""
-        if goal_key not in self.nav_nodes:
-            print(f"[A* DEBUG] 목표 노드가 nav_nodes에 없습니다. 목표: {goal_key}")
-            return None, float('inf')
-
-        import heapq
-        
-        goal_pos = self.nav_nodes[goal_key]['pos']
-
-        open_set = []
-        came_from = {}
-        g_score = {key: float('inf') for key in self.nav_nodes}
-        f_score = {key: float('inf') for key in self.nav_nodes}
-
-        # --- [핵심 변경] 시작 단계: start_pos에서 연결된 모든 walkable 노드를 open_set에 추가 ---
-        nodes_in_start_group = [
-            key for key, data in self.nav_nodes.items()
-            if data.get('walkable', False) and data.get('group') == start_group
-        ]
-
-        if not nodes_in_start_group:
-            print(f"[A* DEBUG] 시작 그룹 '{start_group}' 내에 walkable 노드가 없습니다.")
-            return None, float('inf')
-        
-        print("\n" + "="*20 + " A* 탐색 시작 (동적 확장) " + "="*20)
-        print(f"[A* DEBUG] 가상 시작점: {start_pos.x():.1f}, {start_pos.y():.1f} (그룹: '{start_group}')")
-        print(f"[A* DEBUG] 목표: '{self.nav_nodes[goal_key]['name']}' ({goal_key})")
-        
-        for node_key in nodes_in_start_group:
-            node_pos = self.nav_nodes[node_key]['pos']
-            # 비용 = 현재 위치에서 해당 노드까지의 직선 x축 거리 (걷기 비용과 동일하게)
-            cost_to_node = abs(start_pos.x() - node_pos.x())
-            
-            g_score[node_key] = cost_to_node
-            h_score = math.hypot(node_pos.x() - goal_pos.x(), node_pos.y() - goal_pos.y())
-            f_score[node_key] = cost_to_node + h_score
-            heapq.heappush(open_set, (f_score[node_key], node_key))
-            came_from[node_key] = ("__START__", None) # 가상 시작 노드임을 표시
-            
-            print(f"[A* DEBUG]  - 초기 탐색 노드: '{self.nav_nodes[node_key]['name']}' | G: {cost_to_node:.1f} | H: {h_score:.1f} | F: {f_score[node_key]:.1f}")
-        
-        # --- 이하 A* 메인 루프 (기존과 거의 동일, 디버그 로그 제거) ---
-        iter_count = 0
-        while open_set:
-            iter_count += 1
-            if iter_count > 2000:
-                print("[A* DEBUG] ERROR: 탐색 반복 횟수가 2000회를 초과했습니다. 탐색을 중단합니다.")
-                break
-                
-            _, current_key = heapq.heappop(open_set)
-
-            if current_key == goal_key:
-                path = self._reconstruct_path(came_from, current_key, "__START__")
-                return path, g_score[goal_key]
-
-            # 이웃 노드 탐색
-            for neighbor_key, edge_data in self.nav_graph.get(current_key, {}).items():
-                cost = edge_data.get('cost', float('inf'))
-                tentative_g_score = g_score[current_key] + cost
-                
-                # Case 1: 이웃이 실제 노드인 경우
-                if neighbor_key in self.nav_nodes:
-                    if tentative_g_score < g_score[neighbor_key]:
-                        came_from[neighbor_key] = (current_key, edge_data)
-                        g_score[neighbor_key] = tentative_g_score
-                        neighbor_pos = self.nav_nodes[neighbor_key]['pos']
-                        h_score = math.hypot(neighbor_pos.x() - goal_pos.x(), neighbor_pos.y() - goal_pos.y())
-                        f_score[neighbor_key] = tentative_g_score + h_score
-                        heapq.heappush(open_set, (f_score[neighbor_key], neighbor_key))
-                
-                # Case 2: 이웃이 가상 액션 노드인 경우
-                elif 'target_group' in edge_data:
-                    target_group = edge_data['target_group']
-                    best_landing_node, min_landing_cost = None, float('inf')
-                    action_start_pos = self.nav_nodes[current_key]['pos']
-                    for node_key_in_group, node_data in self.nav_nodes.items():
-                        if node_data.get('group') == target_group:
-                            landing_pos = node_data['pos']
-                            landing_cost = abs(action_start_pos.y() - landing_pos.y()) + abs(action_start_pos.x() - landing_pos.x()) * 0.5
-                            if landing_cost < min_landing_cost:
-                                min_landing_cost = landing_cost
-                                best_landing_node = node_key_in_group
-                    if best_landing_node:
-                        final_tentative_g_score = tentative_g_score + min_landing_cost
-                        if final_tentative_g_score < g_score[best_landing_node]:
-                            came_from[best_landing_node] = (current_key, edge_data)
-                            g_score[best_landing_node] = final_tentative_g_score
-                            landing_node_pos = self.nav_nodes[best_landing_node]['pos']
-                            h_score = math.hypot(landing_node_pos.x() - goal_pos.x(), landing_node_pos.y() - goal_pos.y())
-                            f_score[best_landing_node] = final_tentative_g_score + h_score
-                            heapq.heappush(open_set, (f_score[best_landing_node], best_landing_node))
-
-        return None, float('inf')
-
 
     # === v12.0.0: 추가 끝 ===
 
