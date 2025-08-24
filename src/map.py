@@ -6207,40 +6207,152 @@ class MapTab(QWidget):
                         self.current_segment_index = next_index
                 return
 
+    def _find_safe_landing_zones(self, landing_terrain_group):
+        """
+        주어진 착지 지형 그룹 정보를 바탕으로, 위험 지역(점프 링크, 사다리)을 제외한
+        안전하게 착지 가능한 X축 구간들의 리스트를 반환합니다.
+        
+        :param landing_terrain_group: 착지할 지형의 동적 이름 (e.g., "1층_A")
+        :return: (safe_zones, landing_y)
+                 safe_zones: [(start_x1, end_x1), (start_x2, end_x2), ...] 형태의 리스트
+                 landing_y: 해당 지형의 Y좌표
+        """
+        if not landing_terrain_group:
+            return [], None
+
+        # 1. 착지 지형의 기본 정보 (X범위, Y좌표) 가져오기
+        target_line = next((line for line in self.geometry_data.get("terrain_lines", []) if line.get('dynamic_name') == landing_terrain_group), None)
+        if not target_line:
+            return [], None
+        
+        points = target_line.get('points', [])
+        if len(points) < 2:
+            return [], None
+
+        # 지형이 수평이라고 가정하고 Y좌표와 X범위를 계산
+        landing_y = points[0][1]
+        min_x = min(p[0] for p in points)
+        max_x = max(p[0] for p in points)
+        
+        safe_zones = [(min_x, max_x)]
+
+        # 2. 위험 지역 (Hazard Zones) 정의 및 안전 지역에서 제외
+        
+        # 2a. 점프 링크 제외
+        jump_links = self.geometry_data.get("jump_links", [])
+        for link in jump_links:
+            start_terrain = self._get_contact_terrain(QPointF(*link['start_vertex_pos']))
+            end_terrain = self._get_contact_terrain(QPointF(*link['end_vertex_pos']))
+            
+            # 점프 링크의 양 끝 중 하나라도 착지 지형에 있다면, 해당 X구간을 위험 지역으로 간주
+            if (start_terrain and start_terrain.get('dynamic_name') == landing_terrain_group) or \
+               (end_terrain and end_terrain.get('dynamic_name') == landing_terrain_group):
+                
+                hazard_start_x = min(link['start_vertex_pos'][0], link['end_vertex_pos'][0])
+                hazard_end_x = max(link['start_vertex_pos'][0], link['end_vertex_pos'][0])
+                
+                new_safe_zones = []
+                for sz_start, sz_end in safe_zones:
+                    # 기존 안전지역과 위험지역의 겹치는 부분 계산
+                    overlap_start = max(sz_start, hazard_start_x)
+                    overlap_end = min(sz_end, hazard_end_x)
+                    
+                    if overlap_start < overlap_end: # 겹치는 경우
+                        # 위험지역 왼쪽 부분
+                        if sz_start < overlap_start:
+                            new_safe_zones.append((sz_start, overlap_start))
+                        # 위험지역 오른쪽 부분
+                        if overlap_end < sz_end:
+                            new_safe_zones.append((overlap_end, sz_end))
+                    else: # 겹치지 않는 경우
+                        new_safe_zones.append((sz_start, sz_end))
+                safe_zones = new_safe_zones
+
+        # 2b. 사다리 제외 (LADDER_AVOIDANCE_WIDTH 사용)
+        LADDER_AVOIDANCE_WIDTH = 5.0 # 기존 _build_navigation_graph 에 있던 상수
+        transition_objects = self.geometry_data.get("transition_objects", [])
+        for obj in transition_objects:
+            start_terrain = self._get_contact_terrain(QPointF(*obj['points'][0]))
+            
+            if start_terrain and start_terrain.get('dynamic_name') == landing_terrain_group:
+                ladder_x = obj['points'][0][0]
+                hazard_start_x = ladder_x - LADDER_AVOIDANCE_WIDTH
+                hazard_end_x = ladder_x + LADDER_AVOIDANCE_WIDTH
+
+                new_safe_zones = []
+                for sz_start, sz_end in safe_zones:
+                    overlap_start = max(sz_start, hazard_start_x)
+                    overlap_end = min(sz_end, hazard_end_x)
+                    if overlap_start < overlap_end:
+                        if sz_start < overlap_start: new_safe_zones.append((sz_start, overlap_start))
+                        if overlap_end < sz_end: new_safe_zones.append((overlap_end, sz_end))
+                    else:
+                        new_safe_zones.append((sz_start, sz_end))
+                safe_zones = new_safe_zones
+
+        return safe_zones, landing_y
+
     def _handle_action_preparation(self, final_player_pos):
         """
-        v12.9.9: [수정] '아래 점프/낙하' 안내선 목표 지점의 X좌표를 플레이어의 현재 X좌표로 고정하여 항상 수직으로 표시되도록 수정합니다.
+        v13.0.1: [수정] '아래 점프/낙하' 시, 아래층의 지형 구조(점프 링크, 사다리)를 분석하여
+                 안전한 착지 지점으로 이동하도록 유도하는 로직으로 전면 개편.
         'prepare_to_...' 상태일 때의 모든 로직을 담당합니다.
         """
         action_node_key = self.current_segment_path[self.current_segment_index]
         
         if self.navigation_action in ['prepare_to_down_jump', 'prepare_to_fall']:
-            self.guidance_text = "아래로 점프하세요" if self.navigation_action == 'prepare_to_down_jump' else "낭떠러지로 떨어지세요"
-            
+            # 1. 착지할 지형 그룹 정보 찾기
+            landing_key = None
             neighbors = self.nav_graph.get(action_node_key, {})
             if len(neighbors) == 1:
                 landing_key = list(neighbors.keys())[0]
-                landing_node = self.nav_nodes.get(landing_key)
+
+            landing_node = self.nav_nodes.get(landing_key) if landing_key else None
+            landing_terrain_group = landing_node.get('group') if landing_node else None
+
+            if not landing_terrain_group:
+                # 비상: 착지 지점을 찾을 수 없으면 기존 로직 유지
+                self.guidance_text = "아래로 점프하세요"
+                self.intermediate_target_pos = None # 안내선 숨김
+                self._process_action_preparation(final_player_pos)
+                return
+
+            # 2. 안전/위험 구역 분석
+            safe_zones, landing_y = self._find_safe_landing_zones(landing_terrain_group)
+
+            if not safe_zones or landing_y is None:
+                self.guidance_text = "점프 불가: 안전 지대 없음"
+                self.intermediate_target_pos = None
+                self._process_action_preparation(final_player_pos)
+                return
+
+            # 3. 플레이어 위치 판별 및 목표 설정
+            player_x = final_player_pos.x()
+            is_in_safe_zone = any(start <= player_x <= end for start, end in safe_zones)
+
+            if is_in_safe_zone:
+                # Case 1: 안전 지대에 있을 경우 -> 수직 점프 안내
+                self.guidance_text = "아래로 점프하세요"
+                self.intermediate_target_pos = QPointF(player_x, landing_y)
+            else:
+                # Case 2: 위험 지대에 있을 경우 -> 가장 가까운 안전 지점으로 이동 안내
+                self.guidance_text = "안전 지점으로 이동"
                 
-                if landing_node:
-                    target_group = landing_node.get('group')
-                    target_line = next((line for line in self.geometry_data.get("terrain_lines", []) if line.get('dynamic_name') == target_group), None)
-                    
-                    if target_line:
-                        p1, p2 = target_line['points'][0], target_line['points'][-1]
-                        min_x, max_x = min(p1[0], p2[0]), max(p1[0], p2[0])
-                        
-                        # --- [v12.9.9 핵심 수정] 안내선 수직 고정 로직 ---
-                        # 1. 착지 지형의 Y좌표를 계산하기 위해, 플레이어의 X를 지형 범위 내로 제한(clamping)
-                        clamped_x = max(min_x, min(final_player_pos.x(), max_x))
-                        
-                        # 2. 제한된 X좌표를 이용해 정확한 착지 Y좌표 계산
-                        target_y = p1[1] + (p2[1] - p1[1]) * ((clamped_x - p1[0]) / (p2[0] - p1[0])) if (p2[0] - p1[0]) != 0 else p1[1]
-                        
-                        # 3. 안내선 목표 지점(intermediate_target_pos)의 X좌표는 플레이어의 현재 X좌표를 그대로 사용
-                        #    이를 통해 안내선이 항상 수직을 유지하게 됨
-                        self.intermediate_target_pos = QPointF(final_player_pos.x(), target_y)
-                        # --- 수정 끝 ---
+                # 모든 안전 지대의 경계점들 중 가장 가까운 점 찾기
+                closest_point_x = None
+                min_dist = float('inf')
+                
+                for start, end in safe_zones:
+                    if abs(player_x - start) < min_dist:
+                        min_dist = abs(player_x - start)
+                        closest_point_x = start
+                    if abs(player_x - end) < min_dist:
+                        min_dist = abs(player_x - end)
+                        closest_point_x = end
+                
+                # 플레이어의 현재 Y좌표를 유지하며 X축으로만 이동하도록 안내
+                if closest_point_x is not None:
+                    self.intermediate_target_pos = QPointF(closest_point_x, final_player_pos.y())
 
         # 다른 액션 준비 상태(climb, jump)는 기존 로직 유지
         elif self.current_segment_index + 1 < len(self.current_segment_path):
@@ -6250,7 +6362,7 @@ class MapTab(QWidget):
                 self.intermediate_target_pos = next_node.get('pos')
                 self.guidance_text = next_node.get('name', '')
         
-        # 액션 시작 및 이탈 판정 로직 호출
+        # 액션 시작 및 이탈 판정 로직 호출 (공통)
         self._process_action_preparation(final_player_pos)
 
     def _handle_action_in_progress(self, final_player_pos):
