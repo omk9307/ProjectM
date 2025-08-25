@@ -4008,8 +4008,13 @@ class MapTab(QWidget):
             self.expected_terrain_group = None  # 현재 안내 경로가 유효하기 위해 플레이어가 있어야 할 지형 그룹
             # --- v12.0.0: 추가 끝 ---
             
-            #마지막으로 유효했던 지형 그룹 이름 저장용
+            # 마지막으로 유효했던 지형 그룹 이름 저장용
             self.last_known_terrain_group_name = ""
+
+            # 디버그 체크박스 멤버 변수
+            self.debug_pathfinding_checkbox = None
+            self.debug_state_machine_checkbox = None
+
             #지형 간 상대 위치 벡터 저장
             self.feature_offsets = {}
             
@@ -4150,6 +4155,16 @@ class MapTab(QWidget):
         
         detect_groupbox.setLayout(detect_layout)
         left_layout.addWidget(detect_groupbox)
+
+        # 8. 디버그 제어
+        debug_groupbox = QGroupBox("8. 디버그 제어")
+        debug_layout = QVBoxLayout()
+        self.debug_pathfinding_checkbox = QCheckBox("경로탐색 상세 로그 출력")
+        self.debug_state_machine_checkbox = QCheckBox("상태판정 변경 로그 출력")
+        debug_layout.addWidget(self.debug_pathfinding_checkbox)
+        debug_layout.addWidget(self.debug_state_machine_checkbox)
+        debug_groupbox.setLayout(debug_layout)
+        left_layout.addWidget(debug_groupbox)
 
         left_layout.addStretch(1)
         
@@ -5710,15 +5725,14 @@ class MapTab(QWidget):
 
     def _determine_player_physical_state(self, final_player_pos, contact_terrain):
         """
+        [MODIFIED] v13.1.16: 상태판정 디버그 로그를 UI 체크박스로 제어하고, 변경 원인을 상세히 출력하도록 수정.
         [MODIFIED] v13.1.14: 상태 변경 후 일정 시간(cooldown) 동안 상태가 다시 변경되지 않도록 수정.
         플레이어의 물리적 상태(걷기, 점프 등)를 판정합니다.
         """
         previous_state = self.player_state
 
-        # [수정 시작] 상태 변경 쿨다운 로직
         if (time.time() - self.last_state_change_time) < self.cfg_state_change_cooldown:
-            return previous_state # 쿨다운 시간 내에는 상태 변경 방지
-        # [수정 끝]
+            return previous_state 
 
         x_movement = final_player_pos.x() - self.last_player_pos.x()
         y_movement = self.last_player_pos.y() - final_player_pos.y()
@@ -5727,10 +5741,16 @@ class MapTab(QWidget):
             self.last_movement_time = time.time()
 
         new_state = previous_state
-        if (time.time() - self.last_movement_time) >= self.cfg_idle_time_threshold:
+        # 상태 변경 이유를 기록할 변수
+        reason = "상태 유지 (조건 미충족)"
+
+        time_since_move = time.time() - self.last_movement_time
+        if time_since_move >= self.cfg_idle_time_threshold:
             new_state = 'idle'
+            reason = f"정지 시간 초과 ({time_since_move:.2f}s >= {self.cfg_idle_time_threshold}s)"
         elif contact_terrain:
             new_state = 'on_terrain'
+            reason = "지형에 접촉함"
             self.last_on_terrain_y = final_player_pos.y()
             self.in_jump = False
         else: # 공중 상태
@@ -5738,25 +5758,41 @@ class MapTab(QWidget):
             is_near_ladder, _, _ = self._check_near_ladder(final_player_pos, self.geometry_data.get("transition_objects", []), self.cfg_ladder_x_grab_threshold, return_dist=True, current_floor=self.current_player_floor)
             
             if self.in_jump:
-                if y_above_terrain > self.cfg_jump_y_max_threshold and is_near_ladder: new_state = 'climbing'
-                elif y_above_terrain < -self.cfg_fall_y_min_threshold: new_state = 'falling'
-                else: new_state = 'jumping'
+                if y_above_terrain > self.cfg_jump_y_max_threshold and is_near_ladder:
+                    new_state = 'climbing'
+                    reason = f"점프 중 등반 전환: y_above({y_above_terrain:.2f}) > max_thresh({self.cfg_jump_y_max_threshold}) 이고 사다리 근처"
+                elif y_above_terrain < -self.cfg_fall_y_min_threshold:
+                    new_state = 'falling'
+                    reason = f"점프 중 낙하 전환: y_above({y_above_terrain:.2f}) < -fall_thresh({-self.cfg_fall_y_min_threshold})"
+                else:
+                    new_state = 'jumping'
+                    reason = "점프 상태 유지"
             else:
                 if y_movement > self.cfg_y_movement_deadzone and y_above_terrain > self.cfg_jump_y_min_threshold:
-                    new_state = 'jumping'; self.in_jump = True; self.jump_start_time = time.time()
+                    new_state = 'jumping'
+                    reason = f"점프 시작: y_move({y_movement:.2f}) > deadzone({self.cfg_y_movement_deadzone}) 이고 y_above({y_above_terrain:.2f}) > min_thresh({self.cfg_jump_y_min_threshold})"
+                    self.in_jump = True
+                    self.jump_start_time = time.time()
                 elif is_near_ladder and abs(y_movement) > self.cfg_y_movement_deadzone:
                     new_state = 'climbing'
+                    reason = f"등반 시작: 사다리 근처이고 y_move_abs({abs(y_movement):.2f}) > deadzone({self.cfg_y_movement_deadzone})"
                 else:
                     new_state = 'falling'
+                    reason = f"자유 낙하: 공중 상태이고 점프/등반 조건 미충족"
         
-        if self.in_jump and (time.time() - self.jump_start_time) > self.cfg_max_jump_duration:
+        time_in_jump = time.time() - self.jump_start_time if self.in_jump else 0
+        if self.in_jump and time_in_jump > self.cfg_max_jump_duration:
             self.in_jump = False
-            if new_state == 'jumping': new_state = 'falling'
+            if new_state == 'jumping':
+                new_state = 'falling'
+                reason = f"점프 강제 종료: 점프 시간 초과 ({time_in_jump:.2f}s > {self.cfg_max_jump_duration}s)"
         
-        # [수정 시작] 상태가 실제로 변경되었을 때만 타임스탬프 갱신
         if new_state != previous_state:
             self.last_state_change_time = time.time()
-
+            # 디버그 체크박스가 활성화된 경우에만 상세 로그 출력
+            if self.debug_state_machine_checkbox and self.debug_state_machine_checkbox.isChecked():
+                print(f"[STATE CHANGE] {previous_state} -> {new_state} | 이유: {reason}")
+        
         return new_state
 
     def _plan_next_journey(self, active_route):
@@ -7091,6 +7127,7 @@ class MapTab(QWidget):
     
     def _find_path_astar(self, start_pos, start_group, goal_key):
         """
+        [MODIFIED] v13.1.16: 경로탐색 디버그 로그를 UI 체크박스로 제어하도록 수정.
         [DEBUG] v13.1.3: 이웃 노드 평가 시 필터링되는 이유와 비용 비교 과정을
                  상세히 추적하기 위한 디버그 로그 대폭 강화. (사용자 제공 코드 기반)
         v12.9.7: [수정] 경로 탐색 시작 시, '착지 지점' 역할을 하는 노드를 출발점 후보에서 제외합니다.
@@ -7102,6 +7139,9 @@ class MapTab(QWidget):
 
         import heapq
         
+        # 체크박스 상태를 변수로 저장하여 반복적인 .isChecked() 호출 방지
+        is_debug_enabled = self.debug_pathfinding_checkbox and self.debug_pathfinding_checkbox.isChecked()
+
         goal_pos = self.nav_nodes[goal_key]['pos']
 
         open_set = []
@@ -7121,11 +7161,12 @@ class MapTab(QWidget):
             print(f"[A* CRITICAL] 시작 그룹 '{start_group}' 내에 유효한 출발 노드가 없습니다.")
             return None, float('inf')
         
-        print("\n" + "="*20 + " A* 탐색 시작 (상세 디버그 v2) " + "="*20)
-        print(f"[A* INFO] 가상 시작점: {start_pos.x():.1f}, {start_pos.y():.1f} (그룹: '{start_group}')")
-        print(f"[A* INFO] 목표: '{self.nav_nodes[goal_key]['name']}' ({goal_key}) at ({goal_pos.x():.1f}, {goal_pos.y():.1f})")
-        print("-" * 70)
-        print("[A* INIT] 초기 Open Set 구성:")
+        if is_debug_enabled:
+            print("\n" + "="*20 + " A* 탐색 시작 (상세 디버그 v2) " + "="*20)
+            print(f"[A* INFO] 가상 시작점: {start_pos.x():.1f}, {start_pos.y():.1f} (그룹: '{start_group}')")
+            print(f"[A* INFO] 목표: '{self.nav_nodes[goal_key]['name']}' ({goal_key}) at ({goal_pos.x():.1f}, {goal_pos.y():.1f})")
+            print("-" * 70)
+            print("[A* INIT] 초기 Open Set 구성:")
         
         for node_key in nodes_in_start_group:
             node_pos = self.nav_nodes[node_key]['pos']
@@ -7137,8 +7178,9 @@ class MapTab(QWidget):
             heapq.heappush(open_set, (f_score[node_key], node_key))
             came_from[node_key] = ("__START__", None)
             
-            print(f"  - 추가: '{self.nav_nodes[node_key]['name']}' ({node_key})")
-            print(f"    - G(시작->노드): {cost_to_node:.1f}, H(노드->목표): {h_score:.1f}, F: {f_score[node_key]:.1f}")
+            if is_debug_enabled:
+                print(f"  - 추가: '{self.nav_nodes[node_key]['name']}' ({node_key})")
+                print(f"    - G(시작->노드): {cost_to_node:.1f}, H(노드->목표): {h_score:.1f}, F: {f_score[node_key]:.1f}")
         
         iter_count = 0
         while open_set:
@@ -7153,40 +7195,44 @@ class MapTab(QWidget):
                 continue
             closed_set.add(current_key)
 
-            print("-" * 70)
-            print(f"[A* STEP {iter_count}] 현재 노드: '{self.nav_nodes[current_key]['name']}' ({current_key}) | F: {current_f:.1f}, G: {g_score[current_key]:.1f}")
+            if is_debug_enabled:
+                print("-" * 70)
+                print(f"[A* STEP {iter_count}] 현재 노드: '{self.nav_nodes[current_key]['name']}' ({current_key}) | F: {current_f:.1f}, G: {g_score[current_key]:.1f}")
 
             if current_key == goal_key:
-                print("-" * 70)
-                print("[A* SUCCESS] 목표 노드에 도달했습니다. 경로를 재구성합니다.")
+                if is_debug_enabled:
+                    print("-" * 70)
+                    print("[A* SUCCESS] 목표 노드에 도달했습니다. 경로를 재구성합니다.")
                 path = self._reconstruct_path(came_from, current_key, "__START__")
                 return path, g_score[goal_key]
 
             neighbors = self.nav_graph.get(current_key, {})
-            print(f"  - 이웃 노드 {len(neighbors)}개 평가:")
-
-            if not neighbors:
-                print("    - (이웃 없음)")
+            if is_debug_enabled:
+                print(f"  - 이웃 노드 {len(neighbors)}개 평가:")
+                if not neighbors:
+                    print("    - (이웃 없음)")
 
             for neighbor_key, edge_data in neighbors.items():
                 neighbor_name = self.nav_nodes.get(neighbor_key, {}).get('name', '???')
                 action_to_neighbor = edge_data.get('action', 'N/A')
                 cost = edge_data.get('cost', float('inf'))
                 
-                print(f"    -> '{neighbor_name}' ({neighbor_key}) | action: {action_to_neighbor}, cost: {cost:.1f}")
+                if is_debug_enabled:
+                    print(f"    -> '{neighbor_name}' ({neighbor_key}) | action: {action_to_neighbor}, cost: {cost:.1f}")
 
                 neighbor_node_type = self.nav_nodes.get(neighbor_key, {}).get('type')
                 if neighbor_node_type in ['fall_landing', 'djump_landing'] and action_to_neighbor == 'walk':
-                    print("      - [필터링] 착지 지점으로 걸어갈 수 없어 건너뜀.")
+                    if is_debug_enabled: print("      - [필터링] 착지 지점으로 걸어갈 수 없어 건너뜀.")
                     continue
                 
                 if neighbor_key in closed_set:
-                    print("      - [필터링] 이미 방문한 노드(Closed Set)이므로 건너뜀.")
+                    if is_debug_enabled: print("      - [필터링] 이미 방문한 노드(Closed Set)이므로 건너뜀.")
                     continue
 
                 tentative_g_score = g_score[current_key] + cost
                 
-                print(f"      - G(예상): {g_score[current_key]:.1f} (현재 G) + {cost:.1f} (이동 Cost) = {tentative_g_score:.1f}")
+                if is_debug_enabled:
+                    print(f"      - G(예상): {g_score[current_key]:.1f} (현재 G) + {cost:.1f} (이동 Cost) = {tentative_g_score:.1f}")
 
                 if tentative_g_score < g_score[neighbor_key]:
                     came_from[neighbor_key] = (current_key, edge_data)
@@ -7195,14 +7241,16 @@ class MapTab(QWidget):
                     h_score = math.hypot(neighbor_pos.x() - goal_pos.x(), neighbor_pos.y() - goal_pos.y())
                     f_score[neighbor_key] = tentative_g_score + h_score
                     heapq.heappush(open_set, (f_score[neighbor_key], neighbor_key))
-                    print(f"      - [경로 갱신] 더 나은 경로 발견! H: {h_score:.1f}, F: {f_score[neighbor_key]:.1f}. Open Set에 추가.")
-                else:
+                    if is_debug_enabled:
+                        print(f"      - [경로 갱신] 더 나은 경로 발견! H: {h_score:.1f}, F: {f_score[neighbor_key]:.1f}. Open Set에 추가.")
+                elif is_debug_enabled:
                     print(f"      - [경로 유지] 기존 경로가 더 좋음 (기존 G: {g_score[neighbor_key]:.1f} <= 예상 G: {tentative_g_score:.1f})")
         
-        print("-" * 70)
-        print("[A* FAILED] Open Set이 비었지만 목표에 도달하지 못했습니다. 경로가 존재하지 않습니다.")
+        if is_debug_enabled:
+            print("-" * 70)
+            print("[A* FAILED] Open Set이 비었지만 목표에 도달하지 못했습니다. 경로가 존재하지 않습니다.")
         return None, float('inf')
-
+    
     def _reconstruct_path(self, came_from, current_key, start_key):
         """
         v12.8.1: A* 탐색 결과를 바탕으로 최종 경로 리스트를 재구성합니다.
