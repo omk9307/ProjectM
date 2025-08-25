@@ -6342,6 +6342,13 @@ class MapTab(QWidget):
         [MODIFIED] v13.1.10: '출발지 안전성' 검사 실패 시(사다리 위험), 현재 지형 내에서
                  이동해야 할 가장 가까운 안전 지점을 계산하여 안내하도록 수정 (0px 문제 해결).
         """
+        # 플레이어가 공중 상태일 때는 안전성 검사를 건너뛰고 현재 안내를 유지
+        if self.player_state in ['jumping', 'falling', 'climbing']:
+            # 공중에서는 안내선을 바꾸지 않고 기존 목표를 그대로 유지
+            # _process_action_preparation을 호출하여 액션 시작 여부만 계속 확인
+            self._process_action_preparation(final_player_pos)
+            return
+        
         if self.navigation_action in ['prepare_to_down_jump', 'prepare_to_fall']:
             player_x = final_player_pos.x()
 
