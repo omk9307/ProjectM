@@ -111,7 +111,7 @@ MAX_JUMP_DURATION = 3.0         # 점프 상태가 강제로 해제되기까지�
 WAYPOINT_ARRIVAL_X_THRESHOLD = 8.0 # 웨이포인트 도착 x축 허용 오차 (px)
 LADDER_ARRIVAL_X_THRESHOLD = 8.0   # 사다리 도착 x축 허용 오차 (px)
 JUMP_LINK_ARRIVAL_X_THRESHOLD = 4.0 # 점프 링크/낭떠러지 도착 x축 허용 오차 (px)
-
+LADDER_AVOIDANCE_WIDTH = 3.0 # 아래 점프 시 사다리 회피 X축 반경 (px)
 # ==================== v11.5.0 상태 머신 상수 ====================
 MAX_LOCK_DURATION = 60.0      # 행동 잠금(locked) 상태의 최대 지속 시간 (초)
 PREPARE_TIMEOUT = 60.0         # 행동 준비(prepare_to_*) 상태의 최대 지속 시간 (초)
@@ -5893,85 +5893,99 @@ class MapTab(QWidget):
     
     def _process_action_completion(self, final_player_pos, contact_terrain):
         """
-        v12.9.9: [수정] '아래 점프/낙하' 액션의 성공 기준을 '정확한 지점 도착'에서 '올바른 지형 그룹 착지'로 변경하여 유연성을 높입니다.
+        [MODIFIED] v13.1.5: 액션 완료 시, 불필요한 경유 노드(착지 지점 등)를
+                 자동으로 건너뛰고 다음 실제 목표를 안내하도록 경로 정리 로직 추가.
+        v12.9.9: [수정] '아래 점프/낙하' 액션의 성공 기준을 '올바른 지형 그룹 착지'로 변경.
         액션의 완료 또는 실패를 판정하고 상태를 처리합니다.
         """
         action_completed = False
         action_failed = False
         
-        # --- 1. 예상 도착 지형 그룹 찾기 (기존 로직 유지) ---
-        # 현재 경로와 액션 정보를 바탕으로, 이 액션이 성공했을 때 플레이어가 있어야 할 지형 그룹의 이름을 찾습니다.
+        # --- 1. 예상 도착 지형 그룹 찾기 ---
         expected_group = None
         if self.current_segment_index < len(self.current_segment_path):
             current_node_key = self.current_segment_path[self.current_segment_index]
             
-            # 'climb', 'fall' 등 액션 간선(edge)에 직접 목표 그룹이 명시된 경우
             if 'action' in self.navigation_action:
-                # 현재 노드에서 나가는 모든 간선을 확인
                 for edge_data in self.nav_graph.get(current_node_key, {}).values():
-                    # 간선 데이터에 'target_group' 정보가 있으면 그것을 사용
                     if 'target_group' in edge_data:
                         expected_group = edge_data['target_group']
                         break
-            # 일반적인 점프나 사다리 이동의 경우, 경로상의 다음 노드가 속한 그룹이 목표 그룹
             elif self.current_segment_index + 1 < len(self.current_segment_path):
                  next_node_key = self.current_segment_path[self.current_segment_index + 1]
                  expected_group = self.nav_nodes.get(next_node_key, {}).get('group')
 
         # --- 2. 액션 종류에 따른 성공/실패 판정 ---
-        # 의도: 액션의 종류에 따라 성공 판정 기준을 다르게 적용합니다.
-        #      '낙하'는 목표 지형에 닿기만 하면 성공이지만, '오르기'는 정확한 출구에 도달해야 합니다.
-
-        # [v12.9.9 신규 로직] 아래 점프 또는 낙하 액션에 대한 유연한 성공 판정
-        if self.navigation_action in ['fall_in_progress', 'down_jump_in_progress']:
-            # 플레이어가 땅에 닿았고, 그 땅이 예상했던 지형 그룹이 맞다면 성공으로 간주합니다.
-            if contact_terrain and contact_terrain.get('dynamic_name') == expected_group:
-                action_completed = True
-            # 땅에 닿았지만, 예상과 다른 지형 그룹이라면 실패로 간주합니다.
-            elif contact_terrain and contact_terrain.get('dynamic_name') != expected_group:
-                action_failed = True
-        
-        # 사다리 오르기 액션은 기존과 같이 정확한 도착 지점을 요구
-        elif self.navigation_action == 'climb_in_progress':
-            if self.intermediate_target_pos:
-                dist_x = abs(final_player_pos.x() - self.intermediate_target_pos.x())
-                dist_y = abs(final_player_pos.y() - self.intermediate_target_pos.y())
-                # y축 오차가 거의 없고, x축 오차도 허용 범위 내일 때 성공으로 판정
-                if dist_y < self.cfg_on_terrain_y_threshold * 2 and dist_x < self.cfg_ladder_arrival_x_threshold:
+        # [MODIFIED] v13.1.5: 땅에 닿았을 때만 완료 판정을 하도록 명시
+        if contact_terrain:
+            if self.navigation_action in ['fall_in_progress', 'down_jump_in_progress']:
+                if contact_terrain.get('dynamic_name') == expected_group:
                     action_completed = True
-        
-        # 그 외의 액션(예: 일반 점프)은 땅에 닿으면 일단 성공으로 간주
-        else:
-            action_completed = True
+                elif contact_terrain.get('dynamic_name') != expected_group:
+                    action_failed = True
+            
+            elif self.navigation_action == 'climb_in_progress':
+                if self.intermediate_target_pos:
+                    dist_x = abs(final_player_pos.x() - self.intermediate_target_pos.x())
+                    # [MODIFIED] 방향성을 가진 Y좌표 차이 계산
+                    # y_diff < 0  : 플레이어가 목표보다 위에 있음 (OK)
+                    # y_diff == 0 : 정확히 도착 (OK)
+                    # y_diff > 0  : 플레이어가 목표보다 아래에 있음 (NG)
+                    y_diff = final_player_pos.y() - self.intermediate_target_pos.y()
+                    
+                    # [MODIFIED] 플레이어 발이 목표보다 아래에 있지 않도록 조건 강화
+                    # (단, 약간의 허용 오차는 둠)
+                    if final_player_pos.y() <= self.intermediate_target_pos.y() and dist_x < self.cfg_ladder_arrival_x_threshold:
+                        action_completed = True
+            
+            else: # 그 외 jump_in_progress 등
+                action_completed = True
 
-        # --- 3. 판정 결과에 따른 후속 처리 (기존 로직 유지) ---
+        # --- 3. 판정 결과에 따른 후속 처리 ---
         if action_failed:
             self.update_general_log(f"행동({self.navigation_action}) 실패. 예상 경로를 벗어났습니다. 경로를 재탐색합니다.", "orange")
             print(f"[INFO] 행동 실패: {self.navigation_action}, 예상 그룹: {expected_group}, 현재 그룹: {contact_terrain.get('dynamic_name')}")
             self.navigation_action = 'move_to_target'
             self.navigation_state_locked = False
-            self.current_segment_path = [] # 경로를 비워 다음 프레임에서 재탐색을 유도
+            self.current_segment_path = []
             self.expected_terrain_group = None
 
         elif action_completed:
             action_name = self.navigation_action
             self.navigation_action = 'move_to_target'
             self.navigation_state_locked = False
-            self.current_segment_index += 1 # 경로의 다음 단계로 진행
             
+            # [MODIFIED] v13.1.5: 경로 정리 로직 추가
+            # 액션 노드와 결과 노드를 모두 건너뛰고 다음 '실제' 목표를 찾음
+            via_node_types = {'fall_landing', 'djump_landing', 'ladder_exit'}
+            
+            # 현재 액션 노드를 건너뜀
+            self.current_segment_index += 1
+            
+            # 다음 노드가 경유 노드이면 계속 건너뜀
+            while self.current_segment_index < len(self.current_segment_path):
+                next_node_key = self.current_segment_path[self.current_segment_index]
+                next_node_type = self.nav_nodes.get(next_node_key, {}).get('type')
+                if next_node_type in via_node_types:
+                    skipped_node_name = self.nav_nodes.get(next_node_key, {}).get('name', '경유지')
+                    print(f"[INFO] 경유 노드 '{skipped_node_name}' 자동 건너뛰기.")
+                    self.current_segment_index += 1
+                else:
+                    break # 실제 목표 노드를 찾았으므로 루프 종료
+
             if self.current_segment_index < len(self.current_segment_path):
                 next_node_key = self.current_segment_path[self.current_segment_index]
                 next_node = self.nav_nodes.get(next_node_key, {})
                 self.expected_terrain_group = next_node.get('group')
-                log_message = f"행동({action_name}) 완료. 다음 목표 그룹: '{self.expected_terrain_group}'"
+                log_message = f"행동({action_name}) 완료. 다음 목표: '{next_node.get('name', '??')}' (그룹: '{self.expected_terrain_group}')"
                 print(f"[INFO] {log_message}")
                 self.update_general_log(log_message, "green")
             else:
+                # 경로의 끝에 도달했음을 의미
                 self.expected_terrain_group = None
                 log_message = f"행동({action_name}) 완료. 현재 구간 종료."
                 print(f"[INFO] {log_message}")
                 self.update_general_log(log_message, "green")
-
     
     def _update_player_state_and_navigation(self, final_player_pos):
         """
@@ -6216,23 +6230,15 @@ class MapTab(QWidget):
                         self.current_segment_index = next_index
                 return
 
-    def _find_safe_landing_zones(self, landing_terrain_group, departure_terrain_group):
+    def _find_safe_landing_zones(self, landing_terrain_group):
         """
-        v13.0.2: [수정] 출발 지형 그룹 정보를 인자로 추가하여, 현재 위치에서 '내려가는'
-                 사다리만 위험 지역으로 정확히 식별하도록 로직 개선.
-        주어진 착지/출발 지형 그룹 정보를 바탕으로, 위험 지역(점프 링크, 사다리)을 제외한
-        안전하게 착지 가능한 X축 구간들의 리스트를 반환합니다.
-        
-        :param landing_terrain_group: 착지할 지형의 동적 이름 (e.g., "1층_A")
-        :param departure_terrain_group: 현재 플레이어가 있는 출발 지형의 동적 이름
-        :return: (safe_zones, landing_y)
-                 safe_zones: [(start_x1, end_x1), ...] 형태의 리스트
-                 landing_y: 해당 지형의 Y좌표
+        [MODIFIED] v13.1.6: 함수의 책임을 명확히 분리. 이제 이 함수는 주어진 지형에서
+                 오직 물리적인 구멍(점프 링크)만을 제외하여 착지 가능한 '발판' 구간만 계산.
+                 사다리 위험성 판단은 호출부(상위 메서드)의 책임으로 이전됨.
         """
         if not landing_terrain_group:
             return [], None
 
-        # 1. 착지 지형의 기본 정보 (X범위, Y좌표) 가져오기
         target_line = next((line for line in self.geometry_data.get("terrain_lines", []) if line.get('dynamic_name') == landing_terrain_group), None)
         if not target_line:
             return [], None
@@ -6247,9 +6253,7 @@ class MapTab(QWidget):
         
         safe_zones = [(min_x, max_x)]
 
-        # 2. 위험 지역 (Hazard Zones) 정의 및 안전 지역에서 제외
-        
-        # 2a. 점프 링크 제외 (기존 로직 유지)
+        # 점프 링크 (물리적 구멍) 제외 로직은 유지
         jump_links = self.geometry_data.get("jump_links", [])
         for link in jump_links:
             start_terrain = self._get_contact_terrain(QPointF(*link['start_vertex_pos']))
@@ -6272,44 +6276,6 @@ class MapTab(QWidget):
                         new_safe_zones.append((sz_start, sz_end))
                 safe_zones = new_safe_zones
 
-        # 2b. 사다리 제외 (로직 수정)
-        if departure_terrain_group:
-            LADDER_AVOIDANCE_WIDTH = 5.0
-            transition_objects = self.geometry_data.get("transition_objects", [])
-            departure_line = next((line for line in self.geometry_data.get("terrain_lines", []) if line.get('dynamic_name') == departure_terrain_group), None)
-            
-            if departure_line:
-                departure_floor = departure_line.get('floor')
-                for obj in transition_objects:
-                    # 사다리가 출발 지형에 연결되어 있는지 확인
-                    is_connected_to_departure = False
-                    connected_line_id = None
-                    if obj.get('start_line_id') == departure_line.get('id'):
-                        is_connected_to_departure = True
-                        connected_line_id = obj.get('end_line_id')
-                    elif obj.get('end_line_id') == departure_line.get('id'):
-                        is_connected_to_departure = True
-                        connected_line_id = obj.get('start_line_id')
-
-                    if is_connected_to_departure:
-                        # 연결된 다른 쪽 지형의 층이 더 낮은지 확인 (내려가는 사다리)
-                        other_line_floor = self.line_id_to_floor_map.get(connected_line_id)
-                        if other_line_floor is not None and other_line_floor < departure_floor:
-                            ladder_x = obj['points'][0][0]
-                            hazard_start_x = ladder_x - LADDER_AVOIDANCE_WIDTH
-                            hazard_end_x = ladder_x + LADDER_AVOIDANCE_WIDTH
-
-                            new_safe_zones = []
-                            for sz_start, sz_end in safe_zones:
-                                overlap_start = max(sz_start, hazard_start_x)
-                                overlap_end = min(sz_end, hazard_end_x)
-                                if overlap_start < overlap_end:
-                                    if sz_start < overlap_start: new_safe_zones.append((sz_start, overlap_start))
-                                    if overlap_end < sz_end: new_safe_zones.append((overlap_end, sz_end))
-                                else:
-                                    new_safe_zones.append((sz_start, sz_end))
-                            safe_zones = new_safe_zones
-        
         return safe_zones, landing_y
 
     def _find_best_landing_terrain_at_x(self, departure_pos, max_y_diff=None):
@@ -6351,86 +6317,101 @@ class MapTab(QWidget):
 
     def _handle_action_preparation(self, final_player_pos, departure_terrain_group):
         """
-        [MODIFIED] v13.1.2: "안전 지대" 계산 로직을 전면 재구성.
-                 A*가 계획한 이상적인 착지 지형을 기준으로 먼저 안전 구역을 정의하고,
-                 플레이어의 현재 위치가 해당 구역을 벗어났을 때 가장 가까운 안전 지점으로
-                 능동적으로 유도하도록 수정하여 0px 안내 오류를 해결.
-        'prepare_to_...' 상태일 때의 모든 로직을 담당합니다.
+        [MODIFIED] v13.1.10: '출발지 안전성' 검사 실패 시(사다리 위험), 현재 지형 내에서
+                 이동해야 할 가장 가까운 안전 지점을 계산하여 안내하도록 수정 (0px 문제 해결).
         """
         if self.navigation_action in ['prepare_to_down_jump', 'prepare_to_fall']:
-            # 1. A*가 계획한 '이상적인 착지 지형' 정보 가져오기
-            action_node_key = self.current_segment_path[self.current_segment_index]
-            landing_key = next(iter(self.nav_graph.get(action_node_key, {})), None)
-            landing_node = self.nav_nodes.get(landing_key) if landing_key else None
-            ideal_landing_group = landing_node.get('group') if landing_node else None
-
-            if not ideal_landing_group:
-                self.guidance_text = "경로 오류: 착지 지점 없음"
-                self.intermediate_target_pos = None
-                self._process_action_preparation(final_player_pos)
-                return
-
-            # 2. 이상적인 착지 지형을 기준으로 '안전 지대' 계산
-            safe_zones, ideal_landing_y = self._find_safe_landing_zones(ideal_landing_group, departure_terrain_group)
-
-            if not safe_zones or ideal_landing_y is None:
-                self.guidance_text = "점프 불가: 안전 지대 없음"
-                self.intermediate_target_pos = None
-                self._process_action_preparation(final_player_pos)
-                return
-            
             player_x = final_player_pos.x()
-            current_safe_zone = next((zone for zone in safe_zones if zone[0] <= player_x <= zone[1]), None)
 
-            # 3. 플레이어 위치에 따른 동적 판단 및 안내
-            if current_safe_zone:
-                # Case A: 플레이어가 안전 지대 내에 있을 경우
-                # 현재 위치 바로 아래에 착지 가능한지 한번 더 확인 (점프 링크 등 구멍 확인)
-                real_landing_terrain = self._find_best_landing_terrain_at_x(final_player_pos, max_y_diff=70.0 if self.navigation_action == 'prepare_to_down_jump' else None)
-                
-                if real_landing_terrain and real_landing_terrain.get('dynamic_name') == ideal_landing_group:
-                    # A-1: 구멍 없음 -> 수직 점프 안내
-                    self.guidance_text = ideal_landing_group
-                    self.intermediate_target_pos = QPointF(player_x, ideal_landing_y)
-                else:
-                    # A-2: 구멍 있음 -> 현재 안전 지대의 가까운 경계로 이동 안내
-                    self.guidance_text = "안전 지점으로 이동"
-                    start, end = current_safe_zone
-                    target_x = start if abs(player_x - start) < abs(player_x - end) else end
-                    self.intermediate_target_pos = QPointF(target_x, final_player_pos.y())
-            else:
-                # Case B: 플레이어가 안전 지대 밖에 있을 경우 -> 가장 가까운 안전 지대 경계로 이동 안내
-                self.guidance_text = "안전 지점으로 이동"
-                
-                closest_point_x = None
-                min_dist = float('inf')
-                
-                for start, end in safe_zones:
-                    if abs(player_x - start) < min_dist:
-                        min_dist = abs(player_x - start)
-                        closest_point_x = start
-                    if abs(player_x - end) < min_dist:
-                        min_dist = abs(player_x - end)
-                        closest_point_x = end
-                
-                if closest_point_x is not None:
-                    self.intermediate_target_pos = QPointF(closest_point_x, final_player_pos.y())
-                else:
-                    self.guidance_text = "이동할 안전 지대 없음"
+            # --- 1단계: 출발 지점의 안전성 검사 (키 입력 충돌 위험) ---
+            if departure_terrain_group:
+                departure_line = next((line for line in self.geometry_data.get("terrain_lines", []) if line.get('dynamic_name') == departure_terrain_group), None)
+                if departure_line:
+                    departure_floor = departure_line.get('floor')
+                    
+                    # 현재 지형의 모든 '내려가는 사다리' 위험 구역 찾기
+                    ladder_hazard_zones = []
+                    for obj in self.geometry_data.get("transition_objects", []):
+                        is_connected = obj.get('start_line_id') == departure_line.get('id') or obj.get('end_line_id') == departure_line.get('id')
+                        if is_connected:
+                            other_line_id = obj.get('end_line_id') if obj.get('start_line_id') == departure_line.get('id') else obj.get('start_line_id')
+                            other_line_floor = self.line_id_to_floor_map.get(other_line_id, float('inf'))
+                            if other_line_floor < departure_floor:
+                                ladder_x = obj['points'][0][0]
+                                ladder_hazard_zones.append((ladder_x - LADDER_AVOIDANCE_WIDTH, ladder_x + LADDER_AVOIDANCE_WIDTH))
+                    
+                    # 현재 플레이어 위치가 위험 구역 내에 있는지 확인
+                    is_in_hazard = any(start <= player_x <= end for start, end in ladder_hazard_zones)
+                    if is_in_hazard:
+                        self.guidance_text = "안전 지점으로 이동"
+                        
+                        # 현재 지형의 전체 X범위에서 위험 구역을 제외하여 안전 지대 계산
+                        dep_min_x = min(p[0] for p in departure_line['points'])
+                        dep_max_x = max(p[0] for p in departure_line['points'])
+                        departure_safe_zones = [(dep_min_x, dep_max_x)]
+                        
+                        for h_start, h_end in ladder_hazard_zones:
+                            new_safe_zones = []
+                            for s_start, s_end in departure_safe_zones:
+                                # ... (안전 지대 분할 로직) ...
+                                overlap_start = max(s_start, h_start)
+                                overlap_end = min(s_end, h_end)
+                                if overlap_start < overlap_end:
+                                    if s_start < overlap_start: new_safe_zones.append((s_start, overlap_start))
+                                    if overlap_end < s_end: new_safe_zones.append((overlap_end, s_end))
+                                else:
+                                    new_safe_zones.append((s_start, s_end))
+                            departure_safe_zones = new_safe_zones
+                            
+                        # 가장 가까운 안전 지대 경계점 찾기
+                        if departure_safe_zones:
+                            closest_point_x = min([p for zone in departure_safe_zones for p in zone], key=lambda p: abs(player_x - p))
+                            self.intermediate_target_pos = QPointF(closest_point_x, final_player_pos.y())
+                        else:
+                            self.intermediate_target_pos = None # 안전 지대가 아예 없는 경우
+
+                        self._process_action_preparation(final_player_pos)
+                        return
+
+            # --- 2단계 & 3단계는 이전과 동일 ---
+            max_y_diff = 70.0 if self.navigation_action == 'prepare_to_down_jump' else None
+            best_landing_terrain = self._find_best_landing_terrain_at_x(final_player_pos, max_y_diff=max_y_diff)
+
+            if not best_landing_terrain:
+                action_node_key = self.current_segment_path[self.current_segment_index]
+                landing_key = next(iter(self.nav_graph.get(action_node_key, {})), None)
+                ideal_landing_group = self.nav_nodes.get(landing_key, {}).get('group')
+                safe_zones, _ = self._find_safe_landing_zones(ideal_landing_group)
+                if not safe_zones:
+                    self.guidance_text = "점프 불가: 안전 지대 없음"
                     self.intermediate_target_pos = None
+                else:
+                    self.guidance_text = "안전 지점으로 이동"
+                    closest_point_x = min([p for zone in safe_zones for p in zone], key=lambda p: abs(player_x - p))
+                    self.intermediate_target_pos = QPointF(closest_point_x, final_player_pos.y())
+                self._process_action_preparation(final_player_pos)
+                return
+
+            landing_terrain_group = best_landing_terrain.get('dynamic_name')
+            safe_zones, landing_y = self._find_safe_landing_zones(landing_terrain_group)
+
+            if not any(start <= player_x <= end for start, end in safe_zones):
+                self.guidance_text = "안전 지점으로 이동"
+                closest_point_x = min([p for zone in safe_zones for p in zone], key=lambda p: abs(player_x - p))
+                self.intermediate_target_pos = QPointF(closest_point_x, final_player_pos.y())
+            else:
+                self.guidance_text = landing_terrain_group
+                self.intermediate_target_pos = QPointF(player_x, landing_y)
 
         else: # 일반 점프/오르기 등 다른 prepare 상태는 기존 로직 유지
-            action_node_key = self.current_segment_path[self.current_segment_index]
             next_node_key = None
             if self.current_segment_index + 1 < len(self.current_segment_path):
                 next_node_key = self.current_segment_path[self.current_segment_index + 1]
-
             next_node = self.nav_nodes.get(next_node_key) if next_node_key else None
             if next_node:
                 self.guidance_text = next_node.get('name', '알 수 없는 목적지')
                 self.intermediate_target_pos = next_node.get('pos')
         
-        # 액션 시작 및 이탈 판정 로직 호출 (공통)
         self._process_action_preparation(final_player_pos)
 
     def _handle_action_in_progress(self, final_player_pos):
@@ -6851,16 +6832,16 @@ class MapTab(QWidget):
     
     def _build_navigation_graph(self, waypoint_ids_in_route=None):
             """
-            v13.0.6: [REFACTOR] '아래 점프/낙하' 노드 생성 시, 중간 층 존재 여부가 아닌
-                     실제 물리적 충돌 여부를 기준으로 경로를 생성하도록 장애물 판정 로직 전면 수정.
-            v13.0.0: [수정] '아래 점프' 노드 생성 시, 아래층에 실제 발판이 없는 허공(점프 링크 등)으로의 점프를 방지하고,
-                     현재 지형에서 '내려가는' 모든 사다리 주변을 회피하도록 로직을 전면 수정하여 안정성을 대폭 강화합니다.
-            v12.9.5: [수정] '아래 점프' 노드 생성 시, 사다리 좌우 일정 범위(LADDER_AVOIDANCE_WIDTH) 내에는 노드가 생성되지 않도록 하여 키 입력 충돌을 확실히 방지합니다. 또한 착지 지점의 x좌표가 점프 지점과 항상 동일하도록 보장합니다.
+            [DEBUG] v13.1.9: 노드 생성 시 그룹 할당 과정과, 노드 간 엣지(연결) 생성
+                     과정을 추적하기 위한 상세 디버그 로그 추가.
             """
             self.nav_nodes.clear()
             self.nav_graph = defaultdict(dict)
+            print("\n" + "="*20 + " 내비게이션 그래프 생성 시작 (상세 디버그) " + "="*20)
 
-            if not self.geometry_data: return
+            if not self.geometry_data:
+                print("[GRAPH BUILD] CRITICAL: geometry_data가 없어 그래프 생성을 중단합니다.")
+                return
             if waypoint_ids_in_route is None:
                 waypoint_ids_in_route = [wp['id'] for wp in self.geometry_data.get("waypoints", [])]
 
@@ -6873,32 +6854,45 @@ class MapTab(QWidget):
             JUMP_COST_MULTIPLIER = 1.1
             FALL_COST_MULTIPLIER = 2.0
             DOWN_JUMP_COST_MULTIPLIER = 1.2
-            LADDER_AVOIDANCE_WIDTH = 5.0
 
+            print("[GRAPH BUILD] 1. 노드 생성 시작...")
             # --- 1. 모든 잠재적 노드 생성 및 역할(walkable) 부여 ---
             for wp in self.geometry_data.get("waypoints", []):
                 if wp['id'] in waypoint_ids_in_route:
                     key = f"wp_{wp['id']}"
-                    contact_terrain = self._get_contact_terrain(QPointF(*wp['pos']))
+                    pos = QPointF(*wp['pos'])
+                    contact_terrain = self._get_contact_terrain(pos)
                     group = contact_terrain.get('dynamic_name') if contact_terrain else None
-                    self.nav_nodes[key] = {'type': 'waypoint', 'pos': QPointF(*wp['pos']), 'floor': wp.get('floor'), 'name': wp.get('name'), 'id': wp['id'], 'group': group, 'walkable': True}
+                    if group is None: print(f"  - [WARNING] Waypoint '{wp.get('name')}'의 그룹 정보를 찾지 못했습니다.")
+                    self.nav_nodes[key] = {'type': 'waypoint', 'pos': pos, 'floor': wp.get('floor'), 'name': wp.get('name'), 'id': wp['id'], 'group': group, 'walkable': True}
+                    print(f"  - 생성(wp): '{wp.get('name')}' -> group: '{group}'")
 
             for obj in transition_objects:
                 p1, p2 = QPointF(*obj['points'][0]), QPointF(*obj['points'][1])
                 entry_pos, exit_pos = (p1, p2) if p1.y() > p2.y() else (p2, p1)
                 entry_key, exit_key = f"ladder_entry_{obj['id']}", f"ladder_exit_{obj['id']}"
                 
-                entry_terrain, exit_terrain = self._get_contact_terrain(entry_pos), self._get_contact_terrain(exit_pos)
-                entry_group = entry_terrain.get('dynamic_name') if entry_terrain else None
-                exit_group = exit_terrain.get('dynamic_name') if exit_terrain else None
-                entry_floor = entry_terrain.get('floor') if entry_terrain else None
-                exit_floor = exit_terrain.get('floor') if exit_terrain else None
+                # [DEBUG] 그룹 할당 로직 강화 및 로그 추가
+                entry_terrain = self._get_contact_terrain(entry_pos)
+                exit_terrain = self._get_contact_terrain(exit_pos)
+                
+                start_line = next((line for line in terrain_lines if line['id'] == obj.get('start_line_id')), None)
+                end_line = next((line for line in terrain_lines if line['id'] == obj.get('end_line_id')), None)
+                
+                # _get_contact_terrain 우선, 실패 시 line_id 기반으로 폴백
+                entry_group = entry_terrain.get('dynamic_name') if entry_terrain else (start_line.get('dynamic_name') if start_line else None)
+                exit_group = exit_terrain.get('dynamic_name') if exit_terrain else (end_line.get('dynamic_name') if end_line else None)
+                
+                entry_floor = entry_terrain.get('floor') if entry_terrain else (start_line.get('floor') if start_line else None)
+                exit_floor = exit_terrain.get('floor') if exit_terrain else (end_line.get('floor') if end_line else None)
                 
                 base_name = obj.get('dynamic_name', obj['id'])
                 
                 self.nav_nodes[entry_key] = {'type': 'ladder_entry', 'pos': entry_pos, 'obj_id': obj['id'], 'name': f"{base_name} (입구)", 'group': entry_group, 'walkable': True, 'floor': entry_floor}
                 self.nav_nodes[exit_key] = {'type': 'ladder_exit', 'pos': exit_pos, 'obj_id': obj['id'], 'name': f"{base_name} (출구)", 'group': exit_group, 'walkable': True, 'floor': exit_floor}
-                
+                print(f"  - 생성(ladder): '{base_name} (입구)' -> group: '{entry_group}'")
+                print(f"  - 생성(ladder): '{base_name} (출구)' -> group: '{exit_group}'")
+
                 y_diff = abs(entry_pos.y() - exit_pos.y())
                 cost_up, cost_down = (y_diff * CLIMB_UP_COST_MULTIPLIER) + FLOOR_CHANGE_PENALTY, (y_diff * CLIMB_DOWN_COST_MULTIPLIER) + FLOOR_CHANGE_PENALTY
                 self.nav_graph[entry_key][exit_key] = {'cost': cost_up, 'action': 'climb'}
@@ -6917,29 +6911,20 @@ class MapTab(QWidget):
                     cost += FLOOR_CHANGE_PENALTY
                 self.nav_graph[key1][key2], self.nav_graph[key2][key1] = {'cost': cost, 'action': 'jump'}, {'cost': cost, 'action': 'jump'}
 
-            # --- [MODIFIED] fall_start (낭떠러지 낙하) 노드 생성 로직 ---
             for line_above in terrain_lines:
                 group_above = line_above.get('dynamic_name')
-                # 지형의 양 끝 꼭짓점에서 낙하 경로 탐색
                 for v_idx, vertex in enumerate([line_above['points'][0], line_above['points'][-1]]):
-                    
-                    # 1. 이 꼭짓점에서 수직으로 낙하할 때 만날 수 있는 모든 후보 지형 찾기
                     candidate_landings = []
                     for line_below in terrain_lines:
-                        # 출발 지형보다 낮은 층에 있고, x좌표가 겹치는 지형만 후보
                         if line_above.get('floor', 0) > line_below.get('floor', 0):
                             min_x = min(line_below['points'][0][0], line_below['points'][-1][0])
                             max_x = max(line_below['points'][0][0], line_below['points'][-1][0])
                             if min_x <= vertex[0] <= max_x:
                                 candidate_landings.append(line_below)
                     
-                    if not candidate_landings:
-                        continue
-
-                    # 2. 후보들 중 가장 먼저 물리적으로 충돌하는, 즉 가장 높은 층의 지형을 최종 도착지로 선택
+                    if not candidate_landings: continue
                     best_landing_line = max(candidate_landings, key=lambda line: line.get('floor', 0))
                     
-                    # 3. 최종 선택된 도착지로 fall_start 노드 생성
                     start_key = f"fall_start_{line_above['id']}_{v_idx}"
                     start_pos = QPointF(*vertex)
                     self.nav_nodes[start_key] = {'type': 'fall_start', 'pos': start_pos, 'name': f"{group_above} 낙하 지점", 'group': group_above, 'walkable': False, 'floor': line_above.get('floor')}
@@ -6955,47 +6940,28 @@ class MapTab(QWidget):
                     cost = (abs(start_pos.y() - landing_pos.y()) * FALL_COST_MULTIPLIER) + FLOOR_CHANGE_PENALTY
                     self.nav_graph[start_key][landing_key] = {'cost': cost, 'action': 'fall'}
 
-            # --- [MODIFIED] djump_area (아래 점프) 노드 생성 로직 ---
             for line_above in terrain_lines:
                 group_above = line_above.get('dynamic_name')
                 y_above = line_above['points'][0][1]
-
-                # 1. line_above 아래에 있는 모든 지형을 잠재적 도착 후보로 선정
                 candidate_landings = [line for line in terrain_lines if line_above.get('floor', 0) > line.get('floor', 0)]
-                
-                # 2. 겹치는 X축 구간별로 최적의 착지 지형 찾기
                 ax1, ax2 = min(line_above['points'][0][0], line_above['points'][-1][0]), max(line_above['points'][0][0], line_above['points'][-1][0])
                 
-                # x축을 1px 단위로 순회하며 검사 (정밀도)
                 for x_pos in range(int(ax1), int(ax2)):
-                    
-                    # 2a. 현재 x_pos에서 수직으로 낙하할 때 만날 수 있는 모든 지형 찾기
                     possible_landings_at_x = []
                     for line_below in candidate_landings:
                         bx1, bx2 = min(line_below['points'][0][0], line_below['points'][-1][0]), max(line_below['points'][0][0], line_below['points'][-1][0])
                         if bx1 <= x_pos <= bx2:
                             y_diff = abs(y_above - line_below['points'][0][1])
-                            if 0 < y_diff <= 70: # 점프 가능한 높이인지 확인
+                            if 0 < y_diff <= 70:
                                 possible_landings_at_x.append(line_below)
-
-                    if not possible_landings_at_x:
-                        continue
-                    
-                    # 2b. 그 중 가장 먼저 충돌하는(가장 높은) 지형을 최종 착지 지형으로 선택
+                    if not possible_landings_at_x: continue
                     best_landing_line = max(possible_landings_at_x, key=lambda line: line.get('floor', 0))
-                    
-                    # 2c. 해당 착지 지형으로의 아래 점프 노드가 이미 생성되었는지 확인
-                    #    (동일한 출발-도착 쌍에 대해 중복 생성을 방지하기 위함)
                     area_key = f"djump_area_{line_above['id']}_{best_landing_line['id']}"
-                    if area_key in self.nav_nodes:
-                        continue # 이미 이 경로에 대한 노드가 있으면 건너뛰기
-
-                    # 2d. 사다리 충돌 회피 로직 (기존 로직 유지)
+                    if area_key in self.nav_nodes: continue
+                    
                     is_safe_from_ladders = True
-                    ladder_exclusion_zones = []
                     line_above_floor = line_above.get('floor')
                     for obj in transition_objects:
-                        # ... (기존 사다리 회피 로직과 동일, 생략 가능하나 명확성을 위해 포함) ...
                         start_line_id, end_line_id = obj.get('start_line_id'), obj.get('end_line_id')
                         if (start_line_id == line_above['id'] and self.line_id_to_floor_map.get(end_line_id, float('inf')) < line_above_floor) or \
                            (end_line_id == line_above['id'] and self.line_id_to_floor_map.get(start_line_id, float('inf')) < line_above_floor):
@@ -7004,73 +6970,72 @@ class MapTab(QWidget):
                                 is_safe_from_ladders = False
                                 break
                     
-                    if not is_safe_from_ladders:
-                        continue
+                    if not is_safe_from_ladders: continue
                         
-                    # 2e. 새로운 djump_area 노드 생성
                     overlap_x1, overlap_x2 = max(ax1, min(best_landing_line['points'][0][0], best_landing_line['points'][-1][0])), min(ax2, max(best_landing_line['points'][0][0], best_landing_line['points'][-1][0]))
-                    
-                    self.nav_nodes[area_key] = {
-                        'type': 'djump_area', 'pos': QPointF((overlap_x1+overlap_x2)/2, y_above), 
-                        'name': f"{group_above} 아래 점프 지점", 'group': group_above,
-                        'x_range': [overlap_x1, overlap_x2], 'walkable': False,
-                        'floor': line_above.get('floor')
-                    }
-                    
-                    landing_x = (overlap_x1+overlap_x2)/2 # 대표 x좌표
+                    self.nav_nodes[area_key] = {'type': 'djump_area', 'pos': QPointF((overlap_x1+overlap_x2)/2, y_above), 'name': f"{group_above} 아래 점프 지점", 'group': group_above, 'x_range': [overlap_x1, overlap_x2], 'walkable': False, 'floor': line_above.get('floor')}
+                    landing_x = (overlap_x1+overlap_x2)/2
                     p1, p2 = best_landing_line['points'][0], best_landing_line['points'][-1]
                     landing_y = p1[1] + (p2[1] - p1[1]) * ((landing_x - p1[0]) / (p2[0] - p1[0])) if (p2[0] - p1[0]) != 0 else p1[1]
                     landing_pos = QPointF(landing_x, landing_y)
                     target_group = best_landing_line.get('dynamic_name')
                     landing_key = f"djump_landing_{line_above['id']}_{best_landing_line['id']}"
                     self.nav_nodes[landing_key] = {'type': 'djump_landing', 'pos': landing_pos, 'name': f"{target_group} 착지 지점", 'group': target_group, 'walkable': True}
-
                     cost = (abs(y_above - landing_y) * DOWN_JUMP_COST_MULTIPLIER) + FLOOR_CHANGE_PENALTY
                     self.nav_graph[area_key][landing_key] = {'cost': cost, 'action': 'down_jump'}
-
-            # --- 2. 걷기(Walk) 간선 추가 ---
+            
+            print("\n[GRAPH BUILD] 2. 엣지(연결) 생성 시작...")
+            # --- 2. 걷기(Walk) 간선 통합 생성 ---
             nodes_by_terrain_group = defaultdict(list)
             for key, node_data in self.nav_nodes.items():
-                if node_data.get('walkable'):
-                    if node_data.get('group'):
-                        nodes_by_terrain_group[node_data['group']].append(key)
-            
+                if node_data.get('group'):
+                    nodes_by_terrain_group[node_data['group']].append(key)
+
+            print(f"  - 총 {len(nodes_by_terrain_group)}개의 지형 그룹 발견.")
             for group_name, node_keys in nodes_by_terrain_group.items():
-                for i in range(len(node_keys)):
-                    for j in range(i + 1, len(node_keys)):
-                        key1, key2 = node_keys[i], node_keys[j]
+                print(f"  - 그룹 '{group_name}' 처리 중 ({len(node_keys)}개 노드)...")
+                walkable_nodes_in_group = [k for k in node_keys if self.nav_nodes[k].get('walkable')]
+                action_nodes_in_group = [k for k in node_keys if not self.nav_nodes[k].get('walkable')]
+                print(f"    - Walkable: {len(walkable_nodes_in_group)}개, Action Triggers: {len(action_nodes_in_group)}개")
+
+                # 2a. walkable 노드들끼리 모두 연결
+                print("    - 2a. Walkable 노드 간 연결:")
+                if not walkable_nodes_in_group: print("      - 대상 없음")
+                for i in range(len(walkable_nodes_in_group)):
+                    for j in range(i + 1, len(walkable_nodes_in_group)):
+                        key1, key2 = walkable_nodes_in_group[i], walkable_nodes_in_group[j]
                         pos1, pos2 = self.nav_nodes[key1]['pos'], self.nav_nodes[key2]['pos']
                         cost = abs(pos1.x() - pos2.x())
                         self.nav_graph[key1][key2] = {'cost': cost, 'action': 'walk'}
                         self.nav_graph[key2][key1] = {'cost': cost, 'action': 'walk'}
+                        name1 = self.nav_nodes[key1]['name']
+                        name2 = self.nav_nodes[key2]['name']
+                        print(f"      - 연결: '{name1}' <-> '{name2}' (cost: {cost:.1f})")
 
-            # --- 3. 행동 유발(Action Trigger) 노드 연결 ---
-            action_trigger_nodes = {key: data for key, data in self.nav_nodes.items() if not data.get('walkable')}
-            walkable_nodes = {key: data for key, data in self.nav_nodes.items() if data.get('walkable')}
-
-            for trigger_key, trigger_data in action_trigger_nodes.items():
-                trigger_group = trigger_data.get('group')
-                if not trigger_group: continue
-
-                for walkable_key, walkable_data in walkable_nodes.items():
-                    if walkable_data.get('type') in ['ladder_entry', 'ladder_exit']:
-                        continue
-                        
-                    if walkable_data.get('group') == trigger_group:
-                        pos1 = walkable_data['pos']
-                        pos2 = trigger_data['pos']
+                # 2b. 모든 walkable 노드에서 모든 action trigger 노드로 단방향 연결
+                print("    - 2b. Walkable -> Action Trigger 노드 간 연결:")
+                if not walkable_nodes_in_group or not action_nodes_in_group: print("      - 대상 없음")
+                for w_key in walkable_nodes_in_group:
+                    for a_key in action_nodes_in_group:
+                        pos1, pos2 = self.nav_nodes[w_key]['pos'], self.nav_nodes[a_key]['pos']
                         cost = abs(pos1.x() - pos2.x())
-                        self.nav_graph[walkable_key][trigger_key] = {'cost': cost, 'action': 'walk'}
+                        self.nav_graph[w_key][a_key] = {'cost': cost, 'action': 'walk'}
+                        name1 = self.nav_nodes[w_key]['name']
+                        name2 = self.nav_nodes[a_key]['name']
+                        print(f"      - 연결: '{name1}' -> '{name2}' (cost: {cost:.1f})")
 
+            print("\n" + "="*20 + f" 그래프 생성 완료 (노드: {len(self.nav_nodes)}개) " + "="*20)
             self.update_general_log(f"내비게이션 그래프 생성 완료. (노드: {len(self.nav_nodes)}개)", "purple")
     
     def _find_path_astar(self, start_pos, start_group, goal_key):
         """
+        [DEBUG] v13.1.3: 이웃 노드 평가 시 필터링되는 이유와 비용 비교 과정을
+                 상세히 추적하기 위한 디버그 로그 대폭 강화. (사용자 제공 코드 기반)
         v12.9.7: [수정] 경로 탐색 시작 시, '착지 지점' 역할을 하는 노드를 출발점 후보에서 제외합니다.
         v12.8.1: A* 알고리즘을 수정하여, 플레이어의 실제 위치(가상 노드)에서 탐색을 시작합니다.
         """
         if goal_key not in self.nav_nodes:
-            print(f"[A* DEBUG] 목표 노드가 nav_nodes에 없습니다. 목표: {goal_key}")
+            print(f"[A* CRITICAL] 목표 노드가 nav_nodes에 없습니다. 목표: {goal_key}")
             return None, float('inf')
 
         import heapq
@@ -7078,12 +7043,11 @@ class MapTab(QWidget):
         goal_pos = self.nav_nodes[goal_key]['pos']
 
         open_set = []
+        closed_set = set() # [DEBUG] 이미 방문한 노드를 추적하기 위해 추가
         came_from = {}
         g_score = {key: float('inf') for key in self.nav_nodes}
         f_score = {key: float('inf') for key in self.nav_nodes}
 
-        # --- [v12.9.7 수정] 시작 단계: start_pos에서 연결된 모든 walkable 노드를 open_set에 추가 ---
-        # '착지' 타입의 노드는 출발점 후보에서 제외하여 비논리적 경로 생성 방지
         nodes_in_start_group = [
             key for key, data in self.nav_nodes.items()
             if (data.get('walkable', False) and
@@ -7092,12 +7056,14 @@ class MapTab(QWidget):
         ]
 
         if not nodes_in_start_group:
-            print(f"[A* DEBUG] 시작 그룹 '{start_group}' 내에 유효한 출발 노드가 없습니다.")
+            print(f"[A* CRITICAL] 시작 그룹 '{start_group}' 내에 유효한 출발 노드가 없습니다.")
             return None, float('inf')
         
-        print("\n" + "="*20 + " A* 탐색 시작 (동적 확장) " + "="*20)
-        print(f"[A* DEBUG] 가상 시작점: {start_pos.x():.1f}, {start_pos.y():.1f} (그룹: '{start_group}')")
-        print(f"[A* DEBUG] 목표: '{self.nav_nodes[goal_key]['name']}' ({goal_key})")
+        print("\n" + "="*20 + " A* 탐색 시작 (상세 디버그 v2) " + "="*20)
+        print(f"[A* INFO] 가상 시작점: {start_pos.x():.1f}, {start_pos.y():.1f} (그룹: '{start_group}')")
+        print(f"[A* INFO] 목표: '{self.nav_nodes[goal_key]['name']}' ({goal_key}) at ({goal_pos.x():.1f}, {goal_pos.y():.1f})")
+        print("-" * 70)
+        print("[A* INIT] 초기 Open Set 구성:")
         
         for node_key in nodes_in_start_group:
             node_pos = self.nav_nodes[node_key]['pos']
@@ -7109,64 +7075,70 @@ class MapTab(QWidget):
             heapq.heappush(open_set, (f_score[node_key], node_key))
             came_from[node_key] = ("__START__", None)
             
-            print(f"[A* DEBUG]  - 초기 탐색 노드: '{self.nav_nodes[node_key]['name']}' | G: {cost_to_node:.1f} | H: {h_score:.1f} | F: {f_score[node_key]:.1f}")
+            print(f"  - 추가: '{self.nav_nodes[node_key]['name']}' ({node_key})")
+            print(f"    - G(시작->노드): {cost_to_node:.1f}, H(노드->목표): {h_score:.1f}, F: {f_score[node_key]:.1f}")
         
         iter_count = 0
         while open_set:
             iter_count += 1
             if iter_count > 2000:
-                print("[A* DEBUG] ERROR: 탐색 반복 횟수가 2000회를 초과했습니다. 탐색을 중단합니다.")
+                print("[A* CRITICAL] 탐색 반복 횟수가 2000회를 초과했습니다. 탐색을 중단합니다.")
                 break
                 
-            _, current_key = heapq.heappop(open_set)
+            current_f, current_key = heapq.heappop(open_set)
+            
+            if current_key in closed_set:
+                continue
+            closed_set.add(current_key)
+
+            print("-" * 70)
+            print(f"[A* STEP {iter_count}] 현재 노드: '{self.nav_nodes[current_key]['name']}' ({current_key}) | F: {current_f:.1f}, G: {g_score[current_key]:.1f}")
 
             if current_key == goal_key:
+                print("-" * 70)
+                print("[A* SUCCESS] 목표 노드에 도달했습니다. 경로를 재구성합니다.")
                 path = self._reconstruct_path(came_from, current_key, "__START__")
                 return path, g_score[goal_key]
 
-            for neighbor_key, edge_data in self.nav_graph.get(current_key, {}).items():
-                # --- [v12.9.8 신규 로직] 역할 기반 경로 필터링 ---
-                # (이전 수정에서 추가된 부분으로, 그대로 유지됩니다)
-                neighbor_node_type = self.nav_nodes.get(neighbor_key, {}).get('type')
-                action_to_neighbor = edge_data.get('action')
+            neighbors = self.nav_graph.get(current_key, {})
+            print(f"  - 이웃 노드 {len(neighbors)}개 평가:")
 
-                if neighbor_node_type in ['fall_landing', 'djump_landing'] and action_to_neighbor == 'walk':
-                    continue
-                # --- 로직 끝 ---
+            if not neighbors:
+                print("    - (이웃 없음)")
 
+            for neighbor_key, edge_data in neighbors.items():
+                neighbor_name = self.nav_nodes.get(neighbor_key, {}).get('name', '???')
+                action_to_neighbor = edge_data.get('action', 'N/A')
                 cost = edge_data.get('cost', float('inf'))
+                
+                print(f"    -> '{neighbor_name}' ({neighbor_key}) | action: {action_to_neighbor}, cost: {cost:.1f}")
+
+                neighbor_node_type = self.nav_nodes.get(neighbor_key, {}).get('type')
+                if neighbor_node_type in ['fall_landing', 'djump_landing'] and action_to_neighbor == 'walk':
+                    print("      - [필터링] 착지 지점으로 걸어갈 수 없어 건너뜀.")
+                    continue
+                
+                if neighbor_key in closed_set:
+                    print("      - [필터링] 이미 방문한 노드(Closed Set)이므로 건너뜀.")
+                    continue
+
                 tentative_g_score = g_score[current_key] + cost
                 
-                if neighbor_key in self.nav_nodes:
-                    if tentative_g_score < g_score[neighbor_key]:
-                        came_from[neighbor_key] = (current_key, edge_data)
-                        g_score[neighbor_key] = tentative_g_score
-                        neighbor_pos = self.nav_nodes[neighbor_key]['pos']
-                        h_score = math.hypot(neighbor_pos.x() - goal_pos.x(), neighbor_pos.y() - goal_pos.y())
-                        f_score[neighbor_key] = tentative_g_score + h_score
-                        heapq.heappush(open_set, (f_score[neighbor_key], neighbor_key))
-                
-                elif 'target_group' in edge_data:
-                    target_group = edge_data['target_group']
-                    best_landing_node, min_landing_cost = None, float('inf')
-                    action_start_pos = self.nav_nodes[current_key]['pos']
-                    for node_key_in_group, node_data in self.nav_nodes.items():
-                        if node_data.get('group') == target_group:
-                            landing_pos = node_data['pos']
-                            landing_cost = abs(action_start_pos.y() - landing_pos.y()) + abs(action_start_pos.x() - landing_pos.x()) * 0.5
-                            if landing_cost < min_landing_cost:
-                                min_landing_cost = landing_cost
-                                best_landing_node = node_key_in_group
-                    if best_landing_node:
-                        final_tentative_g_score = tentative_g_score + min_landing_cost
-                        if final_tentative_g_score < g_score[best_landing_node]:
-                            came_from[best_landing_node] = (current_key, edge_data)
-                            g_score[best_landing_node] = final_tentative_g_score
-                            landing_node_pos = self.nav_nodes[best_landing_node]['pos']
-                            h_score = math.hypot(landing_node_pos.x() - goal_pos.x(), landing_node_pos.y() - goal_pos.y())
-                            f_score[best_landing_node] = final_tentative_g_score + h_score
-                            heapq.heappush(open_set, (f_score[best_landing_node], best_landing_node))
+                print(f"      - G(예상): {g_score[current_key]:.1f} (현재 G) + {cost:.1f} (이동 Cost) = {tentative_g_score:.1f}")
 
+                if tentative_g_score < g_score[neighbor_key]:
+                    came_from[neighbor_key] = (current_key, edge_data)
+                    g_score[neighbor_key] = tentative_g_score
+                    neighbor_pos = self.nav_nodes[neighbor_key]['pos']
+                    h_score = math.hypot(neighbor_pos.x() - goal_pos.x(), neighbor_pos.y() - goal_pos.y())
+                    f_score[neighbor_key] = tentative_g_score + h_score
+                    heapq.heappush(open_set, (f_score[neighbor_key], neighbor_key))
+                    print(f"      - [경로 갱신] 더 나은 경로 발견! H: {h_score:.1f}, F: {f_score[neighbor_key]:.1f}. Open Set에 추가.")
+                else:
+                    print(f"      - [경로 유지] 기존 경로가 더 좋음 (기존 G: {g_score[neighbor_key]:.1f} <= 예상 G: {tentative_g_score:.1f})")
+        
+        print("-" * 70)
+        print("[A* FAILED] Open Set이 비었지만 목표에 도달하지 못했습니다. 경로가 존재하지 않습니다.")
         return None, float('inf')
 
     def _reconstruct_path(self, came_from, current_key, start_key):
