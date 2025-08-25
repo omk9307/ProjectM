@@ -4005,7 +4005,9 @@ class MapTab(QWidget):
             self.last_path_recalculation_time = 0.0 # <<< [v12.2.0] 추가: 경로 떨림 방지용
             self.expected_terrain_group = None  # 현재 안내 경로가 유효하기 위해 플레이어가 있어야 할 지형 그룹
             # --- v12.0.0: 추가 끝 ---
-
+            
+            #마지막으로 유효했던 지형 그룹 이름 저장용
+            self.last_known_terrain_group_name = ""
             #지형 간 상대 위치 벡터 저장
             self.feature_offsets = {}
             
@@ -5769,14 +5771,15 @@ class MapTab(QWidget):
         """
         [v12.8.1 수정] 플레이어의 실제 위치를 가상 시작 노드로 사용하여 A* 탐색을 수행합니다.
         """
+        # [수정 시작] 공중 상태일 때 경로 계산을 시도하지 않도록 방어 코드 강화
         current_terrain = self._get_contact_terrain(final_player_pos)
         if not current_terrain:
             # 이전에 계산된 경로가 있다면, 잠시 지형을 벗어난 것일 수 있으므로 즉시 경로를 파기하지 않음
-            # 단, 새로운 여정을 시작해야 하는 경우는 예외
             if not self.current_segment_path:
-                self.update_general_log("경로 계산 실패: 현재 지형을 파악할 수 없습니다.", "red")
-                self.journey_plan = []
+                # 단, 새로 경로를 계산해야 하는 상황에서는 명확한 안내 후 종료
+                self.update_general_log("경로 계산 대기: 공중에서는 경로를 계산할 수 없습니다. 착지 후 재시도합니다.", "gray")
             return
+        # [수정 끝]
 
         start_group = current_terrain.get('dynamic_name')
         if not self.journey_plan or self.current_journey_index >= len(self.journey_plan):
@@ -5992,12 +5995,17 @@ class MapTab(QWidget):
         v12.7.0: [수정] 경로 이탈 판정 로직을 폐기하고,
         목표에서 일정 거리 이상 멀어졌을 때만 경로를 재탐색하는 방식으로 변경.
         """
-        current_terrain_name = ""
+        # [수정 시작] current_terrain_name 변수 초기화 위치 변경 및 로직 수정
         contact_terrain = self._get_contact_terrain(final_player_pos)
         
         if contact_terrain:
             self.current_player_floor = contact_terrain.get('floor')
-            current_terrain_name = contact_terrain.get('dynamic_name', '')
+            # 땅에 있을 때만 마지막 지형 그룹 이름 갱신
+            self.last_known_terrain_group_name = contact_terrain.get('dynamic_name', '')
+        
+        # UI에 표시될 이름은 last_known_terrain_group_name을 사용
+        current_terrain_name = self.last_known_terrain_group_name
+        # [수정 끝]
         
         if final_player_pos is None or self.current_player_floor is None:
             self.navigator_display.update_data("N/A", "", "없음", "", "", "-", 0, [], None, None, self.is_forward, 'walk', "대기 중", "오류: 위치/층 정보 없음")
