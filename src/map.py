@@ -5870,25 +5870,39 @@ class MapTab(QWidget):
         # 2. 이탈 판정 (X축 기준)
         recalc_cooldown = 1.0
         if time.time() - self.last_path_recalculation_time > recalc_cooldown:
-            is_off_course = False
+            # [수정 시작] 상세한 이탈 사유 로깅을 위해 is_off_course 대신 off_course_reason 변수 사용
+            off_course_reason = None
             arrival_threshold = self._get_arrival_threshold(action_node.get('type'))
             exit_threshold = arrival_threshold + HYSTERESIS_EXIT_OFFSET
 
             if self.navigation_action == 'prepare_to_down_jump':
                 x_range = action_node.get('x_range')
                 if x_range and not (x_range[0] - exit_threshold <= final_player_pos.x() <= x_range[1] + exit_threshold):
-                    is_off_course = True
+                    off_course_reason = (
+                        f"djump_area_exit: player_x({final_player_pos.x():.1f})가 "
+                        f"허용 범위({x_range[0] - exit_threshold:.1f} ~ {x_range[1] + exit_threshold:.1f})를 벗어남"
+                    )
             elif self.navigation_action == 'prepare_to_jump':
                 dist_x = abs(final_player_pos.x() - action_node_pos.x())
                 dist_y = abs(final_player_pos.y() - action_node_pos.y())
                 if dist_x > exit_threshold or dist_y > 20.0:
-                    is_off_course = True
+                    off_course_reason = (
+                        f"jump_target_exit: player({final_player_pos.x():.1f}, {final_player_pos.y():.1f})와 "
+                        f"target({action_node_pos.x():.1f}, {action_node_pos.y():.1f})의 거리 초과. "
+                        f"dist_x({dist_x:.1f} > {exit_threshold:.1f}) 또는 dist_y({dist_y:.1f} > 20.0)"
+                    )
             else: # climb, fall
                 dist_x = abs(final_player_pos.x() - action_node_pos.x())
                 if dist_x > exit_threshold:
-                    is_off_course = True
+                    off_course_reason = (
+                        f"generic_exit: player_x({final_player_pos.x():.1f})와 target_x({action_node_pos.x():.1f})의 "
+                        f"거리({dist_x:.1f})가 허용 오차({exit_threshold:.1f})를 초과함"
+                    )
             
-            if is_off_course:
+            if off_course_reason:
+                # 상세 디버그 로그 출력
+                print(f"[DEBUG] 경로 이탈 판정: {off_course_reason}")
+                
                 self.update_general_log(f"[경로 이탈 감지] 행동 준비 중 목표에서 벗어났습니다. 경로를 다시 계산합니다.", "orange")
                 print(f"[INFO] 경로 이탈 감지. 목표: {self.guidance_text}")
                 self.current_segment_path = []
