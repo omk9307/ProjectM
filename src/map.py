@@ -4156,7 +4156,7 @@ class MapTab(QWidget):
         logs_layout.addWidget(QLabel("일반 로그"))
         self.general_log_viewer = QTextEdit()
         self.general_log_viewer.setReadOnly(True)
-        self.general_log_viewer.setFixedHeight(150)
+        self.general_log_viewer.setFixedHeight(300)
         logs_layout.addWidget(self.general_log_viewer)
         
         logs_layout.addWidget(QLabel("탐지 상태 로그"))
@@ -5900,10 +5900,10 @@ class MapTab(QWidget):
                     )
             
             if off_course_reason:
-                # 상세 디버그 로그 출력
-                print(f"[DEBUG] 경로 이탈 판정: {off_course_reason}")
+                # [수정] print 대신 self.update_general_log 사용
+                log_message = f"[경로 이탈] 사유: {off_course_reason}"
+                self.update_general_log(log_message, "orange")
                 
-                self.update_general_log(f"[경로 이탈 감지] 행동 준비 중 목표에서 벗어났습니다. 경로를 다시 계산합니다.", "orange")
                 print(f"[INFO] 경로 이탈 감지. 목표: {self.guidance_text}")
                 self.current_segment_path = []
                 self.navigation_action = 'move_to_target'
