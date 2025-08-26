@@ -28,11 +28,18 @@ from PyQt6.QtWidgets import (
 
     QGraphicsView, QGraphicsScene, QGraphicsPixmapItem, QCheckBox, QGraphicsRectItem,
     QGraphicsLineItem, QGraphicsTextItem, QGraphicsEllipseItem, QTabWidget,
-    QGraphicsSimpleTextItem
+    QGraphicsSimpleTextItem, QFormLayout, QProgressDialog
 )
 from PyQt6.QtGui import QPixmap, QImage, QPainter, QPen, QColor, QBrush, QFont, QCursor, QIcon, QPolygonF, QFontMetrics, QFontMetricsF
-from PyQt6.QtCore import Qt, QThread, pyqtSignal, QRect, QPoint, QRectF, QPointF, QSize, QSizeF
-
+from PyQt6.QtCore import Qt, QThread, pyqtSignal, QRect, QPoint, QRectF, QPointF, QSize, QSizeF, QTimer
+try:
+    import numpy as np
+    from sklearn.ensemble import RandomForestClassifier
+    import joblib
+except ImportError:
+    raise RuntimeError("머신러닝 기반 동작 인식을 위해 scikit-learn과 joblib 라이브러리가 필요합니다.\n"
+                       "pip install scikit-learn joblib")
+    
 try:
     from Learning import ScreenSnipper
 except ImportError:
@@ -3786,71 +3793,362 @@ class AnchorDetectionThread(QThread):
         except Exception as e:
             print(f"[AnchorDetectionThread] 정지 대기 실패: {e}")
 
+# v14.0.0: 동작 인식을 위한 데이터 수집 다이얼로그
+class ActionLearningDialog(QDialog):
+    """플레이어의 동작을 학습시키기 위한 데이터 수집 UI."""
+    # [신규] 삭제 버튼 상태 업데이트를 위한 시그널
+    enable_delete_button_signal = pyqtSignal(bool)
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.parent_map_tab = parent
+        self.setWindowTitle("동작 학습 모드")
+        self.setMinimumSize(400, 320)
+
+        self.actions = [
+            "climb_up_ladder",
+            "climb_down_ladder",
+            "fall"
+        ]
+        self.action_labels = {
+            "climb_up_ladder": "사다리 오르기",
+            "climb_down_ladder": "사다리 내려오기",
+            "fall": "낙하 (아래점프 or 낭떠러지)"
+        }
+        layout = QVBoxLayout(self)
+        form_layout = QFormLayout()
+
+        self.action_combo = QComboBox()
+        for action in self.actions:
+            self.action_combo.addItem(self.action_labels[action], action)
+        
+        self.status_label = QLabel("학습할 동작을 선택하고 '학습 시작'을 누르세요.")
+        self.status_label.setWordWrap(True)
+        
+        self.data_count_label = QTextEdit()
+        self.data_count_label.setReadOnly(True)
+        self.data_count_label.setFixedHeight(100)
+
+        form_layout.addRow("동작 선택:", self.action_combo)
+        form_layout.addRow("상태:", self.status_label)
+        form_layout.addRow("수집된 데이터:", self.data_count_label)
+        
+        layout.addLayout(form_layout)
+
+        button_layout = QHBoxLayout()
+        self.start_button = QPushButton("학습 시작")
+        self.delete_last_button = QPushButton("마지막 학습 삭제")
+        self.train_button = QPushButton("모델 학습")
+        
+        button_layout.addWidget(self.start_button)
+        button_layout.addWidget(self.delete_last_button)
+        button_layout.addWidget(self.train_button)
+        layout.addLayout(button_layout)
+        
+        self.close_button = QPushButton("닫기")
+        layout.addWidget(self.close_button)
+
+        self.start_button.clicked.connect(self.start_learning)
+        self.delete_last_button.clicked.connect(self.delete_last_data)
+        self.train_button.clicked.connect(self.train_model)
+        self.close_button.clicked.connect(self.accept)
+        
+        # 시그널 연결
+        self.enable_delete_button_signal.connect(self.delete_last_button.setEnabled)
+        self.parent_map_tab.collection_status_signal.connect(self.on_collection_status_changed)
+
+        self.delete_last_button.setEnabled(False) # 초기에는 비활성화
+        self.update_data_counts()
+
+    def start_learning(self):
+        """1초 대기 후 움직임 감지 상태로 전환하거나, 수집을 중단합니다."""
+        # '수집 중단' 기능
+        if self.parent_map_tab.is_collecting_action_data or self.parent_map_tab.is_waiting_for_movement:
+            self.parent_map_tab.cancel_action_collection()
+            return
+
+        if not self.parent_map_tab.detection_thread or not self.parent_map_tab.detection_thread.isRunning():
+            QMessageBox.warning(self, "오류", "먼저 '탐지 시작'을 누르세요.")
+            return
+
+        self.set_buttons_enabled(False)
+        self.start_button.setEnabled(True) # 시작/중단 버튼은 계속 활성화
+        self.start_button.setText("취소")
+        self.status_label.setText("1초 후 움직임을 감지합니다...")
+        
+        QTimer.singleShot(1000, self.prepare_for_movement_detection)
+
+    def prepare_for_movement_detection(self):
+        """MapTab에 감지 시작을 요청하고 UI를 업데이트합니다."""
+        action_text = self.action_combo.currentText()
+        selected_action = self.action_combo.currentData()
+        
+        # [MODIFIED] action_text를 직접 인자로 전달
+        self.parent_map_tab.prepare_for_action_collection(selected_action, action_text)
+
+    def on_collection_status_changed(self, status, message, can_delete):
+        """MapTab으로부터 데이터 수집 상태 변경 신호를 받아 UI를 갱신합니다."""
+        self.status_label.setText(message)
+
+        if status == "finished":
+            self.update_data_counts()
+            self.set_buttons_enabled(True)
+            self.start_button.setText("학습 시작")
+            self.delete_last_button.setEnabled(can_delete)
+        elif status == "waiting":
+            self.start_button.setText("취소")
+        elif status == "collecting":
+            self.start_button.setText("수집 중단")
+        elif status == "canceled":
+            self.set_buttons_enabled(True)
+            self.start_button.setText("학습 시작")
+
+    def delete_last_data(self):
+        self.parent_map_tab.delete_last_action_data()
+        self.update_data_counts()
+        self.delete_last_button.setEnabled(False)
+        self.status_label.setText("마지막 데이터를 삭제했습니다.")
+
+    def set_buttons_enabled(self, enabled):
+        self.start_button.setEnabled(enabled)
+        self.delete_last_button.setEnabled(enabled and self.parent_map_tab.last_collected_filepath is not None)
+        self.train_button.setEnabled(enabled)
+        self.action_combo.setEnabled(enabled)
+
+    def train_model(self):
+        """학습 스레드를 시작하고 진행률 대화 상자를 표시합니다."""
+        profile_path = self.parent_map_tab.get_active_profile_path()
+        if not profile_path:
+            QMessageBox.warning(self, "오류", "활성화된 프로필이 없어 학습을 진행할 수 없습니다.")
+            return
+
+        self.set_buttons_enabled(False)
+
+        self.progress_dialog = QProgressDialog("모델 학습 준비 중...", "취소", 0, 100, self)
+        self.progress_dialog.setWindowTitle("학습 진행 중")
+        self.progress_dialog.setWindowModality(Qt.WindowModality.WindowModal)
+        self.progress_dialog.show()
+
+        self.training_thread = ActionTrainingThread(profile_path, self.parent_map_tab)
+        self.training_thread.progress_updated.connect(self.update_progress)
+        self.training_thread.training_finished.connect(self.on_training_finished)
+        self.progress_dialog.canceled.connect(self.training_thread.stop)
+        self.training_thread.start()
+
+    def update_progress(self, message, value):
+        if self.progress_dialog:
+            self.progress_dialog.setLabelText(message)
+            self.progress_dialog.setValue(value)
+
+    def on_training_finished(self, success, message):
+        if self.progress_dialog:
+            self.progress_dialog.close()
+        
+        if success:
+            QMessageBox.information(self, "학습 완료", message)
+            self.parent_map_tab.load_action_model()
+        else:
+            QMessageBox.critical(self, "학습 실패", message)
+
+        self.set_buttons_enabled(True)
+        
+    def update_data_counts(self):
+        """수집된 데이터 파일의 개수를 세어 UI에 표시합니다."""
+        data_dir = os.path.join(self.parent_map_tab.get_active_profile_path(), 'action_data')
+        if not os.path.exists(data_dir):
+            self.data_count_label.setText("수집된 데이터가 없습니다.")
+            return
+        
+        counts = {action: 0 for action in self.actions}
+        for filename in os.listdir(data_dir):
+            for action in self.actions:
+                if filename.startswith(action):
+                    counts[action] += 1
+        
+        text = ""
+        for action, count in counts.items():
+            text += f"- {self.action_labels[action]}: {count}개\n"
+        self.data_count_label.setText(text)
+
+    def cancel_action_collection(self):
+        """데이터 수집 대기 또는 진행을 취소합니다."""
+        was_waiting = self.is_waiting_for_movement
+        was_collecting = self.is_collecting_action_data
+
+        self.is_waiting_for_movement = False
+        self.is_collecting_action_data = False
+        self.action_data_buffer = []
+        self.last_pos_before_collection = None
+
+        if was_waiting or was_collecting:
+            self.collection_status_signal.emit("canceled", "학습이 취소되었습니다. 다시 시작하세요.", False)
+
+# v14.0.1: 동작 인식 모델 학습 스레드
+class ActionTrainingThread(QThread):
+    progress_updated = pyqtSignal(str, int)
+    training_finished = pyqtSignal(bool, str)
+
+    def __init__(self, profile_path, parent_tab):
+        super().__init__()
+        self.profile_path = profile_path
+        self.parent_tab = parent_tab
+        self.is_running = True
+
+    def run(self):
+        """
+        [MODIFIED] v14.3.7: 기존에 저장된 데이터도 학습 직전에 노이즈를 제거하도록 수정.
+        """
+        try:
+            data_dir = os.path.join(self.profile_path, 'action_data')
+            model_path = os.path.join(self.profile_path, 'action_model.joblib')
+
+            if not os.path.exists(data_dir):
+                self.training_finished.emit(False, "학습 데이터가 없습니다. 먼저 데이터를 수집해주세요.")
+                return
+
+            self.progress_updated.emit("데이터 로딩 중...", 10)
+            
+            X, y = [], []
+            files = [f for f in os.listdir(data_dir) if f.endswith('.json')]
+            for i, filename in enumerate(files):
+                if not self.is_running:
+                    self.training_finished.emit(False, "학습이 사용자에 의해 취소되었습니다.")
+                    return
+
+                filepath = os.path.join(data_dir, filename)
+                with open(filepath, 'r') as f:
+                    data = json.load(f)
+                
+                sequence = data.get("sequence", [])
+                action = data.get("action")
+
+                if len(sequence) > 5 and action:
+                    # [PATCH] v14.3.7: 로드된 데이터에 대해 노이즈 제거 로직 적용
+                    trimmed_sequence = self.parent_tab._trim_sequence_noise(sequence, self.parent_tab.cfg_move_deadzone)
+                    
+                    if len(trimmed_sequence) >= 5:
+                        features = self.parent_tab._extract_features_from_sequence(trimmed_sequence)
+                        X.append(features)
+                        y.append(action)
+                
+                self.progress_updated.emit(f"데이터 처리 중... ({i+1}/{len(files)})", 10 + int(60 * (i+1)/len(files)))
+
+            if len(set(y)) < 2:
+                self.training_finished.emit(False, f"학습을 위해 최소 2가지 종류의 동작 데이터가 필요합니다. (현재: {len(set(y))}종류)")
+                return
+
+            self.progress_updated.emit("모델 학습 중...", 80)
+            
+            X = np.array(X)
+            y = np.array(y)
+
+            model = RandomForestClassifier(n_estimators=100, random_state=42, class_weight='balanced')
+            model.fit(X, y)
+
+            self.progress_updated.emit("모델 저장 중...", 95)
+            joblib.dump(model, model_path)
+            
+            self.training_finished.emit(True, f"모델 학습이 완료되었습니다.\n총 {len(X)}개의 정제된 데이터로 학습했습니다.")
+
+        except Exception as e:
+            self.training_finished.emit(False, f"학습 중 오류가 발생했습니다:\n{e}")
+    def stop(self):
+        self.is_running = False
+
 # [v11.3.0] 상태 판정 설정을 위한 팝업 다이얼로그 클래스
 class StateConfigDialog(QDialog):
     def __init__(self, current_config, parent=None):
+        """
+        [MODIFIED] v14.3.8: QSpinBox에 float 값을 설정하려던 TypeError 수정.
+        """
         super().__init__(parent)
-        self.setWindowTitle("판정 설정") # [v11.4.0] 이름 변경
-        self.setMinimumWidth(450) # 너비 확장
+        self.parent_map_tab = parent 
+        self.setWindowTitle("판정 설정")
+        self.setMinimumWidth(450)
         
         self.config = current_config.copy()
         
         main_layout = QVBoxLayout(self)
-        form_layout = QVBoxLayout()
+        
+        self.spinboxes = {}
 
-        def add_spinbox(layout, key, label_text, min_val, max_val, step, is_double=True, decimals=2):
-            h_layout = QHBoxLayout()
-            label = QLabel(label_text)
-            label.setMinimumWidth(200) # 레이블 너비 고정
-            h_layout.addWidget(label)
+        # 일관된 UI 생성을 위한 헬퍼 함수
+        def add_spinbox_row(form_layout, key, label_text, min_val, max_val, step, is_double=True, decimals=2):
+            # [PATCH] v14.3.8: is_double 값에 따라 올바른 타입의 기본값을 사용하도록 수정
+            default_value = 0.0 if is_double else 0
+
             if is_double:
                 spinbox = QDoubleSpinBox()
                 spinbox.setDecimals(decimals)
             else:
                 spinbox = QSpinBox()
+            
             spinbox.setRange(min_val, max_val)
             spinbox.setSingleStep(step)
-            spinbox.setValue(self.config.get(key, 0))
+            spinbox.setValue(self.config.get(key, default_value))
             spinbox.setObjectName(key)
-            h_layout.addWidget(spinbox)
-            layout.addLayout(h_layout)
-            return spinbox
+            self.spinboxes[key] = spinbox
+            form_layout.addRow(label_text, spinbox)
 
-        # [v11.4.0] 사용자 요청에 따라 스핀박스 범위 및 신규 항목 추가
-        add_spinbox(form_layout, "idle_time_threshold", "정지 판정 시간(초):", 0.1, 5.0, 0.1)
-        add_spinbox(form_layout, "max_jump_duration", "최대 점프 시간(초):", 0.1, 5.0, 0.1)
-        add_spinbox(form_layout, "climbing_state_frame_threshold", "등반 판정 프레임:", 1, 100, 1, is_double=False)
-        add_spinbox(form_layout, "falling_state_frame_threshold", "낙하 판정 프레임:", 1, 100, 1, is_double=False)
-        add_spinbox(form_layout, "jumping_state_frame_threshold", "점프 판정 프레임:", 1, 100, 1, is_double=False)
+        # 점프 특성 측정 그룹
+        jump_profile_group = QGroupBox("점프 특성 (자동 측정 권장)")
+        jump_profile_layout = QVBoxLayout(jump_profile_group)
+        jump_form_layout = QFormLayout()
         
-        form_layout.addSpacing(10)
+        # '측정' 버튼이 있는 항목들은 별도로 레이아웃 구성
+        h_layout_duration = QHBoxLayout()
+        spinbox_duration = QDoubleSpinBox()
+        spinbox_duration.setRange(0.1, 10.0); spinbox_duration.setSingleStep(0.1)
+        spinbox_duration.setValue(self.config.get("max_jump_duration", 0.0))
+        self.spinboxes["max_jump_duration"] = spinbox_duration
+        btn_duration = QPushButton("측정")
+        btn_duration.clicked.connect(self.measure_jump_profile)
+        h_layout_duration.addWidget(spinbox_duration)
+        h_layout_duration.addWidget(btn_duration)
+        jump_form_layout.addRow("최대 점프 시간(초):", h_layout_duration)
 
-        add_spinbox(form_layout, "on_terrain_y_threshold", "지상 판정 Y오차(px):", 1.0, 30.0, 0.1)
-        add_spinbox(form_layout, "jump_y_min_threshold", "점프 최소 Y오프셋(px):", 0.01, 30.0, 0.01)
-        add_spinbox(form_layout, "jump_y_max_threshold", "점프 최대 Y오프셋(px):", 1.0, 30.0, 0.1)
-        add_spinbox(form_layout, "fall_y_min_threshold", "낙하 최소 Y오프셋(px):", 1.0, 30.0, 0.1)
-        
-        form_layout.addSpacing(10)
+        h_layout_y_offset = QHBoxLayout()
+        spinbox_y_offset = QDoubleSpinBox()
+        spinbox_y_offset.setRange(1.0, 50.0); spinbox_y_offset.setSingleStep(0.1)
+        spinbox_y_offset.setValue(self.config.get("jump_y_max_threshold", 0.0))
+        self.spinboxes["jump_y_max_threshold"] = spinbox_y_offset
+        btn_y_offset = QPushButton("측정")
+        btn_y_offset.clicked.connect(self.measure_jump_profile)
+        h_layout_y_offset.addWidget(spinbox_y_offset)
+        h_layout_y_offset.addWidget(btn_y_offset)
+        jump_form_layout.addRow("최대 점프 Y오프셋(px):", h_layout_y_offset)
 
-        add_spinbox(form_layout, "move_deadzone", "X/Y 이동 감지 최소값(px):", 0.0, 5.0, 0.01, decimals=2)
-        add_spinbox(form_layout, "y_movement_deadzone", "상승/하강 감지 Y최소값(px/f):", 0.01, 5.0, 0.01, decimals=2)
-        add_spinbox(form_layout, "climb_x_movement_threshold", "등반 최대 X이동(px/f):", 0.01, 5.0, 0.01)
-        add_spinbox(form_layout, "fall_on_ladder_x_movement_threshold", "사다리 낙하 최대 X이동(px/f):", 0.01, 5.0, 0.01)
-        add_spinbox(form_layout, "ladder_x_grab_threshold", "사다리 근접 X오차(px):", 0.5, 20.0, 0.1)
-        
-        form_layout.addSpacing(10)
-        
-        add_spinbox(form_layout, "waypoint_arrival_x_threshold", "웨이포인트 도착 X오차(px):", 0.0, 20.0, 0.1)
-        add_spinbox(form_layout, "ladder_arrival_x_threshold", "사다리 도착 X오차(px):", 0.0, 20.0, 0.1)
-        add_spinbox(form_layout, "jump_link_arrival_x_threshold", "점프/낭떠러지 도착 X오차(px):", 0.0, 20.0, 0.1)
+        jump_profile_layout.addLayout(jump_form_layout)
+        main_layout.addWidget(jump_profile_group)
 
-        # ==================== v11.5.0 UI 항목 추가 시작 ====================
-        form_layout.addSpacing(10)
-        add_spinbox(form_layout, "arrival_frame_threshold", "도착 판정 프레임:", 1, 10, 1, is_double=False)
-        add_spinbox(form_layout, "action_success_frame_threshold", "행동 성공 판정 프레임:", 1, 10, 1, is_double=False)
-        # ==================== v11.5.0 UI 항목 추가 끝 ======================
-
-        main_layout.addLayout(form_layout)
+        # 나머지 설정을 담을 그룹
+        other_settings_group = QGroupBox("기타 판정 설정")
+        form_layout = QFormLayout(other_settings_group)
+        add_spinbox_row(form_layout, "idle_time_threshold", "정지 판정 시간(초):", 0.1, 5.0, 0.1)
+        add_spinbox_row(form_layout, "climbing_state_frame_threshold", "등반 판정 프레임:", 1, 100, 1, is_double=False)
+        add_spinbox_row(form_layout, "falling_state_frame_threshold", "낙하 판정 프레임:", 1, 100, 1, is_double=False)
+        add_spinbox_row(form_layout, "jumping_state_frame_threshold", "점프 판정 프레임:", 1, 100, 1, is_double=False)
+        form_layout.addRow(QLabel("---"))
+        add_spinbox_row(form_layout, "on_terrain_y_threshold", "지상 판정 Y오차(px):", 1.0, 30.0, 0.1)
+        add_spinbox_row(form_layout, "jump_y_min_threshold", "점프 최소 Y오프셋(px):", 0.01, 30.0, 0.01)
+        add_spinbox_row(form_layout, "fall_y_min_threshold", "낙하 최소 Y오프셋(px):", 1.0, 30.0, 0.1)
+        form_layout.addRow(QLabel("---"))
+        add_spinbox_row(form_layout, "move_deadzone", "X/Y 이동 감지 최소값(px):", 0.0, 5.0, 0.01, decimals=2)
+        add_spinbox_row(form_layout, "y_movement_deadzone", "상승/하강 감지 Y최소값(px/f):", 0.01, 5.0, 0.01, decimals=2)
+        add_spinbox_row(form_layout, "climb_x_movement_threshold", "등반 최대 X이동(px/f):", 0.01, 5.0, 0.01)
+        add_spinbox_row(form_layout, "fall_on_ladder_x_movement_threshold", "사다리 낙하 최대 X이동(px/f):", 0.01, 5.0, 0.01)
+        add_spinbox_row(form_layout, "ladder_x_grab_threshold", "사다리 근접 X오차(px):", 0.5, 20.0, 0.1)
+        add_spinbox_row(form_layout, "on_ladder_enter_frame_threshold", "사다리 탑승 판정 프레임:", 1, 10, 1, is_double=False)
+        add_spinbox_row(form_layout, "jump_initial_velocity_threshold", "점프 초기 속도 임계값(px/f):", 1.0, 10.0, 0.1)
+        add_spinbox_row(form_layout, "climb_max_velocity", "등반 최대 속도(px/f):", 1.0, 10.0, 0.1)
+        form_layout.addRow(QLabel("---"))
+        add_spinbox_row(form_layout, "waypoint_arrival_x_threshold", "웨이포인트 도착 X오차(px):", 0.0, 20.0, 0.1)
+        add_spinbox_row(form_layout, "ladder_arrival_x_threshold", "사다리 도착 X오차(px):", 0.0, 20.0, 0.1)
+        add_spinbox_row(form_layout, "jump_link_arrival_x_threshold", "점프/낭떠러지 도착 X오차(px):", 0.0, 20.0, 0.1)
+        form_layout.addRow(QLabel("---"))
+        add_spinbox_row(form_layout, "arrival_frame_threshold", "도착 판정 프레임:", 1, 10, 1, is_double=False)
+        add_spinbox_row(form_layout, "action_success_frame_threshold", "행동 성공 판정 프레임:", 1, 10, 1, is_double=False)
+        main_layout.addWidget(other_settings_group)
         
         button_box = QDialogButtonBox()
         save_btn = button_box.addButton("저장", QDialogButtonBox.ButtonRole.AcceptRole)
@@ -3862,14 +4160,39 @@ class StateConfigDialog(QDialog):
         default_btn.clicked.connect(self.restore_defaults)
         
         main_layout.addWidget(button_box)
+        
+        if self.parent_map_tab:
+            self.parent_map_tab.jump_profile_measured_signal.connect(self.update_jump_profile)
 
-    def get_updated_config(self):
-        updated_config = {}
-        for spinbox in self.findChildren(QSpinBox) + self.findChildren(QDoubleSpinBox):
-            key = spinbox.objectName()
-            updated_config[key] = spinbox.value()
-        return updated_config
+    def measure_jump_profile(self):
+        """MapTab에 점프 특성 프로파일링을 요청합니다."""
+        if not self.parent_map_tab.detection_thread or not self.parent_map_tab.detection_thread.isRunning():
+            QMessageBox.warning(self, "오류", "먼저 '탐지 시작'을 눌러주세요.")
+            return
+        
+        self.parent_map_tab.start_jump_profiling()
+        
+        # 진행률 표시줄
+        self.progress_dialog = QProgressDialog("점프 0/10회 수행됨. 게임에서 점프하세요.", "취소", 0, 10, self)
+        self.progress_dialog.setWindowTitle("점프 특성 측정 중")
+        self.progress_dialog.setWindowModality(Qt.WindowModality.WindowModal)
+        self.progress_dialog.canceled.connect(self.parent_map_tab.cancel_jump_profiling)
+        self.parent_map_tab.jump_profile_progress_signal.connect(self.progress_dialog.setValue)
+        self.parent_map_tab.jump_profile_progress_signal.connect(lambda val: self.progress_dialog.setLabelText(f"점프 {val}/10회 수행됨. 계속 점프하세요."))
+        self.progress_dialog.show()
+        
+    def update_jump_profile(self, duration, y_offset):
+        """측정된 값으로 스핀박스 값을 업데이트합니다."""
+        if self.progress_dialog:
+            self.progress_dialog.close()
 
+        if duration > 0 and y_offset > 0:
+            self.spinboxes["max_jump_duration"].setValue(duration)
+            self.spinboxes["jump_y_max_threshold"].setValue(y_offset)
+            QMessageBox.information(self, "측정 완료", f"측정이 완료되었습니다.\n- 최대 점프 시간: {duration:.2f}초\n- 최대 점프 Y오프셋: {y_offset:.2f}px")
+        else:
+            QMessageBox.warning(self, "측정 실패", "유효한 점프 데이터가 수집되지 않았습니다.\n다시 시도해주세요.")
+            
     def restore_defaults(self):
         defaults = {
             "idle_time_threshold": IDLE_TIME_THRESHOLD,
@@ -3883,6 +4206,7 @@ class StateConfigDialog(QDialog):
             "climb_x_movement_threshold": CLIMB_X_MOVEMENT_THRESHOLD,
             "fall_on_ladder_x_movement_threshold": FALL_ON_LADDER_X_MOVEMENT_THRESHOLD,
             "ladder_x_grab_threshold": LADDER_X_GRAB_THRESHOLD,
+            "on_ladder_enter_frame_threshold": 3,
             "move_deadzone": MOVE_DEADZONE,
             "max_jump_duration": MAX_JUMP_DURATION,
             "y_movement_deadzone": Y_MOVEMENT_DEADZONE,
@@ -3901,7 +4225,11 @@ class StateConfigDialog(QDialog):
 
 class MapTab(QWidget):
     global_pos_updated = pyqtSignal(QPointF)
-
+    collection_status_signal = pyqtSignal(str, str, bool)
+    # [MODIFIED] v14.3.0: 점프 프로파일링 관련 시그널로 변경 및 추가
+    jump_profile_measured_signal = pyqtSignal(float, float) # duration, y_offset
+    jump_profile_progress_signal = pyqtSignal(int)
+    
     def __init__(self):
             super().__init__()
             self.active_profile_name = None
@@ -3943,6 +4271,9 @@ class MapTab(QWidget):
             self.cfg_waypoint_arrival_x_threshold = None
             self.cfg_ladder_arrival_x_threshold = None
             self.cfg_jump_link_arrival_x_threshold = None
+            self.cfg_on_ladder_enter_frame_threshold = None
+            self.cfg_jump_initial_velocity_threshold = None
+            self.cfg_climb_max_velocity = None
 
             # ==================== v11.5.0 설정 변수 추가 시작 ====================
             self.cfg_arrival_frame_threshold = None
@@ -3955,8 +4286,10 @@ class MapTab(QWidget):
             self.player_state = 'on_terrain' # 초기값
             self.in_jump = False
             self.x_movement_history = deque(maxlen=5) # [v11.3.13] X축 이동 방향 추적을 위한 deque 추가
-            self.jump_lock = False # (의사코드에는 있지만, jumping 판정 로직에 통합되어 실제 변수로는 불필요)
             self.jump_start_time = 0.0
+            self.just_left_terrain = False
+            self.y_velocity_history = deque(maxlen=5) # v15 물리 기반 판정
+
             # ==================== v11.5.0 상태 머신 변수 추가 시작 ====================
             self.navigation_action = 'move_to_target' # 초기값 'path_failed'에서 변경
             self.last_state_change_time = 0.0 # 상태 변경 쿨다운을 위한 변수
@@ -3967,7 +4300,7 @@ class MapTab(QWidget):
             self.prepare_timeout_start = 0.0
             self.lock_timeout_start = 0.0
             # ==================== v11.5.0 상태 머신 변수 추가 끝 ======================
-            
+
             self.jumping_candidate_frames = 0
             self.climbing_candidate_frames = 0
             self.falling_candidate_frames = 0
@@ -4014,7 +4347,27 @@ class MapTab(QWidget):
             # 디버그 체크박스 멤버 변수
             self.debug_pathfinding_checkbox = None
             self.debug_state_machine_checkbox = None
+            
+            # v14.0.0: 동작 인식 데이터 수집 관련 변수
+            self.is_waiting_for_movement = False
+            self.is_collecting_action_data = False
+            self.action_data_buffer = []
+            self.current_action_to_learn = None
+            self.last_pos_before_collection = None
+            self.last_collected_filepath = None
+            # [MODIFIED] v14.3.0: 점프 프로파일링 관련 변수로 변경
+            self.is_profiling_jump = False
+            self.jump_profile_data = []
+            self.jump_measure_start_time = 0.0
+            self.current_jump_max_y_offset = 0.0
 
+            # v14.3.4: 수집 목표(target) 정보를 저장할 변수
+            self.collection_target_info = {} 
+
+            self.action_collection_max_frames = 180 # 약 9초 
+            self.action_model = None
+            self.action_inference_buffer = deque(maxlen=self.action_collection_max_frames)
+        
             #지형 간 상대 위치 벡터 저장
             self.feature_offsets = {}
             
@@ -4145,12 +4498,16 @@ class MapTab(QWidget):
         self.state_config_btn = QPushButton("판정 설정")
         self.state_config_btn.clicked.connect(self._open_state_config_dialog)
         
+        self.action_learning_btn = QPushButton("동작 학습")
+        self.action_learning_btn.clicked.connect(self.open_action_learning_dialog) 
+        
         self.detect_anchor_btn = QPushButton("탐지 시작")
         self.detect_anchor_btn.setCheckable(True)
         self.detect_anchor_btn.setStyleSheet("padding: 3px 60px")
         self.detect_anchor_btn.clicked.connect(self.toggle_anchor_detection)
         
         detect_layout.addWidget(self.state_config_btn)
+        detect_layout.addWidget(self.action_learning_btn)
         detect_layout.addWidget(self.detect_anchor_btn)
         
         detect_groupbox.setLayout(detect_layout)
@@ -4200,6 +4557,61 @@ class MapTab(QWidget):
         main_layout.addLayout(logs_layout, 1)
         main_layout.addLayout(right_layout, 2)
         self.update_general_log("MapTab이 초기화되었습니다. 맵 프로필을 선택해주세요.", "black")
+
+    def _extract_features_from_sequence(self, sequence):
+        """[MODIFIED] v14.0.3: 강화된 특징 추출 로직."""
+        seq = np.array(sequence, dtype=np.float32)
+        
+        if len(seq) < 2: # 데이터가 너무 짧으면 0 벡터 반환
+            return np.zeros(11)
+
+        # 1. 정규화
+        normalized_seq = seq - seq[0]
+        
+        # 2. 기본 통계 특징
+        min_coords = np.min(normalized_seq, axis=0)
+        max_coords = np.max(normalized_seq, axis=0)
+        
+        # 3. 궤적 특징
+        total_distance = np.sum(np.sqrt(np.sum(np.diff(normalized_seq, axis=0)**2, axis=1)))
+        displacement = np.sqrt(np.sum((normalized_seq[-1] - normalized_seq[0])**2))
+        x_range = max_coords[0] - min_coords[0]
+        y_range = max_coords[1] - min_coords[1]
+        
+        # 4. 속도 특징
+        velocities = np.diff(normalized_seq, axis=0)
+        mean_velocity_y = np.mean(velocities[:, 1])
+        max_velocity_y = np.max(velocities[:, 1])
+        min_velocity_y = np.min(velocities[:, 1])
+        
+        # 5. 시퀀스 길이
+        sequence_length = len(normalized_seq)
+        
+        features = np.array([
+            total_distance, displacement,
+            x_range, y_range,
+            mean_velocity_y, max_velocity_y, min_velocity_y,
+            min_coords[1], max_coords[1], # y좌표 최소/최대값
+            sequence_length,
+            x_range / (y_range + 1e-6) # 가로/세로 비율
+        ])
+        return features
+
+    def load_action_model(self):
+        """저장된 동작 인식 모델을 로드합니다."""
+        self.action_model = None
+        profile_path = self.get_active_profile_path()
+        if not profile_path: return
+
+        model_path = os.path.join(profile_path, 'action_model.joblib')
+        if os.path.exists(model_path):
+            try:
+                self.action_model = joblib.load(model_path)
+                self.update_general_log("동작 인식 모델을 성공적으로 로드했습니다.", "green")
+            except Exception as e:
+                self.update_general_log(f"동작 인식 모델 로드 실패: {e}", "red")
+        else:
+            self.update_general_log("학습된 동작 인식 모델이 없습니다. '동작 학습'을 진행해주세요.", "orange")
 
     def _get_floor_from_closest_terrain_data(self, point, terrain_lines):
             """주어진 점에서 가장 가까운 지형선 데이터를 찾아 그 층 번호를 반환합니다."""
@@ -4389,6 +4801,9 @@ class MapTab(QWidget):
             self.cfg_waypoint_arrival_x_threshold = WAYPOINT_ARRIVAL_X_THRESHOLD
             self.cfg_ladder_arrival_x_threshold = LADDER_ARRIVAL_X_THRESHOLD
             self.cfg_jump_link_arrival_x_threshold = JUMP_LINK_ARRIVAL_X_THRESHOLD
+            self.cfg_on_ladder_enter_frame_threshold = 3
+            self.cfg_jump_initial_velocity_threshold = 4.0
+            self.cfg_climb_max_velocity = 3.0
             # ==================== v11.5.0 기본값 초기화 추가 시작 ====================
             self.cfg_arrival_frame_threshold = 2
             self.cfg_action_success_frame_threshold = 2
@@ -4421,6 +4836,9 @@ class MapTab(QWidget):
                 self.cfg_waypoint_arrival_x_threshold = state_config.get("waypoint_arrival_x_threshold", self.cfg_waypoint_arrival_x_threshold)
                 self.cfg_ladder_arrival_x_threshold = state_config.get("ladder_arrival_x_threshold", self.cfg_ladder_arrival_x_threshold)
                 self.cfg_jump_link_arrival_x_threshold = state_config.get("jump_link_arrival_x_threshold", self.cfg_jump_link_arrival_x_threshold)
+                self.cfg_on_ladder_enter_frame_threshold = state_config.get("on_ladder_enter_frame_threshold", self.cfg_on_ladder_enter_frame_threshold)
+                self.cfg_jump_initial_velocity_threshold = state_config.get("jump_initial_velocity_threshold", self.cfg_jump_initial_velocity_threshold)
+                self.cfg_climb_max_velocity = state_config.get("climb_max_velocity", self.cfg_climb_max_velocity)
                 # ==================== v11.5.0 설정 로드 추가 시작 ====================
                 self.cfg_arrival_frame_threshold = state_config.get("arrival_frame_threshold", self.cfg_arrival_frame_threshold)
                 self.cfg_action_success_frame_threshold = state_config.get("action_success_frame_threshold", self.cfg_action_success_frame_threshold)
@@ -4604,6 +5022,9 @@ class MapTab(QWidget):
                 "waypoint_arrival_x_threshold": self.cfg_waypoint_arrival_x_threshold,
                 "ladder_arrival_x_threshold": self.cfg_ladder_arrival_x_threshold,
                 "jump_link_arrival_x_threshold": self.cfg_jump_link_arrival_x_threshold,
+                "on_ladder_enter_frame_threshold": self.cfg_on_ladder_enter_frame_threshold,
+                "jump_initial_velocity_threshold": self.cfg_jump_initial_velocity_threshold,
+                "climb_max_velocity": self.cfg_climb_max_velocity,
                 # ==================== v11.5.0 설정 저장 추가 시작 ====================
                 "arrival_frame_threshold": self.cfg_arrival_frame_threshold,
                 "action_success_frame_threshold": self.cfg_action_success_frame_threshold,
@@ -5187,6 +5608,7 @@ class MapTab(QWidget):
                     return
 
                 self.save_profile_data()
+                self.load_action_model()
                 self.general_log_viewer.clear()
                 self.detection_log_viewer.clear()
                 self.update_general_log("탐지를 시작합니다...", "SaddleBrown")
@@ -5253,7 +5675,180 @@ class MapTab(QWidget):
 
                 if self.debug_dialog:
                     self.debug_dialog.close()
-                    
+
+    def _open_state_config_dialog(self):
+        """
+        [PATCH] v14.3.3: '판정 설정' 다이얼로그를 열고, 변경된 설정을 저장하는 기능.
+        """
+        current_config = {
+            "idle_time_threshold": self.cfg_idle_time_threshold,
+            "climbing_state_frame_threshold": self.cfg_climbing_state_frame_threshold,
+            "falling_state_frame_threshold": self.cfg_falling_state_frame_threshold,
+            "jumping_state_frame_threshold": self.cfg_jumping_state_frame_threshold,
+            "on_terrain_y_threshold": self.cfg_on_terrain_y_threshold,
+            "jump_y_min_threshold": self.cfg_jump_y_min_threshold,
+            "jump_y_max_threshold": self.cfg_jump_y_max_threshold,
+            "fall_y_min_threshold": self.cfg_fall_y_min_threshold,
+            "climb_x_movement_threshold": self.cfg_climb_x_movement_threshold,
+            "fall_on_ladder_x_movement_threshold": self.cfg_fall_on_ladder_x_movement_threshold,
+            "ladder_x_grab_threshold": self.cfg_ladder_x_grab_threshold,
+            "move_deadzone": self.cfg_move_deadzone,
+            "max_jump_duration": self.cfg_max_jump_duration,
+            "y_movement_deadzone": self.cfg_y_movement_deadzone,
+            "waypoint_arrival_x_threshold": self.cfg_waypoint_arrival_x_threshold,
+            "ladder_arrival_x_threshold": self.cfg_ladder_arrival_x_threshold,
+            "jump_link_arrival_x_threshold": self.cfg_jump_link_arrival_x_threshold,
+            "on_ladder_enter_frame_threshold": self.cfg_on_ladder_enter_frame_threshold,
+            "jump_initial_velocity_threshold": self.cfg_jump_initial_velocity_threshold,
+            "climb_max_velocity": self.cfg_climb_max_velocity,
+            "arrival_frame_threshold": self.cfg_arrival_frame_threshold,
+            "action_success_frame_threshold": self.cfg_action_success_frame_threshold,
+        }
+        
+        # [MODIFIED] v14.3.3: parent_tab 대신 표준 parent 인자 사용
+        dialog = StateConfigDialog(current_config, parent=self)
+        if dialog.exec():
+            updated_config = dialog.get_updated_config()
+            
+            for key, value in updated_config.items():
+                # 'cfg_' 접두사를 붙여 MapTab의 속성을 설정
+                attr_name = f"cfg_{key}"
+                if hasattr(self, attr_name):
+                    setattr(self, attr_name, value)
+
+            self.update_general_log("상태 판정 설정이 업데이트되었습니다.", "blue")
+            self.save_profile_data()              
+
+# v14.0.0: 동작 학습 관련 메서드들
+    def get_active_profile_path(self):
+        """현재 활성화된 프로필의 폴더 경로를 반환합니다."""
+        if not self.active_profile_name:
+            return None
+        return os.path.join(MAPS_DIR, self.active_profile_name)
+
+    def open_action_learning_dialog(self):
+        """'동작 학습' 버튼 클릭 시 다이얼로그를 엽니다."""
+        if not self.active_profile_name:
+            QMessageBox.warning(self, "오류", "먼저 맵 프로필을 선택해주세요.")
+            return
+        dialog = ActionLearningDialog(self)
+        dialog.exec()
+
+    def prepare_for_action_collection(self, action_name, action_text):
+        """
+        [MODIFIED] v14.3.4: 데이터 수집 전, 기하학적 목표 정보를 미리 계산.
+        ActionLearningDialog로부터 호출되어 움직임 감지 대기를 시작합니다.
+        """
+        self.current_action_to_learn = action_name
+        self.collection_target_info = {} # 이전 정보 초기화
+
+        # 수집 시작 전, 현재 위치를 기반으로 목표 정보 설정
+        if not self.smoothed_player_pos:
+            self.collection_status_signal.emit("finished", "오류: 플레이어 위치를 알 수 없어 학습을 시작할 수 없습니다.", False)
+            return
+
+        current_pos = self.smoothed_player_pos
+        
+        if action_name == "climb_up_ladder":
+            ladder = self._find_closest_ladder(current_pos)
+            if not ladder:
+                self.collection_status_signal.emit("finished", "오류: 주변에 사다리가 없어 '오르기'를 학습할 수 없습니다.", False)
+                return
+            # 사다리의 위쪽 끝점(y좌표가 더 작은 점)을 목표로 설정
+            self.collection_target_info['target_y'] = min(ladder['points'][0][1], ladder['points'][1][1])
+            self.collection_target_info['type'] = 'climb_up'
+
+        elif action_name == "climb_down_ladder":
+            ladder = self._find_closest_ladder(current_pos)
+            if not ladder:
+                self.collection_status_signal.emit("finished", "오류: 주변에 사다리가 없어 '내려가기'를 학습할 수 없습니다.", False)
+                return
+            # 사다리의 아래쪽 끝점(y좌표가 더 큰 점)을 목표로 설정
+            self.collection_target_info['target_y'] = max(ladder['points'][0][1], ladder['points'][1][1])
+            self.collection_target_info['type'] = 'climb_down'
+            
+        elif action_name == "fall":
+            start_terrain = self._get_contact_terrain(current_pos)
+            if not start_terrain:
+                self.collection_status_signal.emit("finished", "오류: 땅 위에서 '낙하' 학습을 시작해야 합니다.", False)
+                return
+            self.collection_target_info['start_floor'] = start_terrain.get('floor')
+            self.collection_target_info['type'] = 'fall'
+
+        # 모든 준비가 끝나면 움직임 감지 대기 상태로 전환
+        self.is_waiting_for_movement = True
+        self.last_pos_before_collection = None
+        self.collection_status_signal.emit("waiting", f"'{action_text}' 동작을 수행하세요...", False)
+
+    # [MODIFIED] v14.0.2: 마지막 파일 경로 저장 및 시그널 방출 추가
+    def save_action_data(self):
+        """
+        [MODIFIED] v14.3.7: '핵심 구간 추출' 노이즈 제거 로직 적용.
+        """
+        self.is_collecting_action_data = False
+        self.is_waiting_for_movement = False
+        
+        if not self.current_action_to_learn or len(self.action_data_buffer) < 5:
+            self.collection_status_signal.emit("finished", "데이터 수집 실패: 움직임이 너무 짧거나 없습니다.", False)
+            self.action_data_buffer = []
+            return
+
+        # [PATCH] v14.3.7: 새로운 노이즈 제거 메서드 호출
+        trimmed_buffer = self._trim_sequence_noise(self.action_data_buffer, self.cfg_move_deadzone)
+        
+        if len(trimmed_buffer) < 5:
+            self.collection_status_signal.emit("finished", f"데이터 수집 실패: 노이즈 제거 후 데이터가 너무 짧습니다. ({len(trimmed_buffer)} frames)", False)
+            self.action_data_buffer = []
+            return
+
+        profile_path = self.get_active_profile_path()
+        if not profile_path: return
+
+        data_dir = os.path.join(profile_path, 'action_data')
+        os.makedirs(data_dir, exist_ok=True)
+
+        timestamp = int(time.time() * 1000)
+        filename = f"{self.current_action_to_learn}_{timestamp}.json"
+        filepath = os.path.join(data_dir, filename)
+
+        data_to_save = { "action": self.current_action_to_learn, "sequence": trimmed_buffer }
+        with open(filepath, 'w', encoding='utf-8') as f:
+            json.dump(data_to_save, f)
+        
+        self.last_collected_filepath = filepath
+        self.action_data_buffer = []
+        self.collection_status_signal.emit("finished", f"데이터 수집 완료! (핵심 {len(trimmed_buffer)} frames)", True)
+
+    def cancel_action_collection(self):
+        """
+        [PATCH] v14.3.6: 데이터 수집 대기 또는 진행을 취소하는 기능.
+        """
+        was_waiting = self.is_waiting_for_movement
+        was_collecting = self.is_collecting_action_data
+
+        self.is_waiting_for_movement = False
+        self.is_collecting_action_data = False
+        self.action_data_buffer = []
+        self.last_pos_before_collection = None
+        self.collection_target_info = {}
+
+        if was_waiting or was_collecting:
+            self.collection_status_signal.emit("canceled", "학습이 취소되었습니다. 다시 시작하세요.", False)
+        
+    # [신규] v14.0.2: 마지막 데이터 삭제 메서드
+    def delete_last_action_data(self):
+        """가장 최근에 수집된 데이터 파일을 삭제합니다."""
+        if self.last_collected_filepath and os.path.exists(self.last_collected_filepath):
+            try:
+                os.remove(self.last_collected_filepath)
+                print(f"삭제 완료: {self.last_collected_filepath}")
+                self.last_collected_filepath = None
+            except OSError as e:
+                print(f"파일 삭제 오류: {e}")
+                QMessageBox.warning(self, "오류", f"파일 삭제에 실패했습니다:\n{e}")
+        else:
+            print("삭제할 파일이 없습니다.")              
+   
     def _open_state_config_dialog(self):
         # 현재 설정값들을 딕셔너리로 만듦
         current_config = {
@@ -5310,19 +5905,137 @@ class MapTab(QWidget):
             self.update_general_log("상태 판정 설정이 업데이트되었습니다.", "blue")
             self.save_profile_data() # 변경사항을 즉시 파일에 저장
 
+    def start_jump_profiling(self):
+        """점프 특성 프로파일링 모드를 시작합니다."""
+        self.is_profiling_jump = True
+        self.jump_profile_data = []
+        self.jump_measure_start_time = 0.0
+        self.current_jump_max_y_offset = 0.0
+        self.jump_profile_progress_signal.emit(0)
+
+    def cancel_jump_profiling(self):
+        """점프 특성 프로파일링을 중단합니다."""
+        self.is_profiling_jump = False
+        self.jump_profile_data = []
+        print("점프 특성 측정이 취소되었습니다.")
+
+    def _analyze_jump_profile(self):
+        """수집된 점프 데이터를 분석하여 이상치를 제거하고 평균을 계산합니다."""
+        if len(self.jump_profile_data) < 5: # 최소 5개 데이터는 있어야 분석 의미가 있음
+            self.jump_profile_measured_signal.emit(0.0, 0.0)
+            return
+
+        durations = np.array([item[0] for item in self.jump_profile_data])
+        y_offsets = np.array([item[1] for item in self.jump_profile_data])
+
+        # IQR을 이용한 이상치 제거
+        def remove_outliers(data):
+            q1, q3 = np.percentile(data, [25, 75])
+            iqr = q3 - q1
+            lower_bound = q1 - (1.5 * iqr)
+            upper_bound = q3 + (1.5 * iqr)
+            return data[(data >= lower_bound) & (data <= upper_bound)]
+
+        valid_durations = remove_outliers(durations)
+        valid_y_offsets = remove_outliers(y_offsets)
+
+        if len(valid_durations) == 0 or len(valid_y_offsets) == 0:
+            self.jump_profile_measured_signal.emit(0.0, 0.0)
+            return
+
+        # 평균 계산 및 여유분 추가
+        avg_duration = np.mean(valid_durations)
+        avg_y_offset = np.mean(valid_y_offsets)
+        
+        final_duration = round(avg_duration * 1.15, 2) # 15% 여유
+        final_y_offset = round(avg_y_offset * 1.10, 2) # 10% 여유
+
+        self.jump_profile_measured_signal.emit(final_duration, final_y_offset)
+
+    def _trim_sequence_noise(self, sequence, move_deadzone):
+        """
+        [PATCH] v14.3.7: 수집된 시퀀스의 앞/뒤에 있는 정지 구간(노이즈)을 제거합니다.
+        """
+        if len(sequence) < 3:
+            return sequence
+
+        seq_np = np.array(sequence)
+        
+        # 속도 계산 (프레임 간 이동 거리)
+        velocities = np.sqrt(np.sum(np.diff(seq_np, axis=0)**2, axis=1))
+
+        # 1. 시작점 노이즈 제거
+        start_index = 0
+        for i in range(len(velocities)):
+            if velocities[i] > move_deadzone:
+                start_index = i
+                break
+        
+        # 2. 종료점 노이즈 제거
+        end_index = len(velocities) -1
+        for i in range(len(velocities) - 1, -1, -1):
+            if velocities[i] > move_deadzone:
+                end_index = i
+                break
+        
+        # end_index는 diff의 인덱스이므로, 원본 시퀀스에서는 +1을 해줘야 함
+        trimmed_sequence = sequence[start_index : end_index + 2]
+
+        # 너무 짧아지면 원본 반환 (안전장치)
+        if len(trimmed_sequence) < 5:
+            return sequence
+            
+        return trimmed_sequence
+
+    def _find_closest_ladder(self, pos):
+        """
+        [PATCH] v14.3.4: 주어진 위치에서 가장 가까운 사다리 객체를 찾습니다.
+        """
+        ladders = self.geometry_data.get("transition_objects", [])
+        if not ladders:
+            return None
+
+        closest_ladder = None
+        min_dist_sq = float('inf')
+
+        for ladder in ladders:
+            points = ladder.get("points")
+            if not points or len(points) < 2:
+                continue
+            
+            # 사다리의 x좌표와 플레이어의 x좌표 거리만 비교
+            ladder_x = points[0][0]
+            dist_sq = (pos.x() - ladder_x)**2
+            
+            if dist_sq < min_dist_sq:
+                min_dist_sq = dist_sq
+                closest_ladder = ladder
+        
+        return closest_ladder
+
+    def start_jump_time_measurement(self):
+        """
+        [PATCH] v14.2.0: '최대 점프 시간 측정' 기능을 위한 상태 플래그 설정 메서드.
+        StateConfigDialog로부터 호출되어 점프 시간 측정을 준비합니다.
+        """
+        self.is_measuring_jump_time = True
+        self.jump_measure_start_time = 0.0
+
     def on_detection_ready(self, frame_bgr, found_features, my_player_rects, other_player_rects):
         """
-        [MODIFIED] RANSAC 변환 행렬의 안정성을 종합적으로 검사하고,
-        모든 좌표 변환 단계에 안전장치를 추가하여 좌표 튐 현상을 방지합니다.
-        데이터 전달 흐름을 명확히 하여 실시간 뷰 렌더링 오류를 수정합니다.
+        [MODIFIED] v14.3.1: UnboundLocalError 수정을 위해 로직 실행 순서 정상화.
+        - 1. final_player_pos를 가장 먼저 계산.
+        - 2. player_state를 최신화.
+        - 3. 계산된 위치/상태 값을 사용하는 부가 기능(프로파일링, 데이터 수집)을 마지막에 실행.
         """
         if not my_player_rects:
             self.update_detection_log_message("플레이어 아이콘 탐지 실패", "red")
             if self.debug_dialog and self.debug_dialog.isVisible():
                 self.debug_dialog.update_debug_info(frame_bgr, {'all_features': found_features, 'inlier_ids': set(), 'player_pos_local': None})
-            # [NEW] 캐릭터가 없으면 뷰 업데이트를 하지 않고 이전 상태를 유지
             return
 
+        # --- [PATCH] 1. 위치 추정 로직을 가장 먼저 실행 ---
+        # 이 블록에서 final_player_pos가 계산되고 할당됩니다.
         reliable_features = [f for f in found_features if f['id'] in self.key_features and f['conf'] >= self.key_features[f['id']].get('threshold', 0.85)]
         
         valid_features_map = {f['id']: f for f in reliable_features if f['id'] in self.global_positions}
@@ -5349,16 +6062,13 @@ class MapTab(QWidget):
         inlier_ids = set()
         transform_matrix = None
         
-        # --- 좌표 추정 로직 시작 ---
         if len(source_points) >= 3:
             src_pts, dst_pts = np.float32(source_points), np.float32(dest_points)
             matrix, inliers_mask = cv2.estimateAffinePartial2D(src_pts, dst_pts, method=cv2.RANSAC, ransacReprojThreshold=5.0)
 
             if matrix is not None and inliers_mask is not None and np.sum(inliers_mask) >= 3:
-                # [NEW] 변환 행렬 안정성 종합 검사
                 sx = np.sqrt(matrix[0,0]**2 + matrix[1,0]**2)
                 sy = np.sqrt(matrix[0,1]**2 + matrix[1,1]**2)
-                # 스케일링, 회전, 이동값이 상식적인 범위 내에 있는지 확인
                 if (0.8 < sx < 1.2 and 0.8 < sy < 1.2 and 
                     abs(matrix[0,1]) < 0.5 and abs(matrix[1,0]) < 0.5 and
                     abs(matrix[0,2]) < 10000 and abs(matrix[1,2]) < 10000):
@@ -5368,14 +6078,13 @@ class MapTab(QWidget):
                         if inliers_mask[i]:
                             inlier_ids.add(fid)
         
-        # --- 전역 플레이어 위치 계산 (RANSAC 성공/실패 모두 처리) ---
         inlier_features = [valid_features_map[fid] for fid in inlier_ids] if inlier_ids else list(valid_features_map.values())
         
         if transform_matrix is not None:
             px, py = player_anchor_local.x(), player_anchor_local.y()
             transformed = (transform_matrix[:, :2] @ np.array([px, py])) + transform_matrix[:, 2]
             avg_player_global_pos = QPointF(float(transformed[0]), float(transformed[1]))
-        elif inlier_features: # RANSAC 실패 시 폴백
+        elif inlier_features:
             total_conf = sum(f['conf'] for f in inlier_features)
             if total_conf > 0:
                 w_sum_x, w_sum_y = 0, 0
@@ -5394,7 +6103,171 @@ class MapTab(QWidget):
                 self.update_detection_log_message("플레이어 전역 위치 추정 실패", "red")
                 return
 
-        # --- 스무딩 ---
+        alpha = 0.3
+        if self.smoothed_player_pos is None:
+            self.smoothed_player_pos = avg_player_global_pos
+        else:
+            self.smoothed_player_pos = (avg_player_global_pos * alpha) + (self.smoothed_player_pos * (1 - alpha))
+        final_player_pos = self.smoothed_player_pos # <<< 여기서 final_player_pos가 할당됨
+
+        # --- [PATCH] 2. 상태 업데이트를 두 번째로 실행 ---
+        # 이 호출을 통해 self.player_state가 최신화됩니다.
+        self._update_player_state_and_navigation(final_player_pos)
+
+        # --- [PATCH] 3. 부가 기능(프로파일링, 데이터 수집)을 마지막에 실행 ---
+        # 이제 final_player_pos와 최신 self.player_state를 안전하게 사용할 수 있습니다.
+        if self.is_profiling_jump:
+            is_in_air = self.player_state not in ['on_terrain', 'idle']
+            is_on_ground = not is_in_air
+
+            if is_in_air and self.jump_measure_start_time == 0:
+                self.jump_measure_start_time = time.time()
+                self.current_jump_max_y_offset = 0.0
+            
+            elif is_in_air and self.jump_measure_start_time > 0:
+                y_above_terrain = self.last_on_terrain_y - final_player_pos.y()
+                if y_above_terrain > self.current_jump_max_y_offset:
+                    self.current_jump_max_y_offset = y_above_terrain
+
+            elif is_on_ground and self.jump_measure_start_time > 0:
+                duration = time.time() - self.jump_measure_start_time
+                self.jump_profile_data.append((duration, self.current_jump_max_y_offset))
+                
+                self.jump_measure_start_time = 0.0
+                self.current_jump_max_y_offset = 0.0
+                progress = len(self.jump_profile_data)
+                self.jump_profile_progress_signal.emit(progress)
+
+                if progress >= 10:
+                    self.is_profiling_jump = False
+                    self._analyze_jump_profile()
+        
+        if self.is_waiting_for_movement and self.smoothed_player_pos:
+            if self.last_pos_before_collection:
+                dist_moved = math.hypot(self.smoothed_player_pos.x() - self.last_pos_before_collection.x(),
+                                        self.smoothed_player_pos.y() - self.last_pos_before_collection.y())
+                
+                if dist_moved > (self.cfg_move_deadzone * 2):
+                    self.is_waiting_for_movement = False
+                    self.is_collecting_action_data = True
+                    self.action_data_buffer.append((self.smoothed_player_pos.x(), self.smoothed_player_pos.y()))
+                    self.collection_status_signal.emit("collecting", "데이터 수집 중... (착지 시 자동 완료)", False)
+            else:
+                self.last_pos_before_collection = self.smoothed_player_pos
+
+        elif self.is_collecting_action_data and self.smoothed_player_pos:
+            # [PATCH] v14.3.5: 사다리 수집 종료 조건에 4px 여유 추가
+            self.action_data_buffer.append((self.smoothed_player_pos.x(), self.smoothed_player_pos.y()))
+            
+            should_stop = False
+            is_timeout = len(self.action_data_buffer) >= self.action_collection_max_frames
+            
+            action_type = self.collection_target_info.get('type')
+            current_pos = self.smoothed_player_pos
+
+            if action_type == 'climb_up':
+                target_y = self.collection_target_info.get('target_y')
+                # 목표 지점(위쪽 끝)을 통과하거나 4px 이내로 근접하면 종료
+                if target_y is not None and current_pos.y() <= (target_y + 4.0):
+                    should_stop = True
+            
+            elif action_type == 'climb_down':
+                target_y = self.collection_target_info.get('target_y')
+                # 목표 지점(아래쪽 끝)을 통과하거나 4px 이내로 근접하면 종료
+                if target_y is not None and current_pos.y() >= (target_y - 4.0):
+                    should_stop = True
+
+            elif action_type == 'fall':
+                start_floor = self.collection_target_info.get('start_floor')
+                landing_terrain = self._get_contact_terrain(current_pos)
+                if landing_terrain and landing_terrain.get('floor') < start_floor:
+                    landing_y = landing_terrain['points'][0][1]
+                    if abs(current_pos.y() - landing_y) < 4.0:
+                        should_stop = True
+
+            if should_stop or is_timeout:
+                if is_timeout and not should_stop:
+                    print("경고: 최대 프레임에 도달하여 데이터 수집을 강제 종료합니다.")
+                self.save_action_data()
+        
+        if self.smoothed_player_pos:
+            self.action_inference_buffer.append((self.smoothed_player_pos.x(), self.smoothed_player_pos.y()))
+
+
+        if not my_player_rects:
+            self.update_detection_log_message("플레이어 아이콘 탐지 실패", "red")
+            if self.debug_dialog and self.debug_dialog.isVisible():
+                self.debug_dialog.update_debug_info(frame_bgr, {'all_features': found_features, 'inlier_ids': set(), 'player_pos_local': None})
+            return
+
+        # --- 이하 위치 추정 로직은 변경 없음 ---
+        reliable_features = [f for f in found_features if f['id'] in self.key_features and f['conf'] >= self.key_features[f['id']].get('threshold', 0.85)]
+        
+        valid_features_map = {f['id']: f for f in reliable_features if f['id'] in self.global_positions}
+        source_points = []
+        dest_points = []
+        feature_ids = []
+
+        for fid, feature in valid_features_map.items():
+            size = feature['size']
+            local_pos = feature['local_pos']
+            global_pos = self.global_positions[fid]
+            
+            src_cx = local_pos.x() + size.width() / 2
+            src_cy = local_pos.y() + size.height() / 2
+            dst_cx = global_pos.x() + size.width() / 2
+            dst_cy = global_pos.y() + size.height() / 2
+            source_points.append([src_cx, src_cy])
+            dest_points.append([dst_cx, dst_cy])
+            feature_ids.append(fid)
+
+        player_anchor_local = QPointF(my_player_rects[0].center().x(), float(my_player_rects[0].bottom()) + PLAYER_Y_OFFSET)
+
+        avg_player_global_pos = None
+        inlier_ids = set()
+        transform_matrix = None
+        
+        if len(source_points) >= 3:
+            src_pts, dst_pts = np.float32(source_points), np.float32(dest_points)
+            matrix, inliers_mask = cv2.estimateAffinePartial2D(src_pts, dst_pts, method=cv2.RANSAC, ransacReprojThreshold=5.0)
+
+            if matrix is not None and inliers_mask is not None and np.sum(inliers_mask) >= 3:
+                sx = np.sqrt(matrix[0,0]**2 + matrix[1,0]**2)
+                sy = np.sqrt(matrix[0,1]**2 + matrix[1,1]**2)
+                if (0.8 < sx < 1.2 and 0.8 < sy < 1.2 and 
+                    abs(matrix[0,1]) < 0.5 and abs(matrix[1,0]) < 0.5 and
+                    abs(matrix[0,2]) < 10000 and abs(matrix[1,2]) < 10000):
+                    transform_matrix = matrix
+                    inliers_mask = inliers_mask.flatten()
+                    for i, fid in enumerate(feature_ids):
+                        if inliers_mask[i]:
+                            inlier_ids.add(fid)
+        
+        inlier_features = [valid_features_map[fid] for fid in inlier_ids] if inlier_ids else list(valid_features_map.values())
+        
+        if transform_matrix is not None:
+            px, py = player_anchor_local.x(), player_anchor_local.y()
+            transformed = (transform_matrix[:, :2] @ np.array([px, py])) + transform_matrix[:, 2]
+            avg_player_global_pos = QPointF(float(transformed[0]), float(transformed[1]))
+        elif inlier_features:
+            total_conf = sum(f['conf'] for f in inlier_features)
+            if total_conf > 0:
+                w_sum_x, w_sum_y = 0, 0
+                for f in inlier_features:
+                    offset = player_anchor_local - (f['local_pos'] + QPointF(f['size'].width()/2, f['size'].height()/2))
+                    global_center = self.global_positions[f['id']] + QPointF(f['size'].width()/2, f['size'].height()/2)
+                    pos = global_center + offset
+                    w_sum_x += pos.x() * f['conf']
+                    w_sum_y += pos.y() * f['conf']
+                avg_player_global_pos = QPointF(w_sum_x / total_conf, w_sum_y / total_conf)
+
+        if avg_player_global_pos is None:
+            if self.smoothed_player_pos is not None:
+                avg_player_global_pos = self.smoothed_player_pos
+            else:
+                self.update_detection_log_message("플레이어 전역 위치 추정 실패", "red")
+                return
+
         alpha = 0.3
         if self.smoothed_player_pos is None:
             self.smoothed_player_pos = avg_player_global_pos
@@ -5402,7 +6275,6 @@ class MapTab(QWidget):
             self.smoothed_player_pos = (avg_player_global_pos * alpha) + (self.smoothed_player_pos * (1 - alpha))
         final_player_pos = self.smoothed_player_pos
         
-        # --- 아이콘들의 전역 좌표 계산 ---
         my_player_global_rects = []
         other_player_global_rects = []
         
@@ -5424,7 +6296,6 @@ class MapTab(QWidget):
                 
                 if sum_conf > 0:
                     center_global = sum_pos / sum_conf
-                    # [v12.2.0 BUGFIX] QSize를 QSizeF로 명시적으로 변환하여 TypeError 방지
                     return QRectF(center_global - QPointF(rect.width()/2, rect.height()/2), QSizeF(rect.size()))
                 return QRectF()
 
@@ -5435,7 +6306,6 @@ class MapTab(QWidget):
         
         self.active_feature_info = inlier_features
 
-        # --- 상태 및 뷰 업데이트 ---
         self._update_player_state_and_navigation(final_player_pos)
 
         if self.debug_dialog and self.debug_dialog.isVisible():
@@ -5446,8 +6316,6 @@ class MapTab(QWidget):
 
         camera_pos_to_send = final_player_pos if self.center_on_player_checkbox.isChecked() else self.minimap_view_label.camera_center_global
         
-        # [MODIFIED] _update_navigator_and_view 에서 이미 node_type을 포함하여 업데이트 했으므로
-        # 여기서는 시그니처를 맞추기 위해 값을 다시 계산하여 전달
         intermediate_node_type = None
         if self.current_segment_path and self.current_segment_index < len(self.current_segment_path):
             current_node_key = self.current_segment_path[self.current_segment_index]
@@ -5465,7 +6333,7 @@ class MapTab(QWidget):
             intermediate_pos=self.intermediate_target_pos,
             intermediate_type=self.intermediate_target_type,
             nav_action=self.navigation_action,
-            intermediate_node_type=intermediate_node_type # [NEW]
+            intermediate_node_type=intermediate_node_type
         )
         self.global_pos_updated.emit(final_player_pos)
         
@@ -5725,76 +6593,85 @@ class MapTab(QWidget):
 
     def _determine_player_physical_state(self, final_player_pos, contact_terrain):
         """
-        [MODIFIED] v13.1.16: 상태판정 디버그 로그를 UI 체크박스로 제어하고, 변경 원인을 상세히 출력하도록 수정.
-        [MODIFIED] v13.1.14: 상태 변경 후 일정 시간(cooldown) 동안 상태가 다시 변경되지 않도록 수정.
-        플레이어의 물리적 상태(걷기, 점프 등)를 판정합니다.
+        [MODIFIED] v14.3.3: 폴백 로직에서 in_jump 플래그 초기화 누락 문제 수정.
         """
         previous_state = self.player_state
 
         if (time.time() - self.last_state_change_time) < self.cfg_state_change_cooldown:
-            return previous_state 
+            return previous_state
 
         x_movement = final_player_pos.x() - self.last_player_pos.x()
         y_movement = self.last_player_pos.y() - final_player_pos.y()
-        
+        self.y_velocity_history.append(y_movement)
         if abs(x_movement) > self.cfg_move_deadzone or abs(y_movement) > self.cfg_move_deadzone:
             self.last_movement_time = time.time()
 
         new_state = previous_state
-        # 상태 변경 이유를 기록할 변수
-        reason = "상태 유지 (조건 미충족)"
+        reason = "상태 유지"
 
-        time_since_move = time.time() - self.last_movement_time
-        if time_since_move >= self.cfg_idle_time_threshold:
-            new_state = 'idle'
-            reason = f"정지 시간 초과 ({time_since_move:.2f}s >= {self.cfg_idle_time_threshold}s)"
-        elif contact_terrain:
-            new_state = 'on_terrain'
-            reason = "지형에 접촉함"
+        # 1. 지상 상태 판정
+        if contact_terrain:
+            time_since_move = time.time() - self.last_movement_time
+            if time_since_move >= self.cfg_idle_time_threshold:
+                new_state = 'idle'
+                reason = "정지 시간 초과"
+            else:
+                new_state = 'on_terrain'
+                reason = "지형에 접촉함"
+            
             self.last_on_terrain_y = final_player_pos.y()
             self.in_jump = False
-        else: # 공중 상태
+        
+        # 2. 공중 상태 판정
+        else:
             y_above_terrain = self.last_on_terrain_y - final_player_pos.y()
-            is_near_ladder, _, _ = self._check_near_ladder(final_player_pos, self.geometry_data.get("transition_objects", []), self.cfg_ladder_x_grab_threshold, return_dist=True, current_floor=self.current_player_floor)
-            
-            if self.in_jump:
-                if y_above_terrain > self.cfg_jump_y_max_threshold and is_near_ladder:
-                    new_state = 'climbing'
-                    reason = f"점프 중 등반 전환: y_above({y_above_terrain:.2f}) > max_thresh({self.cfg_jump_y_max_threshold}) 이고 사다리 근처"
-                elif y_above_terrain < -self.cfg_fall_y_min_threshold:
+            is_in_jump_height_range = self.cfg_jump_y_min_threshold < y_above_terrain < self.cfg_jump_y_max_threshold
+
+            # 2a. 점프 '시작' 또는 '유지' 판정 (최우선 규칙)
+            if (not self.in_jump and is_in_jump_height_range) or self.in_jump:
+                time_in_jump = time.time() - self.jump_start_time if self.in_jump else 0
+                if self.in_jump and (time_in_jump > self.cfg_max_jump_duration or not is_in_jump_height_range):
                     new_state = 'falling'
-                    reason = f"점프 중 낙하 전환: y_above({y_above_terrain:.2f}) < -fall_thresh({-self.cfg_fall_y_min_threshold})"
+                    self.in_jump = False
+                    reason = "규칙: 점프 종료 (타임아웃/높이이탈)"
                 else:
+                    if not self.in_jump:
+                        reason = f"규칙: 점프 시작 (Y오프셋 {y_above_terrain:.2f})"
+                        self.jump_start_time = time.time()
+                    else:
+                        reason = "규칙: 점프 상태 유지"
                     new_state = 'jumping'
-                    reason = "점프 상태 유지"
-            else:
-                if y_movement > self.cfg_y_movement_deadzone and y_above_terrain > self.cfg_jump_y_min_threshold:
-                    new_state = 'jumping'
-                    reason = f"점프 시작: y_move({y_movement:.2f}) > deadzone({self.cfg_y_movement_deadzone}) 이고 y_above({y_above_terrain:.2f}) > min_thresh({self.cfg_jump_y_min_threshold})"
                     self.in_jump = True
-                    self.jump_start_time = time.time()
-                elif is_near_ladder and abs(y_movement) > self.cfg_y_movement_deadzone:
-                    new_state = 'climbing'
-                    reason = f"등반 시작: 사다리 근처이고 y_move_abs({abs(y_movement):.2f}) > deadzone({self.cfg_y_movement_deadzone})"
+
+            # 2b. 점프가 아닌 공중 동작 (모델 기반 예측)
+            else:
+                predicted_action = None
+                if self.action_model and len(self.action_inference_buffer) == self.action_collection_max_frames:
+                    try:
+                        features = self._extract_features_from_sequence(list(self.action_inference_buffer))
+                        predicted_action = self.action_model.predict(features.reshape(1, -1))[0]
+                    except Exception as e:
+                        print(f"동작 예측 오류: {e}")
+
+                if predicted_action:
+                    action_map = { "climb_up_ladder": "climbing_up", "climb_down_ladder": "climbing_down", "fall": "falling" }
+                    new_state = action_map.get(predicted_action, 'falling')
+                    reason = f"모델 예측: '{predicted_action}'"
                 else:
                     new_state = 'falling'
-                    reason = f"자유 낙하: 공중 상태이고 점프/등반 조건 미충족"
-        
-        time_in_jump = time.time() - self.jump_start_time if self.in_jump else 0
-        if self.in_jump and time_in_jump > self.cfg_max_jump_duration:
-            self.in_jump = False
-            if new_state == 'jumping':
-                new_state = 'falling'
-                reason = f"점프 강제 종료: 점프 시간 초과 ({time_in_jump:.2f}s > {self.cfg_max_jump_duration}s)"
-        
+                    reason = "폴백: 자유 낙하"
+                
+                # [PATCH] v14.3.3: 모델 기반 판정 후에는 점프 상태가 아니어야 함
+                self.in_jump = False
+
+        # 최종 상태 변경 및 로그 출력
         if new_state != previous_state:
             self.last_state_change_time = time.time()
-            # 디버그 체크박스가 활성화된 경우에만 상세 로그 출력
             if self.debug_state_machine_checkbox and self.debug_state_machine_checkbox.isChecked():
                 print(f"[STATE CHANGE] {previous_state} -> {new_state} | 이유: {reason}")
         
         return new_state
-
+    
     def _plan_next_journey(self, active_route):
         """다음 여정을 계획하고 경로 순환 로직을 처리합니다."""
         self.is_forward = not self.is_forward
@@ -6213,7 +7090,11 @@ class MapTab(QWidget):
                 next_wp_id = self.journey_plan[self.current_journey_index + 1]
                 next_name = all_waypoints_map.get(next_wp_id, {}).get('name', '')
         
-        state_text_map = {'idle': '정지', 'on_terrain': '걷기', 'climbing': '오르기', 'falling': '내려가기', 'jumping': '점프 중'}
+        state_text_map = {
+            'idle': '정지', 'on_terrain': '걷기', 
+            'climbing_up': '오르기', 'climbing_down': '내려가기', 'on_ladder_idle': '매달리기',
+            'falling': '낙하 중', 'jumping': '점프 중'
+        } # <<< 'on_ladder'를 세분화하고 'falling' 텍스트 수정
         player_state_text = state_text_map.get(self.player_state, '알 수 없음')
         
         self.intermediate_target_type = final_intermediate_type
