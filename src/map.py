@@ -7590,6 +7590,28 @@ class MapTab(QWidget):
 
     def _handle_action_in_progress(self, final_player_pos):
         """'..._in_progress' 상태일 때의 로직을 담당합니다."""
+        # <<< [수정] 아래 로직 전체 추가
+        # 1. 등반 중 이탈 감지
+        if self.navigation_action == 'climb_in_progress':
+            # 현재 액션 노드(사다리 입구) 정보를 가져옴
+            action_node_key = self.current_segment_path[self.current_segment_index]
+            action_node = self.nav_nodes.get(action_node_key, {})
+            obj_id = action_node.get('obj_id')
+
+            if obj_id:
+                # 해당 사다리 객체만 특정하여 검사
+                current_ladder = next((obj for obj in self.geometry_data.get("transition_objects", []) if obj.get('id') == obj_id), None)
+                if current_ladder:
+                    is_on_ladder = self._check_near_ladder(final_player_pos, [current_ladder], self.cfg_ladder_arrival_x_threshold)
+                    if not is_on_ladder:
+                        self.update_general_log("등반 중 사다리 범위를 벗어나 경로를 재탐색합니다.", "orange")
+                        self.navigation_action = 'move_to_target'
+                        self.navigation_state_locked = False
+                        self.current_segment_path = []
+                        self.expected_terrain_group = None
+                        return # 즉시 함수 종료
+
+        # 2. 기존 목표 안내 로직 (변경 없음)
         # 목표는 액션의 출구 또는 가상 착지 지점을 계속 유지
         if self.current_segment_index + 1 < len(self.current_segment_path):
             next_node_key = self.current_segment_path[self.current_segment_index + 1]
@@ -8025,7 +8047,7 @@ class MapTab(QWidget):
             FLOOR_CHANGE_PENALTY = 0.0
             CLIMB_UP_COST_MULTIPLIER = 1.5
             CLIMB_DOWN_COST_MULTIPLIER = 500.0
-            JUMP_COST_MULTIPLIER = 1.1
+            JUMP_COST_MULTIPLIER = 1.3
             FALL_COST_MULTIPLIER = 2.0
             DOWN_JUMP_COST_MULTIPLIER = 1.2
 
