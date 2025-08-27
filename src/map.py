@@ -8179,7 +8179,8 @@ class MapTab(QWidget):
                     for j in range(i + 1, len(walkable_nodes_in_group)):
                         key1, key2 = walkable_nodes_in_group[i], walkable_nodes_in_group[j]
                         pos1, pos2 = self.nav_nodes[key1]['pos'], self.nav_nodes[key2]['pos']
-                        cost = abs(pos1.x() - pos2.x())
+                        # <<< [수정] 아래 cost 계산식 변경
+                        cost = math.hypot(pos1.x() - pos2.x(), pos1.y() - pos2.y())
                         self.nav_graph[key1][key2] = {'cost': cost, 'action': 'walk'}
                         self.nav_graph[key2][key1] = {'cost': cost, 'action': 'walk'}
                         name1 = self.nav_nodes[key1]['name']
@@ -8192,7 +8193,8 @@ class MapTab(QWidget):
                 for w_key in walkable_nodes_in_group:
                     for a_key in action_nodes_in_group:
                         pos1, pos2 = self.nav_nodes[w_key]['pos'], self.nav_nodes[a_key]['pos']
-                        cost = abs(pos1.x() - pos2.x())
+                        # <<< [수정] 아래 cost 계산식 변경
+                        cost = math.hypot(pos1.x() - pos2.x(), pos1.y() - pos2.y())
                         self.nav_graph[w_key][a_key] = {'cost': cost, 'action': 'walk'}
                         name1 = self.nav_nodes[w_key]['name']
                         name2 = self.nav_nodes[a_key]['name']
@@ -8226,14 +8228,14 @@ class MapTab(QWidget):
         g_score = {key: float('inf') for key in self.nav_nodes}
         f_score = {key: float('inf') for key in self.nav_nodes}
 
-        nodes_in_start_group = [
+        # <<< [수정] 아래 로직 전체 변경: walkable: False 노드도 초기 후보로 포함
+        candidate_keys = [
             key for key, data in self.nav_nodes.items()
-            if (data.get('walkable', False) and
-                data.get('group') == start_group and
-                data.get('type') not in ['fall_landing', 'djump_landing'])
+            if data.get('group') == start_group and
+               data.get('type') not in ['fall_landing', 'djump_landing']
         ]
 
-        if not nodes_in_start_group:
+        if not candidate_keys:
             print(f"[A* CRITICAL] 시작 그룹 '{start_group}' 내에 유효한 출발 노드가 없습니다.")
             return None, float('inf')
         
@@ -8244,9 +8246,21 @@ class MapTab(QWidget):
             print("-" * 70)
             print("[A* INIT] 초기 Open Set 구성:")
         
-        for node_key in nodes_in_start_group:
-            node_pos = self.nav_nodes[node_key]['pos']
-            cost_to_node = abs(start_pos.x() - node_pos.x())
+        for node_key in candidate_keys:
+            node_data = self.nav_nodes[node_key]
+            node_pos = node_data['pos']
+            cost_to_node = 0.0
+
+            # <<< [수정] 아래 if-else 블록 추가
+            if node_data.get('type') == 'djump_area':
+                x_range = node_data.get('x_range')
+                if x_range and x_range[0] <= start_pos.x() <= x_range[1]:
+                    cost_to_node = 0.0 # 범위 안에 있으면 비용 0
+                else:
+                    # 범위 밖이면 가장 가까운 경계까지의 거리
+                    cost_to_node = min(abs(start_pos.x() - x_range[0]), abs(start_pos.x() - x_range[1]))
+            else:
+                cost_to_node = math.hypot(start_pos.x() - node_pos.x(), start_pos.y() - node_pos.y())
             
             g_score[node_key] = cost_to_node
             h_score = math.hypot(node_pos.x() - goal_pos.x(), node_pos.y() - goal_pos.y())
@@ -8255,7 +8269,7 @@ class MapTab(QWidget):
             came_from[node_key] = ("__START__", None)
             
             if is_debug_enabled:
-                print(f"  - 추가: '{self.nav_nodes[node_key]['name']}' ({node_key})")
+                print(f"  - 추가: '{node_data['name']}' ({node_key})")
                 print(f"    - G(시작->노드): {cost_to_node:.1f}, H(노드->목표): {h_score:.1f}, F: {f_score[node_key]:.1f}")
         
         iter_count = 0
