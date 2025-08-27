@@ -6962,8 +6962,12 @@ class MapTab(QWidget):
             self.navigation_action = 'move_to_target'
             return
         
+        # climbing 상태가 세분화됨에 따라, 모든 등반 관련 상태를 '액션 시작'으로 간주하도록 수정
         action_started = False
-        if self.navigation_action == 'prepare_to_climb' and self.player_state == 'climbing': action_started = True
+        climbing_states = ['climbing_up', 'climbing_down', 'on_ladder_idle']
+
+        if self.navigation_action == 'prepare_to_climb' and self.player_state in climbing_states:
+            action_started = True
         elif self.navigation_action == 'prepare_to_jump' and self.player_state == 'jumping': action_started = True
         elif self.navigation_action == 'prepare_to_fall' and self.player_state == 'falling': action_started = True
         elif self.navigation_action == 'prepare_to_down_jump' and self.player_state in ['jumping', 'falling']:
@@ -6975,7 +6979,6 @@ class MapTab(QWidget):
             self.navigation_state_locked = True
             self.lock_timeout_start = time.time()
             
-            # [PATCH] v14.3.9: print문을 조건문으로 감쌈
             if self.debug_basic_pathfinding_checkbox and self.debug_basic_pathfinding_checkbox.isChecked():
                 print(f"[INFO] 행동 시작 감지. 상태 잠금 -> {self.navigation_action}")
             return
@@ -6989,38 +6992,27 @@ class MapTab(QWidget):
             if self.navigation_action == 'prepare_to_down_jump':
                 x_range = action_node.get('x_range')
                 if x_range and not (x_range[0] - exit_threshold <= final_player_pos.x() <= x_range[1] + exit_threshold):
-                    off_course_reason = (
-                        f"djump_area_exit: player_x({final_player_pos.x():.1f})가 "
-                        f"허용 범위({x_range[0] - exit_threshold:.1f} ~ {x_range[1] + exit_threshold:.1f})를 벗어남"
-                    )
+                    off_course_reason = (f"djump_area_exit: player_x({final_player_pos.x():.1f})가 허용 범위({x_range[0] - exit_threshold:.1f} ~ {x_range[1] + exit_threshold:.1f})를 벗어남")
             elif self.navigation_action == 'prepare_to_jump':
                 dist_x = abs(final_player_pos.x() - action_node_pos.x())
                 dist_y = abs(final_player_pos.y() - action_node_pos.y())
                 if dist_x > exit_threshold or dist_y > 20.0:
-                    off_course_reason = (
-                        f"jump_target_exit: player({final_player_pos.x():.1f}, {final_player_pos.y():.1f})와 "
-                        f"target({action_node_pos.x():.1f}, {action_node_pos.y():.1f})의 거리 초과. "
-                        f"dist_x({dist_x:.1f} > {exit_threshold:.1f}) 또는 dist_y({dist_y:.1f} > 20.0)"
-                    )
+                    off_course_reason = (f"jump_target_exit: player({final_player_pos.x():.1f}, {final_player_pos.y():.1f})와 target({action_node_pos.x():.1f}, {action_node_pos.y():.1f})의 거리 초과.")
             else:
                 dist_x = abs(final_player_pos.x() - action_node_pos.x())
                 if dist_x > exit_threshold:
-                    off_course_reason = (
-                        f"generic_exit: player_x({final_player_pos.x():.1f})와 target_x({action_node_pos.x():.1f})의 "
-                        f"거리({dist_x:.1f})가 허용 오차({exit_threshold:.1f})를 초과함"
-                    )
+                    off_course_reason = (f"generic_exit: player_x({final_player_pos.x():.1f})와 target_x({action_node_pos.x():.1f})의 거리({dist_x:.1f})가 허용 오차({exit_threshold:.1f})를 초과함")
             
             if off_course_reason:
                 log_message = f"[경로 이탈] 사유: {off_course_reason}"
                 self.update_general_log(log_message, "orange")
                 
-                # [PATCH] v14.3.9: print문을 조건문으로 감쌈
                 if self.debug_basic_pathfinding_checkbox and self.debug_basic_pathfinding_checkbox.isChecked():
                     print(f"[INFO] 경로 이탈 감지. 목표: {self.guidance_text}")
 
                 self.current_segment_path = []
                 self.navigation_action = 'move_to_target'
-    
+
     def _process_action_completion(self, final_player_pos, contact_terrain):
         """
         [MODIFIED] v13.1.5: 액션 완료 시, 불필요한 경유 노드(착지 지점 등)를
@@ -7114,28 +7106,39 @@ class MapTab(QWidget):
 
                 self.expected_terrain_group = None
                 self.update_general_log(log_message, "green")
-    
+
     def _update_player_state_and_navigation(self, final_player_pos):
         """
-        v12.7.0: [수정] 경로 이탈 판정 로직을 폐기하고,
-        목표에서 일정 거리 이상 멀어졌을 때만 경로를 재탐색하는 방식으로 변경.
+        v12.7.0: [수정] 경로 이탈 판정 로직을 폐기하고, 목표에서 일정 거리 이상 멀어졌을 때만 경로를 재탐색하는 방식으로 변경.
+        [MODIFIED] 2025-08-27 18:25 (KST): 등반 중 사다리 이탈 시 상태를 초기화하는 안전 로직 추가
         """
-        # [수정 시작] current_terrain_name 변수 초기화 위치 변경 및 로직 수정
         contact_terrain = self._get_contact_terrain(final_player_pos)
         
         if contact_terrain:
             self.current_player_floor = contact_terrain.get('floor')
-            # 땅에 있을 때만 마지막 지형 그룹 이름 갱신
             self.last_known_terrain_group_name = contact_terrain.get('dynamic_name', '')
         
-        # UI에 표시될 이름은 last_known_terrain_group_name을 사용
         current_terrain_name = self.last_known_terrain_group_name
-        # [수정 끝]
         
         if final_player_pos is None or self.current_player_floor is None:
             self.navigator_display.update_data("N/A", "", "없음", "", "", "-", 0, [], None, None, self.is_forward, 'walk', "대기 중", "오류: 위치/층 정보 없음")
             return
         
+        # ==================== 수정 시작: 안전 탈출 로직 ====================
+        # Phase -1: 액션 진행 중 안전 탈출 조건 확인
+        if self.navigation_state_locked and self.navigation_action == 'climb_in_progress':
+            is_still_near_ladder, _, _ = self._check_near_ladder(final_player_pos, self.geometry_data.get("transition_objects", []), self.cfg_ladder_x_grab_threshold, return_dist=True, current_floor=self.current_player_floor)
+            if not is_still_near_ladder:
+                self.update_general_log("등반 중 사다리 범위를 벗어나 경로를 재탐색합니다.", "orange")
+                self.navigation_action = 'move_to_target'
+                self.navigation_state_locked = False
+                self.current_segment_path = [] # 경로 초기화하여 재탐색 유도
+                # 안전 탈출 후에는 즉시 나머지 로직을 건너뛰고 다음 프레임에서 새로 시작
+                self._update_navigator_and_view(final_player_pos, current_terrain_name)
+                self.last_player_pos = final_player_pos
+                return
+        # ==================== 수정 끝 ======================
+
         # Phase 0: 타임아웃 (유지)
         if (self.navigation_state_locked and (time.time() - self.lock_timeout_start > MAX_LOCK_DURATION)) or \
            (self.navigation_action.startswith('prepare_to_') and (time.time() - self.prepare_timeout_start > PREPARE_TIMEOUT)):
@@ -7151,18 +7154,14 @@ class MapTab(QWidget):
         if self.navigation_state_locked and self.player_state == 'on_terrain':
             self._process_action_completion(final_player_pos, contact_terrain)
 
-        # --- [새로운 경로 관리 로직] ---
         # Phase 3: 경로 계획 및 재탐색 트리거
         active_route = self.route_profiles.get(self.active_route_profile_name)
         if not active_route: self.last_player_pos = final_player_pos; return
 
-        # 3a. 전체 여정이 없거나 끝났으면 새로 계획
         if not self.journey_plan or self.current_journey_index >= len(self.journey_plan):
             self._plan_next_journey(active_route)
         
-        # 3b. (핵심 수정) 맥락(Context) 기반 재탐색 트리거
-        #    'move_to_target' 상태에서, 예상된 지형 그룹을 벗어났을 때만 재탐색
-        RECALCULATION_COOLDOWN = 1.0 # 최소 1초의 재탐색 대기시간
+        RECALCULATION_COOLDOWN = 1.0
         
         if (self.navigation_action == 'move_to_target' and 
             self.expected_terrain_group is not None and
@@ -7172,10 +7171,9 @@ class MapTab(QWidget):
             
             print(f"[INFO] 경로 재탐색: 예상 지형 그룹('{self.expected_terrain_group}')을 벗어났습니다. (현재: '{contact_terrain.get('dynamic_name')}')")
             self.update_general_log("예상 경로를 벗어나 재탐색합니다.", "orange")
-            self.current_segment_path = []      # 재탐색 유도
-            self.expected_terrain_group = None  # 예상 그룹 초기화
+            self.current_segment_path = []
+            self.expected_terrain_group = None
 
-        # 3c. 상세 구간 경로가 없으면 새로 계산
         if self.journey_plan and self.start_waypoint_found and not self.current_segment_path:
             self._calculate_segment_path(final_player_pos)
 
@@ -7194,10 +7192,7 @@ class MapTab(QWidget):
 
     def _update_navigator_and_view(self, final_player_pos, current_terrain_name):
         """
-        [MODIFIED] v13.1.14: 내비게이션 상태(낙하/등반/이동)에 따라 거리/방향 안내를 다르게 표시하도록 수정.
-        [MODIFIED] v13.1.1: "안전 지대로 이동" 상태 처리 로직을 강화하여,
-                 intermediate_target_pos가 유효할 때만 거리/방향을 계산하도록 수정.
-        v13.0.8: [REFACTOR] UI 피드백 일관성 확보.
+        [MODIFIED] 2025-08-27 18:02 (KST): climbing 상태 세분화에 따른 UI 표시 로직 명확화
         계산된 모든 상태를 기반으로 UI 위젯들을 업데이트합니다.
         """
         all_waypoints_map = {wp['id']: wp for wp in self.geometry_data.get("waypoints", [])}
@@ -7206,63 +7201,50 @@ class MapTab(QWidget):
         nav_action_text = '대기 중'
         final_intermediate_type = 'walk'
         
-        # [수정 시작] 내비게이션 상태에 따른 UI 표시 분기
-        # Case 1: 완전 통제 불능 상태 (낙하, 아래 점프)
-        if self.navigation_action in ['fall_in_progress', 'down_jump_in_progress']:
-            direction = "-"
+        # 내비게이션 상태에 따라 UI 표시를 명확하게 분기
+        
+        # Case 1: 등반 준비 상태
+        if self.navigation_action == 'prepare_to_climb':
+            nav_action_text = "점프+↑+방향키를 눌러 오르세요"
+            final_intermediate_type = 'climb'
             if self.intermediate_target_pos:
-                # 수직(Y) 거리 계산
-                distance = abs(final_player_pos.y() - self.intermediate_target_pos.y())
-            else:
-                distance = 0
-            nav_action_text = "낙하 중..."
-            final_intermediate_type = 'fall'
+                distance = abs(final_player_pos.x() - self.intermediate_target_pos.x())
+                direction = "→" if final_player_pos.x() < self.intermediate_target_pos.x() else "←"
 
-        # Case 2: 부분 통제 가능 상태 (등반)
+        # Case 2: 실제 등반 진행 중
         elif self.navigation_action == 'climb_in_progress':
             direction = "↑"
-            if self.intermediate_target_pos:
-                # 수직(Y) 거리 계산
-                distance = abs(final_player_pos.y() - self.intermediate_target_pos.y())
-            else:
-                distance = 0
             nav_action_text = "오르는 중..."
             final_intermediate_type = 'climb'
+            if self.intermediate_target_pos:
+                distance = abs(final_player_pos.y() - self.intermediate_target_pos.y())
+        
+        # Case 3: 낙하/아래점프 진행 중
+        elif self.navigation_action in ['fall_in_progress', 'down_jump_in_progress']:
+            direction = "-"
+            nav_action_text = "낙하 중..."
+            final_intermediate_type = 'fall'
+            if self.intermediate_target_pos:
+                distance = abs(final_player_pos.y() - self.intermediate_target_pos.y())
 
-        # Case 3: 그 외 모든 일반 상태 (지상 이동, 행동 준비 등)
+        # Case 4: 그 외 모든 일반 상태 (지상 이동, 점프 준비 등)
         else:
-            if self.guidance_text in ["안전 지점으로 이동", "점프 불가: 안전 지대 없음", "이동할 안전 지대 없음"]:
-                nav_action_text = self.guidance_text
-                final_intermediate_type = 'walk'
-                if self.intermediate_target_pos:
-                    distance = abs(final_player_pos.x() - self.intermediate_target_pos.x())
-                    direction = "→" if final_player_pos.x() < self.intermediate_target_pos.x() else "←"
-                else:
-                    distance = 0
-                    direction = "-"
-            else:
-                if self.intermediate_target_pos:
-                    distance = abs(final_player_pos.x() - self.intermediate_target_pos.x())
-                    direction = "→" if final_player_pos.x() < self.intermediate_target_pos.x() else "←"
+            if self.intermediate_target_pos:
+                distance = abs(final_player_pos.x() - self.intermediate_target_pos.x())
+                direction = "→" if final_player_pos.x() < self.intermediate_target_pos.x() else "←"
 
-                action_text_map = {
-                    'move_to_target': "다음 목표로 이동",
-                    'prepare_to_climb': "점프+↑+방향키를 눌러 오르세요",
-                    'prepare_to_fall': "낭떠러지로 떨어지세요",
-                    'prepare_to_down_jump': "아래로 점프하세요",
-                    'prepare_to_jump': "점프하세요",
-                    'climb_in_progress': "오르는 중...", # 이 부분은 위에서 처리되지만 안전장치로 둠
-                    'fall_in_progress': "낙하 중...",   # 이 부분은 위에서 처리되지만 안전장치로 둠
-                    'jump_in_progress': "점프 중...",
-                }
-                nav_action_text = action_text_map.get(self.navigation_action, '대기 중')
+            action_text_map = {
+                'move_to_target': "다음 목표로 이동",
+                'prepare_to_fall': "낭떠러지로 떨어지세요",
+                'prepare_to_down_jump': "아래로 점프하세요",
+                'prepare_to_jump': "점프하세요",
+                'jump_in_progress': "점프 중...",
+            }
+            nav_action_text = action_text_map.get(self.navigation_action, self.guidance_text)
 
-                if self.current_segment_path and self.current_segment_index < len(self.current_segment_path):
-                    if self.navigation_action.startswith('prepare_to_') or self.navigation_action.endswith('_in_progress'):
-                        if 'climb' in self.navigation_action: final_intermediate_type = 'climb'
-                        elif 'jump' in self.navigation_action: final_intermediate_type = 'jump'
-                        elif 'fall' in self.navigation_action or 'down_jump' in self.navigation_action: final_intermediate_type = 'fall'
-        # [수정 끝]
+            if self.navigation_action.startswith('prepare_to_') or self.navigation_action.endswith('_in_progress'):
+                if 'jump' in self.navigation_action: final_intermediate_type = 'jump'
+                elif 'fall' in self.navigation_action or 'down_jump' in self.navigation_action: final_intermediate_type = 'fall'
 
         # --- 공통 UI 업데이트 로직 (경로 이름 등) ---
         if self.start_waypoint_found and self.journey_plan:
@@ -7309,7 +7291,7 @@ class MapTab(QWidget):
             nav_action=self.navigation_action,
             intermediate_node_type=intermediate_node_type
         )
-        
+
     def _handle_move_to_target(self, final_player_pos):
             """
             v12.9.6: [수정] '아래 점프' 또는 '낭떠러지' 도착 시, 안내선을 즉시 고정하지 않고 상태만 전환하여 다음 프레임에서 동적 안내선이 생성되도록 수정.
