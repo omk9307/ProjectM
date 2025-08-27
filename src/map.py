@@ -7472,6 +7472,8 @@ class MapTab(QWidget):
         - '사다리' 상태에서는 안전성 검사를 건너뛰고 기존 목표를 유지.
         - '점프/낙하' 상태에서는 액션 시작 여부만 감지.
         - '지상' 상태에서만 모든 안전성 검사를 수행.
+        [MODIFIED] 2025-08-27 17:42 (KST): 'prepare_to_climb' 상태에서 점프 시 안내가 시작점으로 돌아가는 문제 수정
+        [MODIFIED] 2025-08-27 17:47 (KST): 'climbing_up' 상태가 되었을 때 안내가 초기화되는 문제 수정
         """
         # [PATCH] v14.3.15: 플레이어 상태에 따른 로직 분기 시작
         
@@ -7560,17 +7562,31 @@ class MapTab(QWidget):
 
         # Case 2 & 3: 플레이어가 공중(점프/낙하) 또는 사다리에 있을 때
         else:
-            # [수정] 안전지대 안내를 원래의 목표로 되돌립니다.
-            action_node_key = self.current_segment_path[self.current_segment_index]
-            action_node = self.nav_nodes.get(action_node_key, {})
-            self.guidance_text = action_node.get('name', '')
-            self.intermediate_target_pos = action_node.get('pos')
-            # 액션 시작 여부는 계속 확인해야 함 (예: 사다리에서 바로 점프/낙하)
+            # ==================== 수정 시작 ====================
+            # 'prepare_to_climb' 상태에서 점프 및 등반 관련 상태는 정상 과정으로 간주하여 안내 목표를 유지합니다.
+            climbing_related_states = ['jumping', 'climbing_up', 'climbing_down', 'on_ladder_idle']
+            if self.navigation_action == 'prepare_to_climb' and self.player_state in climbing_related_states:
+                # 등반을 위한 점프 및 등반 중에는 안내 목표를 '출구'(다음 노드)로 유지합니다.
+                next_node_key = self.current_segment_path[self.current_segment_index + 1] if self.current_segment_index + 1 < len(self.current_segment_path) else None
+                next_node = self.nav_nodes.get(next_node_key) if next_node_key else None
+                if next_node:
+                    self.guidance_text = next_node.get('name', '알 수 없는 목적지')
+                    self.intermediate_target_pos = next_node.get('pos')
+            else:
+                # 그 외의 모든 공중 상태에서는 안전을 위해 시작점('입구')으로 안내를 되돌립니다. (기존 로직)
+                action_node_key = self.current_segment_path[self.current_segment_index]
+                action_node = self.nav_nodes.get(action_node_key, {})
+                self.guidance_text = action_node.get('name', '')
+                self.intermediate_target_pos = action_node.get('pos')
+            
+            # 액션 시작 여부는 모든 공중 상태에서 계속 확인해야 합니다.
             self._process_action_preparation(final_player_pos)
             return
+            # ==================== 수정 끝 ======================
 
         # 모든 prepare 상태는 최종적으로 액션 시작 여부를 확인해야 함
         self._process_action_preparation(final_player_pos)
+
 
     def _handle_action_in_progress(self, final_player_pos):
         """'..._in_progress' 상태일 때의 로직을 담당합니다."""
