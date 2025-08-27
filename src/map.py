@@ -6706,114 +6706,125 @@ class MapTab(QWidget):
         
         # 공중에 있을 때
         else:
-            y_above_terrain = self.last_on_terrain_y - final_player_pos.y()
-            is_near_ladder, _, _ = self._check_near_ladder(final_player_pos, self.geometry_data.get("transition_objects", []), self.cfg_ladder_x_grab_threshold, return_dist=True, current_floor=self.current_player_floor)
-
-            # 0순위: 사다리 위에서의 상태 전이 (히스테리시스 적용)
-            if previous_state in ['climbing_up', 'climbing_down', 'on_ladder_idle']:
-                
-                # Case 1: 이전 상태가 '매달리기' 였을 때 (민감한 탈출 조건)
-                if previous_state == 'on_ladder_idle':
-                    # 미세한 움직임이라도 감지되면 즉시 climbing 상태로 전환 시도
-                    if abs(y_movement) > self.cfg_move_deadzone:
-                        predicted_action = None
-                        if self.action_model and len(self.action_inference_buffer) > 5:
-                            try:
-                                recent_sequence = list(self.action_inference_buffer)[-30:]
-                                features = self._extract_features_from_sequence(recent_sequence)
-                                predicted_action = self.action_model.predict(features.reshape(1, -1))[0]
-                            except Exception as e:
-                                print(f"동작 예측 오류: {e}")
-                        
-                        if predicted_action == "climb_up_ladder":
-                            new_state = 'climbing_up'
-                            reason = "모델: idle -> 오르기"
-                        elif predicted_action == "climb_down_ladder":
-                            new_state = 'climbing_down'
-                            reason = "모델: idle -> 내려가기"
-                        # 모델이 없거나 다른 것을 예측하면, 물리 규칙으로 판정 (폴백)
-                        else:
-                            if y_movement > 0:
-                                new_state = 'climbing_up'
-                                reason = '규칙: idle -> 오르기'
-                            else:
-                                new_state = 'climbing_down'
-                                reason = '규칙: idle -> 내려가기'
-                    # 움직임이 없으면 idle 상태 유지
-                    else:
-                        new_state = 'on_ladder_idle'
-                        reason = '상태 유지: on_ladder_idle'
-
-                # Case 2: 이전 상태가 '움직이는 중' 이었을 때 (둔감한 진입 조건)
-                else: # climbing_up or climbing_down
-                    time_since_move = time.time() - self.last_movement_time
-                    if time_since_move >= self.cfg_idle_time_threshold:
-                        new_state = 'on_ladder_idle'
-                        reason = '규칙: 사다리 위 정지 (시간)'
-                    else:
-                        # 움직이고 있을 때는 모델과 물리 규칙으로 현재 상태를 계속 업데이트
-                        predicted_action = None
-                        if self.action_model and len(self.action_inference_buffer) > 5: # 최소 프레임 조건 완화
-                            try:
-                                # 최근 30프레임 데이터만으로 예측하여 반응성 향상
-                                recent_sequence = list(self.action_inference_buffer)[-30:]
-                                features = self._extract_features_from_sequence(recent_sequence)
-                                predicted_action = self.action_model.predict(features.reshape(1, -1))[0]
-                            except Exception as e:
-                                print(f"동작 예측 오류: {e}")
-                        
-                        movement_trend = sum(list(self.y_velocity_history)[-3:]) # 최근 3프레임 추세
-
-                        # 방향 전환을 위한 물리 규칙 우선 적용
-                        if previous_state == 'climbing_up' and movement_trend < -self.cfg_y_movement_deadzone:
-                            new_state = 'climbing_down'
-                            reason = '규칙: 오르다 방향 전환'
-                        elif previous_state == 'climbing_down' and movement_trend > self.cfg_y_movement_deadzone:
-                            new_state = 'climbing_up'
-                            reason = '규칙: 내리다 방향 전환'
-                        # 모델 예측이 유효하고 물리 법칙과 일치할 때
-                        elif predicted_action == "climb_up_ladder" and movement_trend > 0:
-                            new_state = 'climbing_up'
-                            reason = f"모델 예측 (검증됨): '{predicted_action}'"
-                        elif predicted_action == "climb_down_ladder" and movement_trend < 0:
-                            new_state = 'climbing_down'
-                            reason = f"모델 예측 (검증됨): '{predicted_action}'"
-                        elif predicted_action == "fall":
-                            new_state = 'falling'
-                            reason = f"모델 예측: '{predicted_action}'"
-                        else:
-                            # 애매한 경우 이전 상태 유지
-                            new_state = previous_state
-                            reason = f"상태 유지 (추세: {movement_trend:.2f})"
-
-            # 1-3순위: 그 외 공중 상태에 대한 강력한 규칙
+            # [수정] 점프 타임아웃을 모든 공중 상태 판정보다 최우선으로 검사
+            if self.in_jump and (time.time() - self.jump_start_time > self.cfg_max_jump_duration):
+                new_state = 'falling'
+                reason = "규칙: 점프 타임아웃 (최우선)"
+            
             else:
-                was_on_terrain = previous_state in ['on_terrain', 'idle']
-                
-                if was_on_terrain and is_near_ladder and final_player_pos.y() > (self.last_on_terrain_y + 4.0):
-                    new_state = 'climbing_down'; reason = "규칙: 지상->내려가기"
-                
-                elif is_near_ladder and y_above_terrain > self.cfg_jump_y_max_threshold:
-                    new_state = 'climbing_up'; reason = f"규칙: 오르기 (Y오프셋 {y_above_terrain:.2f} > 최대 점프 {self.cfg_jump_y_max_threshold:.2f})"
-                
-                elif y_above_terrain < -self.cfg_fall_y_min_threshold:
-                    new_state = 'falling'; reason = f"규칙: 낙하 (Y오프셋 {y_above_terrain:.2f} < 낙하 임계값)"
+                y_above_terrain = self.last_on_terrain_y - final_player_pos.y()
+                is_near_ladder, _, _ = self._check_near_ladder(final_player_pos, self.geometry_data.get("transition_objects", []), self.cfg_ladder_x_grab_threshold, return_dist=True, current_floor=self.current_player_floor)
 
-                # 4순위: 나머지 기본 판정 (점프 등)
-                else:
-                    is_in_jump_height_range = self.cfg_jump_y_min_threshold < y_above_terrain < self.cfg_jump_y_max_threshold
-                    if not self.in_jump and is_in_jump_height_range:
-                        new_state = 'jumping'; reason = f"규칙: 점프 시작 (Y오프셋 {y_above_terrain:.2f})"
-                        self.in_jump = True
-                        self.jump_start_time = time.time()
-                    elif self.in_jump:
-                        time_in_jump = time.time() - self.jump_start_time
-                        if time_in_jump > self.cfg_max_jump_duration:
-                            new_state = 'falling'; reason = "규칙: 점프 타임아웃"
+                # 0순위: 사다리 위에서의 상태 전이 (히스테리시스 적용)
+                if previous_state in ['climbing_up', 'climbing_down', 'on_ladder_idle']:
+                    
+                    # Case 1: 이전 상태가 '매달리기' 였을 때 (민감한 탈출 조건)
+                    if previous_state == 'on_ladder_idle':
+                        # 미세한 움직임이라도 감지되면 즉시 climbing 상태로 전환 시도
+                        if abs(y_movement) > self.cfg_move_deadzone:
+                            predicted_action = None
+                            if self.action_model and len(self.action_inference_buffer) > 5:
+                                try:
+                                    recent_sequence = list(self.action_inference_buffer)[-30:]
+                                    features = self._extract_features_from_sequence(recent_sequence)
+                                    predicted_action = self.action_model.predict(features.reshape(1, -1))[0]
+                                except Exception as e:
+                                    print(f"동작 예측 오류: {e}")
+                            
+                            if predicted_action == "climb_up_ladder":
+                                new_state = 'climbing_up'
+                                reason = "모델: idle -> 오르기"
+                            elif predicted_action == "climb_down_ladder":
+                                new_state = 'climbing_down'
+                                reason = "모델: idle -> 내려가기"
+                            # 모델이 없거나 다른 것을 예측하면, 물리 규칙으로 판정 (폴백)
+                            else:
+                                if y_movement > 0:
+                                    new_state = 'climbing_up'
+                                    reason = '규칙: idle -> 오르기'
+                                else:
+                                    new_state = 'climbing_down'
+                                    reason = '규칙: idle -> 내려가기'
+                        # 움직임이 없으면 idle 상태 유지
                         else:
-                            new_state = 'jumping'; reason = "규칙: 점프 유지"
+                            new_state = 'on_ladder_idle'
+                            reason = '상태 유지: on_ladder_idle'
+
+                    # Case 2: 이전 상태가 '움직이는 중' 이었을 때 (둔감한 진입 조건)
+                    else: # climbing_up or climbing_down
+                        time_since_move = time.time() - self.last_movement_time
+                        if time_since_move >= self.cfg_idle_time_threshold:
+                            new_state = 'on_ladder_idle'
+                            reason = '규칙: 사다리 위 정지 (시간)'
+                        else:
+                            # 움직이고 있을 때는 모델과 물리 규칙으로 현재 상태를 계속 업데이트
+                            predicted_action = None
+                            if self.action_model and len(self.action_inference_buffer) > 5: # 최소 프레임 조건 완화
+                                try:
+                                    # 최근 30프레임 데이터만으로 예측하여 반응성 향상
+                                    recent_sequence = list(self.action_inference_buffer)[-30:]
+                                    features = self._extract_features_from_sequence(recent_sequence)
+                                    predicted_action = self.action_model.predict(features.reshape(1, -1))[0]
+                                except Exception as e:
+                                    print(f"동작 예측 오류: {e}")
+                            
+                            movement_trend = sum(list(self.y_velocity_history)[-3:]) # 최근 3프레임 추세
+
+                            # 방향 전환을 위한 물리 규칙 우선 적용
+                            if previous_state == 'climbing_up' and movement_trend < -self.cfg_y_movement_deadzone:
+                                new_state = 'climbing_down'
+                                reason = '규칙: 오르다 방향 전환'
+                            elif previous_state == 'climbing_down' and movement_trend > self.cfg_y_movement_deadzone:
+                                new_state = 'climbing_up'
+                                reason = '규칙: 내리다 방향 전환'
+                            # 모델 예측이 유효하고 물리 법칙과 일치할 때
+                            elif predicted_action == "climb_up_ladder" and movement_trend > 0:
+                                new_state = 'climbing_up'
+                                reason = f"모델 예측 (검증됨): '{predicted_action}'"
+                            elif predicted_action == "climb_down_ladder" and movement_trend < 0:
+                                new_state = 'climbing_down'
+                                reason = f"모델 예측 (검증됨): '{predicted_action}'"
+                            elif predicted_action == "fall":
+                                new_state = 'falling'
+                                reason = f"모델 예측: '{predicted_action}'"
+                            else:
+                                # 애매한 경우 이전 상태 유지
+                                new_state = previous_state
+                                reason = f"상태 유지 (추세: {movement_trend:.2f})"
+
+                # 1-3순위: 그 외 공중 상태에 대한 강력한 규칙
+                else:
+                    was_on_terrain = previous_state in ['on_terrain', 'idle']
+                    
+                    if was_on_terrain and is_near_ladder and final_player_pos.y() > (self.last_on_terrain_y + 4.0):
+                        new_state = 'climbing_down'; reason = "규칙: 지상->내려가기"
+                    
+                    elif is_near_ladder and y_above_terrain > self.cfg_jump_y_max_threshold:
+                        new_state = 'climbing_up'; reason = f"규칙: 오르기 (Y오프셋 {y_above_terrain:.2f} > 최대 점프 {self.cfg_jump_y_max_threshold:.2f})"
+                    
+                    elif y_above_terrain < -self.cfg_fall_y_min_threshold:
+                        new_state = 'falling'; reason = f"규칙: 낙하 (Y오프셋 {y_above_terrain:.2f} < 낙하 임계값)"
+
+                    # 4순위: 나머지 기본 판정 (점프 등)
                     else:
-                        new_state = 'falling'; reason = "폴백: 자유 낙하"
+                        is_in_jump_height_range = self.cfg_jump_y_min_threshold < y_above_terrain < self.cfg_jump_y_max_threshold
+                        
+                        # Case 4a: 현재 점프 중일 때 (타임아웃은 이미 위에서 처리됨)
+                        if self.in_jump:
+                            new_state = 'jumping'
+                            reason = "규칙: 점프 유지"
+                        
+                        # Case 4b: 점프 중이 아닐 때 (점프 시작 검사)
+                        elif is_in_jump_height_range:
+                            new_state = 'jumping'
+                            reason = f"규칙: 점프 시작 (Y오프셋 {y_above_terrain:.2f})"
+                            self.in_jump = True
+                            self.jump_start_time = time.time()
+                        
+                        # Case 4c: 위 모든 경우에 해당하지 않는 공중 상태 (폴백)
+                        else:
+                            new_state = 'falling'
+                            reason = "폴백: 자유 낙하"
 
         # 최종 'falling' 상태 검증
         if new_state == 'falling':
