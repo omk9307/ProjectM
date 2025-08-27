@@ -76,6 +76,7 @@ WORKSPACE_ROOT = os.path.abspath(os.path.join(SRC_ROOT, '..', 'workspace'))
 CONFIG_PATH = os.path.join(WORKSPACE_ROOT, 'config')
 MAPS_DIR = os.path.join(CONFIG_PATH, 'maps') # 모든 맵 프로필을 저장할 최상위 폴더
 GLOBAL_MAP_SETTINGS_FILE = os.path.join(CONFIG_PATH, 'global_map_settings.json')
+GLOBAL_ACTION_MODEL_DIR = os.path.join(CONFIG_PATH, 'global_action_model')
 
 # 내 캐릭터 (노란색 계열)
 PLAYER_ICON_LOWER = np.array([22, 120, 120])
@@ -3943,10 +3944,8 @@ class ActionLearningDialog(QDialog):
 
     def train_model(self):
         """학습 스레드를 시작하고 진행률 대화 상자를 표시합니다."""
-        profile_path = self.parent_map_tab.get_active_profile_path()
-        if not profile_path:
-            QMessageBox.warning(self, "오류", "활성화된 프로필이 없어 학습을 진행할 수 없습니다.")
-            return
+        # <<< [수정] 아래 profile_path 가져오는 부분 수정
+        model_path = self.parent_map_tab._get_global_action_model_path()
 
         self.set_buttons_enabled(False)
 
@@ -3955,12 +3954,13 @@ class ActionLearningDialog(QDialog):
         self.progress_dialog.setWindowModality(Qt.WindowModality.WindowModal)
         self.progress_dialog.show()
 
-        self.training_thread = ActionTrainingThread(profile_path, self.parent_map_tab)
+        # <<< [수정] ActionTrainingThread 생성자 인자 수정
+        self.training_thread = ActionTrainingThread(model_path, self.parent_map_tab)
         self.training_thread.progress_updated.connect(self.update_progress)
         self.training_thread.training_finished.connect(self.on_training_finished)
         self.progress_dialog.canceled.connect(self.training_thread.stop)
         self.training_thread.start()
-
+        
     def update_progress(self, message, value):
         if self.progress_dialog:
             self.progress_dialog.setLabelText(message)
@@ -3980,7 +3980,10 @@ class ActionLearningDialog(QDialog):
         
     def update_data_counts(self):
         """수집된 데이터 파일의 개수를 세어 UI에 표시합니다."""
-        data_dir = os.path.join(self.parent_map_tab.get_active_profile_path(), 'action_data')
+        # <<< [수정] 아래 data_dir 가져오는 부분 수정
+        model_dir = self.parent_map_tab._get_global_action_model_path()
+        data_dir = os.path.join(model_dir, 'action_data')
+        
         if not os.path.exists(data_dir):
             self.data_count_label.setText("수집된 데이터가 없습니다.")
             return
@@ -4014,10 +4017,10 @@ class ActionTrainingThread(QThread):
     progress_updated = pyqtSignal(str, int)
     training_finished = pyqtSignal(bool, str)
 
-    def __init__(self, profile_path, parent_tab):
+    def __init__(self, model_dir_path, parent_tab):
         super().__init__()
-        self.profile_path = profile_path
-        self.parent_tab = parent_tab
+        self.model_dir_path = model_dir_path
+        self.parent_map_tab = parent_tab
         self.is_running = True
 
     def run(self):
@@ -4025,8 +4028,9 @@ class ActionTrainingThread(QThread):
         [MODIFIED] v14.3.7: 기존에 저장된 데이터도 학습 직전에 노이즈를 제거하도록 수정.
         """
         try:
-            data_dir = os.path.join(self.profile_path, 'action_data')
-            model_path = os.path.join(self.profile_path, 'action_model.joblib')
+            # <<< [수정] 아래 경로 설정 부분 수정
+            data_dir = os.path.join(self.model_dir_path, 'action_data')
+            model_path = os.path.join(self.model_dir_path, 'action_model.joblib')
 
             if not os.path.exists(data_dir):
                 self.training_finished.emit(False, "학습 데이터가 없습니다. 먼저 데이터를 수집해주세요.")
@@ -4050,10 +4054,10 @@ class ActionTrainingThread(QThread):
 
                 if len(sequence) > 5 and action:
                     # [PATCH] v14.3.7: 로드된 데이터에 대해 노이즈 제거 로직 적용
-                    trimmed_sequence = self.parent_tab._trim_sequence_noise(sequence, self.parent_tab.cfg_move_deadzone)
+                    trimmed_sequence = self.parent_map_tab._trim_sequence_noise(sequence, self.parent_map_tab.cfg_move_deadzone)
                     
                     if len(trimmed_sequence) >= 5:
-                        features = self.parent_tab._extract_features_from_sequence(trimmed_sequence)
+                        features = self.parent_map_tab._extract_features_from_sequence(trimmed_sequence)
                         X.append(features)
                         y.append(action)
                 
@@ -4078,6 +4082,7 @@ class ActionTrainingThread(QThread):
 
         except Exception as e:
             self.training_finished.emit(False, f"학습 중 오류가 발생했습니다:\n{e}")
+            
     def stop(self):
         self.is_running = False
 
@@ -4651,19 +4656,24 @@ class MapTab(QWidget):
         ])
         return features
 
+    def _get_global_action_model_path(self):
+        """동작 학습 모델과 데이터가 저장될 전역 경로를 반환합니다."""
+        os.makedirs(GLOBAL_ACTION_MODEL_DIR, exist_ok=True)
+        return GLOBAL_ACTION_MODEL_DIR
+
     def load_action_model(self):
         """저장된 동작 인식 모델을 로드합니다."""
         self.action_model = None
-        profile_path = self.get_active_profile_path()
-        if not profile_path: return
+        # <<< [수정] 아래 두 줄 수정
+        model_dir = self._get_global_action_model_path()
+        model_path = os.path.join(model_dir, 'action_model.joblib')
 
-        model_path = os.path.join(profile_path, 'action_model.joblib')
         if os.path.exists(model_path):
             try:
                 self.action_model = joblib.load(model_path)
-                self.update_general_log("동작 인식 모델을 성공적으로 로드했습니다.", "green")
+                self.update_general_log("전역 동작 인식 모델을 성공적으로 로드했습니다.", "green")
             except Exception as e:
-                self.update_general_log(f"동작 인식 모델 로드 실패: {e}", "red")
+                self.update_general_log(f"전역 동작 인식 모델 로드 실패: {e}", "red")
         else:
             self.update_general_log("학습된 동작 인식 모델이 없습니다. '동작 학습'을 진행해주세요.", "orange")
 
@@ -5782,9 +5792,7 @@ class MapTab(QWidget):
 
     def open_action_learning_dialog(self):
         """'동작 학습' 버튼 클릭 시 다이얼로그를 엽니다."""
-        if not self.active_profile_name:
-            QMessageBox.warning(self, "오류", "먼저 맵 프로필을 선택해주세요.")
-            return
+        # <<< [수정] 프로필 존재 여부 체크 제거
         dialog = ActionLearningDialog(self)
         dialog.exec()
 
@@ -5861,10 +5869,9 @@ class MapTab(QWidget):
             self.action_data_buffer = []
             return
 
-        profile_path = self.get_active_profile_path()
-        if not profile_path: return
-
-        data_dir = os.path.join(profile_path, 'action_data')
+        # <<< [수정] 아래 두 줄 수정
+        model_dir = self._get_global_action_model_path()
+        data_dir = os.path.join(model_dir, 'action_data')
         os.makedirs(data_dir, exist_ok=True)
 
         timestamp = int(time.time() * 1000)
@@ -5939,7 +5946,7 @@ class MapTab(QWidget):
                 print(f"파일 삭제 오류: {e}")
                 QMessageBox.warning(self, "오류", f"파일 삭제에 실패했습니다:\n{e}")
         else:
-            print("삭제할 파일이 없습니다.")              
+            print("삭제할 파일이 없습니다.")            
    
     def _open_state_config_dialog(self):
         # 현재 설정값들을 딕셔너리로 만듦
@@ -6850,7 +6857,7 @@ class MapTab(QWidget):
                 elif previous_state not in ['on_terrain', 'idle']:
                     new_state = previous_state; reason = f"검증 실패: 'falling' 취소 (이전 상태 유지)"
                 else:
-                    new_state = 'on_terrain'; reason = f"검증 실패: 'falling' 취소 (지상 상태 복귀)"
+                    new_state = previous_state; reason = f"검증 실패: 'falling' 취소 (이전 지상 상태 '{previous_state}'로 복귀)"
 
         # 최종 상태 변경 및 로그 출력
         if new_state != previous_state:
