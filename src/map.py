@@ -228,8 +228,8 @@ class NavigatorDisplay(QWidget):
 
                 def get_indicator(index):
                     if not self.full_path: return ""
-                    if index == 0: return "🚩"
-                    if index == len(self.full_path) - 1: return "🏁"
+                    if index == 0: return "[출발지]🚩"
+                    if index == len(self.full_path) - 1: return "[목적지]🏁"
                     return circled_nums[index] if 0 <= index < len(circled_nums) else str(index + 1)
 
                 indicator_curr = get_indicator(current_idx)
@@ -248,11 +248,11 @@ class NavigatorDisplay(QWidget):
             
             main_target_text = self.target_name
             if self.intermediate_target_type == 'climb':
-                main_target_text = f"🔺 {self.target_name}"
+                main_target_text = f"[사다리] {self.target_name}"
             elif self.intermediate_target_type == 'fall':
                 main_target_text = f"🔻 {self.target_name}"
             elif self.intermediate_target_type == 'jump':
-                main_target_text = f"🤸 {self.target_name}"
+                main_target_text = f"[지형] {self.target_name}"
             elif self.intermediate_target_type == 'walk':
                 main_target_text = f"{indicator_curr} {self.target_name}" if indicator_curr else self.target_name
 
@@ -4391,7 +4391,12 @@ class MapTab(QWidget):
             # 디버그 체크박스 멤버 변수
             self.debug_pathfinding_checkbox = None
             self.debug_state_machine_checkbox = None
-            
+            self.debug_guidance_checkbox = None # <<< [추가] 경로안내선 디버그 체크박스 변수
+
+            # [추가] 경로안내선 디버그를 위한 이전 상태 저장 변수
+            self.last_debug_target_pos = None
+            self.last_debug_nav_action = None
+
             # v14.0.0: 동작 인식 데이터 수집 관련 변수
             self.is_waiting_for_movement = False
             self.is_collecting_action_data = False
@@ -4563,9 +4568,11 @@ class MapTab(QWidget):
         self.debug_basic_pathfinding_checkbox = QCheckBox("경로탐색 기본 로그 출력")
         self.debug_pathfinding_checkbox = QCheckBox("경로탐색 상세 로그 출력 (A*)")
         self.debug_state_machine_checkbox = QCheckBox("상태판정 변경 로그 출력")
+        self.debug_guidance_checkbox = QCheckBox("경로안내선 변경 로그 출력") # <<< [추가]
         debug_layout.addWidget(self.debug_basic_pathfinding_checkbox)
         debug_layout.addWidget(self.debug_pathfinding_checkbox)
         debug_layout.addWidget(self.debug_state_machine_checkbox)
+        debug_layout.addWidget(self.debug_guidance_checkbox) # <<< [추가]
         debug_groupbox.setLayout(debug_layout)
         left_layout.addWidget(debug_groupbox)
 
@@ -7190,6 +7197,34 @@ class MapTab(QWidget):
 
         # Phase 5: UI 업데이트 (유지)
         self._update_navigator_and_view(final_player_pos, current_terrain_name)
+
+        # --- 경로안내선 디버그 로그 출력 ---
+        if self.debug_guidance_checkbox and self.debug_guidance_checkbox.isChecked():
+            target_changed = False
+            # QPointF는 직접 비교가 어려울 수 있으므로 좌표값으로 비교
+            if self.intermediate_target_pos is None and self.last_debug_target_pos is not None:
+                target_changed = True
+            elif self.intermediate_target_pos is not None and self.last_debug_target_pos is None:
+                target_changed = True
+            elif self.intermediate_target_pos and self.last_debug_target_pos:
+                if (abs(self.intermediate_target_pos.x() - self.last_debug_target_pos.x()) > 0.1 or
+                    abs(self.intermediate_target_pos.y() - self.last_debug_target_pos.y()) > 0.1):
+                    target_changed = True
+
+            action_changed = self.navigation_action != self.last_debug_nav_action
+
+            if target_changed or action_changed:
+                target_name = self.guidance_text
+                target_pos_str = "None"
+                if self.intermediate_target_pos:
+                    target_pos_str = f"({self.intermediate_target_pos.x():.1f}, {self.intermediate_target_pos.y():.1f})"
+                
+                print(f"[GUIDANCE DEBUG] Target: '{target_name}' @{target_pos_str} | State: {self.navigation_action}")
+
+            self.last_debug_target_pos = self.intermediate_target_pos
+            self.last_debug_nav_action = self.navigation_action
+        
+
         self.last_player_pos = final_player_pos
 
     def _update_navigator_and_view(self, final_player_pos, current_terrain_name):
