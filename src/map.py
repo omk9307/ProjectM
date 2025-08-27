@@ -228,8 +228,8 @@ class NavigatorDisplay(QWidget):
 
                 def get_indicator(index):
                     if not self.full_path: return ""
-                    if index == 0: return "[출발지]🚩"
-                    if index == len(self.full_path) - 1: return "[목적지]🏁"
+                    if index == 0: return "[출발]🚩"
+                    if index == len(self.full_path) - 1: return "[도착]🏁"
                     return circled_nums[index] if 0 <= index < len(circled_nums) else str(index + 1)
 
                 indicator_curr = get_indicator(current_idx)
@@ -248,11 +248,11 @@ class NavigatorDisplay(QWidget):
             
             main_target_text = self.target_name
             if self.intermediate_target_type == 'climb':
-                main_target_text = f"[사다리] {self.target_name}"
+                main_target_text = f"🔺 {self.target_name}"
             elif self.intermediate_target_type == 'fall':
                 main_target_text = f"🔻 {self.target_name}"
             elif self.intermediate_target_type == 'jump':
-                main_target_text = f"[지형] {self.target_name}"
+                main_target_text = f"[발판] {self.target_name}"
             elif self.intermediate_target_type == 'walk':
                 main_target_text = f"{indicator_curr} {self.target_name}" if indicator_curr else self.target_name
 
@@ -4396,6 +4396,7 @@ class MapTab(QWidget):
             # [추가] 경로안내선 디버그를 위한 이전 상태 저장 변수
             self.last_debug_target_pos = None
             self.last_debug_nav_action = None
+            self.last_debug_guidance_text = None
 
             # v14.0.0: 동작 인식 데이터 수집 관련 변수
             self.is_waiting_for_movement = False
@@ -7200,31 +7201,17 @@ class MapTab(QWidget):
 
         # --- 경로안내선 디버그 로그 출력 ---
         if self.debug_guidance_checkbox and self.debug_guidance_checkbox.isChecked():
-            target_changed = False
-            # QPointF는 직접 비교가 어려울 수 있으므로 좌표값으로 비교
-            if self.intermediate_target_pos is None and self.last_debug_target_pos is not None:
-                target_changed = True
-            elif self.intermediate_target_pos is not None and self.last_debug_target_pos is None:
-                target_changed = True
-            elif self.intermediate_target_pos and self.last_debug_target_pos:
-                if (abs(self.intermediate_target_pos.x() - self.last_debug_target_pos.x()) > 0.1 or
-                    abs(self.intermediate_target_pos.y() - self.last_debug_target_pos.y()) > 0.1):
-                    target_changed = True
-
-            action_changed = self.navigation_action != self.last_debug_nav_action
-
-            if target_changed or action_changed:
-                target_name = self.guidance_text
+            # 안내 텍스트(이름)가 변경되었을 때만 로그 출력
+            if self.guidance_text != self.last_debug_guidance_text:
                 target_pos_str = "None"
                 if self.intermediate_target_pos:
                     target_pos_str = f"({self.intermediate_target_pos.x():.1f}, {self.intermediate_target_pos.y():.1f})"
                 
-                print(f"[GUIDANCE DEBUG] Target: '{target_name}' @{target_pos_str} | State: {self.navigation_action}")
+                print(f"[GUIDANCE DEBUG] New Target: '{self.guidance_text}' @{target_pos_str}")
 
-            self.last_debug_target_pos = self.intermediate_target_pos
-            self.last_debug_nav_action = self.navigation_action
-        
-
+            # 현재 상태를 다음 프레임과 비교하기 위해 저장
+            self.last_debug_guidance_text = self.guidance_text
+            
         self.last_player_pos = final_player_pos
 
     def _update_navigator_and_view(self, final_player_pos, current_terrain_name):
@@ -7243,14 +7230,21 @@ class MapTab(QWidget):
         
         # [수정 시작] 내비게이션 상태에 따른 UI 표시 분기
         # Case 1: 완전 통제 불능 상태 (낙하, 아래 점프)
-        if self.navigation_action in ['fall_in_progress', 'down_jump_in_progress']:
-            direction = "-"
+        # <<< [수정] 아래 if문 조건 수정 및 내용 추가
+        if self.navigation_action in ['fall_in_progress', 'down_jump_in_progress', 'prepare_to_down_jump']:
+            # 수직(Y) 거리 계산
             if self.intermediate_target_pos:
-                # 수직(Y) 거리 계산
                 distance = abs(final_player_pos.y() - self.intermediate_target_pos.y())
             else:
                 distance = 0
-            nav_action_text = "낙하 중..."
+            
+            if 'down_jump' in self.navigation_action:
+                direction = "↓" # 아래 점프 시에는 아래 화살표
+                nav_action_text = "아래로 점프하세요"
+            else:
+                direction = "-" # 일반 낙하는 방향 없음
+                nav_action_text = "낙하 중..."
+            
             final_intermediate_type = 'fall'
 
         # Case 2: 부분 통제 가능 상태 (등반)
@@ -7284,7 +7278,7 @@ class MapTab(QWidget):
                     'move_to_target': "다음 목표로 이동",
                     'prepare_to_climb': "점프+↑+방향키를 눌러 오르세요",
                     'prepare_to_fall': "낭떠러지로 떨어지세요",
-                    'prepare_to_down_jump': "아래로 점프하세요",
+                    # 'prepare_to_down_jump': "아래로 점프하세요", # 위에서 처리됨
                     'prepare_to_jump': "점프하세요",
                     'climb_in_progress': "오르는 중...", # 이 부분은 위에서 처리되지만 안전장치로 둠
                     'fall_in_progress': "낙하 중...",   # 이 부분은 위에서 처리되지만 안전장치로 둠
