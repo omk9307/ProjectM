@@ -100,7 +100,7 @@ PLAYER_ICON_STD_HEIGHT = 11
 # [v11.4.0] 사용자 피드백 기반 기본값 대규모 조정 및 신규 상수 추가
 IDLE_TIME_THRESHOLD = 0.8       # 정지 상태로 판정되기까지의 시간 (초)
 CLIMBING_STATE_FRAME_THRESHOLD = 2 # climbing 상태로 변경되기까지 필요한 연속 프레임
-FALLING_STATE_FRAME_THRESHOLD = 10  # falling 상태로 변경되기까지 필요한 연속 프레임
+FALLING_STATE_FRAME_THRESHOLD = 2  # falling 상태로 변경되기까지 필요한 연속 프레임
 JUMPING_STATE_FRAME_THRESHOLD = 1  # jumping 상태로 변경되기까지 필요한 연속 프레임
 ON_TERRAIN_Y_THRESHOLD = 3.0    # 지상 판정 y축 허용 오차 (px)
 JUMP_Y_MIN_THRESHOLD = 1.0      # 점프 상태로 인식될 최소 y 오프셋 (px)
@@ -6696,8 +6696,15 @@ class MapTab(QWidget):
         x_movement = final_player_pos.x() - self.last_player_pos.x()
         y_movement = self.last_player_pos.y() - final_player_pos.y()
         self.y_velocity_history.append(y_movement)
-        if abs(x_movement) > self.cfg_move_deadzone or abs(y_movement) > self.cfg_move_deadzone:
-            self.last_movement_time = time.time()
+        
+        # <<< [수정] 아래 움직임 감지 로직 블록 전체 수정
+        # 지상에서는 X축 움직임만, 공중에서는 X 또는 Y축 움직임을 감지
+        if contact_terrain:
+            if abs(x_movement) > self.cfg_move_deadzone:
+                self.last_movement_time = time.time()
+        else: # 공중에 있을 때
+            if abs(x_movement) > self.cfg_move_deadzone or abs(y_movement) > self.cfg_move_deadzone:
+                self.last_movement_time = time.time()
 
         new_state = previous_state
         reason = "상태 유지"
@@ -7228,10 +7235,20 @@ class MapTab(QWidget):
         nav_action_text = '대기 중'
         final_intermediate_type = 'walk'
         
-        # [수정 시작] 내비게이션 상태에 따른 UI 표시 분기
+        # <<< [수정] 아래 로직 블록 전체 수정
+        # [최우선 순위] "안전 지점 이동" 안내 시에는 항상 수평 이동으로 간주
+        if self.guidance_text in ["안전 지점으로 이동", "점프 불가: 안전 지대 없음", "이동할 안전 지대 없음"]:
+            nav_action_text = self.guidance_text
+            final_intermediate_type = 'walk'
+            if self.intermediate_target_pos:
+                distance = abs(final_player_pos.x() - self.intermediate_target_pos.x())
+                direction = "→" if final_player_pos.x() < self.intermediate_target_pos.x() else "←"
+            else:
+                distance = 0
+                direction = "-"
+        
         # Case 1: 완전 통제 불능 상태 (낙하, 아래 점프)
-        # <<< [수정] 아래 if문 조건 수정 및 내용 추가
-        if self.navigation_action in ['fall_in_progress', 'down_jump_in_progress', 'prepare_to_down_jump']:
+        elif self.navigation_action in ['fall_in_progress', 'down_jump_in_progress', 'prepare_to_down_jump']:
             # 수직(Y) 거리 계산
             if self.intermediate_target_pos:
                 distance = abs(final_player_pos.y() - self.intermediate_target_pos.y())
@@ -7260,39 +7277,28 @@ class MapTab(QWidget):
 
         # Case 3: 그 외 모든 일반 상태 (지상 이동, 행동 준비 등)
         else:
-            if self.guidance_text in ["안전 지점으로 이동", "점프 불가: 안전 지대 없음", "이동할 안전 지대 없음"]:
-                nav_action_text = self.guidance_text
-                final_intermediate_type = 'walk'
-                if self.intermediate_target_pos:
-                    distance = abs(final_player_pos.x() - self.intermediate_target_pos.x())
-                    direction = "→" if final_player_pos.x() < self.intermediate_target_pos.x() else "←"
-                else:
-                    distance = 0
-                    direction = "-"
-            else:
-                if self.intermediate_target_pos:
-                    distance = abs(final_player_pos.x() - self.intermediate_target_pos.x())
-                    direction = "→" if final_player_pos.x() < self.intermediate_target_pos.x() else "←"
+            if self.intermediate_target_pos:
+                distance = abs(final_player_pos.x() - self.intermediate_target_pos.x())
+                direction = "→" if final_player_pos.x() < self.intermediate_target_pos.x() else "←"
 
-                action_text_map = {
-                    'move_to_target': "다음 목표로 이동",
-                    'prepare_to_climb': "점프+↑+방향키를 눌러 오르세요",
-                    'prepare_to_fall': "낭떠러지로 떨어지세요",
-                    # 'prepare_to_down_jump': "아래로 점프하세요", # 위에서 처리됨
-                    'prepare_to_jump': "점프하세요",
-                    'climb_in_progress': "오르는 중...", # 이 부분은 위에서 처리되지만 안전장치로 둠
-                    'fall_in_progress': "낙하 중...",   # 이 부분은 위에서 처리되지만 안전장치로 둠
-                    'jump_in_progress': "점프 중...",
-                }
-                nav_action_text = action_text_map.get(self.navigation_action, '대기 중')
+            action_text_map = {
+                'move_to_target': "다음 목표로 이동",
+                'prepare_to_climb': "점프+↑+방향키를 눌러 오르세요",
+                'prepare_to_fall': "낭떠러지로 떨어지세요",
+                # 'prepare_to_down_jump': "아래로 점프하세요", # 위에서 처리됨
+                'prepare_to_jump': "점프하세요",
+                'climb_in_progress': "오르는 중...", # 이 부분은 위에서 처리되지만 안전장치로 둠
+                'fall_in_progress': "낙하 중...",   # 이 부분은 위에서 처리되지만 안전장치로 둠
+                'jump_in_progress': "점프 중...",
+            }
+            nav_action_text = action_text_map.get(self.navigation_action, '대기 중')
 
-                if self.current_segment_path and self.current_segment_index < len(self.current_segment_path):
-                    if self.navigation_action.startswith('prepare_to_') or self.navigation_action.endswith('_in_progress'):
-                        if 'climb' in self.navigation_action: final_intermediate_type = 'climb'
-                        elif 'jump' in self.navigation_action: final_intermediate_type = 'jump'
-                        elif 'fall' in self.navigation_action or 'down_jump' in self.navigation_action: final_intermediate_type = 'fall'
-        # [수정 끝]
-
+            if self.current_segment_path and self.current_segment_index < len(self.current_segment_path):
+                if self.navigation_action.startswith('prepare_to_') or self.navigation_action.endswith('_in_progress'):
+                    if 'climb' in self.navigation_action: final_intermediate_type = 'climb'
+                    elif 'jump' in self.navigation_action: final_intermediate_type = 'jump'
+                    elif 'fall' in self.navigation_action or 'down_jump' in self.navigation_action: final_intermediate_type = 'fall'
+        
         # --- 공통 UI 업데이트 로직 (경로 이름 등) ---
         if self.start_waypoint_found and self.journey_plan:
             if self.current_journey_index > 0:
