@@ -4390,6 +4390,12 @@ class MapTab(QWidget):
             self.expected_terrain_group = None  # 현재 안내 경로가 유효하기 위해 플레이어가 있어야 할 지형 그룹
             # --- v12.0.0: 추가 끝 ---
             
+            # [추가] 마지막으로 출력한 물리적 상태를 기억하기 위한 변수
+            self.last_printed_player_state = None
+            # [추가] 마지막으로 출력한 행동과 방향을 기억하기 위한 변수
+            self.last_printed_action = None
+            self.last_printed_direction = None
+
             # 마지막으로 유효했던 지형 그룹 이름 저장용
             self.last_known_terrain_group_name = ""
 
@@ -7371,6 +7377,63 @@ class MapTab(QWidget):
         if self.current_segment_path and self.current_segment_index < len(self.current_segment_path):
             current_node_key = self.current_segment_path[self.current_segment_index]
             intermediate_node_type = self.nav_nodes.get(current_node_key, {}).get('type')
+
+        # === [사용자 요청] 통합된 키 입력 안내 로직 (v10) ===
+        current_action_key = self.navigation_action
+        current_player_state = self.player_state
+        current_direction = direction
+
+        action_changed = current_action_key != self.last_printed_action
+        direction_changed = current_direction != self.last_printed_direction
+        player_state_changed = current_player_state != self.last_printed_player_state
+
+        # 1. 'prepare_to_climb' 상태일 때의 특별 처리
+        if current_action_key == 'prepare_to_climb':
+            # [수정] 캐릭터가 '지상'에 있을 때만 방향 안내를 갱신하도록 조건을 추가합니다.
+            is_on_ground = self._get_contact_terrain(final_player_pos) is not None
+            
+            if (action_changed or direction_changed) and is_on_ground:
+                direction_key_text = "우측" if current_direction == "→" else "좌측"
+                print(f"{direction_key_text}방향키 + 점프키 + 방향키떼기 + 윗방향키(누르고있기)")
+                self.last_printed_direction = current_direction
+
+        # 2. 그 외의 행동들은, 행동 자체가 처음 변경되었을 때만 출력합니다.
+        elif action_changed:
+            if current_action_key == 'prepare_to_jump':
+                print("점프키 누르기")
+            elif current_action_key == 'prepare_to_down_jump':
+                print("아래방향키 + 점프키 + 아래방향키 떼기")
+            elif current_action_key == 'climb_in_progress':
+                if self.player_state == 'climbing_up':
+                    print("위방향키 누르기")
+            self.last_printed_direction = None
+
+        # 3. 'move_to_target'(일반 이동) 상태일 때, 방향이 변경된 경우에만 출력합니다.
+        if current_action_key == 'move_to_target' and direction_changed:
+            if current_direction in ["→", "←"]:
+                if current_direction == "→":
+                    print("우측 방향키 누르기")
+                elif current_direction == "←":
+                    print("좌측 방향키 누르기")
+                self.last_printed_direction = current_direction
+
+        # 4. 물리적 상태 변경 감지
+        if player_state_changed:
+            if current_player_state == 'falling':
+                if 'prepare_to_' not in current_action_key:
+                    print("모든 키 떼기")
+            
+            if self.last_printed_player_state == 'falling' and current_player_state in ['on_terrain', 'idle']:
+                self.last_printed_direction = None
+
+        # 마지막으로, 현재 상태들을 "마지막으로 출력한 상태"로 기록합니다.
+        if action_changed:
+            self.last_printed_action = current_action_key
+            self.last_printed_player_state = None 
+        if player_state_changed:
+            self.last_printed_player_state = current_player_state
+        # === [사용자 요청] 로직 끝 ===
+
 
         self.navigator_display.update_data(
             floor=self.current_player_floor if self.current_player_floor is not None else "N/A",
