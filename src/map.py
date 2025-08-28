@@ -7242,71 +7242,114 @@ class MapTab(QWidget):
         nav_action_text = '대기 중'
         final_intermediate_type = 'walk'
         
-        # <<< [수정] 아래 로직 블록 전체 수정
-        # [최우선 순위] "안전 지점 이동" 안내 시에는 항상 수평 이동으로 간주
+        # <<< [핵심 수정] 상태에 따른 안내선 목표(intermediate_target_pos) 및 텍스트(guidance_text) 결정 >>>
+        # 최우선 순위: "안전 지점으로 이동"과 같은 특수 안내는 그대로 유지
         if self.guidance_text in ["안전 지점으로 이동", "점프 불가: 안전 지대 없음", "이동할 안전 지대 없음"]:
-            nav_action_text = self.guidance_text
-            final_intermediate_type = 'walk'
+            # 이 경우는 _handle_action_preparation에서 이미 intermediate_target_pos를 설정했으므로 그대로 사용
+            pass
+        # 1순위: 아래 점프 또는 낙하 관련 상태일 때
+        elif self.navigation_action in ['prepare_to_down_jump', 'prepare_to_fall', 'down_jump_in_progress', 'fall_in_progress']:
+            # 실시간으로 착지 지점을 계산하여 안내
+            max_y_diff = 70.0 if 'down_jump' in self.navigation_action else None
+            best_landing_terrain = self._find_best_landing_terrain_at_x(final_player_pos, max_y_diff=max_y_diff)
+            if best_landing_terrain:
+                landing_terrain_group = best_landing_terrain.get('dynamic_name')
+                p1, p2 = best_landing_terrain['points'][0], best_landing_terrain['points'][-1]
+                landing_y = p1[1] + (p2[1] - p1[1]) * ((final_player_pos.x() - p1[0]) / (p2[0] - p1[0])) if (p2[0] - p1[0]) != 0 else p1[1]
+                
+                self.guidance_text = landing_terrain_group
+                self.intermediate_target_pos = QPointF(final_player_pos.x(), landing_y)
+            else:
+                self.guidance_text = "착지 지점 없음"
+                self.intermediate_target_pos = None
+        # <<< 핵심 수정 1 >>> prepare_to_climb 상태를 위한 분기 추가
+        elif self.navigation_action == 'prepare_to_climb':
+            # 사다리 오르기 준비 시에는 항상 다음 목표(사다리 출구)를 안내
+            if self.current_segment_path and self.current_segment_index + 1 < len(self.current_segment_path):
+                target_node_key = self.current_segment_path[self.current_segment_index + 1]
+                target_node = self.nav_nodes.get(target_node_key, {})
+                self.guidance_text = target_node.get('name', '경로 없음')
+                self.intermediate_target_pos = target_node.get('pos')
+            else:
+                self.guidance_text = "경로 계산 중..."
+                self.intermediate_target_pos = None
+
+        # 2순위: 그 외 모든 상태 (일반 이동, 등반, 점프 등)
+        else:
+            # A* 경로상의 다음 노드를 목표로 설정
+            if self.current_segment_path and self.current_segment_index < len(self.current_segment_path):
+                # 액션 중일 때는 다음 노드가 목표
+                if self.navigation_action.endswith('_in_progress'):
+                    target_index = self.current_segment_index + 1
+                # 일반 이동이나 준비 상태일 때는 현재 노드가 목표
+                else:
+                    target_index = self.current_segment_index
+                
+                if target_index < len(self.current_segment_path):
+                    target_node_key = self.current_segment_path[target_index]
+                    target_node = self.nav_nodes.get(target_node_key, {})
+                    
+                    # <<< 핵심 수정 >>> 착지 지점 건너뛰기 로직
+                    final_target_node = target_node
+                    final_target_index = target_index
+                    while final_target_node.get('type') in ['fall_landing', 'djump_landing']:
+                        final_target_index += 1
+                        if final_target_index < len(self.current_segment_path):
+                             final_target_key = self.current_segment_path[final_target_index]
+                             final_target_node = self.nav_nodes.get(final_target_key, {})
+                        else:
+                             # 경로 끝에 도달하면 마지막 착지 지점을 그대로 사용
+                             final_target_node = target_node
+                             break
+                    
+                    self.guidance_text = final_target_node.get('name', '경로 없음')
+                    self.intermediate_target_pos = final_target_node.get('pos')
+                else:
+                    self.guidance_text = "경로 계산 중..."
+                    self.intermediate_target_pos = None
+            else:
+                self.guidance_text = "경로 없음"
+                self.intermediate_target_pos = None
+
+
+        # --- 이하 거리/방향 계산 및 UI 업데이트 로직 (기존과 거의 동일) ---
+        # <<< 핵심 수정 2 >>> "안전 지점으로 이동"일 때 X축 거리 계산을 최우선으로 처리
+        if self.guidance_text == "안전 지점으로 이동":
             if self.intermediate_target_pos:
                 distance = abs(final_player_pos.x() - self.intermediate_target_pos.x())
                 direction = "→" if final_player_pos.x() < self.intermediate_target_pos.x() else "←"
-            else:
-                distance = 0
-                direction = "-"
-        
-        # Case 1: 완전 통제 불능 상태 (낙하, 아래 점프)
-        elif self.navigation_action in ['fall_in_progress', 'down_jump_in_progress', 'prepare_to_down_jump']:
-            # 수직(Y) 거리 계산
+            nav_action_text = self.guidance_text
+            final_intermediate_type = 'walk'
+        elif 'down_jump' in self.navigation_action or 'fall' in self.navigation_action:
             if self.intermediate_target_pos:
                 distance = abs(final_player_pos.y() - self.intermediate_target_pos.y())
             else:
                 distance = 0
-            
-            if 'down_jump' in self.navigation_action:
-                direction = "↓" # 아래 점프 시에는 아래 화살표
-                nav_action_text = "아래로 점프하세요"
-            else:
-                direction = "-" # 일반 낙하는 방향 없음
-                nav_action_text = "낙하 중..."
-            
+            direction = "↓" if 'down_jump' in self.navigation_action else "-"
+            nav_action_text = "아래로 점프하세요" if 'down_jump' in self.navigation_action else "낙하 중..."
             final_intermediate_type = 'fall'
-
-        # Case 2: 부분 통제 가능 상태 (등반)
         elif self.navigation_action == 'climb_in_progress':
             direction = "↑"
             if self.intermediate_target_pos:
-                # 수직(Y) 거리 계산
                 distance = abs(final_player_pos.y() - self.intermediate_target_pos.y())
             else:
                 distance = 0
             nav_action_text = "오르는 중..."
             final_intermediate_type = 'climb'
-
-        # Case 3: 그 외 모든 일반 상태 (지상 이동, 행동 준비 등)
         else:
             if self.intermediate_target_pos:
                 distance = abs(final_player_pos.x() - self.intermediate_target_pos.x())
                 direction = "→" if final_player_pos.x() < self.intermediate_target_pos.x() else "←"
-
             action_text_map = {
                 'move_to_target': "다음 목표로 이동",
                 'prepare_to_climb': "점프+↑+방향키를 눌러 오르세요",
-                'prepare_to_fall': "낭떠러지로 떨어지세요",
-                # 'prepare_to_down_jump': "아래로 점프하세요", # 위에서 처리됨
                 'prepare_to_jump': "점프하세요",
-                'climb_in_progress': "오르는 중...", # 이 부분은 위에서 처리되지만 안전장치로 둠
-                'fall_in_progress': "낙하 중...",   # 이 부분은 위에서 처리되지만 안전장치로 둠
-                'jump_in_progress': "점프 중...",
             }
             nav_action_text = action_text_map.get(self.navigation_action, '대기 중')
-
-            if self.current_segment_path and self.current_segment_index < len(self.current_segment_path):
-                if self.navigation_action.startswith('prepare_to_') or self.navigation_action.endswith('_in_progress'):
-                    if 'climb' in self.navigation_action: final_intermediate_type = 'climb'
-                    elif 'jump' in self.navigation_action: final_intermediate_type = 'jump'
-                    elif 'fall' in self.navigation_action or 'down_jump' in self.navigation_action: final_intermediate_type = 'fall'
+            if self.navigation_action.startswith('prepare_to_') or self.navigation_action.endswith('_in_progress'):
+                if 'climb' in self.navigation_action: final_intermediate_type = 'climb'
+                elif 'jump' in self.navigation_action: final_intermediate_type = 'jump'
         
-        # --- 공통 UI 업데이트 로직 (경로 이름 등) ---
         if self.start_waypoint_found and self.journey_plan:
             if self.current_journey_index > 0:
                 prev_wp_id = self.journey_plan[self.current_journey_index - 1]
@@ -7479,8 +7522,16 @@ class MapTab(QWidget):
         물리적으로 가장 먼저 충돌하는(가장 높은 층에 있는) 지형 라인을 찾아 반환합니다.
         """
         departure_terrain = self._get_contact_terrain(departure_pos)
+        
+        # <<< 핵심 수정 >>>
+        # 만약 플레이어가 공중에 있다면(contact_terrain is None), 마지막으로 알려진 지형 정보를 사용
         if not departure_terrain:
-            return None
+            if self.last_known_terrain_group_name:
+                departure_terrain = next((line for line in self.geometry_data.get("terrain_lines", []) if line.get('dynamic_name') == self.last_known_terrain_group_name), None)
+            
+            # 마지막으로 알려진 지형 정보조차 없으면 계산 불가
+            if not departure_terrain:
+                return None
 
         departure_floor = departure_terrain.get('floor', float('inf'))
         departure_y = departure_pos.y()
@@ -7592,6 +7643,8 @@ class MapTab(QWidget):
                     closest_point_x = min([p for zone in safe_zones for p in zone], key=lambda p: abs(player_x - p))
                     self.intermediate_target_pos = QPointF(closest_point_x, final_player_pos.y())
                 else:
+                    # <<< 핵심 수정 지점 (원래 로직으로 복원) >>>
+                    # 지상에서는 실시간 예측 착지 지점을 안내
                     self.guidance_text = landing_terrain_group
                     self.intermediate_target_pos = QPointF(player_x, landing_y)
 
@@ -7604,18 +7657,21 @@ class MapTab(QWidget):
 
         # Case 2 & 3: 플레이어가 공중(점프/낙하) 또는 사다리에 있을 때
         else:
-            # ==================== 수정 시작 ====================
-            # 'prepare_to_climb' 상태에서 점프 및 등반 관련 상태는 정상 과정으로 간주하여 안내 목표를 유지합니다.
+            # <<< 2차 수정 지점 (유지) >>>
+            # 의도된 공중 진입 상태에서는 안내선을 다음 목표로 고정
+            expected_air_states = ['prepare_to_down_jump', 'prepare_to_fall', 'prepare_to_jump']
             climbing_related_states = ['jumping', 'climbing_up', 'climbing_down', 'on_ladder_idle']
-            if self.navigation_action == 'prepare_to_climb' and self.player_state in climbing_related_states:
-                # 등반을 위한 점프 및 등반 중에는 안내 목표를 '출구'(다음 노드)로 유지합니다.
+
+            if self.navigation_action in expected_air_states or \
+               (self.navigation_action == 'prepare_to_climb' and self.player_state in climbing_related_states):
+                # 점프/낙하/등반 과정은 정상 과정이므로 안내 목표를 '출구'(다음 노드)로 고정
                 next_node_key = self.current_segment_path[self.current_segment_index + 1] if self.current_segment_index + 1 < len(self.current_segment_path) else None
                 next_node = self.nav_nodes.get(next_node_key) if next_node_key else None
                 if next_node:
                     self.guidance_text = next_node.get('name', '알 수 없는 목적지')
                     self.intermediate_target_pos = next_node.get('pos')
             else:
-                # 그 외의 모든 공중 상태에서는 안전을 위해 시작점('입구')으로 안내를 되돌립니다. (기존 로직)
+                # 그 외 예상치 못한 모든 공중 상태에서는 안전을 위해 시작점('입구')으로 안내를 되돌림
                 action_node_key = self.current_segment_path[self.current_segment_index]
                 action_node = self.nav_nodes.get(action_node_key, {})
                 self.guidance_text = action_node.get('name', '')
@@ -7624,7 +7680,6 @@ class MapTab(QWidget):
             # 액션 시작 여부는 모든 공중 상태에서 계속 확인해야 합니다.
             self._process_action_preparation(final_player_pos)
             return
-            # ==================== 수정 끝 ======================
 
         # 모든 prepare 상태는 최종적으로 액션 시작 여부를 확인해야 함
         self._process_action_preparation(final_player_pos)
@@ -7652,14 +7707,6 @@ class MapTab(QWidget):
                         self.current_segment_path = []
                         self.expected_terrain_group = None
                         return # 즉시 함수 종료
-
-        # 2. 기존 목표 안내 로직 (변경 없음)
-        # 목표는 액션의 출구 또는 가상 착지 지점을 계속 유지
-        if self.current_segment_index + 1 < len(self.current_segment_path):
-            next_node_key = self.current_segment_path[self.current_segment_index + 1]
-            if next_node_key in self.nav_nodes:
-                self.intermediate_target_pos = self.nav_nodes[next_node_key]['pos']
-                self.guidance_text = self.nav_nodes[next_node_key]['name']
 
     def _get_terrain_id_from_vertex(self, vertex_pos):
         """주어진 꼭짓점(vertex) 좌표에 연결된 지형선 ID를 반환합니다."""
