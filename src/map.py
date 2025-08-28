@@ -7520,7 +7520,7 @@ class MapTab(QWidget):
         # [PATCH] v14.3.15: 플레이어 상태에 따른 로직 분기 시작
         
         # Case 1: 플레이어가 지상에 있을 때 (가장 일반적인 경우)
-        if self.player_state in ['on_terrain', 'idle']:
+        if departure_terrain_group is not None:
             if self.navigation_action in ['prepare_to_down_jump', 'prepare_to_fall']:
                 player_x = final_player_pos.x()
 
