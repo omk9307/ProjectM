@@ -636,6 +636,8 @@ class AutoControlTab(QWidget):
         """
         if self.is_sequence_running:
             self.sequence_timer.stop()
+            # [추가 개선] 이전 시퀀스 중단 시, 눌려있던 모든 키를 해제
+            self._release_all_keys()
             print(f"--- [AutoControl] 이전 시퀀스 중단: '{self.current_command_name}' ---")
 
         self.status_label.setText(f"'{command_name}' 실행 중...")
