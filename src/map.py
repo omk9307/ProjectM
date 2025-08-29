@@ -5725,7 +5725,9 @@ class MapTab(QWidget):
                 if self.capture_thread and self.capture_thread.isRunning():
                     self.capture_thread.stop()
                     self.capture_thread.wait()
-
+                    
+                # [핵심 수정] 탐지 중지 시 모든 키를 떼도록 명령
+                self.control_command_issued.emit("모든 키 떼기")
                 self.update_general_log("탐지를 중단합니다.", "black")
                 self.detect_anchor_btn.setText("탐지 시작")
                 self.update_detection_log_message("탐지 중단됨", "black")
