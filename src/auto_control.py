@@ -6,13 +6,13 @@ import json
 import os
 import random
 from PyQt6.QtWidgets import (
-    QWidget, QVBoxLayout, QHBoxLayout, QLabel, QListWidget, QPushButton,
+    QApplication, QWidget, QVBoxLayout, QHBoxLayout, QLabel, QListWidget, QPushButton,
     QGroupBox, QFormLayout, QComboBox, QSpinBox, QMessageBox, QFrame,
     QListWidgetItem, QInputDialog
 )
-from PyQt6.QtCore import pyqtSlot, Qt
+from PyQt6.QtCore import pyqtSlot, Qt, QTimer, pyqtSignal
 from PyQt6.QtGui import QIcon
-from pynput.keyboard import Key
+from pynput.keyboard import Key, Listener
 
 # --- 설정 및 상수 ---
 SERIAL_PORT = 'COM6'
@@ -21,15 +21,30 @@ CMD_PRESS = 0x01
 CMD_RELEASE = 0x02
 KEY_MAPPINGS_FILE = os.path.join('Project_Maple','workspace', 'config', 'key_mappings.json')
 
-# ... (KEY_MAP은 이전과 동일하게 유지) ...
-KEY_MAP = {
-    'a': 4, 'b': 5, 'c': 6, 'd': 7, 'e': 8, 'f': 9, 'g': 10, 'h': 11, 'i': 12, 'j': 13, 'k': 14, 'l': 15, 'm': 16, 'n': 17, 'o': 18, 'p': 19, 'q': 20, 'r': 21, 's': 22, 't': 23, 'u': 24, 'v': 25, 'w': 26, 'x': 27, 'y': 28, 'z': 29, '1': 30, '2': 31, '3': 32, '4': 33, '5': 34, '6': 35, '7': 36, '8': 37, '9': 38, '0': 39, Key.enter: 40, Key.esc: 41, Key.backspace: 42, Key.tab: 43, Key.space: 44, '-': 45, '_': 45, '=': 46, '+': 46, '[': 47, '{': 47, ']': 48, '}': 48, '\\': 49, '|': 49, ';': 51, ':': 51, "'": 52, '"': 52, '`': 53, '~': 53, ',': 54, '<': 54, '.': 55, '>': 55, '/': 56, '?': 56, Key.caps_lock: 57, Key.f1: 58, Key.f2: 59, Key.f3: 60, Key.f4: 61, Key.f5: 62, Key.f6: 63, Key.f7: 64, Key.f8: 65, Key.f9: 66, Key.f10: 67, Key.f11: 68, Key.f12: 69, Key.print_screen: 70, Key.scroll_lock: 71, Key.pause: 72, Key.insert: 73, Key.home: 74, Key.page_up: 75, Key.delete: 76, Key.end: 77, Key.page_down: 78, Key.right: 79, Key.left: 80, Key.down: 81, Key.up: 82, Key.num_lock: 83,
-    Key.alt: 0, Key.alt_l: 0, Key.alt_r: 0, 
-    Key.ctrl: 0, Key.ctrl_l: 0, Key.ctrl_r: 0,
-    Key.shift: 0, Key.shift_l: 0, Key.shift_r: 0,
+# [수정] 모든 키의 표준 HID 코드를 담는 통합 맵
+FULL_KEY_MAP = {
+    'a': 4, 'b': 5, 'c': 6, 'd': 7, 'e': 8, 'f': 9, 'g': 10, 'h': 11, 'i': 12, 'j': 13, 'k': 14, 'l': 15, 'm': 16, 'n': 17, 'o': 18, 'p': 19, 'q': 20, 'r': 21, 's': 22, 't': 23, 'u': 24, 'v': 25, 'w': 26, 'x': 27, 'y': 28, 'z': 29,
+    '1': 30, '2': 31, '3': 32, '4': 33, '5': 34, '6': 35, '7': 36, '8': 37, '9': 38, '0': 39,
+    Key.enter: 40, Key.esc: 41, Key.backspace: 42, Key.tab: 43, Key.space: 44,
+    Key.right: 79, Key.left: 80, Key.down: 81, Key.up: 82,
+    # 수식 키(Modifier)들의 표준 HID 코드를 추가
+    Key.ctrl: 224, Key.ctrl_l: 224,
+    Key.shift: 225, Key.shift_l: 225,
+    Key.alt: 226, Key.alt_l: 226,
+    Key.cmd: 227, Key.cmd_l: 227, # Windows Key
+    Key.ctrl_r: 228,
+    Key.shift_r: 229,
+    Key.alt_r: 230,
+    Key.cmd_r: 231,
 }
 
 class AutoControlTab(QWidget):
+    recording_status_changed = pyqtSignal(str)
+    # [오류 수정] pynput 스레드에서 GUI 타이머를 제어하기 위한 시그널
+    reset_auto_stop_timer_signal = pyqtSignal()
+    # [오류 수정] pynput 스레드에서 녹화 중지를 요청하기 위한 시그널
+    stop_recording_signal = pyqtSignal()
+
     def __init__(self):
         super().__init__()
         self.ser = None
@@ -37,25 +52,43 @@ class AutoControlTab(QWidget):
         self.mappings = {}
         self.key_list_str = self._generate_key_list()
 
+        self.is_recording = False
+        self.is_waiting_for_start_key = False
+        self.keyboard_listener = None
+        self.recorded_sequence = []
+        self.last_event_time = 0
+        self.auto_stop_timer = QTimer(self)
+        self.auto_stop_timer.setSingleShot(True) # 한 번만 실행되도록 설정
+        self.auto_stop_timer.timeout.connect(self.stop_recording)
+
+        # [기능 추가] 키 반복 입력을 방지하기 위한 상태 추적용 집합
+        self.currently_pressed_keys_for_recording = set()
+
         self.init_ui()
         self.load_mappings()
         self.connect_to_pi()
         
+        self.recording_status_changed.connect(self.update_status_label)
+        # [오류 수정] 시그널과 슬롯 연결
+        self.reset_auto_stop_timer_signal.connect(self._handle_reset_auto_stop_timer)
+        self.stop_recording_signal.connect(self.stop_recording)
+        
+        # ... (스타일시트 코드는 이전과 동일) ...
         self.setStyleSheet("""
             QFrame { border: 1px solid #444; border-radius: 5px; }
             QLabel#TitleLabel { font-size: 13px; font-weight: bold; padding: 5px; background-color: #3a3a3a; color: white; border-top-left-radius: 4px; border-top-right-radius: 4px; }
             QGroupBox { font-size: 12px; font-weight: bold; }
             QPushButton { padding: 4px; }
+            QPushButton:checked { background-color: #c62828; color: white; border: 1px solid #999; }
         """)
 
+    # ... (init_ui 및 UI 생성 메서드들은 이전과 동일) ...
     def init_ui(self):
         main_layout = QHBoxLayout(self)
         main_layout.setContentsMargins(5, 5, 5, 5)
         main_layout.setSpacing(5)
-
         left_panel = self._create_left_panel()
         main_layout.addWidget(left_panel, 1)
-
         right_panel = self._create_right_panel()
         main_layout.addWidget(right_panel, 1)
 
@@ -77,22 +110,36 @@ class AutoControlTab(QWidget):
         cmd_buttons_layout = QHBoxLayout()
         add_cmd_btn = QPushButton(QIcon.fromTheme("list-add"), " 추가"); add_cmd_btn.clicked.connect(self.add_command_profile)
         remove_cmd_btn = QPushButton(QIcon.fromTheme("list-remove"), " 삭제"); remove_cmd_btn.clicked.connect(self.remove_command_profile)
+        randomize_btn = QPushButton(QIcon.fromTheme("view-refresh"), " 지연 랜덤화")
+        randomize_btn.clicked.connect(self.randomize_delays)
+
         cmd_buttons_layout.addWidget(add_cmd_btn)
         cmd_buttons_layout.addWidget(remove_cmd_btn)
+        cmd_buttons_layout.addWidget(randomize_btn)
         cmd_group_layout.addLayout(cmd_buttons_layout)
-        # [UI 수정] 명령 프로필(2) : 액션 시퀀스(1) 비율로 변경
         top_h_layout.addLayout(cmd_group_layout, 2)
 
         # --- 시퀀스 편집기 ---
         seq_group_layout = QVBoxLayout()
+        
+        # [수정] 제목과 복사 버튼을 한 줄에 배치
+        seq_title_layout = QHBoxLayout()
         seq_title = QLabel("액션 시퀀스"); seq_title.setObjectName("TitleLabel")
-        seq_group_layout.addWidget(seq_title)
+        copy_seq_btn = QPushButton(QIcon.fromTheme("edit-copy"), " 복사")
+        copy_seq_btn.clicked.connect(self.copy_sequence_to_clipboard)
+        seq_title_layout.addWidget(seq_title)
+        seq_title_layout.addStretch()
+        seq_title_layout.addWidget(copy_seq_btn)
+        seq_group_layout.addLayout(seq_title_layout)
         
         self.action_sequence_list = QListWidget()
         self.action_sequence_list.currentItemChanged.connect(self.on_action_step_selected)
         seq_group_layout.addWidget(self.action_sequence_list)
 
         seq_buttons_layout = QHBoxLayout()
+        self.record_btn = QPushButton(QIcon.fromTheme("media-record"), " 녹화")
+        self.record_btn.setCheckable(True)
+        self.record_btn.clicked.connect(self.toggle_recording)
         test_seq_btn = QPushButton(QIcon.fromTheme("media-playback-start"), " 테스트"); test_seq_btn.clicked.connect(self.test_selected_sequence)
         
         add_step_btn = QPushButton(QIcon.fromTheme("list-add"), ""); add_step_btn.clicked.connect(self.add_action_step)
@@ -100,6 +147,7 @@ class AutoControlTab(QWidget):
         move_up_btn = QPushButton(QIcon.fromTheme("go-up"), ""); move_up_btn.clicked.connect(lambda: self.move_action_step(-1))
         move_down_btn = QPushButton(QIcon.fromTheme("go-down"), ""); move_down_btn.clicked.connect(lambda: self.move_action_step(1))
         
+        seq_buttons_layout.addWidget(self.record_btn)
         seq_buttons_layout.addWidget(test_seq_btn)
         seq_buttons_layout.addStretch()
         seq_buttons_layout.addWidget(add_step_btn)
@@ -110,9 +158,10 @@ class AutoControlTab(QWidget):
         top_h_layout.addLayout(seq_group_layout, 1)
         
         main_v_layout.addLayout(top_h_layout)
-
         self.editor_group = self._create_editor_panel()
         main_v_layout.addWidget(self.editor_group)
+        self.recording_settings_group = self._create_recording_settings_panel()
+        main_v_layout.addWidget(self.recording_settings_group)
         main_v_layout.addStretch()
         
         bottom_layout = QVBoxLayout()
@@ -165,6 +214,26 @@ class AutoControlTab(QWidget):
         editor_group.setEnabled(False)
         return editor_group
 
+    def _create_recording_settings_panel(self):
+        group = QGroupBox("녹화 설정")
+        layout = QFormLayout(group)
+        
+        key_options = ["없음"] + self.key_list_str
+        self.start_key_combo = QComboBox()
+        self.start_key_combo.addItems(key_options)
+        self.stop_key_combo = QComboBox()
+        self.stop_key_combo.addItems(key_options)
+        self.auto_stop_spin = QSpinBox()
+        self.auto_stop_spin.setRange(500, 30000) # 0.5초 ~ 30초
+        self.auto_stop_spin.setSingleStep(100)
+        self.auto_stop_spin.setValue(2000)
+        self.auto_stop_spin.setSuffix(" ms")
+
+        layout.addRow("녹화 시작 키:", self.start_key_combo)
+        layout.addRow("녹화 종료 키:", self.stop_key_combo)
+        layout.addRow("자동 종료 시간:", self.auto_stop_spin)
+        return group
+
     def _create_right_panel(self):
         right_widget = QFrame()
         right_layout = QVBoxLayout(right_widget)
@@ -193,15 +262,14 @@ class AutoControlTab(QWidget):
             QMessageBox.critical(self, "오류", f"키 매핑 저장에 실패했습니다:\n{e}")
 
     def create_default_mappings(self):
-        # [수정] 기본 지연 시간을 80~120ms로, 명령 프로필 이름을 새로운 이름으로 변경
         return {
             "걷기(우)": [{"type": "release_specific", "key_str": "Key.left"}, {"type": "press", "key_str": "Key.right"}],
             "걷기(좌)": [{"type": "release_specific", "key_str": "Key.right"}, {"type": "press", "key_str": "Key.left"}],
             "점프키 누르기": [{"type": "press", "key_str": "Key.space"}, {"type": "delay", "min_ms": 80, "max_ms": 120}, {"type": "release", "key_str": "Key.space"}],
             "아래점프": [
-                {"type": "press", "key_str": "Key.down"}, {"type": "delay", "min_ms": 80, "max_ms": 120},
-                {"type": "press", "key_str": "Key.space"}, {"type": "delay", "min_ms": 80, "max_ms": 120},
-                {"type": "release", "key_str": "Key.space"}, {"type": "delay", "min_ms": 80, "max_ms": 120},
+                {"type": "press", "key_str": "Key.down"}, {"type": "delay", "min_ms": 70, "max_ms": 120}, # 실제 녹화값 기반
+                {"type": "press", "key_str": "Key.alt_l"}, {"type": "delay", "min_ms": 40, "max_ms": 90},  # 실제 녹화값 기반
+                {"type": "release", "key_str": "Key.alt_l"}, {"type": "delay", "min_ms": 10, "max_ms": 50},   # 실제 녹화값 기반
                 {"type": "release", "key_str": "Key.down"}
             ],
             "사다리타기(우)": [
@@ -218,8 +286,11 @@ class AutoControlTab(QWidget):
                 {"type": "release", "key_str": "Key.left"}, {"type": "delay", "min_ms": 80, "max_ms": 120},
                 {"type": "press", "key_str": "Key.up"}
             ],
+            "오르기": [{"type": "press", "key_str": "Key.up"}], # <-- 이 줄이 추가되었습니다.
             "모든 키 떼기": [{"type": "release_all"}]
         }
+
+
     def reset_to_defaults(self):
         reply = QMessageBox.question(self, "기본값 복원", "모든 키 매핑을 기본값으로 되돌리시겠습니까?\n저장하지 않은 변경사항은 사라집니다.",
                                      QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel)
@@ -239,26 +310,69 @@ class AutoControlTab(QWidget):
                 self.command_list.setCurrentItem(items[0])
 
     def _generate_key_list(self):
-        keys = []
-        for k in KEY_MAP.keys():
+        """FULL_KEY_MAP에서 UI 콤보박스에 표시할 그룹화된 문자열 리스트 생성"""
+        
+        # 1. 키를 타입별로 분류
+        keys_by_type = {
+            "주요 특수키": [], "방향키": [], "알파벳": [], "숫자": [],
+            "기능키 (F1-F12)": [], "편집키": [], "수식키": []
+        }
+        
+        for k in FULL_KEY_MAP.keys():
+            key_str = ""
             if isinstance(k, str):
-                keys.append(k)
+                if 'a' <= k <= 'z':
+                    keys_by_type["알파벳"].append(k)
+                elif '0' <= k <= '9':
+                    keys_by_type["숫자"].append(k)
+                continue # 그 외 문자열 키는 일단 제외
+                
             elif isinstance(k, Key):
-                keys.append(f"Key.{k.name}")
-        return sorted(list(set(keys)))
+                name = k.name.replace('_l', '').replace('_r', '')
+                key_str = f"Key.{name}"
+                
+                if name in ['up', 'down', 'left', 'right']:
+                    keys_by_type["방향키"].append(key_str)
+                elif name.startswith('f') and name[1:].isdigit():
+                    keys_by_type["기능키 (F1-F12)"].append(key_str)
+                elif name in ['insert', 'delete', 'home', 'end', 'page_up', 'page_down']:
+                    keys_by_type["편집키"].append(key_str)
+                elif name in ['space', 'enter', 'esc', 'tab', 'backspace']:
+                    keys_by_type["주요 특수키"].append(key_str)
+                elif name in ['ctrl', 'alt', 'shift', 'cmd']:
+                    keys_by_type["수식키"].append(key_str)
+        
+        # 2. 각 그룹 내부 정렬
+        # 기능키는 F1, F2, F10 순서가 되도록 숫자 기준으로 특별 정렬
+        keys_by_type["기능키 (F1-F12)"].sort(key=lambda x: int(x.split('.')[1][1:]))
+        keys_by_type["방향키"].sort()
+        keys_by_type["알파벳"].sort()
+        keys_by_type["숫자"].sort()
+        
+        # 3. 최종 리스트 생성 (그룹화 및 구분선 추가)
+        final_key_list = []
+        for group_name, key_list in keys_by_type.items():
+            if key_list:
+                if final_key_list: # 첫 그룹이 아니면 구분선 추가
+                    final_key_list.append(f"─── {group_name} ───")
+                final_key_list.extend(sorted(list(set(key_list))))
+                
+        return final_key_list
 
-    def on_command_selected(self, current_item, _=None):
+    def on_command_selected(self, current_item, previous_item):
         self.editor_group.setEnabled(False) 
         self.action_sequence_list.clear()
-        if not current_item: return
+        if not current_item:
+            return
         
         command_text = current_item.text()
         self._populate_action_sequence_list(command_text)
 
-    def on_action_step_selected(self, current_item, _=None):
+    def on_action_step_selected(self, current_item, previous_item):
         if not current_item:
             self.editor_group.setEnabled(False)
             return
+            
         command_item = self.command_list.currentItem()
         if not command_item: return
         
@@ -369,6 +483,37 @@ class AutoControlTab(QWidget):
         del self.mappings[command_text][row]
         self._populate_action_sequence_list(command_text)
 
+    def randomize_delays(self):
+        """선택된 명령 프로필의 모든 delay 액션에 랜덤성을 부여합니다."""
+        command_item = self.command_list.currentItem()
+        if not command_item:
+            QMessageBox.warning(self, "알림", "지연 시간을 변경할 명령 프로필을 선택하세요.")
+            return
+
+        command_text = command_item.text()
+        sequence = self.mappings.get(command_text, [])
+        
+        changed_count = 0
+        for step in sequence:
+            if step.get("type") == "delay":
+                min_ms = step.get("min_ms", 0)
+                max_ms = step.get("max_ms", 0)
+                
+                # 최소값은 20ms 빼고, 최대값은 20ms 더함
+                new_min = max(0, min_ms - 20) # 음수가 되지 않도록 보장
+                new_max = max_ms + 20
+                
+                step["min_ms"] = new_min
+                step["max_ms"] = new_max
+                changed_count += 1
+        
+        if changed_count > 0:
+            # 변경된 내용을 UI에 즉시 반영
+            self._populate_action_sequence_list(command_text)
+            self.status_label.setText(f"'{command_text}' 프로필의 지연 시간 {changed_count}개를 랜덤화했습니다.")
+        else:
+            QMessageBox.information(self, "알림", "선택된 프로필에 지연(delay) 액션이 없습니다.")
+
     def move_action_step(self, direction):
         command_item = self.command_list.currentItem(); row = self.action_sequence_list.currentRow()
         if not command_item or row < 0: return
@@ -381,6 +526,36 @@ class AutoControlTab(QWidget):
         self._populate_action_sequence_list(command_text)
         self.action_sequence_list.setCurrentRow(new_row)
 
+# [기능 추가] 시퀀스 복사 메서드
+    def copy_sequence_to_clipboard(self):
+        """현재 선택된 명령 프로필의 액션 시퀀스를 JSON 문자열로 클립보드에 복사합니다."""
+        command_item = self.command_list.currentItem()
+        if not command_item:
+            QMessageBox.warning(self, "알림", "복사할 명령 프로필을 선택하세요.")
+            return
+
+        command_text = command_item.text()
+        sequence = self.mappings.get(command_text, [])
+
+        if not sequence:
+            QMessageBox.information(self, "알림", "선택된 프로필에 복사할 액션이 없습니다.")
+            return
+
+        try:
+            # 보기 좋게 들여쓰기된 JSON 문자열로 변환
+            sequence_text = json.dumps(sequence, indent=4, ensure_ascii=False)
+            
+            # PyQt의 클립보드 기능 사용
+            clipboard = QApplication.clipboard()
+            clipboard.setText(sequence_text)
+            
+            self.status_label.setText(f"'{command_text}' 시퀀스가 클립보드에 복사되었습니다.")
+            print(f"--- 클립보드에 복사된 내용 ---\n{sequence_text}\n--------------------------")
+
+        except Exception as e:
+            QMessageBox.critical(self, "오류", f"클립보드 복사 중 오류가 발생했습니다:\n{e}")
+
+    # --- 시리얼 통신 및 명령 실행 ---
     def connect_to_pi(self):
         if self.ser and self.ser.is_open:
             self.ser.close()
@@ -398,13 +573,17 @@ class AutoControlTab(QWidget):
         else: return key_str 
 
     def _send_command(self, command, key_object):
-        if not self.ser or not self.ser.is_open: return
-        key_code = KEY_MAP.get(key_object)
+        if not self.ser or not self.ser.is_open:
+            return
+        
+        # [수정] KEY_MAP 대신 FULL_KEY_MAP 사용
+        key_code = FULL_KEY_MAP.get(key_object)
         if key_code is not None:
             try:
                 self.ser.write(bytes([command, key_code]))
             except serial.SerialException as e:
-                print(f"[AutoControl] 데이터 전송 실패: {e}"); self.connect_to_pi()
+                print(f"[AutoControl] 데이터 전송 실패: {e}")
+                self.connect_to_pi()
 
     def _press_key(self, key_object):
         if key_object not in self.held_keys:
@@ -417,6 +596,14 @@ class AutoControlTab(QWidget):
     def _release_all_keys(self):
         for key_obj in list(self.held_keys): self._release_key(key_obj)
 
+# [기능 추가] 테스트 종료 후 안전하게 모든 키를 떼는 슬롯
+    @pyqtSlot()
+    def _safe_release_all_keys(self):
+        """테스트 종료 후 안전하게 모든 키를 떼고 상태를 업데이트하는 슬롯."""
+        print("[AutoControl] All keys released automatically after test.")
+        self._release_all_keys()
+        self.status_label.setText("테스트 후 모든 키가 자동으로 해제되었습니다.")
+
     def test_selected_sequence(self):
         command_item = self.command_list.currentItem()
         if not command_item:
@@ -427,11 +614,20 @@ class AutoControlTab(QWidget):
         if sequence is None:
             QMessageBox.warning(self, "오류", "선택된 명령에 대한 시퀀스를 찾을 수 없습니다.")
             return
-        self._execute_sequence(sequence, f"TEST: {command_text}")
+        
+        self.status_label.setText("2초 후 테스트를 시작합니다...")
+        # [수정] _execute_sequence 호출 시 is_test=True 인자 추가
+        QTimer.singleShot(2000, lambda: self._execute_sequence(sequence, f"TEST: {command_text}", is_test=True))
 
-    def _execute_sequence(self, sequence, command_name):
+    def _execute_sequence(self, sequence, command_name, is_test=False):
+        self.status_label.setText(f"'{command_name}' 실행 중...")
         print(f"--- [AutoControl] 실행 시작: '{command_name}' ---")
-        for step in sequence:
+        
+        for i, step in enumerate(sequence):
+            if is_test:
+                self.action_sequence_list.setCurrentRow(i)
+                QApplication.processEvents()
+
             action_type = step.get("type")
             if action_type in ["press", "release", "release_specific"]:
                 key_obj = self._str_to_key_obj(step.get("key_str"))
@@ -444,21 +640,34 @@ class AutoControlTab(QWidget):
                     self._release_key(key_obj); print(f"  - RELEASE: {key_obj}")
             elif action_type == "delay":
                 min_ms = step.get("min_ms", 0); max_ms = step.get("max_ms", 0)
-                # [수정] 정규 분포 랜덤 지연 적용
                 if min_ms >= max_ms:
                     delay_s = min_ms / 1000.0
                 else:
                     mean = (min_ms + max_ms) / 2
                     std_dev = (max_ms - min_ms) / 6
                     delay_ms = random.gauss(mean, std_dev)
-                    # 생성된 값이 범위를 벗어나지 않도록 강제
                     delay_ms = max(min(delay_ms, max_ms), min_ms)
                     delay_s = delay_ms / 1000.0
-
                 print(f"  - DELAY: {delay_s*1000:.0f}ms (범위: {min_ms}~{max_ms}ms)")
                 time.sleep(delay_s)
             elif action_type == "release_all":
                 self._release_all_keys(); print("  - RELEASE_ALL_KEYS")
+        
+        # --- [핵심 수정] ---
+        if is_test:
+            self.action_sequence_list.clearSelection()
+            QApplication.processEvents()
+
+            # 테스트 후 눌려있는 키가 있으면 2초 뒤 자동으로 모두 해제
+            if self.held_keys:
+                self.status_label.setText("테스트 완료. 2초 후 모든 키를 해제합니다...")
+                print("[AutoControl] TEST END: Sequence left keys pressed. Releasing all in 2s.")
+                QTimer.singleShot(2000, self._safe_release_all_keys)
+            else:
+                self.status_label.setText(f"'{command_name}' 실행 완료.")
+        else:
+            self.status_label.setText(f"'{command_name}' 실행 완료.")
+
         print(f"--- [AutoControl] 실행 완료 ---")
 
     @pyqtSlot(str)
@@ -467,10 +676,142 @@ class AutoControlTab(QWidget):
         if not sequence:
             print(f"[AutoControl] 경고: '{command_text}'에 대한 매핑이 없습니다.")
             return
+        
+        # [수정] is_test 인자를 전달하지 않음 (기본값 False 사용)
         self._execute_sequence(sequence, command_text)
+        
+    def toggle_recording(self):
+        if self.is_recording or self.is_waiting_for_start_key:
+            self.stop_recording()
+        else:
+            self.start_recording()
+
+    def start_recording(self):
+        if not self.command_list.currentItem():
+            QMessageBox.warning(self, "알림", "녹화할 명령 프로필을 먼저 선택하세요.")
+            self.record_btn.setChecked(False)
+            return
+        
+        self.recorded_sequence = []
+        self.last_event_time = 0 # [수정] 0으로 초기화하는 것은 유지
+        
+        # [수정] 녹화 시작 시 눌린 키 상태 초기화
+        self.currently_pressed_keys_for_recording.clear()
+        
+        self.start_key_str = self.start_key_combo.currentText()
+        self.stop_key_str = self.stop_key_combo.currentText()
+        
+        self.keyboard_listener = Listener(on_press=self._on_press, on_release=self._on_release)
+        self.keyboard_listener.start()
+        
+        if self.start_key_str != "없음":
+            self.is_waiting_for_start_key = True
+            self.recording_status_changed.emit(f"'{self.start_key_str}' 키를 눌러 녹화를 시작하세요...")
+        else:
+            self.is_recording = True
+            # [수정] 녹화가 즉시 시작되면, last_event_time을 현재 시간으로 설정
+            self.last_event_time = time.time()
+            self.reset_auto_stop_timer_signal.emit()
+            self.recording_status_changed.emit(f"녹화 중... ({self.auto_stop_spin.value()}ms 동안 입력 없으면 자동 종료)")
+        
+        self.record_btn.setText(" 녹화 중단")
+
+    @pyqtSlot()
+    def stop_recording(self):
+        if not self.is_recording and not self.is_waiting_for_start_key:
+            return
+
+        if self.keyboard_listener:
+            self.keyboard_listener.stop()
+            self.keyboard_listener = None
+        
+        self.auto_stop_timer.stop()
+        self.is_recording = False
+        self.is_waiting_for_start_key = False
+        
+        command_item = self.command_list.currentItem()
+        if command_item and self.recorded_sequence:
+            command_text = command_item.text()
+            self.mappings[command_text] = self.recorded_sequence
+            self._populate_action_sequence_list(command_text)
+            self.recording_status_changed.emit("녹화 완료. '매핑 저장'을 눌러주세요.")
+        else:
+            self.recording_status_changed.emit("녹화가 중단되었습니다.")
+            
+        self.record_btn.setChecked(False)
+        self.record_btn.setText(" 녹화")
+
+    def _key_to_str(self, key):
+        if isinstance(key, Key): return f"Key.{key.name}"
+        return key.char if hasattr(key, 'char') else 'N/A'
+
+    def _on_press(self, key):
+        key_str = self._key_to_str(key)
+        
+        if self.is_waiting_for_start_key:
+            if key_str == self.start_key_str:
+                self.is_waiting_for_start_key = False
+                self.is_recording = True
+                self.last_event_time = time.time()
+                self.reset_auto_stop_timer_signal.emit()
+                self.recording_status_changed.emit(f"녹화 시작! ('{self.stop_key_str}'로 종료)")
+            return
+
+        if self.is_recording:
+            # [핵심 수정] 시퀀스 기록 여부와 상관없이, 키 이벤트가 발생하면 무조건 타이머를 리셋
+            self.reset_auto_stop_timer_signal.emit()
+
+            # 키 반복 이벤트는 시퀀스에 기록하지 않고 무시
+            if key_str in self.currently_pressed_keys_for_recording:
+                return
+            
+            # 새로운 키 입력이므로 상태 집합과 시퀀스에 추가
+            self.currently_pressed_keys_for_recording.add(key_str)
+
+            now = time.time()
+            if self.last_event_time > 0:
+                delay_ms = int((now - self.last_event_time) * 1000)
+                if delay_ms > 0: 
+                    self.recorded_sequence.append({"type": "delay", "min_ms": delay_ms, "max_ms": delay_ms})
+            
+            self.recorded_sequence.append({"type": "press", "key_str": key_str})
+            self.last_event_time = now
+            
+            if key_str == self.stop_key_str:
+                self.recording_status_changed.emit("종료 키 입력됨. 녹화를 중단합니다.")
+                self.stop_recording_signal.emit()
+
+    def _on_release(self, key):
+        key_str = self._key_to_str(key)
+
+        if self.is_recording:
+            # [핵심 수정] 시퀀스 기록 여부와 상관없이, 키 이벤트가 발생하면 무조건 타이머를 리셋
+            self.reset_auto_stop_timer_signal.emit()
+
+            # 키를 떼었으므로 상태 집합에서 제거
+            self.currently_pressed_keys_for_recording.discard(key_str)
+
+            now = time.time()
+            delay_ms = int((now - self.last_event_time) * 1000)
+            if delay_ms > 0: 
+                self.recorded_sequence.append({"type": "delay", "min_ms": delay_ms, "max_ms": delay_ms})
+            
+            self.recorded_sequence.append({"type": "release", "key_str": key_str})
+            self.last_event_time = now
+
+
+    @pyqtSlot()
+    def _handle_reset_auto_stop_timer(self):
+        self.auto_stop_timer.start(self.auto_stop_spin.value())
+
+    @pyqtSlot(str)
+    def update_status_label(self, text):
+        self.status_label.setText(text)
 
     def cleanup_on_close(self):
         print("'자동 제어' 탭 정리 중...")
+        if self.keyboard_listener:
+            self.keyboard_listener.stop()
         if self.ser and self.ser.is_open:
             self._release_all_keys()
             time.sleep(0.1)
