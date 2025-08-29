@@ -7386,12 +7386,19 @@ class MapTab(QWidget):
         action_changed = current_action_key != self.last_printed_action
         direction_changed = current_direction != self.last_printed_direction
         player_state_changed = current_player_state != self.last_printed_player_state
-
+        # [수정] 캐릭터가 '지상'에 있을 때만 방향 안내를 갱신하도록 조건을 추가합니다.
+        is_on_ground = self._get_contact_terrain(final_player_pos) is not None
+        
         # 1. 'prepare_to_climb' 상태일 때의 특별 처리
         if current_action_key == 'prepare_to_climb':
-            # [수정] 캐릭터가 '지상'에 있을 때만 방향 안내를 갱신하도록 조건을 추가합니다.
-            is_on_ground = self._get_contact_terrain(final_player_pos) is not None
+
             
+            if self.last_printed_player_state in ['jumping'] and current_player_state in ['on_terrain', 'idle'] and is_on_ground:
+                if (action_changed or not direction_changed):
+                    direction_key_text = "우측" if current_direction == "→" else "좌측"
+                    print(f"{direction_key_text}방향키 + 점프키 + 방향키떼기 + 윗방향키(누르고있기)")
+                    self.last_printed_direction = current_direction
+          
             if (action_changed or direction_changed) and is_on_ground:
                 direction_key_text = "우측" if current_direction == "→" else "좌측"
                 print(f"{direction_key_text}방향키 + 점프키 + 방향키떼기 + 윗방향키(누르고있기)")
@@ -7403,13 +7410,10 @@ class MapTab(QWidget):
                 print("점프키 누르기")
             elif current_action_key == 'prepare_to_down_jump':
                 print("아래방향키 + 점프키 + 아래방향키 떼기")
-            elif current_action_key == 'climb_in_progress':
-                if self.player_state == 'climbing_up':
-                    print("위방향키 누르기")
             self.last_printed_direction = None
 
         # 3. 'move_to_target'(일반 이동) 상태일 때, 방향이 변경된 경우에만 출력합니다.
-        if current_action_key == 'move_to_target' and direction_changed:
+        if current_action_key == 'move_to_target' and direction_changed and is_on_ground:
             if current_direction in ["→", "←"]:
                 if current_direction == "→":
                     print("우측 방향키 누르기")
