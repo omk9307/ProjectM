@@ -55,26 +55,22 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.setWindowTitle('Project M - 통합 대시보드')
         
-        # ==================== v1.1 수정 시작 ====================
-        # 설정 파일 로드 및 창 위치/크기 복원
-        # QSettings("회사/조직 이름", "프로그램 이름")
         self.settings = QSettings("Gemini Inc.", "Maple AI Trainer")
         geometry = self.settings.value("geometry")
         if geometry:
             self.restoreGeometry(geometry)
         else:
-            # 기본 크기 설정
             self.setGeometry(100, 100, 1280, 800)
-        # ==================== v1.1 수정 끝 ======================
 
-        # 메인 탭 위젯 생성
         self.tab_widget = QTabWidget()
         self.tab_widget.setTabPosition(QTabWidget.TabPosition.North)
         self.tab_widget.setMovable(True)
 
         self.setCentralWidget(self.tab_widget)
 
-        # 정의된 탭들을 로드합니다.
+        # [수정] 로드된 탭 인스턴스를 저장할 딕셔너리
+        self.loaded_tabs = {}
+
         self.load_tabs()
 
     def load_tabs(self):
@@ -83,11 +79,15 @@ class MainWindow(QMainWindow):
         """
         tabs_to_load = [
             ('Learning', 'LearningTab', '학습'),
-            ('map', 'MapTab', '맵')
+            ('map', 'MapTab', '맵'),
+            ('auto_control', 'AutoControlTab', '자동 제어') # [추가]
         ]
 
         for module_name, class_name, tab_title in tabs_to_load:
             self.load_tab(module_name, class_name, tab_title)
+            
+        # [추가] 모든 탭 로드 후 시그널-슬롯 연결
+        self.connect_tabs()
 
     def load_tab(self, module_name, class_name, tab_title):
         """
@@ -98,9 +98,14 @@ class MainWindow(QMainWindow):
             TabClass = getattr(module, class_name)
             tab_instance = TabClass()
             self.tab_widget.addTab(tab_instance, tab_title)
+            
+            # [수정] 인스턴스를 딕셔너리에 저장
+            self.loaded_tabs[tab_title] = tab_instance
+            
             print(f"성공: '{tab_title}' 탭을 로드했습니다.")
 
         except ImportError as e:
+            # ... (기존 오류 처리 코드는 동일) ...
             print(f"오류: 모듈 '{module_name}'을(를) 찾을 수 없습니다. {e}")
             self.add_error_tab(tab_title, f"모듈 파일을 찾을 수 없습니다:\n{module_name}.py")
         except AttributeError as e:
@@ -110,6 +115,23 @@ class MainWindow(QMainWindow):
             print(f"오류: '{tab_title}' 탭 로드 중 예외 발생: {e}")
             self.add_error_tab(tab_title, f"알 수 없는 오류가 발생했습니다:\n{e}")
 
+    # [추가] 시그널-슬롯 연결을 위한 새 메서드
+    def connect_tabs(self):
+        """
+        로드된 탭들 간의 필요한 시그널-슬롯을 연결합니다.
+        """
+        if '맵' in self.loaded_tabs and '자동 제어' in self.loaded_tabs:
+            map_tab = self.loaded_tabs['맵']
+            auto_control_tab = self.loaded_tabs['자동 제어']
+            
+            # MapTab의 시그널을 AutoControlTab의 슬롯에 연결
+            map_tab.control_command_issued.connect(auto_control_tab.receive_control_command)
+            
+            print("성공: '맵' 탭과 '자동 제어' 탭을 연결했습니다.")
+        else:
+            print("경고: '맵' 또는 '자동 제어' 탭을 찾을 수 없어 연결하지 못했습니다.")
+
+    # ... (add_error_tab, closeEvent 메서드는 기존과 동일) ...
     def add_error_tab(self, title, message):
         """
         탭 로딩 실패 시, 사용자에게 오류를 알리는 탭을 추가합니다.
@@ -123,16 +145,13 @@ class MainWindow(QMainWindow):
         error_widget.setLayout(layout)
         self.tab_widget.addTab(error_widget, f"{title} (오류)")
 
-    # ==================== v1.1 수정 시작 ====================
     def closeEvent(self, event):
         """
         메인 윈도우가 닫힐 때 각 탭의 정리(cleanup) 함수를 호출하고,
         창의 위치와 크기를 저장합니다.
         """
-        # 창 위치/크기 저장
         self.settings.setValue("geometry", self.saveGeometry())
         
-        # 각 탭의 리소스 정리
         for i in range(self.tab_widget.count()):
             widget = self.tab_widget.widget(i)
             if hasattr(widget, 'cleanup_on_close') and callable(getattr(widget, 'cleanup_on_close')):
@@ -140,7 +159,6 @@ class MainWindow(QMainWindow):
                 widget.cleanup_on_close()
         
         event.accept()
-    # ==================== v1.1 수정 끝 ======================
 
 
 if __name__ == '__main__':
