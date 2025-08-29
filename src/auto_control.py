@@ -64,6 +64,18 @@ class AutoControlTab(QWidget):
         # [기능 추가] 키 반복 입력을 방지하기 위한 상태 추적용 집합
         self.currently_pressed_keys_for_recording = set()
 
+        # --- [핵심 수정] 시퀀스 실행 상태를 관리하기 위한 멤버 변수 추가 ---
+        self.sequence_timer = QTimer(self)
+        self.sequence_timer.setSingleShot(True)
+        self.sequence_timer.timeout.connect(self._process_next_step)
+        self.is_sequence_running = False
+        self.current_sequence = []
+        self.current_sequence_index = 0
+        self.current_command_name = ""
+        self.is_test_mode = False
+        # --- 수정 끝 ---
+
+
         self.init_ui()
         self.load_mappings()
         self.connect_to_pi()
@@ -82,7 +94,7 @@ class AutoControlTab(QWidget):
             QPushButton:checked { background-color: #c62828; color: white; border: 1px solid #999; }
         """)
 
-    # ... (init_ui 및 UI 생성 메서드들은 이전과 동일) ...
+    # ... (init_ui 및 다른 UI 관련 메서드는 변경 없음) ...
     def init_ui(self):
         main_layout = QHBoxLayout(self)
         main_layout.setContentsMargins(5, 5, 5, 5)
@@ -526,7 +538,6 @@ class AutoControlTab(QWidget):
         self._populate_action_sequence_list(command_text)
         self.action_sequence_list.setCurrentRow(new_row)
 
-# [기능 추가] 시퀀스 복사 메서드
     def copy_sequence_to_clipboard(self):
         """현재 선택된 명령 프로필의 액션 시퀀스를 JSON 문자열로 클립보드에 복사합니다."""
         command_item = self.command_list.currentItem()
@@ -616,59 +627,92 @@ class AutoControlTab(QWidget):
             return
         
         self.status_label.setText("2초 후 테스트를 시작합니다...")
-        # [수정] _execute_sequence 호출 시 is_test=True 인자 추가
-        QTimer.singleShot(2000, lambda: self._execute_sequence(sequence, f"TEST: {command_text}", is_test=True))
+        QTimer.singleShot(2000, lambda: self._start_sequence_execution(sequence, f"TEST: {command_text}", is_test=True))
+    
+    # --- [핵심 수정] time.sleep()을 QTimer 기반의 비동기 방식으로 변경 ---
+    def _start_sequence_execution(self, sequence, command_name, is_test=False):
+        """
+        시퀀스 실행을 시작합니다. 이미 실행 중인 시퀀스가 있다면 중단합니다.
+        """
+        if self.is_sequence_running:
+            self.sequence_timer.stop()
+            print(f"--- [AutoControl] 이전 시퀀스 중단: '{self.current_command_name}' ---")
 
-    def _execute_sequence(self, sequence, command_name, is_test=False):
         self.status_label.setText(f"'{command_name}' 실행 중...")
         print(f"--- [AutoControl] 실행 시작: '{command_name}' ---")
-        
-        for i, step in enumerate(sequence):
-            if is_test:
-                self.action_sequence_list.setCurrentRow(i)
-                QApplication.processEvents()
 
-            action_type = step.get("type")
-            if action_type in ["press", "release", "release_specific"]:
-                key_obj = self._str_to_key_obj(step.get("key_str"))
-                if not key_obj:
-                    print(f"  - 오류: 알 수 없는 키 '{step.get('key_str')}'")
-                    continue
-                if action_type == "press":
-                    self._press_key(key_obj); print(f"  - PRESS: {key_obj}")
-                else:
-                    self._release_key(key_obj); print(f"  - RELEASE: {key_obj}")
-            elif action_type == "delay":
-                min_ms = step.get("min_ms", 0); max_ms = step.get("max_ms", 0)
-                if min_ms >= max_ms:
-                    delay_s = min_ms / 1000.0
-                else:
-                    mean = (min_ms + max_ms) / 2
-                    std_dev = (max_ms - min_ms) / 6
-                    delay_ms = random.gauss(mean, std_dev)
-                    delay_ms = max(min(delay_ms, max_ms), min_ms)
-                    delay_s = delay_ms / 1000.0
-                print(f"  - DELAY: {delay_s*1000:.0f}ms (범위: {min_ms}~{max_ms}ms)")
-                time.sleep(delay_s)
-            elif action_type == "release_all":
-                self._release_all_keys(); print("  - RELEASE_ALL_KEYS")
+        self.current_sequence = sequence
+        self.current_command_name = command_name
+        self.is_test_mode = is_test
+        self.current_sequence_index = 0
+        self.is_sequence_running = True
         
-        # --- [핵심 수정] ---
-        if is_test:
-            self.action_sequence_list.clearSelection()
-            QApplication.processEvents()
+        # 첫 단계를 즉시 실행
+        self._process_next_step()
 
-            # 테스트 후 눌려있는 키가 있으면 2초 뒤 자동으로 모두 해제
-            if self.held_keys:
-                self.status_label.setText("테스트 완료. 2초 후 모든 키를 해제합니다...")
-                print("[AutoControl] TEST END: Sequence left keys pressed. Releasing all in 2s.")
-                QTimer.singleShot(2000, self._safe_release_all_keys)
+    def _process_next_step(self):
+        """
+        시퀀스의 현재 단계를 처리하고, 다음 단계를 QTimer로 스케줄링합니다.
+        """
+        # 시퀀스가 중단되었거나 끝에 도달했으면 종료
+        if not self.is_sequence_running or self.current_sequence_index >= len(self.current_sequence):
+            self.is_sequence_running = False
+            
+            if self.is_test_mode:
+                self.action_sequence_list.clearSelection()
+                # 테스트 후 눌려있는 키가 있으면 2초 뒤 자동으로 모두 해제
+                if self.held_keys:
+                    self.status_label.setText("테스트 완료. 2초 후 모든 키를 해제합니다...")
+                    print("[AutoControl] TEST END: Sequence left keys pressed. Releasing all in 2s.")
+                    QTimer.singleShot(2000, self._safe_release_all_keys)
+                else:
+                    self.status_label.setText(f"'{self.current_command_name}' 실행 완료.")
             else:
-                self.status_label.setText(f"'{command_name}' 실행 완료.")
-        else:
-            self.status_label.setText(f"'{command_name}' 실행 완료.")
+                self.status_label.setText(f"'{self.current_command_name}' 실행 완료.")
 
-        print(f"--- [AutoControl] 실행 완료 ---")
+            print(f"--- [AutoControl] 실행 완료: '{self.current_command_name}' ---")
+            return
+
+        step = self.current_sequence[self.current_sequence_index]
+        
+        if self.is_test_mode:
+            self.action_sequence_list.setCurrentRow(self.current_sequence_index)
+            # QApplication.processEvents() # QTimer를 사용하므로 더 이상 필요 없음
+
+        action_type = step.get("type")
+        delay_ms = 1 # 기본 딜레이. 키 입력 후 즉시 다음 단계로 넘어감
+
+        if action_type in ["press", "release", "release_specific"]:
+            key_obj = self._str_to_key_obj(step.get("key_str"))
+            if not key_obj:
+                print(f"  - 오류: 알 수 없는 키 '{step.get('key_str')}'")
+            elif action_type == "press":
+                self._press_key(key_obj); print(f"  - PRESS: {key_obj}")
+            else:
+                self._release_key(key_obj); print(f"  - RELEASE: {key_obj}")
+        
+        elif action_type == "delay":
+            min_ms = step.get("min_ms", 0)
+            max_ms = step.get("max_ms", 0)
+            if min_ms >= max_ms:
+                delay_ms = min_ms
+            else:
+                # 가우시안 분포를 사용한 랜덤 지연 (기존 로직과 동일)
+                mean = (min_ms + max_ms) / 2
+                std_dev = (max_ms - min_ms) / 6
+                random_delay = random.gauss(mean, std_dev)
+                delay_ms = int(max(min(random_delay, max_ms), min_ms))
+            print(f"  - DELAY: {delay_ms}ms (범위: {min_ms}~{max_ms}ms)")
+
+        elif action_type == "release_all":
+            self._release_all_keys()
+            print("  - RELEASE_ALL_KEYS")
+            
+        # 다음 단계로 인덱스 증가
+        self.current_sequence_index += 1
+        
+        # 다음 단계 실행을 스케줄링
+        self.sequence_timer.start(delay_ms)
 
     @pyqtSlot(str)
     def receive_control_command(self, command_text):
@@ -677,8 +721,8 @@ class AutoControlTab(QWidget):
             print(f"[AutoControl] 경고: '{command_text}'에 대한 매핑이 없습니다.")
             return
         
-        # [수정] is_test 인자를 전달하지 않음 (기본값 False 사용)
-        self._execute_sequence(sequence, command_text)
+        # is_test 인자를 False로 하여 실행 시작
+        self._start_sequence_execution(sequence, command_text, is_test=False)
         
     def toggle_recording(self):
         if self.is_recording or self.is_waiting_for_start_key:
@@ -810,10 +854,14 @@ class AutoControlTab(QWidget):
 
     def cleanup_on_close(self):
         print("'자동 제어' 탭 정리 중...")
+        # --- [핵심 수정] 종료 시 실행 중인 시퀀스 중단 ---
+        self.is_sequence_running = False
+        self.sequence_timer.stop()
+        # --- 수정 끝 ---
         if self.keyboard_listener:
             self.keyboard_listener.stop()
         if self.ser and self.ser.is_open:
             self._release_all_keys()
-            time.sleep(0.1)
+            time.sleep(0.1) # 키 떼기 명령이 전달될 시간을 확보
             self.ser.close()
             print("시리얼 포트 연결을 해제했습니다.")
