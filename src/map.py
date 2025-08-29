@@ -4273,6 +4273,9 @@ class StateConfigDialog(QDialog):
                 spinbox.setValue(defaults[key])
 
 class MapTab(QWidget):
+    # control_command_issued 시그널을 추가합니다. str 타입을 전달합니다.
+    control_command_issued = pyqtSignal(str) 
+    
     global_pos_updated = pyqtSignal(QPointF)
     collection_status_signal = pyqtSignal(str, str, bool)
     # [MODIFIED] v14.3.0: 점프 프로파일링 관련 시그널로 변경 및 추가
@@ -7378,7 +7381,7 @@ class MapTab(QWidget):
             current_node_key = self.current_segment_path[self.current_segment_index]
             intermediate_node_type = self.nav_nodes.get(current_node_key, {}).get('type')
 
-        # === [사용자 요청] 통합된 키 입력 안내 로직 (v10) ===
+        # === [사용자 요청] 통합된 키 입력 안내 로직 (v10) - 이름 재지정됨 ===
         current_action_key = self.navigation_action
         current_player_state = self.player_state
         current_direction = direction
@@ -7386,49 +7389,59 @@ class MapTab(QWidget):
         action_changed = current_action_key != self.last_printed_action
         direction_changed = current_direction != self.last_printed_direction
         player_state_changed = current_player_state != self.last_printed_player_state
-        # [수정] 캐릭터가 '지상'에 있을 때만 방향 안내를 갱신하도록 조건을 추가합니다.
         is_on_ground = self._get_contact_terrain(final_player_pos) is not None
         
         # 1. 'prepare_to_climb' 상태일 때의 특별 처리
         if current_action_key == 'prepare_to_climb':
-
-            
             if self.last_printed_player_state in ['jumping'] and current_player_state in ['on_terrain', 'idle'] and is_on_ground:
                 if (action_changed or not direction_changed):
-                    direction_key_text = "우측" if current_direction == "→" else "좌측"
-                    print(f"{direction_key_text}방향키 + 점프키 + 방향키떼기 + 윗방향키(누르고있기)")
+                    # [이름 변경]
+                    if current_direction == "→":
+                        self.control_command_issued.emit("사다리타기(우)")
+                    else:
+                        self.control_command_issued.emit("사다리타기(좌)")
                     self.last_printed_direction = current_direction
           
             if (action_changed or direction_changed) and is_on_ground:
-                direction_key_text = "우측" if current_direction == "→" else "좌측"
-                print(f"{direction_key_text}방향키 + 점프키 + 방향키떼기 + 윗방향키(누르고있기)")
+                # [이름 변경]
+                if current_direction == "→":
+                    self.control_command_issued.emit("사다리타기(우)")
+                else:
+                    self.control_command_issued.emit("사다리타기(좌)")
                 self.last_printed_direction = current_direction
 
         # 2. 그 외의 행동들은, 행동 자체가 처음 변경되었을 때만 출력합니다.
         elif action_changed:
             if current_action_key == 'prepare_to_jump':
-                print("점프키 누르기")
+                self.control_command_issued.emit("점프키 누르기") # 변경 없음
             elif current_action_key == 'prepare_to_down_jump':
-                print("아래방향키 + 점프키 + 아래방향키 떼기")
+                # [이름 변경]
+                self.control_command_issued.emit("아래점프")
             self.last_printed_direction = None
 
-        # 3. 'move_to_target'(일반 이동) 상태일 때, 방향이 변경된 경우에만 출력합니다.
-        if current_action_key == 'move_to_target' and direction_changed and is_on_ground:
-            if current_direction in ["→", "←"]:
-                if current_direction == "→":
-                    print("우측 방향키 누르기")
-                elif current_direction == "←":
-                    print("좌측 방향키 누르기")
-                self.last_printed_direction = current_direction
-
-        # 4. 물리적 상태 변경 감지
+        # 3. 물리적 상태 변경 감지를 먼저 처리
         if player_state_changed:
+            # [기능 추가] 'climbing_up' 상태 진입 시 "오르기" 명령 전송
+            if current_player_state == 'climbing_up':
+                self.control_command_issued.emit("오르기")
+                
             if current_player_state == 'falling':
                 if 'prepare_to_' not in current_action_key:
-                    print("모든 키 떼기")
+                    self.control_command_issued.emit("모든 키 떼기")
             
+            # 착지 시, 다음 프레임에서 방향 안내가 다시 나갈 수 있도록 last_printed_direction을 초기화
             if self.last_printed_player_state == 'falling' and current_player_state in ['on_terrain', 'idle']:
                 self.last_printed_direction = None
+
+        # 4. 'move_to_target'(일반 이동) 상태일 때, 방향이 변경된 경우에만 출력합니다.
+        if current_action_key == 'move_to_target' and direction_changed and is_on_ground:
+            if current_direction in ["→", "←"]:
+                # [이름 변경]
+                if current_direction == "→":
+                    self.control_command_issued.emit("걷기(우)")
+                elif current_direction == "←":
+                    self.control_command_issued.emit("걷기(좌)")
+                self.last_printed_direction = current_direction
 
         # 마지막으로, 현재 상태들을 "마지막으로 출력한 상태"로 기록합니다.
         if action_changed:
