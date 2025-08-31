@@ -4296,6 +4296,9 @@ class MapTab(QWidget):
             self.editor_dialog = None 
             self.global_positions = {}
             
+            # 탐지 스레드의 실행 상태를 명확하게 추적하기 위한 플래그
+            self.is_detection_running = False
+            
             self.full_map_pixmap = None
             self.full_map_bounding_rect = QRectF()
             self.my_player_global_rects = []
@@ -4393,9 +4396,9 @@ class MapTab(QWidget):
             self.expected_terrain_group = None  # 현재 안내 경로가 유효하기 위해 플레이어가 있어야 할 지형 그룹
             # --- v12.0.0: 추가 끝 ---
             
-            # [추가] 마지막으로 출력한 물리적 상태를 기억하기 위한 변수
+            #  마지막으로 출력한 물리적 상태를 기억하기 위한 변수
             self.last_printed_player_state = None
-            # [추가] 마지막으로 출력한 행동과 방향을 기억하기 위한 변수
+            #  마지막으로 출력한 행동과 방향을 기억하기 위한 변수
             self.last_printed_action = None
             self.last_printed_direction = None
 
@@ -4405,9 +4408,9 @@ class MapTab(QWidget):
             # 디버그 체크박스 멤버 변수
             self.debug_pathfinding_checkbox = None
             self.debug_state_machine_checkbox = None
-            self.debug_guidance_checkbox = None # <<< [추가] 경로안내선 디버그 체크박스 변수
+            self.debug_guidance_checkbox = None # <<<  경로안내선 디버그 체크박스 변수
 
-            # [추가] 경로안내선 디버그를 위한 이전 상태 저장 변수
+            #  경로안내선 디버그를 위한 이전 상태 저장 변수
             self.last_debug_target_pos = None
             self.last_debug_nav_action = None
             self.last_debug_guidance_text = None
@@ -4438,7 +4441,7 @@ class MapTab(QWidget):
             # [NEW] UI 업데이트 조절(Throttling)을 위한 카운터
             self.log_update_counter = 0
 
-            # [추가] 탐지 시작 시간을 기록하기 위한 변수
+            #  탐지 시작 시간을 기록하기 위한 변수
             self.detection_start_time = 0
             # [핵심 수정] 시작 딜레이 중 키 해제 명령을 한 번만 보내기 위한 플래그
             self.initial_delay_active = False
@@ -4597,11 +4600,11 @@ class MapTab(QWidget):
         self.debug_basic_pathfinding_checkbox = QCheckBox("경로탐색 기본 로그 출력")
         self.debug_pathfinding_checkbox = QCheckBox("경로탐색 상세 로그 출력 (A*)")
         self.debug_state_machine_checkbox = QCheckBox("상태판정 변경 로그 출력")
-        self.debug_guidance_checkbox = QCheckBox("경로안내선 변경 로그 출력") # <<< [추가]
+        self.debug_guidance_checkbox = QCheckBox("경로안내선 변경 로그 출력") 
         debug_layout.addWidget(self.debug_basic_pathfinding_checkbox)
         debug_layout.addWidget(self.debug_pathfinding_checkbox)
         debug_layout.addWidget(self.debug_state_machine_checkbox)
-        debug_layout.addWidget(self.debug_guidance_checkbox) # <<< [추가]
+        debug_layout.addWidget(self.debug_guidance_checkbox)
         debug_groupbox.setLayout(debug_layout)
         left_layout.addWidget(debug_groupbox)
 
@@ -5700,6 +5703,10 @@ class MapTab(QWidget):
                 self.detection_log_viewer.clear()
                 self.update_general_log("탐지를 시작합니다...", "SaddleBrown")
 
+                # 스레드 시작 전에 플래그를 True로 설정
+                self.is_detection_running = True
+                self.update_general_log("탐지를 시작합니다...", "SaddleBrown")
+
                 # --- [v12.3.1] 모든 내비게이션 상태 변수 완벽 초기화 ---
                 self.journey_plan = []
                 self.current_journey_index = 0
@@ -5737,6 +5744,9 @@ class MapTab(QWidget):
 
                 self.detect_anchor_btn.setText("탐지 중단")
             else:
+                # [핵심 수정] 스레드 중단 전에 플래그를 False로 먼저 설정
+                self.is_detection_running = False
+
                 if self.detection_thread and self.detection_thread.isRunning():
                     self.detection_thread.stop()
                     self.detection_thread.wait()
@@ -5744,7 +5754,6 @@ class MapTab(QWidget):
                     self.capture_thread.stop()
                     self.capture_thread.wait()
                     
-                # [핵심 수정] 탐지 중지 시 모든 키를 떼도록 명령
                 self.control_command_issued.emit("모든 키 떼기")
                 self.update_general_log("탐지를 중단합니다.", "black")
                 self.detect_anchor_btn.setText("탐지 시작")
@@ -6159,6 +6168,10 @@ class MapTab(QWidget):
         - 2. player_state를 최신화.
         - 3. 계산된 위치/상태 값을 사용하는 부가 기능(프로파일링, 데이터 수집)을 마지막에 실행.
         """
+        # [핵심 수정] 탐지 상태 플래그를 확인하여 경쟁 조건을 방지
+        if not self.is_detection_running:
+            return
+
         if not my_player_rects:
             self.update_detection_log_message("플레이어 아이콘 탐지 실패", "red")
             if self.debug_dialog and self.debug_dialog.isVisible():
@@ -8735,6 +8748,9 @@ class MapTab(QWidget):
 
     def cleanup_on_close(self):
         self.save_global_settings()
+        # 프로그램 종료 시에도 탐지 상태 플래그를 False로 설정
+        self.is_detection_running = False
+
         if self.detection_thread and self.detection_thread.isRunning():
             self.detection_thread.stop()
             self.detection_thread.wait()
