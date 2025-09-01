@@ -4275,7 +4275,8 @@ class StateConfigDialog(QDialog):
 class MapTab(QWidget):
     # control_command_issued 시그널을 추가합니다. str 타입을 전달합니다.
     control_command_issued = pyqtSignal(str) 
-    
+    # [추가] 탐지 상태 변경을 알리는 신호 (True: 시작, False: 중단)
+    detection_status_changed = pyqtSignal(bool)
     global_pos_updated = pyqtSignal(QPointF)
     collection_status_signal = pyqtSignal(str, str, bool)
     # [MODIFIED] v14.3.0: 점프 프로파일링 관련 시그널로 변경 및 추가
@@ -5683,6 +5684,13 @@ class MapTab(QWidget):
         return valid_rects
 
     def toggle_anchor_detection(self, checked):
+            #  외부 호출(sender() is None) 또는 버튼 직접 클릭 시 상태를 동기화
+            if self.sender() is None:
+                # 외부에서 호출된 경우, 버튼의 상태를 프로그램적으로 토글
+                self.detect_anchor_btn.toggle()
+                # 토글된 후의 실제 상태를 checked 변수에 반영
+                checked = self.detect_anchor_btn.isChecked()
+            
             if checked:
                 if not self.minimap_region:
                     QMessageBox.warning(self, "오류", "먼저 '미니맵 범위 지정'을 해주세요.")
@@ -5705,6 +5713,7 @@ class MapTab(QWidget):
 
                 # 스레드 시작 전에 플래그를 True로 설정
                 self.is_detection_running = True
+                self.detection_status_changed.emit(True)   # 탐지 시작 상태를 신호로 알림
                 self.update_general_log("탐지를 시작합니다...", "SaddleBrown")
 
                 # --- [v12.3.1] 모든 내비게이션 상태 변수 완벽 초기화 ---
@@ -5746,6 +5755,7 @@ class MapTab(QWidget):
             else:
                 # [핵심 수정] 스레드 중단 전에 플래그를 False로 먼저 설정
                 self.is_detection_running = False
+                self.detection_status_changed.emit(False)
 
                 if self.detection_thread and self.detection_thread.isRunning():
                     self.detection_thread.stop()

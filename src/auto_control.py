@@ -7,12 +7,13 @@ import os
 import random
 from PyQt6.QtWidgets import (
     QApplication, QWidget, QVBoxLayout, QHBoxLayout, QLabel, QListWidget, QPushButton,
-    QGroupBox, QFormLayout, QComboBox, QSpinBox, QMessageBox, QFrame,
-    QListWidgetItem, QInputDialog
+    QGroupBox, QFormLayout, QComboBox, QSpinBox, QMessageBox, QFrame, QCheckBox,
+    QListWidgetItem, QInputDialog, QAbstractItemView
 )
 from PyQt6.QtCore import pyqtSlot, Qt, QTimer, pyqtSignal
-from PyQt6.QtGui import QIcon
+from PyQt6.QtGui import QIcon, QColor
 from pynput.keyboard import Key, Listener
+from datetime import datetime
 
 # --- 설정 및 상수 ---
 SERIAL_PORT = 'COM6'
@@ -21,7 +22,7 @@ CMD_PRESS = 0x01
 CMD_RELEASE = 0x02
 KEY_MAPPINGS_FILE = os.path.join('Project_Maple','workspace', 'config', 'key_mappings.json')
 
-# [수정] 모든 키의 표준 HID 코드를 담는 통합 맵
+#  모든 키의 표준 HID 코드를 담는 통합 맵
 FULL_KEY_MAP = {
     'a': 4, 'b': 5, 'c': 6, 'd': 7, 'e': 8, 'f': 9, 'g': 10, 'h': 11, 'i': 12, 'j': 13, 'k': 14, 'l': 15, 'm': 16, 'n': 17, 'o': 18, 'p': 19, 'q': 20, 'r': 21, 's': 22, 't': 23, 'u': 24, 'v': 25, 'w': 26, 'x': 27, 'y': 28, 'z': 29,
     '1': 30, '2': 31, '3': 32, '4': 33, '5': 34, '6': 35, '7': 36, '8': 37, '9': 38, '0': 39,
@@ -38,12 +39,31 @@ FULL_KEY_MAP = {
     Key.cmd_r: 231,
 }
 
+class CopyableListWidget(QListWidget):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        # 여러 항목을 선택할 수 있도록 설정
+        self.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
+
+    def keyPressEvent(self, event):
+        # Ctrl+C가 눌렸는지 확인
+        if event.key() == Qt.Key.Key_C and event.modifiers() == Qt.KeyboardModifier.ControlModifier:
+            selected_items = self.selectedItems()
+            if selected_items:
+                # 선택된 모든 항목의 텍스트를 줄바꿈으로 연결
+                copied_text = "\n".join(item.text() for item in selected_items)
+                QApplication.clipboard().setText(copied_text)
+        else:
+            # 다른 키 입력은 기본 동작을 따름
+            super().keyPressEvent(event)
+
+
 class AutoControlTab(QWidget):
     recording_status_changed = pyqtSignal(str)
-    # [오류 수정] pynput 스레드에서 GUI 타이머를 제어하기 위한 시그널
     reset_auto_stop_timer_signal = pyqtSignal()
-    # [오류 수정] pynput 스레드에서 녹화 중지를 요청하기 위한 시그널
     stop_recording_signal = pyqtSignal()
+    log_generated = pyqtSignal(str, str)
+    request_detection_toggle = pyqtSignal()
 
     def __init__(self):
         super().__init__()
@@ -52,19 +72,18 @@ class AutoControlTab(QWidget):
         self.mappings = {}
         self.key_list_str = self._generate_key_list()
 
+        # --- 녹화 관련 변수 ---
         self.is_recording = False
         self.is_waiting_for_start_key = False
         self.keyboard_listener = None
         self.recorded_sequence = []
         self.last_event_time = 0
         self.auto_stop_timer = QTimer(self)
-        self.auto_stop_timer.setSingleShot(True) # 한 번만 실행되도록 설정
+        self.auto_stop_timer.setSingleShot(True)
         self.auto_stop_timer.timeout.connect(self.stop_recording)
-
-        # [기능 추가] 키 반복 입력을 방지하기 위한 상태 추적용 집합
         self.currently_pressed_keys_for_recording = set()
 
-        # --- [핵심 수정] 시퀀스 실행 상태를 관리하기 위한 멤버 변수 추가 ---
+        # --- 시퀀스 실행 관련 변수 ---
         self.sequence_timer = QTimer(self)
         self.sequence_timer.setSingleShot(True)
         self.sequence_timer.timeout.connect(self._process_next_step)
@@ -73,19 +92,26 @@ class AutoControlTab(QWidget):
         self.current_sequence_index = 0
         self.current_command_name = ""
         self.is_test_mode = False
-        # --- 수정 끝 ---
 
+        self.is_map_detection_running = False
+        self.last_log_time = 0.0
 
+        self.globally_pressed_keys = set()
+        self.global_listener = None
+        
         self.init_ui()
         self.load_mappings()
         self.connect_to_pi()
         
+        # --- 시그널/슬롯 연결 ---
         self.recording_status_changed.connect(self.update_status_label)
-        # [오류 수정] 시그널과 슬롯 연결
         self.reset_auto_stop_timer_signal.connect(self._handle_reset_auto_stop_timer)
         self.stop_recording_signal.connect(self.stop_recording)
+        # [핵심 수정] 통합된 로그 신호와 슬롯만 연결합니다.
+        self.log_generated.connect(self._add_log_entry)
+
+        self.start_global_listener()
         
-        # ... (스타일시트 코드는 이전과 동일) ...
         self.setStyleSheet("""
             QFrame { border: 1px solid #444; border-radius: 5px; }
             QLabel#TitleLabel { font-size: 13px; font-weight: bold; padding: 5px; background-color: #3a3a3a; color: white; border-top-left-radius: 4px; border-top-right-radius: 4px; }
@@ -94,7 +120,6 @@ class AutoControlTab(QWidget):
             QPushButton:checked { background-color: #c62828; color: white; border: 1px solid #999; }
         """)
 
-    # ... (init_ui 및 다른 UI 관련 메서드는 변경 없음) ...
     def init_ui(self):
         main_layout = QHBoxLayout(self)
         main_layout.setContentsMargins(5, 5, 5, 5)
@@ -134,7 +159,7 @@ class AutoControlTab(QWidget):
         # --- 시퀀스 편집기 ---
         seq_group_layout = QVBoxLayout()
         
-        # [수정] 제목과 복사 버튼을 한 줄에 배치
+        #  제목과 복사 버튼을 한 줄에 배치
         seq_title_layout = QHBoxLayout()
         seq_title = QLabel("액션 시퀀스"); seq_title.setObjectName("TitleLabel")
         copy_seq_btn = QPushButton(QIcon.fromTheme("edit-copy"), " 복사")
@@ -249,9 +274,47 @@ class AutoControlTab(QWidget):
     def _create_right_panel(self):
         right_widget = QFrame()
         right_layout = QVBoxLayout(right_widget)
-        info_label = QLabel("추후 기능 추가 예정")
-        info_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        right_layout.addWidget(info_label)
+        
+        header_layout = QHBoxLayout()
+        title = QLabel("실시간 로그") # [수정] 제목 변경
+        title.setObjectName("TitleLabel")
+        
+        self.log_checkbox = QCheckBox("입력 감지")
+        self.log_checkbox.setChecked(False)
+        
+        self.console_log_checkbox = QCheckBox("상세 콘솔 로그")
+        self.console_log_checkbox.setChecked(False)
+        
+        clear_log_btn = QPushButton(QIcon.fromTheme("edit-clear"), "로그 지우기")
+        
+        header_layout.addWidget(title)
+        header_layout.addStretch()
+        header_layout.addWidget(self.log_checkbox)
+        header_layout.addWidget(self.console_log_checkbox)
+        header_layout.addWidget(clear_log_btn)
+        
+        right_layout.addLayout(header_layout)
+
+        # [수정] QListWidget을 CopyableListWidget으로 교체
+        self.key_log_list = CopyableListWidget()
+        self.key_log_list.setWordWrap(True)
+        self.key_log_list.setStyleSheet("""
+            QListWidget {
+                background-color: #2E2E2E;
+                color: white;
+                border: 1px solid #555;
+            }
+        """)
+        right_layout.addWidget(self.key_log_list)
+
+        # [추가] 탐지 시작/중지 버튼 추가 및 기능 연결
+        self.detection_button = QPushButton("탐지 시작")
+        self.detection_button.setCheckable(True)
+        self.detection_button.clicked.connect(self.request_detection_toggle.emit)
+        right_layout.addWidget(self.detection_button)
+
+        clear_log_btn.clicked.connect(self.key_log_list.clear)
+
         return right_widget
 
     def load_mappings(self):
@@ -587,7 +650,7 @@ class AutoControlTab(QWidget):
         if not self.ser or not self.ser.is_open:
             return
         
-        # [수정] KEY_MAP 대신 FULL_KEY_MAP 사용
+        #  KEY_MAP 대신 FULL_KEY_MAP 사용
         key_code = FULL_KEY_MAP.get(key_object)
         if key_code is not None:
             try:
@@ -636,12 +699,15 @@ class AutoControlTab(QWidget):
         """
         if self.is_sequence_running:
             self.sequence_timer.stop()
-            # [추가 개선] 이전 시퀀스 중단 시, 눌려있던 모든 키를 해제
             self._release_all_keys()
-            print(f"--- [AutoControl] 이전 시퀀스 중단: '{self.current_command_name}' ---")
+            if self.console_log_checkbox.isChecked():
+                print(f"--- [AutoControl] 이전 시퀀스 중단: '{self.current_command_name}' ---")
 
+        #  통합 로그 시그널 사용
+        self.log_generated.emit(f"(시작) {command_name}", "red")
         self.status_label.setText(f"'{command_name}' 실행 중...")
-        print(f"--- [AutoControl] 실행 시작: '{command_name}' ---")
+        if self.console_log_checkbox.isChecked():
+            print(f"--- [AutoControl] 실행 시작: '{command_name}' ---")
 
         self.current_sequence = sequence
         self.current_command_name = command_name
@@ -649,49 +715,53 @@ class AutoControlTab(QWidget):
         self.current_sequence_index = 0
         self.is_sequence_running = True
         
-        # 첫 단계를 즉시 실행
         self._process_next_step()
 
     def _process_next_step(self):
         """
         시퀀스의 현재 단계를 처리하고, 다음 단계를 QTimer로 스케줄링합니다.
         """
-        # 시퀀스가 중단되었거나 끝에 도달했으면 종료
         if not self.is_sequence_running or self.current_sequence_index >= len(self.current_sequence):
             self.is_sequence_running = False
             
+            # [수정] (완료) 로그 색상을 'lightgreen'으로 변경
+            self.log_generated.emit(f"(완료) {self.current_command_name}", "lightgreen")
+
             if self.is_test_mode:
                 self.action_sequence_list.clearSelection()
-                # 테스트 후 눌려있는 키가 있으면 2초 뒤 자동으로 모두 해제
                 if self.held_keys:
                     self.status_label.setText("테스트 완료. 2초 후 모든 키를 해제합니다...")
-                    print("[AutoControl] TEST END: Sequence left keys pressed. Releasing all in 2s.")
+                    if self.console_log_checkbox.isChecked():
+                        print("[AutoControl] TEST END: Sequence left keys pressed. Releasing all in 2s.")
                     QTimer.singleShot(2000, self._safe_release_all_keys)
                 else:
                     self.status_label.setText(f"'{self.current_command_name}' 실행 완료.")
             else:
                 self.status_label.setText(f"'{self.current_command_name}' 실행 완료.")
 
-            print(f"--- [AutoControl] 실행 완료: '{self.current_command_name}' ---")
+            if self.console_log_checkbox.isChecked():
+                print(f"--- [AutoControl] 실행 완료: '{self.current_command_name}' ---")
             return
 
         step = self.current_sequence[self.current_sequence_index]
         
         if self.is_test_mode:
             self.action_sequence_list.setCurrentRow(self.current_sequence_index)
-            # QApplication.processEvents() # QTimer를 사용하므로 더 이상 필요 없음
 
         action_type = step.get("type")
-        delay_ms = 1 # 기본 딜레이. 키 입력 후 즉시 다음 단계로 넘어감
+        delay_ms = 1
 
         if action_type in ["press", "release", "release_specific"]:
             key_obj = self._str_to_key_obj(step.get("key_str"))
             if not key_obj:
-                print(f"  - 오류: 알 수 없는 키 '{step.get('key_str')}'")
+                if self.console_log_checkbox.isChecked():
+                    print(f"  - 오류: 알 수 없는 키 '{step.get('key_str')}'")
             elif action_type == "press":
-                self._press_key(key_obj); print(f"  - PRESS: {key_obj}")
+                self._press_key(key_obj)
+                if self.console_log_checkbox.isChecked(): print(f"  - PRESS: {key_obj}")
             else:
-                self._release_key(key_obj); print(f"  - RELEASE: {key_obj}")
+                self._release_key(key_obj)
+                if self.console_log_checkbox.isChecked(): print(f"  - RELEASE: {key_obj}")
         
         elif action_type == "delay":
             min_ms = step.get("min_ms", 0)
@@ -699,21 +769,21 @@ class AutoControlTab(QWidget):
             if min_ms >= max_ms:
                 delay_ms = min_ms
             else:
-                # 가우시안 분포를 사용한 랜덤 지연 (기존 로직과 동일)
                 mean = (min_ms + max_ms) / 2
                 std_dev = (max_ms - min_ms) / 6
                 random_delay = random.gauss(mean, std_dev)
                 delay_ms = int(max(min(random_delay, max_ms), min_ms))
-            print(f"  - DELAY: {delay_ms}ms (범위: {min_ms}~{max_ms}ms)")
+            
+            # [수정] (대기) 로그 색상을 'yellow'로 변경하고, 중복 신호 제거
+            self.log_generated.emit(f"(대기) {delay_ms}ms (범위: {min_ms}~{max_ms}ms)", "yellow")
+            if self.console_log_checkbox.isChecked():
+                print(f"  - DELAY: {delay_ms}ms (범위: {min_ms}~{max_ms}ms)")
 
         elif action_type == "release_all":
             self._release_all_keys()
-            print("  - RELEASE_ALL_KEYS")
+            if self.console_log_checkbox.isChecked(): print("  - RELEASE_ALL_KEYS")
             
-        # 다음 단계로 인덱스 증가
         self.current_sequence_index += 1
-        
-        # 다음 단계 실행을 스케줄링
         self.sequence_timer.start(delay_ms)
 
     @pyqtSlot(str)
@@ -739,9 +809,9 @@ class AutoControlTab(QWidget):
             return
         
         self.recorded_sequence = []
-        self.last_event_time = 0 # [수정] 0으로 초기화하는 것은 유지
+        self.last_event_time = 0 #  0으로 초기화하는 것은 유지
         
-        # [수정] 녹화 시작 시 눌린 키 상태 초기화
+        #  녹화 시작 시 눌린 키 상태 초기화
         self.currently_pressed_keys_for_recording.clear()
         
         self.start_key_str = self.start_key_combo.currentText()
@@ -755,7 +825,7 @@ class AutoControlTab(QWidget):
             self.recording_status_changed.emit(f"'{self.start_key_str}' 키를 눌러 녹화를 시작하세요...")
         else:
             self.is_recording = True
-            # [수정] 녹화가 즉시 시작되면, last_event_time을 현재 시간으로 설정
+            #  녹화가 즉시 시작되면, last_event_time을 현재 시간으로 설정
             self.last_event_time = time.time()
             self.reset_auto_stop_timer_signal.emit()
             self.recording_status_changed.emit(f"녹화 중... ({self.auto_stop_spin.value()}ms 동안 입력 없으면 자동 종료)")
@@ -854,16 +924,135 @@ class AutoControlTab(QWidget):
     def update_status_label(self, text):
         self.status_label.setText(text)
 
+    #  전역 키보드 리스너 관련 메소드들
+    def start_global_listener(self):
+        if self.global_listener is None:
+            try:
+                self.global_listener = Listener(on_press=self._on_global_press, on_release=self._on_global_release)
+                self.global_listener.start()
+            except Exception as e:
+                print(f"[AutoControl] 전역 키보드 리스너 시작 실패: {e}")
+
+    #  MapTab의 탐지 상태를 수신하는 슬롯
+    @pyqtSlot(bool)
+    def update_map_detection_status(self, is_running):
+        self.is_map_detection_running = is_running
+        # [추가] 연동 버튼의 상태와 텍스트를 동기화
+        self.detection_button.setChecked(is_running)
+        self.detection_button.setText("탐지 중단" if is_running else "탐지 시작")
+        
+        if not is_running:
+            self.globally_pressed_keys.clear()
+
+    def _on_global_press(self, key):
+        #  MapTab 탐지 상태까지 함께 확인
+        if not self.log_checkbox.isChecked() or not self.is_map_detection_running:
+            return
+            
+        key_str = self._key_to_str(key)
+        if key_str in self.globally_pressed_keys:
+            return
+        
+        self.globally_pressed_keys.add(key_str)
+        friendly_key_name = self._translate_key_for_logging(key_str)
+        #  통합 로그 신호만 사용하고 색상을 'white'로 명시
+        self.log_generated.emit(f"(누르기) {friendly_key_name}", "white")
+
+    def _on_global_release(self, key):
+        #  MapTab 탐지 상태까지 함께 확인
+        if not self.log_checkbox.isChecked() or not self.is_map_detection_running:
+            return
+
+        key_str = self._key_to_str(key)
+        self.globally_pressed_keys.discard(key_str)
+        friendly_key_name = self._translate_key_for_logging(key_str)
+        # [수정] 통합 로그 신호만 사용하고 색상을 'white'로 명시
+        self.log_generated.emit(f"(떼기) {friendly_key_name}", "white")
+
+    #  모든 로그를 처리하는 통합 슬롯
+    @pyqtSlot(str, str)
+    def _add_log_entry(self, message, color_str):
+        now = time.time()
+        # [추가] 마지막 로그와 5초 이상 차이 나면 구분선 추가
+        if self.last_log_time > 0 and (now - self.last_log_time) > 5:
+            separator_item = QListWidgetItem("──────────")
+            separator_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+            separator_item.setForeground(QColor("#888"))
+            self.key_log_list.addItem(separator_item)
+        
+        timestamp = datetime.now().strftime("%H:%M:%S:%f")[:-3]
+        log_text = f"[{timestamp}] {message}"
+        
+        item = QListWidgetItem(log_text)
+        item.setForeground(QColor(color_str)) # 문자열로 받은 색상 적용
+        self.key_log_list.addItem(item)
+        
+        if self.key_log_list.count() > 200:
+            self.key_log_list.takeItem(0)
+            
+        self.key_log_list.scrollToBottom()
+        self.last_log_time = now # 마지막 로그 시간 갱신
+
+    @pyqtSlot(str, str)
+    def _add_key_log_entry(self, action, key_name):
+        # HH:MM:SS:ms 형식으로 타임스탬프 생성
+        timestamp = datetime.now().strftime("%H:%M:%S:%f")[:-3]
+        log_text = f"[{timestamp}] ({action}) {key_name}"
+        
+        item = QListWidgetItem(log_text)
+        self.key_log_list.addItem(item)
+        
+        # 로그가 200줄을 넘어가면 가장 오래된 로그를 삭제하여 메모리 관리
+        if self.key_log_list.count() > 200:
+            self.key_log_list.takeItem(0)
+            
+        # 항상 최신 로그가 보이도록 스크롤
+        self.key_log_list.scrollToBottom()
+
+    @pyqtSlot(str)
+    def _add_execution_log_entry(self, log_message):
+        """시퀀스 실행 로그를 타임스탬프와 함께 GUI에 추가합니다."""
+        timestamp = datetime.now().strftime("%H:%M:%S:%f")[:-3]
+        full_log = f"[{timestamp}] {log_message}"
+        
+        item = QListWidgetItem(full_log)
+        # 실행 로그는 다른 색상으로 구분 (예: 파란색)
+        item.setForeground(Qt.GlobalColor.cyan)
+        self.key_log_list.addItem(item)
+        
+        if self.key_log_list.count() > 200:
+            self.key_log_list.takeItem(0)
+            
+        self.key_log_list.scrollToBottom()
+
+    def _translate_key_for_logging(self, key_str):
+        translation_map = {
+            'Key.right': '→', 'Key.left': '←', 'Key.down': '↓', 'Key.up': '↑',
+            'Key.space': 'Space', 'Key.enter': 'Enter', 'Key.esc': 'Esc',
+            'Key.ctrl_l': 'Ctrl_L', 'Key.ctrl_r': 'Ctrl_R', 'Key.ctrl': 'Ctrl',
+            'Key.alt_l': 'Alt_L', 'Key.alt_r': 'Alt_R', 'Key.alt': 'Alt',
+            'Key.shift_l': 'Shift_L', 'Key.shift_r': 'Shift_R', 'Key.shift': 'Shift',
+            'Key.cmd': 'Win', 'Key.cmd_l': 'Win_L', 'Key.cmd_r': 'Win_R',
+            'Key.tab': 'Tab', 'Key.backspace': 'Backspace',
+        }
+        # 맵에 키가 있으면 변환된 값을, 없으면 원래 값을 반환
+        return translation_map.get(key_str, key_str)
+
     def cleanup_on_close(self):
         print("'자동 제어' 탭 정리 중...")
-        # --- [핵심 수정] 종료 시 실행 중인 시퀀스 중단 ---
         self.is_sequence_running = False
         self.sequence_timer.stop()
-        # --- 수정 끝 ---
+        
+        # 녹화용 리스너 중지
         if self.keyboard_listener:
             self.keyboard_listener.stop()
+        
+        # 전역 키 로깅용 리스너 중지
+        if self.global_listener:
+            self.global_listener.stop()
+
         if self.ser and self.ser.is_open:
             self._release_all_keys()
-            time.sleep(0.1) # 키 떼기 명령이 전달될 시간을 확보
+            time.sleep(0.1)
             self.ser.close()
             print("시리얼 포트 연결을 해제했습니다.")

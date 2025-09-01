@@ -124,8 +124,11 @@ class MainWindow(QMainWindow):
             map_tab = self.loaded_tabs['맵']
             auto_control_tab = self.loaded_tabs['자동 제어']
             
-            # MapTab의 시그널을 AutoControlTab의 슬롯에 연결
             map_tab.control_command_issued.connect(auto_control_tab.receive_control_command)
+            map_tab.detection_status_changed.connect(auto_control_tab.update_map_detection_status)
+            
+            # [추가] AutoControlTab의 탐지 토글 요청을 MapTab의 버튼 클릭 슬롯에 연결
+            auto_control_tab.request_detection_toggle.connect(map_tab.detect_anchor_btn.click)
             
             print("성공: '맵' 탭과 '자동 제어' 탭을 연결했습니다.")
         else:
