@@ -93,6 +93,9 @@ class AutoControlTab(QWidget):
         self.current_command_name = ""
         self.is_test_mode = False
 
+        self.is_processing_step = False                    # <- (신규) _process_next_step 재진입 방지 플래그
+        self.last_sent_timestamps = {}                     # <- (신규) 키 전송 시각 기록 (에코 무시용)
+
         self.is_map_detection_running = False
         self.last_log_time = 0.0
 
@@ -107,11 +110,8 @@ class AutoControlTab(QWidget):
         self.recording_status_changed.connect(self.update_status_label)
         self.reset_auto_stop_timer_signal.connect(self._handle_reset_auto_stop_timer)
         self.stop_recording_signal.connect(self.stop_recording)
-        # [핵심 수정] 통합된 로그 신호와 슬롯만 연결합니다.
         self.log_generated.connect(self._add_log_entry)
-
-        self.start_global_listener()
-        
+      
         self.setStyleSheet("""
             QFrame { border: 1px solid #444; border-radius: 5px; }
             QLabel#TitleLabel { font-size: 13px; font-weight: bold; padding: 5px; background-color: #3a3a3a; color: white; border-top-left-radius: 4px; border-top-right-radius: 4px; }
@@ -276,11 +276,13 @@ class AutoControlTab(QWidget):
         right_layout = QVBoxLayout(right_widget)
         
         header_layout = QHBoxLayout()
-        title = QLabel("실시간 로그") # [수정] 제목 변경
+        title = QLabel("실시간 로그")
         title.setObjectName("TitleLabel")
         
         self.log_checkbox = QCheckBox("입력 감지")
         self.log_checkbox.setChecked(False)
+        # [수정] 체크박스 상태가 변경될 때 리스너 상태를 업데이트하도록 연결
+        self.log_checkbox.toggled.connect(self._update_global_listener_state)
         
         self.console_log_checkbox = QCheckBox("상세 콘솔 로그")
         self.console_log_checkbox.setChecked(False)
@@ -295,7 +297,6 @@ class AutoControlTab(QWidget):
         
         right_layout.addLayout(header_layout)
 
-        # [수정] QListWidget을 CopyableListWidget으로 교체
         self.key_log_list = CopyableListWidget()
         self.key_log_list.setWordWrap(True)
         self.key_log_list.setStyleSheet("""
@@ -307,7 +308,6 @@ class AutoControlTab(QWidget):
         """)
         right_layout.addWidget(self.key_log_list)
 
-        # [추가] 탐지 시작/중지 버튼 추가 및 기능 연결
         self.detection_button = QPushButton("탐지 시작")
         self.detection_button.setCheckable(True)
         self.detection_button.clicked.connect(self.request_detection_toggle.emit)
@@ -316,6 +316,28 @@ class AutoControlTab(QWidget):
         clear_log_btn.clicked.connect(self.key_log_list.clear)
 
         return right_widget
+
+    #  전역 키보드 리스너의 상태를 관리하는 메소드
+    def _update_global_listener_state(self):
+        should_listen = self.is_map_detection_running and self.log_checkbox.isChecked()
+
+        # 현재 리스너가 동작해야 하는 상태인데, 리스너가 없는 경우
+        if should_listen and self.global_listener is None:
+            try:
+                self.global_listener = Listener(on_press=self._on_global_press, on_release=self._on_global_release)
+                self.global_listener.start()
+                if self.console_log_checkbox.isChecked():
+                    print("[AutoControl] 전역 키보드 리스너를 시작합니다.")
+            except Exception as e:
+                print(f"[AutoControl] 전역 키보드 리스너 시작 실패: {e}")
+
+        # 현재 리스너가 동작하면 안 되는데, 리스너가 있는 경우
+        elif not should_listen and self.global_listener is not None:
+            self.global_listener.stop()
+            self.global_listener = None
+            self.globally_pressed_keys.clear() # 키 상태 초기화
+            if self.console_log_checkbox.isChecked():
+                print("[AutoControl] 전역 키보드 리스너를 중지합니다.")
 
     def load_mappings(self):
         if os.path.exists(KEY_MAPPINGS_FILE):
@@ -338,30 +360,44 @@ class AutoControlTab(QWidget):
 
     def create_default_mappings(self):
         return {
-            "걷기(우)": [{"type": "release_specific", "key_str": "Key.left"}, {"type": "press", "key_str": "Key.right"}],
-            "걷기(좌)": [{"type": "release_specific", "key_str": "Key.right"}, {"type": "press", "key_str": "Key.left"}],
-            "점프키 누르기": [{"type": "press", "key_str": "Key.space"}, {"type": "delay", "min_ms": 80, "max_ms": 120}, {"type": "release", "key_str": "Key.space"}],
+            "걷기(우)": [
+                {"type": "release_specific", "key_str": "Key.left"}, 
+                {"type": "press", "key_str": "Key.right"}
+            ],
+            "걷기(좌)": [
+                {"type": "release_specific", "key_str": "Key.right"}, 
+                {"type": "press", "key_str": "Key.left"}
+            ],
+            # [수정] 점프키를 Key.alt_l 로 변경
+            "점프키 누르기": [
+                {"type": "press", "key_str": "Key.alt_l"}, 
+                {"type": "delay", "min_ms": 80, "max_ms": 120}, 
+                {"type": "release", "key_str": "Key.alt_l"}
+            ],
             "아래점프": [
-                {"type": "press", "key_str": "Key.down"}, {"type": "delay", "min_ms": 70, "max_ms": 120}, # 실제 녹화값 기반
-                {"type": "press", "key_str": "Key.alt_l"}, {"type": "delay", "min_ms": 40, "max_ms": 90},  # 실제 녹화값 기반
-                {"type": "release", "key_str": "Key.alt_l"}, {"type": "delay", "min_ms": 10, "max_ms": 50},   # 실제 녹화값 기반
+                {"type": "press", "key_str": "Key.down"}, {"type": "delay", "min_ms": 70, "max_ms": 120},
+                {"type": "press", "key_str": "Key.alt_l"}, {"type": "delay", "min_ms": 40, "max_ms": 90},
+                {"type": "release", "key_str": "Key.alt_l"}, {"type": "delay", "min_ms": 10, "max_ms": 50},
                 {"type": "release", "key_str": "Key.down"}
             ],
+            # [수정] 사다리타기 시퀀스의 점프키도 Key.alt_l 로 변경
             "사다리타기(우)": [
+                {"type": "release_specific", "key_str": "Key.left"},
                 {"type": "press", "key_str": "Key.right"}, {"type": "delay", "min_ms": 80, "max_ms": 120},
-                {"type": "press", "key_str": "Key.space"}, {"type": "delay", "min_ms": 80, "max_ms": 120},
-                {"type": "release", "key_str": "Key.space"}, {"type": "delay", "min_ms": 80, "max_ms": 120},
+                {"type": "press", "key_str": "Key.alt_l"}, {"type": "delay", "min_ms": 80, "max_ms": 120},
+                {"type": "release", "key_str": "Key.alt_l"}, {"type": "delay", "min_ms": 80, "max_ms": 120},
                 {"type": "release", "key_str": "Key.right"}, {"type": "delay", "min_ms": 80, "max_ms": 120},
                 {"type": "press", "key_str": "Key.up"}
             ],
             "사다리타기(좌)": [
+                {"type": "release_specific", "key_str": "Key.right"},
                 {"type": "press", "key_str": "Key.left"}, {"type": "delay", "min_ms": 80, "max_ms": 120},
-                {"type": "press", "key_str": "Key.space"}, {"type": "delay", "min_ms": 80, "max_ms": 120},
-                {"type": "release", "key_str": "Key.space"}, {"type": "delay", "min_ms": 80, "max_ms": 120},
+                {"type": "press", "key_str": "Key.alt_l"}, {"type": "delay", "min_ms": 80, "max_ms": 120},
+                {"type": "release", "key_str": "Key.alt_l"}, {"type": "delay", "min_ms": 80, "max_ms": 120},
                 {"type": "release", "key_str": "Key.left"}, {"type": "delay", "min_ms": 80, "max_ms": 120},
                 {"type": "press", "key_str": "Key.up"}
             ],
-            "오르기": [{"type": "press", "key_str": "Key.up"}], # <-- 이 줄이 추가되었습니다.
+            "오르기": [{"type": "press", "key_str": "Key.up"}],
             "모든 키 떼기": [{"type": "release_all"}]
         }
 
@@ -655,17 +691,33 @@ class AutoControlTab(QWidget):
         if key_code is not None:
             try:
                 self.ser.write(bytes([command, key_code]))
+                # --- (신규) 전송 직후 타임스탬프 저장 (에코/리스너 무시에 사용) ---
+                key_str_id = self._key_obj_to_str(key_object)  # 새로운 헬퍼 사용
+                self.last_sent_timestamps[key_str_id] = time.time()  # 전송 시각 저장
             except serial.SerialException as e:
                 print(f"[AutoControl] 데이터 전송 실패: {e}")
                 self.connect_to_pi()
 
     def _press_key(self, key_object):
+        """
+        (수정) 실제로 전송이 발생했는지(True/False)를 반환하도록 변경.
+        기존: 내부에서만 held_keys를 관리.
+        """
         if key_object not in self.held_keys:
-            self.held_keys.add(key_object); self._send_command(CMD_PRESS, key_object)
+            self.held_keys.add(key_object)
+            self._send_command(CMD_PRESS, key_object)
+            return True    # 실제 전송이 발생했음을 알림
+        return False       # 이미 눌려있어 전송하지 않음
 
     def _release_key(self, key_object):
+        """
+        (수정) 실제로 전송이 발생했는지(True/False)를 반환하도록 변경.
+        """
         if key_object in self.held_keys:
-            self.held_keys.discard(key_object); self._send_command(CMD_RELEASE, key_object)
+            self.held_keys.discard(key_object)
+            self._send_command(CMD_RELEASE, key_object)
+            return True
+        return False
 
     def _release_all_keys(self):
         for key_obj in list(self.held_keys): self._release_key(key_obj)
@@ -697,14 +749,18 @@ class AutoControlTab(QWidget):
         """
         시퀀스 실행을 시작합니다. 이미 실행 중인 시퀀스가 있다면 중단합니다.
         """
+        # [핵심 수정 1] 현재 실행 중인 명령과 동일한 명령이 들어오면 무시
+        if self.is_sequence_running and self.current_command_name == command_name:
+            if self.console_log_checkbox.isChecked():
+                print(f"--- [AutoControl] 중복 명령 무시: '{command_name}' ---")
+            return
+
         if self.is_sequence_running:
             self.sequence_timer.stop()
-            self._release_all_keys()
+            # [핵심 수정 2] 무조건적인 _release_all_keys() 호출 제거
             if self.console_log_checkbox.isChecked():
                 print(f"--- [AutoControl] 이전 시퀀스 중단: '{self.current_command_name}' ---")
 
-        #  통합 로그 시그널 사용
-        self.log_generated.emit(f"(시작) {command_name}", "red")
         self.status_label.setText(f"'{command_name}' 실행 중...")
         if self.console_log_checkbox.isChecked():
             print(f"--- [AutoControl] 실행 시작: '{command_name}' ---")
@@ -714,80 +770,114 @@ class AutoControlTab(QWidget):
         self.is_test_mode = is_test
         self.current_sequence_index = 0
         self.is_sequence_running = True
+        self.is_first_key_event_in_sequence = True
         
         self._process_next_step()
 
     def _process_next_step(self):
         """
         시퀀스의 현재 단계를 처리하고, 다음 단계를 QTimer로 스케줄링합니다.
+        -> 재진입 방지, 실제 전송 여부에 따른 로그 출력, 타이머 중복 start 방지 적용
         """
-        if not self.is_sequence_running or self.current_sequence_index >= len(self.current_sequence):
-            self.is_sequence_running = False
-            
-            # [수정] (완료) 로그 색상을 'lightgreen'으로 변경
-            self.log_generated.emit(f"(완료) {self.current_command_name}", "lightgreen")
+        # --- (신규) 재진입 방지 ---
+        if getattr(self, "is_processing_step", False):
+            if self.console_log_checkbox.isChecked():
+                print("[AutoControl] 중복 스텝 처리 차단 (is_processing_step=True).")
+            return
+        self.is_processing_step = True
 
-            if self.is_test_mode:
-                self.action_sequence_list.clearSelection()
-                if self.held_keys:
-                    self.status_label.setText("테스트 완료. 2초 후 모든 키를 해제합니다...")
-                    if self.console_log_checkbox.isChecked():
-                        print("[AutoControl] TEST END: Sequence left keys pressed. Releasing all in 2s.")
-                    QTimer.singleShot(2000, self._safe_release_all_keys)
+        try:
+            if not self.is_sequence_running or self.current_sequence_index >= len(self.current_sequence):
+                self.is_sequence_running = False
+                
+                log_msg = f"--- (완료) {self.current_command_name} ---"
+                self.log_generated.emit(log_msg, "lightgreen")
+
+                if self.is_test_mode:
+                    self.action_sequence_list.clearSelection()
+                    if self.held_keys:
+                        self.status_label.setText("테스트 완료. 2초 후 모든 키를 해제합니다...")
+                        if self.console_log_checkbox.isChecked():
+                            print("[AutoControl] TEST END: Sequence left keys pressed. Releasing all in 2s.")
+                        QTimer.singleShot(2000, self._safe_release_all_keys)
+                    else:
+                        self.status_label.setText(f"'{self.current_command_name}' 실행 완료.")
                 else:
                     self.status_label.setText(f"'{self.current_command_name}' 실행 완료.")
-            else:
-                self.status_label.setText(f"'{self.current_command_name}' 실행 완료.")
 
-            if self.console_log_checkbox.isChecked():
-                print(f"--- [AutoControl] 실행 완료: '{self.current_command_name}' ---")
-            return
-
-        step = self.current_sequence[self.current_sequence_index]
-        
-        if self.is_test_mode:
-            self.action_sequence_list.setCurrentRow(self.current_sequence_index)
-
-        action_type = step.get("type")
-        delay_ms = 1
-
-        if action_type in ["press", "release", "release_specific"]:
-            key_obj = self._str_to_key_obj(step.get("key_str"))
-            if not key_obj:
                 if self.console_log_checkbox.isChecked():
-                    print(f"  - 오류: 알 수 없는 키 '{step.get('key_str')}'")
-            elif action_type == "press":
-                self._press_key(key_obj)
-                if self.console_log_checkbox.isChecked(): print(f"  - PRESS: {key_obj}")
-            else:
-                self._release_key(key_obj)
-                if self.console_log_checkbox.isChecked(): print(f"  - RELEASE: {key_obj}")
-        
-        elif action_type == "delay":
-            min_ms = step.get("min_ms", 0)
-            max_ms = step.get("max_ms", 0)
-            if min_ms >= max_ms:
-                delay_ms = min_ms
-            else:
-                mean = (min_ms + max_ms) / 2
-                std_dev = (max_ms - min_ms) / 6
-                random_delay = random.gauss(mean, std_dev)
-                delay_ms = int(max(min(random_delay, max_ms), min_ms))
-            
-            # [수정] (대기) 로그 색상을 'yellow'로 변경하고, 중복 신호 제거
-            self.log_generated.emit(f"(대기) {delay_ms}ms (범위: {min_ms}~{max_ms}ms)", "yellow")
-            if self.console_log_checkbox.isChecked():
-                print(f"  - DELAY: {delay_ms}ms (범위: {min_ms}~{max_ms}ms)")
+                    print(f"--- [AutoControl] 실행 완료: '{self.current_command_name}' ---")
+                return
 
-        elif action_type == "release_all":
-            self._release_all_keys()
-            if self.console_log_checkbox.isChecked(): print("  - RELEASE_ALL_KEYS")
-            
-        self.current_sequence_index += 1
-        self.sequence_timer.start(delay_ms)
+            step = self.current_sequence[self.current_sequence_index]
+            if self.is_test_mode:
+                self.action_sequence_list.setCurrentRow(self.current_sequence_index)
+
+            action_type = step.get("type")
+            delay_ms = 1
+
+            is_key_event = action_type in ["press", "release", "release_specific", "release_all"]
+            if is_key_event and self.is_first_key_event_in_sequence:
+                log_msg = f"--- (시작) {self.current_command_name} ---"
+                self.log_generated.emit(log_msg, "magenta")
+                self.is_first_key_event_in_sequence = False
+
+            if action_type in ["press", "release", "release_specific"]:
+                key_obj = self._str_to_key_obj(step.get("key_str"))
+                if not key_obj:
+                    log_msg = f"오류: 알 수 없는 키 '{step.get('key_str')}'"
+                    self.log_generated.emit(log_msg, "red")
+                    if self.console_log_checkbox.isChecked(): print(f"  - {log_msg}")
+                elif action_type == "press":
+                    sent = self._press_key(key_obj)  # 이제 True/False 반환
+                    # --- (수정) 실제 전송이 있었을 때만 '(누르기)' 로그 생성 ---
+                    if sent:
+                        self.log_generated.emit(f"(누르기) {self._translate_key_for_logging(step.get('key_str'))}", "white")
+                        if self.console_log_checkbox.isChecked(): print(f"  - PRESS (SENT): {key_obj}")
+                    else:
+                        # 중복 전송 스킵 로그 (디버그용)
+                        if self.console_log_checkbox.isChecked(): print(f"  - PRESS skipped (already held): {key_obj}")
+                else:
+                    released = self._release_key(key_obj)  # True/False 반환
+                    if released:
+                        self.log_generated.emit(f"(떼기) {self._translate_key_for_logging(step.get('key_str'))}", "white")
+                        if self.console_log_checkbox.isChecked(): print(f"  - RELEASE (SENT): {key_obj}")
+                    else:
+                        if self.console_log_checkbox.isChecked(): print(f"  - RELEASE skipped (not held): {key_obj}")
+
+            elif action_type == "delay":
+                min_ms = step.get("min_ms", 0)
+                max_ms = step.get("max_ms", 0)
+                if min_ms >= max_ms:
+                    delay_ms = min_ms
+                else:
+                    mean = (min_ms + max_ms) / 2
+                    std_dev = (max_ms - min_ms) / 6
+                    random_delay = random.gauss(mean, std_dev)
+                    delay_ms = int(max(min(random_delay, max_ms), min_ms))
+                if self.console_log_checkbox.isChecked():
+                    print(f"  - DELAY: {delay_ms}ms (범위: {min_ms}~{max_ms}ms)")
+
+            elif action_type == "release_all":
+                # 항상 실제 릴리즈 시도 (내부에서 held_keys 기준으로 전송)
+                self._release_all_keys()
+                self.log_generated.emit("(모든 키 떼기)", "white")
+                if self.console_log_checkbox.isChecked(): print("  - RELEASE_ALL_KEYS")
+
+            # --- 다음 스텝 예약: 기존 타이머 안전하게 멈추고 시작 ---
+            self.current_sequence_index += 1
+            try:
+                self.sequence_timer.stop()    # 기존 타이머 중지 (중복 start 방지)
+            except Exception:
+                pass
+            self.sequence_timer.start(delay_ms)
+        finally:
+            self.is_processing_step = False
+
 
     @pyqtSlot(str)
     def receive_control_command(self, command_text):
+
         sequence = self.mappings.get(command_text)
         if not sequence:
             print(f"[AutoControl] 경고: '{command_text}'에 대한 매핑이 없습니다.")
@@ -860,6 +950,13 @@ class AutoControlTab(QWidget):
     def _key_to_str(self, key):
         if isinstance(key, Key): return f"Key.{key.name}"
         return key.char if hasattr(key, 'char') else 'N/A'
+
+    def _key_obj_to_str(self, key_obj):
+        """(신규) key object -> 일관된 문자열 표현으로 변환 (예: 'Key.alt_l' 또는 'a')"""
+        from pynput.keyboard import Key
+        if isinstance(key_obj, Key):
+            return f"Key.{key_obj.name}"
+        return str(key_obj)
 
     def _on_press(self, key):
         key_str = self._key_to_str(key)
@@ -935,45 +1032,64 @@ class AutoControlTab(QWidget):
 
     #  MapTab의 탐지 상태를 수신하는 슬롯
     @pyqtSlot(bool)
+    @pyqtSlot(bool)
     def update_map_detection_status(self, is_running):
         self.is_map_detection_running = is_running
-        # [추가] 연동 버튼의 상태와 텍스트를 동기화
         self.detection_button.setChecked(is_running)
         self.detection_button.setText("탐지 중단" if is_running else "탐지 시작")
         
+        # [수정] 탐지 상태가 변경될 때마다 리스너 상태를 업데이트하도록 호출
+        self._update_global_listener_state()
+
         if not is_running:
+            # 탐지가 중지되면 눌린 키 상태를 확실히 초기화
             self.globally_pressed_keys.clear()
 
     def _on_global_press(self, key):
-        #  MapTab 탐지 상태까지 함께 확인
-        if not self.log_checkbox.isChecked() or not self.is_map_detection_running:
-            return
-            
         key_str = self._key_to_str(key)
+
+        # --- (신규) 우리가 직전에 보낸 키의 '에코'라면 무시 ---
+        last_sent = self.last_sent_timestamps.get(key_str, 0)
+        if time.time() - last_sent < 0.06:   # 60ms 이내면 '자체 전송의 에코'로 간주하여 무시
+            if self.console_log_checkbox.isChecked():
+                print(f"[AutoControl] Global press ignored (echo) for {key_str}")
+            return
+
         if key_str in self.globally_pressed_keys:
             return
-        
+
         self.globally_pressed_keys.add(key_str)
         friendly_key_name = self._translate_key_for_logging(key_str)
-        #  통합 로그 신호만 사용하고 색상을 'white'로 명시
         self.log_generated.emit(f"(누르기) {friendly_key_name}", "white")
 
     def _on_global_release(self, key):
-        #  MapTab 탐지 상태까지 함께 확인
-        if not self.log_checkbox.isChecked() or not self.is_map_detection_running:
+        key_str = self._key_to_str(key)
+
+        # --- (신규) 에코 무시 (release도 동일하게 처리) ---
+        last_sent = self.last_sent_timestamps.get(key_str, 0)
+        if time.time() - last_sent < 0.06:
+            if self.console_log_checkbox.isChecked():
+                print(f"[AutoControl] Global release ignored (echo) for {key_str}")
             return
 
-        key_str = self._key_to_str(key)
         self.globally_pressed_keys.discard(key_str)
         friendly_key_name = self._translate_key_for_logging(key_str)
-        # [수정] 통합 로그 신호만 사용하고 색상을 'white'로 명시
         self.log_generated.emit(f"(떼기) {friendly_key_name}", "white")
 
     #  모든 로그를 처리하는 통합 슬롯
     @pyqtSlot(str, str)
     def _add_log_entry(self, message, color_str):
+        if not self.log_checkbox.isChecked():
+            return
+
         now = time.time()
-        # [추가] 마지막 로그와 5초 이상 차이 나면 구분선 추가
+        
+        # [신규] 이전 로그와의 시간차 계산 및 문자열 생성
+        delta_text = ""
+        if self.last_log_time > 0:
+            delta_ms = int((now - self.last_log_time) * 1000)
+            delta_text = f" (Δ {delta_ms}ms)"
+
         if self.last_log_time > 0 and (now - self.last_log_time) > 5:
             separator_item = QListWidgetItem("──────────")
             separator_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -981,17 +1097,18 @@ class AutoControlTab(QWidget):
             self.key_log_list.addItem(separator_item)
         
         timestamp = datetime.now().strftime("%H:%M:%S:%f")[:-3]
-        log_text = f"[{timestamp}] {message}"
+        # [수정] 로그 메시지에 시간차 정보 추가
+        log_text = f"[{timestamp}] {message}{delta_text}"
         
         item = QListWidgetItem(log_text)
-        item.setForeground(QColor(color_str)) # 문자열로 받은 색상 적용
+        item.setForeground(QColor(color_str))
         self.key_log_list.addItem(item)
         
         if self.key_log_list.count() > 200:
             self.key_log_list.takeItem(0)
             
         self.key_log_list.scrollToBottom()
-        self.last_log_time = now # 마지막 로그 시간 갱신
+        self.last_log_time = now
 
     @pyqtSlot(str, str)
     def _add_key_log_entry(self, action, key_name):
@@ -1047,9 +1164,10 @@ class AutoControlTab(QWidget):
         if self.keyboard_listener:
             self.keyboard_listener.stop()
         
-        # 전역 키 로깅용 리스너 중지
+        # [수정] 전역 키 로깅용 리스너를 안전하게 중지
         if self.global_listener:
             self.global_listener.stop()
+            self.global_listener = None
 
         if self.ser and self.ser.is_open:
             self._release_all_keys()
