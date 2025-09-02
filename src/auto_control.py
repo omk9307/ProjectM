@@ -444,7 +444,12 @@ class AutoControlTab(QWidget):
                 continue # 그 외 문자열 키는 일단 제외
                 
             elif isinstance(k, Key):
-                name = k.name.replace('_l', '').replace('_r', '')
+                # <<< [수정] alt 키만 예외 처리하고 나머지는 기존 방식 유지
+                if k.name.startswith('alt'):
+                    name = k.name # alt_l, alt_r 그대로 사용
+                else:
+                    name = k.name.replace('_l', '').replace('_r', '') # ctrl, shift 등은 단일 이름으로
+                
                 key_str = f"Key.{name}"
                 
                 if name in ['up', 'down', 'left', 'right']:
@@ -455,7 +460,7 @@ class AutoControlTab(QWidget):
                     keys_by_type["편집키"].append(key_str)
                 elif name in ['space', 'enter', 'esc', 'tab', 'backspace']:
                     keys_by_type["주요 특수키"].append(key_str)
-                elif name in ['ctrl', 'alt', 'shift', 'cmd']:
+                elif name in ['ctrl', 'shift', 'cmd', 'alt_l']:
                     keys_by_type["수식키"].append(key_str)
         
         # 2. 각 그룹 내부 정렬
@@ -474,7 +479,6 @@ class AutoControlTab(QWidget):
                 final_key_list.extend(sorted(list(set(key_list))))
                 
         return final_key_list
-
     def on_command_selected(self, current_item, previous_item):
         self.editor_group.setEnabled(False) 
         self.action_sequence_list.clear()
