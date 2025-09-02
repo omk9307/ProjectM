@@ -95,7 +95,7 @@ class AutoControlTab(QWidget):
 
         self.is_processing_step = False                 # 중복 _process_next_step 재진입 방지 플래그
         self.last_sent_timestamps = {}                  # 전송한 키의 타임스탬프 (에코 무시용)
-        self.ECHO_IGNORE_MS = 60                        # 기본 60ms, 필요하면 40~120 범위로 조절 권장
+        self.ECHO_IGNORE_MS = 10                        # 기본 60ms, 필요하면 40~120 범위로 조절 권장
         self.last_command_start_time = 0.0              # 마지막 시퀀스 시작 시각
         self.sequence_watchdog = QTimer(self)           # 시퀀스가 멈추는 경우 복구용 와치독
         self.sequence_watchdog.setSingleShot(True)
@@ -403,9 +403,25 @@ class AutoControlTab(QWidget):
                 {"type": "press", "key_str": "Key.up"}
             ],
             "오르기": [{"type": "press", "key_str": "Key.up"}],
-            "모든 키 떼기": [{"type": "release_all"}]
+            "모든 키 떼기": [{"type": "release_all"}],
+            # <<< [추가] 방향성 점프 명령 추가
+            "점프(좌)": [
+                {"type": "release_specific", "key_str": "Key.right"},
+                {"type": "press", "key_str": "Key.left"},
+                {"type": "delay", "min_ms": 40, "max_ms": 60},
+                {"type": "press", "key_str": "Key.alt_l"},
+                {"type": "delay", "min_ms": 75, "max_ms": 113},
+                {"type": "release", "key_str": "Key.alt_l"}
+            ],
+            "점프(우)": [
+                {"type": "release_specific", "key_str": "Key.left"},
+                {"type": "press", "key_str": "Key.right"},
+                {"type": "delay", "min_ms": 40, "max_ms": 60},
+                {"type": "press", "key_str": "Key.alt_l"},
+                {"type": "delay", "min_ms": 75, "max_ms": 113},
+                {"type": "release", "key_str": "Key.alt_l"}
+            ]
         }
-
 
     def reset_to_defaults(self):
         reply = QMessageBox.question(self, "기본값 복원", "모든 키 매핑을 기본값으로 되돌리시겠습니까?\n저장하지 않은 변경사항은 사라집니다.",

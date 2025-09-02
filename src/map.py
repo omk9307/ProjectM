@@ -7449,7 +7449,6 @@ class MapTab(QWidget):
             intermediate_node_type = self.nav_nodes.get(current_node_key, {}).get('type')
 
         # <<< [수정] 자동 제어 또는 테스트 모드에 따라 분기
-        # is_control_active 변수를 사용하여 중복 코드 방지
         is_control_or_test_active = self.auto_control_checkbox.isChecked() or self.debug_auto_control_checkbox.isChecked()
 
         if is_control_or_test_active:
@@ -7488,8 +7487,17 @@ class MapTab(QWidget):
                         self.last_printed_direction = current_direction
 
                 elif action_changed:
-                    if current_action_key == 'prepare_to_jump': command_to_send = "점프키 누르기"
-                    elif current_action_key == 'prepare_to_down_jump': command_to_send = "아래점프"
+                    # <<< [수정] 점프 명령 분기 처리
+                    if current_action_key == 'prepare_to_jump':
+                        if self.jump_direction == 'left':
+                            command_to_send = "점프(좌)"
+                        elif self.jump_direction == 'right':
+                            command_to_send = "점프(우)"
+                        else:
+                            command_to_send = "점프키 누르기" # Fallback
+                        self.jump_direction = None # 사용 후 초기화
+                    elif current_action_key == 'prepare_to_down_jump': 
+                        command_to_send = "아래점프"
                     self.last_printed_direction = None
 
                 if player_state_changed:
@@ -7604,7 +7612,15 @@ class MapTab(QWidget):
                     
                     next_action_state = None
                     if action == 'climb': next_action_state = 'prepare_to_climb'
-                    elif action == 'jump': next_action_state = 'prepare_to_jump'
+                    elif action == 'jump':
+                        # <<< [추가] 점프 방향 계산 및 저장
+                        next_node_pos = self.nav_nodes.get(next_node_key, {}).get('pos')
+                        if next_node_pos:
+                            if next_node_pos.x() > current_node.get('pos').x():
+                                self.jump_direction = 'right'
+                            else:
+                                self.jump_direction = 'left'
+                        next_action_state = 'prepare_to_jump'
                     elif action == 'climb_down': next_action_state = 'prepare_to_fall'
 
                     if next_action_state:
