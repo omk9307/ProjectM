@@ -905,7 +905,9 @@ class AutoControlTab(QWidget):
                     mean = (min_ms + max_ms) / 2
                     std_dev = (max_ms - min_ms) / 6
                     delay_ms = int(max(min(random.gauss(mean, std_dev), max_ms), min_ms))
-
+                # <<< (추가) 대기 로그를 동작 사이에 별도로 출력 >>>
+                self.log_generated.emit(f"(대기) {delay_ms}ms", "gray")
+        
             elif action_type == "release_all":
                 self._release_all_keys(force=True)
                 self.log_generated.emit("(모든 키 떼기)", "white")
