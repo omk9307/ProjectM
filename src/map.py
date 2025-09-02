@@ -4556,28 +4556,26 @@ class MapTab(QWidget):
         left_layout.addWidget(self.editor_groupbox)
         
         # 7. 탐지 제어
-        # [v11.3.5] UI 순서 및 텍스트 변경
         detect_groupbox = QGroupBox("7. 탐지 제어")
-        # [수정] 레이아웃을 VBox로 변경하여 여러 줄의 설정을 배치
         detect_v_layout = QVBoxLayout()
 
-        # 상단 설정 라인 (디버그 뷰, 시작 딜레이)
+        # 상단 설정 라인 (자동 제어, 시작 딜레이)
         settings_h_layout = QHBoxLayout()
-        self.debug_view_checkbox = QCheckBox("디버그 뷰")
-        self.debug_view_checkbox.toggled.connect(self.toggle_debug_view)
-        settings_h_layout.addWidget(self.debug_view_checkbox)
+        self.auto_control_checkbox = QCheckBox("자동 제어")
+        self.auto_control_checkbox.setChecked(False)
+        settings_h_layout.addWidget(self.auto_control_checkbox)
         settings_h_layout.addStretch(1)
         settings_h_layout.addWidget(QLabel("시작 딜레이:"))
         self.initial_delay_spinbox = QSpinBox()
-        self.initial_delay_spinbox.setRange(0, 10000) # 0 ~ 10초
+        self.initial_delay_spinbox.setRange(0, 10000)
         self.initial_delay_spinbox.setSingleStep(500)
-        self.initial_delay_spinbox.setValue(2000) # 기본값 2초
+        self.initial_delay_spinbox.setValue(2000)
         self.initial_delay_spinbox.setSuffix(" ms")
         settings_h_layout.addWidget(self.initial_delay_spinbox)
         
         # 하단 버튼 라인
         buttons_h_layout = QHBoxLayout()
-        buttons_h_layout.addStretch(1) # 버튼을 우측으로 정렬
+        buttons_h_layout.addStretch(1)
         self.state_config_btn = QPushButton("판정 설정")
         self.state_config_btn.clicked.connect(self._open_state_config_dialog)
         self.action_learning_btn = QPushButton("동작 학습")
@@ -4597,15 +4595,33 @@ class MapTab(QWidget):
 
         # 8. 디버그 제어
         debug_groupbox = QGroupBox("8. 디버그 제어")
-        debug_layout = QVBoxLayout()
+        # <<< [수정] 레이아웃을 QHBoxLayout으로 변경
+        debug_layout = QHBoxLayout()
+        
+        # 좌측 디버그 옵션
+        debug_left_layout = QVBoxLayout()
+        self.debug_view_checkbox = QCheckBox("디버그 뷰 표시")
+        self.debug_view_checkbox.toggled.connect(self.toggle_debug_view)
         self.debug_basic_pathfinding_checkbox = QCheckBox("경로탐색 기본 로그 출력")
         self.debug_pathfinding_checkbox = QCheckBox("경로탐색 상세 로그 출력 (A*)")
         self.debug_state_machine_checkbox = QCheckBox("상태판정 변경 로그 출력")
         self.debug_guidance_checkbox = QCheckBox("경로안내선 변경 로그 출력") 
-        debug_layout.addWidget(self.debug_basic_pathfinding_checkbox)
-        debug_layout.addWidget(self.debug_pathfinding_checkbox)
-        debug_layout.addWidget(self.debug_state_machine_checkbox)
-        debug_layout.addWidget(self.debug_guidance_checkbox)
+        debug_left_layout.addWidget(self.debug_view_checkbox)
+        debug_left_layout.addWidget(self.debug_basic_pathfinding_checkbox)
+        debug_left_layout.addWidget(self.debug_pathfinding_checkbox)
+        debug_left_layout.addWidget(self.debug_state_machine_checkbox)
+        debug_left_layout.addWidget(self.debug_guidance_checkbox)
+
+        # 우측 디버그 옵션
+        debug_right_layout = QVBoxLayout()
+        self.debug_auto_control_checkbox = QCheckBox("자동 제어 테스트") # <<< [추가]
+        self.debug_auto_control_checkbox.setChecked(False)              # <<< [추가]
+        debug_right_layout.addWidget(self.debug_auto_control_checkbox)  # <<< [추가]
+        debug_right_layout.addStretch() # 위쪽에 붙도록
+        
+        debug_layout.addLayout(debug_left_layout)
+        debug_layout.addLayout(debug_right_layout)
+        
         debug_groupbox.setLayout(debug_layout)
         left_layout.addWidget(debug_groupbox)
 
@@ -5764,7 +5780,12 @@ class MapTab(QWidget):
                     self.capture_thread.stop()
                     self.capture_thread.wait()
                     
-                self.control_command_issued.emit("모든 키 떼기")
+                # <<< [수정] 자동 제어 테스트 모드 또는 실제 자동 제어 모드에 따라 분기 처리
+                if self.debug_auto_control_checkbox.isChecked():
+                    print("[자동 제어 테스트] 모든 키 떼기")
+                elif self.auto_control_checkbox.isChecked():
+                    self.control_command_issued.emit("모든 키 떼기")
+
                 self.update_general_log("탐지를 중단합니다.", "black")
                 self.detect_anchor_btn.setText("탐지 시작")
                 self.update_detection_log_message("탐지 중단됨", "black")
@@ -7427,92 +7448,77 @@ class MapTab(QWidget):
             current_node_key = self.current_segment_path[self.current_segment_index]
             intermediate_node_type = self.nav_nodes.get(current_node_key, {}).get('type')
 
-        # [핵심 수정] 탐지 시작 후 초기 딜레이 적용 로직
-        initial_delay_ms = self.initial_delay_spinbox.value()
-        time_since_start_ms = (time.time() - self.detection_start_time) * 1000
+        # <<< [수정] 자동 제어 또는 테스트 모드에 따라 분기
+        # is_control_active 변수를 사용하여 중복 코드 방지
+        is_control_or_test_active = self.auto_control_checkbox.isChecked() or self.debug_auto_control_checkbox.isChecked()
 
-        # 아직 딜레이 시간이 지나지 않았다면, 카운트다운을 표시하고 키 입력을 보내지 않음
-        if time_since_start_ms < initial_delay_ms:
-            remaining_time_s = (initial_delay_ms - time_since_start_ms) / 1000.0
-            nav_action_text = f"시작 대기 중... ({remaining_time_s:.1f}초)"
-            # [핵심 수정] 플래그를 확인하여 "모든 키 떼기" 명령을 딱 한 번만 보냄
-            if self.initial_delay_active:
-                self.control_command_issued.emit("모든 키 떼기")
-                self.initial_delay_active = False # 플래그를 비활성화하여 다시 보내지 않도록 함
+        if is_control_or_test_active:
+            initial_delay_ms = self.initial_delay_spinbox.value()
+            time_since_start_ms = (time.time() - self.detection_start_time) * 1000
 
-        # 딜레이 시간이 지났으면, 정상적으로 키 입력 안내 로직 수행
-        else:
-            # === [사용자 요청] 통합된 키 입력 안내 로직 (v10) - 이름 재지정됨 ===
-            current_action_key = self.navigation_action
-            current_player_state = self.player_state
-            current_direction = direction
-
-            action_changed = current_action_key != self.last_printed_action
-            direction_changed = current_direction != self.last_printed_direction
-            player_state_changed = current_player_state != self.last_printed_player_state
-            is_on_ground = self._get_contact_terrain(final_player_pos) is not None
-            
-            # 1. 'prepare_to_climb' 상태일 때의 특별 처리
-            if current_action_key == 'prepare_to_climb':
-                if self.last_printed_player_state in ['jumping'] and current_player_state in ['on_terrain', 'idle'] and is_on_ground:
-                    if (action_changed or not direction_changed):
-                        # [이름 변경]
-                        if current_direction == "→":
-                            self.control_command_issued.emit("사다리타기(우)")
-                        else:
-                            self.control_command_issued.emit("사다리타기(좌)")
-                        self.last_printed_direction = current_direction
-              
-                if (action_changed or direction_changed) and is_on_ground:
-                    # [이름 변경]
-                    if current_direction == "→":
-                        self.control_command_issued.emit("사다리타기(우)")
-                    else:
-                        self.control_command_issued.emit("사다리타기(좌)")
-                    self.last_printed_direction = current_direction
-
-            # 2. 그 외의 행동들은, 행동 자체가 처음 변경되었을 때만 출력합니다.
-            elif action_changed:
-                if current_action_key == 'prepare_to_jump':
-                    self.control_command_issued.emit("점프키 누르기") # 변경 없음
-                elif current_action_key == 'prepare_to_down_jump':
-                    # [이름 변경]
-                    self.control_command_issued.emit("아래점프")
-                self.last_printed_direction = None
-
-            # 3. 물리적 상태 변경 감지를 먼저 처리
-            if player_state_changed:
-                # [기능 추가] 'climbing_up' 상태 진입 시 "오르기" 명령 전송
-                if current_player_state == 'climbing_up':
-                    self.control_command_issued.emit("오르기")
-                    
-                if current_player_state == 'falling':
-                    if 'prepare_to_' not in current_action_key:
+            if time_since_start_ms < initial_delay_ms:
+                remaining_time_s = (initial_delay_ms - time_since_start_ms) / 1000.0
+                nav_action_text = f"시작 대기 중... ({remaining_time_s:.1f}초)"
+                if self.initial_delay_active:
+                    if self.debug_auto_control_checkbox.isChecked():
+                        print("[자동 제어 테스트] 모든 키 떼기")
+                    elif self.auto_control_checkbox.isChecked():
                         self.control_command_issued.emit("모든 키 떼기")
+                    self.initial_delay_active = False
+            else:
+                # 공통 로직: 어떤 명령을 보낼지 결정
+                command_to_send = None
+                current_action_key = self.navigation_action
+                current_player_state = self.player_state
+                current_direction = direction
+
+                action_changed = current_action_key != self.last_printed_action
+                direction_changed = current_direction != self.last_printed_direction
+                player_state_changed = current_player_state != self.last_printed_player_state
+                is_on_ground = self._get_contact_terrain(final_player_pos) is not None
                 
-                # 착지 시, 다음 프레임에서 방향 안내가 다시 나갈 수 있도록 last_printed_direction을 초기화
-                if self.last_printed_player_state == 'falling' and current_player_state in ['on_terrain', 'idle']:
+                if current_action_key == 'prepare_to_climb':
+                    if self.last_printed_player_state in ['jumping'] and current_player_state in ['on_terrain', 'idle'] and is_on_ground:
+                        if (action_changed or not direction_changed):
+                            command_to_send = "사다리타기(우)" if current_direction == "→" else "사다리타기(좌)"
+                            self.last_printed_direction = current_direction
+                  
+                    if (action_changed or direction_changed) and is_on_ground:
+                        command_to_send = "사다리타기(우)" if current_direction == "→" else "사다리타기(좌)"
+                        self.last_printed_direction = current_direction
+
+                elif action_changed:
+                    if current_action_key == 'prepare_to_jump': command_to_send = "점프키 누르기"
+                    elif current_action_key == 'prepare_to_down_jump': command_to_send = "아래점프"
                     self.last_printed_direction = None
 
-            # 4. 'move_to_target'(일반 이동) 상태일 때, 방향이 변경된 경우에만 출력합니다.
-            if current_action_key == 'move_to_target' and direction_changed and is_on_ground:
-                if current_direction in ["→", "←"]:
-                    # [이름 변경]
-                    if current_direction == "→":
-                        self.control_command_issued.emit("걷기(우)")
-                    elif current_direction == "←":
-                        self.control_command_issued.emit("걷기(좌)")
-                    self.last_printed_direction = current_direction
+                if player_state_changed:
+                    if current_player_state == 'climbing_up': command_to_send = "오르기"
+                    if current_player_state == 'falling':
+                        if 'prepare_to_' not in current_action_key: command_to_send = "모든 키 떼기"
+                    if self.last_printed_player_state == 'falling' and current_player_state in ['on_terrain', 'idle']:
+                        self.last_printed_direction = None
 
-            # 마지막으로, 현재 상태들을 "마지막으로 출력한 상태"로 기록합니다.
-            if action_changed:
-                self.last_printed_action = current_action_key
-                self.last_printed_player_state = None 
-            if player_state_changed:
-                self.last_printed_player_state = current_player_state
-            # === [사용자 요청] 로직 끝 ===
+                if current_action_key == 'move_to_target' and direction_changed and is_on_ground:
+                    if current_direction in ["→", "←"]:
+                        command_to_send = "걷기(우)" if current_direction == "→" else "걷기(좌)"
+                        self.last_printed_direction = current_direction
 
+                # 명령 전송 (테스트 또는 실제)
+                if command_to_send:
+                    if self.debug_auto_control_checkbox.isChecked():
+                        print(f"[자동 제어 테스트] {command_to_send}")
+                    elif self.auto_control_checkbox.isChecked():
+                        self.control_command_issued.emit(command_to_send)
 
+                # 상태 업데이트
+                if action_changed:
+                    self.last_printed_action = current_action_key
+                    self.last_printed_player_state = None 
+                if player_state_changed:
+                    self.last_printed_player_state = current_player_state
+        
+        # UI 업데이트는 항상 실행
         self.navigator_display.update_data(
             floor=self.current_player_floor if self.current_player_floor is not None else "N/A",
             terrain_name=current_terrain_name,
