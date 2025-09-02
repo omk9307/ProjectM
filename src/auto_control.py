@@ -93,9 +93,14 @@ class AutoControlTab(QWidget):
         self.current_command_name = ""
         self.is_test_mode = False
 
-        self.is_processing_step = False                    # <- (신규) _process_next_step 재진입 방지 플래그
-        self.last_sent_timestamps = {}                     # <- (신규) 키 전송 시각 기록 (에코 무시용)
-
+        self.is_processing_step = False                 # 중복 _process_next_step 재진입 방지 플래그
+        self.last_sent_timestamps = {}                  # 전송한 키의 타임스탬프 (에코 무시용)
+        self.ECHO_IGNORE_MS = 60                        # 기본 60ms, 필요하면 40~120 범위로 조절 권장
+        self.last_command_start_time = 0.0              # 마지막 시퀀스 시작 시각
+        self.sequence_watchdog = QTimer(self)           # 시퀀스가 멈추는 경우 복구용 와치독
+        self.sequence_watchdog.setSingleShot(True)
+        self.sequence_watchdog.timeout.connect(self._on_sequence_stuck)  # stuck 시 복구 시도
+        self.SEQUENCE_STUCK_TIMEOUT_MS = 5000           # 와치독 기본 시간 (조정 가능)
         self.is_map_detection_running = False
         self.last_log_time = 0.0
 
@@ -698,29 +703,37 @@ class AutoControlTab(QWidget):
                 print(f"[AutoControl] 데이터 전송 실패: {e}")
                 self.connect_to_pi()
 
-    def _press_key(self, key_object):
+    def _press_key(self, key_object, force=False):
         """
-        (수정) 실제로 전송이 발생했는지(True/False)를 반환하도록 변경.
-        기존: 내부에서만 held_keys를 관리.
+        (수정) 전송이 실제로 발생했는지 True/False 반환.
+        force=True면 held_keys 상태를 무시하고 강제로 전송(재시도)함.
         """
-        if key_object not in self.held_keys:
+        if force or key_object not in self.held_keys:
+            # 실제 전송 시각 기록은 _send_command 내부에서 처리
             self.held_keys.add(key_object)
             self._send_command(CMD_PRESS, key_object)
-            return True    # 실제 전송이 발생했음을 알림
-        return False       # 이미 눌려있어 전송하지 않음
+            return True
+        return False
 
-    def _release_key(self, key_object):
+    def _release_key(self, key_object, force=False):
         """
-        (수정) 실제로 전송이 발생했는지(True/False)를 반환하도록 변경.
+        (수정) 반환값 명시, force=True면 강제 릴리즈 시도.
         """
-        if key_object in self.held_keys:
+        if force or key_object in self.held_keys:
             self.held_keys.discard(key_object)
             self._send_command(CMD_RELEASE, key_object)
             return True
         return False
 
-    def _release_all_keys(self):
-        for key_obj in list(self.held_keys): self._release_key(key_obj)
+    def _release_all_keys(self, force=False):
+        """
+        (수정) 안전하게 모든 키를 떼고 held_keys를 초기화.
+        force=True이면 _release_key에 force=True로 호출(하드 릴리즈).
+        """
+        for key_obj in list(self.held_keys):
+            self._release_key(key_obj, force=force)
+        # 확실히 빈 상태로 만듦
+        self.held_keys.clear()
 
 # [기능 추가] 테스트 종료 후 안전하게 모든 키를 떼는 슬롯
     @pyqtSlot()
@@ -747,21 +760,38 @@ class AutoControlTab(QWidget):
     # --- [핵심 수정] time.sleep()을 QTimer 기반의 비동기 방식으로 변경 ---
     def _start_sequence_execution(self, sequence, command_name, is_test=False):
         """
-        시퀀스 실행을 시작합니다. 이미 실행 중인 시퀀스가 있다면 중단합니다.
+        시퀀스 실행 시작.
+        기존: 동일 명령 중복이면 무시 -> 문제: 실패 복구 시 재시도가 막힘.
+        수정: 동일 명령이 들어오면 '안전하게 중단하고' 재시작(강제 재실행) 처리.
         """
-        # [핵심 수정 1] 현재 실행 중인 명령과 동일한 명령이 들어오면 무시
+        # 만약 현재 동일 명령이 실행 중이면 '강제 재시작' 수행
         if self.is_sequence_running and self.current_command_name == command_name:
             if self.console_log_checkbox.isChecked():
-                print(f"--- [AutoControl] 중복 명령 무시: '{command_name}' ---")
-            return
+                print(f"--- [AutoControl] 동일 명령 재요청: '{command_name}' -> 강제 재시작 수행 ---")
+            # 안전하게 기존 시퀀스 정리
+            try:
+                self.sequence_timer.stop()
+            except Exception:
+                pass
+            # 이미 눌린 키가 남아있을 수 있으므로 강제 해제
+            self._release_all_keys(force=True)
+            # 내부 상태 초기화
+            self.is_sequence_running = False
+            self.is_processing_step = False
 
-        if self.is_sequence_running:
-            self.sequence_timer.stop()
-            # [핵심 수정 2] 무조건적인 _release_all_keys() 호출 제거
+        # 만약 다른 시퀀스가 실행 중이면 기존 시퀀스 중단(이전 동작 취소)
+        elif self.is_sequence_running:
             if self.console_log_checkbox.isChecked():
                 print(f"--- [AutoControl] 이전 시퀀스 중단: '{self.current_command_name}' ---")
+            try:
+                self.sequence_timer.stop()
+            except Exception:
+                pass
+            # 안전하게 키들만 해제 (기본 동작: 강제 해제는 하지 않음)
+            self._release_all_keys()
 
-        self.status_label.setText(f"'{command_name}' 실행 중...")
+        # 이제 새 시퀀스 초기화
+        self.status_label.setText(f"'{command_name}' 실행 중.")
         if self.console_log_checkbox.isChecked():
             print(f"--- [AutoControl] 실행 시작: '{command_name}' ---")
 
@@ -771,121 +801,159 @@ class AutoControlTab(QWidget):
         self.current_sequence_index = 0
         self.is_sequence_running = True
         self.is_first_key_event_in_sequence = True
+        self.last_command_start_time = time.time()
         
+        start_msg = f"--- (시작) {self.current_command_name} ---"              # <<< (추가) UI에 '(시작)' 로그를 즉시 남기기 위해 생성
+        self.log_generated.emit(start_msg, "magenta")                        # <<< (추가) UI 로그 시그널로 즉시 표시
+
+        # (와치독) 시퀀스가 멈추는 걸 감지하기 위해 재시작
+        self.sequence_watchdog.start(self.SEQUENCE_STUCK_TIMEOUT_MS)
+
         self._process_next_step()
 
     def _process_next_step(self):
         """
         시퀀스의 현재 단계를 처리하고, 다음 단계를 QTimer로 스케줄링합니다.
-        -> 재진입 방지, 실제 전송 여부에 따른 로그 출력, 타이머 중복 start 방지 적용
+        - 재진입 방지(is_processing_step)
+        - 단계 처리 후 와치독 재시작
+        - 예외가 발생해도 상태가 깨지지 않도록 finally에서 정리
         """
-        # --- (신규) 재진입 방지 ---
-        if getattr(self, "is_processing_step", False):
-            if self.console_log_checkbox.isChecked():
-                print("[AutoControl] 중복 스텝 처리 차단 (is_processing_step=True).")
+        if not self.is_sequence_running:
             return
-        self.is_processing_step = True
 
+        # 중복 진입 차단
+        if self.is_processing_step:
+            if self.console_log_checkbox.isChecked():
+                print("[AutoControl] 스텝 재진입 차단됨 (is_processing_step=True)")
+            return
+
+        self.is_processing_step = True
         try:
-            if not self.is_sequence_running or self.current_sequence_index >= len(self.current_sequence):
+            # 완료 검사
+            if self.current_sequence_index >= len(self.current_sequence):
                 self.is_sequence_running = False
-                
+                self.sequence_watchdog.stop()
                 log_msg = f"--- (완료) {self.current_command_name} ---"
                 self.log_generated.emit(log_msg, "lightgreen")
-
-                if self.is_test_mode:
-                    self.action_sequence_list.clearSelection()
-                    if self.held_keys:
-                        self.status_label.setText("테스트 완료. 2초 후 모든 키를 해제합니다...")
-                        if self.console_log_checkbox.isChecked():
-                            print("[AutoControl] TEST END: Sequence left keys pressed. Releasing all in 2s.")
-                        QTimer.singleShot(2000, self._safe_release_all_keys)
-                    else:
-                        self.status_label.setText(f"'{self.current_command_name}' 실행 완료.")
-                else:
-                    self.status_label.setText(f"'{self.current_command_name}' 실행 완료.")
-
-                if self.console_log_checkbox.isChecked():
-                    print(f"--- [AutoControl] 실행 완료: '{self.current_command_name}' ---")
+                # 테스트 모드 후 키 남아있으면 안전 해제
+                if self.is_test_mode and self.held_keys:
+                    QTimer.singleShot(2000, lambda: self._release_all_keys(force=True))
                 return
 
             step = self.current_sequence[self.current_sequence_index]
-            if self.is_test_mode:
-                self.action_sequence_list.setCurrentRow(self.current_sequence_index)
-
             action_type = step.get("type")
             delay_ms = 1
 
-            is_key_event = action_type in ["press", "release", "release_specific", "release_all"]
-            if is_key_event and self.is_first_key_event_in_sequence:
-                log_msg = f"--- (시작) {self.current_command_name} ---"
-                self.log_generated.emit(log_msg, "magenta")
-                self.is_first_key_event_in_sequence = False
-
+            # key event 처리
             if action_type in ["press", "release", "release_specific"]:
                 key_obj = self._str_to_key_obj(step.get("key_str"))
                 if not key_obj:
-                    log_msg = f"오류: 알 수 없는 키 '{step.get('key_str')}'"
-                    self.log_generated.emit(log_msg, "red")
-                    if self.console_log_checkbox.isChecked(): print(f"  - {log_msg}")
+                    self.log_generated.emit(f"오류: 알 수 없는 키 '{step.get('key_str')}'", "red")
                 elif action_type == "press":
-                    sent = self._press_key(key_obj)  # 이제 True/False 반환
-                    # --- (수정) 실제 전송이 있었을 때만 '(누르기)' 로그 생성 ---
-                    if sent:
-                        self.log_generated.emit(f"(누르기) {self._translate_key_for_logging(step.get('key_str'))}", "white")
-                        if self.console_log_checkbox.isChecked(): print(f"  - PRESS (SENT): {key_obj}")
+                    key_obj = self._str_to_key_obj(step.get("key_str"))
+                    key_str = self._key_obj_to_str(key_obj)  # <<< (추가) 일관된 문자열 식별자
+                    if not key_obj:
+                        self.log_generated.emit(f"오류: 알 수 없는 키 '{step.get('key_str')}'", "red")
                     else:
-                        # 중복 전송 스킵 로그 (디버그용)
-                        if self.console_log_checkbox.isChecked(): print(f"  - PRESS skipped (already held): {key_obj}")
-                else:
-                    released = self._release_key(key_obj)  # True/False 반환
+                        # 1) 정상 시도 (이미 존재하지 않으면 정상 전송)
+                        sent = self._press_key(key_obj, force=False)
+                        if sent:
+                            self.log_generated.emit(f"(누르기) {self._translate_key_for_logging(step.get('key_str'))}", "white")
+                        else:
+                            # 기존: 바로 force=True로 보냈음 -> 문제 소지
+                            # 개선: 강제 전송 전 추가 검사 수행
+                            now = time.time()
+                            last_sent = self.last_sent_timestamps.get(key_str, 0)
+                            observed_pressed = key_str in self.globally_pressed_keys  # 전역 리스너 관찰값
+
+                            # 조건: held_keys에 남아있었고, 관찰상으로는 눌려있지 않으며,
+                            # 우리가 바로 전에 보낸 이벤트의 '에코 윈도우'가 지나갔을 때만 강제 전송
+                            echo_window_s = (self.ECHO_IGNORE_MS / 1000.0)
+                            should_force = (key_obj in self.held_keys) and (not observed_pressed) and (now - last_sent > echo_window_s)
+
+                            if self.console_log_checkbox.isChecked():
+                                print(f"[AutoControl] PRESS skipped (already held). observed_pressed={observed_pressed}, last_sent_delta={(now-last_sent)*1000:.0f}ms, echo_window_ms={self.ECHO_IGNORE_MS}, should_force={should_force}")
+
+                            if should_force:
+                                forced = self._press_key(key_obj, force=True)
+                                if forced:
+                                    self.log_generated.emit(f"(누르기-forced) {self._translate_key_for_logging(step.get('key_str'))}", "white")
+                                else:
+                                    if self.console_log_checkbox.isChecked():
+                                        print(f"[AutoControl] forced press attempted but _press_key returned False (unexpected): {key_obj}")
+                            else:
+                                # 강제 전송을 하지 않고 스킵: 상태 동기화(또는 와치독)으로 복구 대기
+                                if self.console_log_checkbox.isChecked():
+                                    print(f"[AutoControl] PRESS not forced (skip). Will wait for external release/echo or watchdog.")
+                else:  # release
+                    released = self._release_key(key_obj, force=False)
                     if released:
                         self.log_generated.emit(f"(떼기) {self._translate_key_for_logging(step.get('key_str'))}", "white")
-                        if self.console_log_checkbox.isChecked(): print(f"  - RELEASE (SENT): {key_obj}")
                     else:
-                        if self.console_log_checkbox.isChecked(): print(f"  - RELEASE skipped (not held): {key_obj}")
+                        # 이미 떼어진 상태일 수 있으므로 강제 릴리즈로 정리 시도
+                        if self.console_log_checkbox.isChecked():
+                            print(f"[AutoControl] RELEASE skipped (not held) -> 강제 릴리즈 시도: {key_obj}")
+                        self._release_key(key_obj, force=True)
+                        # 강제 릴리즈는 로그로 남깁니다.
+                        self.log_generated.emit(f"(떼기-forced) {self._translate_key_for_logging(step.get('key_str'))}", "white")
 
             elif action_type == "delay":
                 min_ms = step.get("min_ms", 0)
                 max_ms = step.get("max_ms", 0)
-                if min_ms >= max_ms:
-                    delay_ms = min_ms
+                if min_ms >= max_ms: delay_ms = min_ms
                 else:
                     mean = (min_ms + max_ms) / 2
                     std_dev = (max_ms - min_ms) / 6
-                    random_delay = random.gauss(mean, std_dev)
-                    delay_ms = int(max(min(random_delay, max_ms), min_ms))
-                if self.console_log_checkbox.isChecked():
-                    print(f"  - DELAY: {delay_ms}ms (범위: {min_ms}~{max_ms}ms)")
+                    delay_ms = int(max(min(random.gauss(mean, std_dev), max_ms), min_ms))
 
             elif action_type == "release_all":
-                # 항상 실제 릴리즈 시도 (내부에서 held_keys 기준으로 전송)
-                self._release_all_keys()
+                self._release_all_keys(force=True)
                 self.log_generated.emit("(모든 키 떼기)", "white")
-                if self.console_log_checkbox.isChecked(): print("  - RELEASE_ALL_KEYS")
 
-            # --- 다음 스텝 예약: 기존 타이머 안전하게 멈추고 시작 ---
+            # 다음 스텝로 이동 및 타이머 재시작
             self.current_sequence_index += 1
             try:
-                self.sequence_timer.stop()    # 기존 타이머 중지 (중복 start 방지)
+                self.sequence_timer.stop()
             except Exception:
                 pass
+            # 와치독 재시작: 새 단계가 스케줄되므로 타임아웃 다시 시작
+            self.sequence_watchdog.start(self.SEQUENCE_STUCK_TIMEOUT_MS)
             self.sequence_timer.start(delay_ms)
+
+        except Exception as e:
+            # 예외 발생 시 로그 및 안전 복구
+            print(f"[AutoControl] _process_next_step 예외: {e}")
+            self.log_generated.emit(f"오류: _process_next_step 예외 발생 - {e}", "red")
+            # 강제 복구 시도
+            self._release_all_keys(force=True)
+            self.is_sequence_running = False
+            self.sequence_watchdog.stop()
         finally:
             self.is_processing_step = False
 
-
     @pyqtSlot(str)
     def receive_control_command(self, command_text):
-
         sequence = self.mappings.get(command_text)
         if not sequence:
             print(f"[AutoControl] 경고: '{command_text}'에 대한 매핑이 없습니다.")
             return
-        
-        # is_test 인자를 False로 하여 실행 시작
+
+        # 새 동작: 만약 동일 명령이 이미 실행 중이라면 강제 재시작하도록 _start_sequence_execution이 처리
         self._start_sequence_execution(sequence, command_text, is_test=False)
-        
+
+    def _on_sequence_stuck(self):
+        """(신규) 시퀀스가 일정 시간 진행이 없을 때 호출되어 안전 복구를 시도합니다."""
+        print(f"[AutoControl] Sequence watchdog fired for '{self.current_command_name}'. Performing safe recovery.")
+        self.log_generated.emit(f"경고: '{self.current_command_name}' 시퀀스가 멈춤. 복구 시도 중...", "orange")
+        # 시퀀스 강제 중단 및 키 정리
+        try:
+            self.sequence_timer.stop()
+        except Exception:
+            pass
+        self._release_all_keys(force=True)
+        self.is_sequence_running = False
+        self.is_processing_step = False
+
     def toggle_recording(self):
         if self.is_recording or self.is_waiting_for_start_key:
             self.stop_recording()
@@ -1046,30 +1114,31 @@ class AutoControlTab(QWidget):
             self.globally_pressed_keys.clear()
 
     def _on_global_press(self, key):
-        key_str = self._key_to_str(key)
+        key_str = self._key_to_str(key)  # 기존에 있던 헬퍼 사용 (문자열 일관화용)
 
-        # --- (신규) 우리가 직전에 보낸 키의 '에코'라면 무시 ---
+        # <<< (수정) 우리가 직전에 전송한 키의 '에코'라면 무시 (ECHO_IGNORE_MS 사용) >>>
         last_sent = self.last_sent_timestamps.get(key_str, 0)
-        if time.time() - last_sent < 0.06:   # 60ms 이내면 '자체 전송의 에코'로 간주하여 무시
-            if self.console_log_checkbox.isChecked():
-                print(f"[AutoControl] Global press ignored (echo) for {key_str}")
+        if time.time() - last_sent < (self.ECHO_IGNORE_MS / 1000.0):  # ms -> s 로 변환하여 비교
+            if getattr(self, "console_log_checkbox", None) and self.console_log_checkbox.isChecked():
+                print(f"[AutoControl] Global press ignored (echo) for {key_str} (within {self.ECHO_IGNORE_MS} ms)")
             return
 
+        # 기존 처리 (정상적인 외부 입력으로 처리)
         if key_str in self.globally_pressed_keys:
             return
 
         self.globally_pressed_keys.add(key_str)
         friendly_key_name = self._translate_key_for_logging(key_str)
         self.log_generated.emit(f"(누르기) {friendly_key_name}", "white")
-
+        
     def _on_global_release(self, key):
         key_str = self._key_to_str(key)
 
-        # --- (신규) 에코 무시 (release도 동일하게 처리) ---
+        # <<< (수정) 에코 무시 로직 (ECHO_IGNORE_MS 사용) >>>
         last_sent = self.last_sent_timestamps.get(key_str, 0)
-        if time.time() - last_sent < 0.06:
-            if self.console_log_checkbox.isChecked():
-                print(f"[AutoControl] Global release ignored (echo) for {key_str}")
+        if time.time() - last_sent < (self.ECHO_IGNORE_MS / 1000.0):
+            if getattr(self, "console_log_checkbox", None) and self.console_log_checkbox.isChecked():
+                print(f"[AutoControl] Global release ignored (echo) for {key_str} (within {self.ECHO_IGNORE_MS} ms)")
             return
 
         self.globally_pressed_keys.discard(key_str)
