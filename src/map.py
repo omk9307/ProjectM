@@ -4451,6 +4451,13 @@ class MapTab(QWidget):
                 'background': True, 'features': True, 'waypoints': True,
                 'terrain': True, 'objects': True, 'jump_links': True
             }
+            # --- 멈춤 감지 및 자동 복구 시스템 변수 ---
+            self.last_action_time = 0.0                      # 마지막으로 'idle'이 아닌 상태였던 시간
+            self.last_movement_command = None                # 마지막으로 전송한 이동 명령 (예: '걷기(우)')
+            self.stuck_recovery_attempts = 0                 # 복구 시도 횟수
+            self.STUCK_DETECTION_THRESHOLD_S = 1.5           # 멈춤으로 간주할 시간 (초)
+            self.MAX_STUCK_RECOVERY_ATTEMPTS = 3             # 최대 복구 시도 횟수
+            
             self.initUI()
             self.perform_initial_setup()
         
@@ -7245,6 +7252,48 @@ class MapTab(QWidget):
         # Phase 1: 물리적 상태 판정 (유지)
         self.player_state = self._determine_player_physical_state(final_player_pos, contact_terrain)
 
+        # --- [신규] 멈춤 감지 및 자동 복구 로직 ---
+        is_moving_state = self.player_state not in ['idle']
+        should_be_moving = self.navigation_action in ['move_to_target', 'prepare_to_climb', 'prepare_to_jump', 'prepare_to_down_jump', 'prepare_to_fall'] and self.start_waypoint_found
+
+        if is_moving_state:
+            # 캐릭터가 움직이고 있다면, 복구 상태를 초기화
+            self.last_action_time = time.time()
+            if self.stuck_recovery_attempts > 0:
+                self.update_general_log("[자동 복구] 캐릭터 움직임 감지. 복구 상태를 초기화합니다.", "green")
+                self.stuck_recovery_attempts = 0
+                self.last_movement_command = None # 복구 성공 시, 이전 명령은 무효화
+
+        elif should_be_moving: # 움직여야 하는데, is_moving_state가 False (즉, idle 상태)
+            time_since_last_action = time.time() - self.last_action_time
+            
+            # 마지막 액션 이후 일정 시간이 지났고, 복구 시도 횟수가 남았을 때
+            if time_since_last_action > self.STUCK_DETECTION_THRESHOLD_S and self.stuck_recovery_attempts < self.MAX_STUCK_RECOVERY_ATTEMPTS:
+                if self.last_movement_command:
+                    self.stuck_recovery_attempts += 1
+                    log_msg = f"[자동 복구] 멈춤 감지 ({self.stuck_recovery_attempts}/{self.MAX_STUCK_RECOVERY_ATTEMPTS}). 마지막 명령 '{self.last_movement_command}' 재전송."
+                    self.update_general_log(log_msg, "orange")
+                    
+                    # 마지막 명령 재전송
+                    if self.debug_auto_control_checkbox.isChecked():
+                        print(f"[자동 제어 테스트] RECOVERY: {self.last_movement_command}")
+                    elif self.auto_control_checkbox.isChecked():
+                        self.control_command_issued.emit(self.last_movement_command)
+                    
+                    # 재시도 후 다시 기다리도록 시간 갱신
+                    self.last_action_time = time.time()
+                else:
+                    # 재전송할 명령이 없는 경우 (탐지 시작 직후 등)
+                    if self.debug_basic_pathfinding_checkbox and self.debug_basic_pathfinding_checkbox.isChecked():
+                        print("[자동 복구] 경고: 멈춤이 감지되었으나 재전송할 마지막 명령이 없습니다.")
+            
+            elif time_since_last_action > self.STUCK_DETECTION_THRESHOLD_S and self.stuck_recovery_attempts >= self.MAX_STUCK_RECOVERY_ATTEMPTS:
+                # 최대 시도 횟수를 초과한 경우, 5초에 한 번씩만 로그를 남겨서 스팸 방지
+                if time.time() - getattr(self, '_last_stuck_log_time', 0) > 5.0:
+                    self.update_general_log(f"[자동 복구] 실패: 최대 복구 시도({self.MAX_STUCK_RECOVERY_ATTEMPTS}회)를 초과했습니다. 수동 개입이 필요할 수 있습니다.", "red")
+                    setattr(self, '_last_stuck_log_time', time.time())
+        # --- 로직 끝 ---
+
         # Phase 2: 행동 완료/실패 판정 (유지)
         if self.navigation_state_locked and self.player_state == 'on_terrain':
             self._process_action_completion(final_player_pos, contact_terrain)
@@ -7514,6 +7563,12 @@ class MapTab(QWidget):
 
                 # 명령 전송 (테스트 또는 실제)
                 if command_to_send:
+                    # --- [신규] 멈춤 감지 시스템을 위해 마지막 이동 명령 저장 ---
+                    movement_related_keywords = ["걷기", "점프", "오르기", "사다리타기"]
+                    if any(keyword in command_to_send for keyword in movement_related_keywords):
+                        self.last_movement_command = command_to_send
+                    # --- 저장 로직 끝 ---
+                    
                     if self.debug_auto_control_checkbox.isChecked():
                         print(f"[자동 제어 테스트] {command_to_send}")
                     elif self.auto_control_checkbox.isChecked():
