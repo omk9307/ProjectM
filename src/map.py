@@ -7290,28 +7290,31 @@ class MapTab(QWidget):
         if self.current_segment_index < len(self.current_segment_path):
             current_node_key = self.current_segment_path[self.current_segment_index]
             
-            if 'action' in self.navigation_action:
-                for edge_data in self.nav_graph.get(current_node_key, {}).values():
-                    if 'target_group' in edge_data:
-                        expected_group = edge_data['target_group']
-                        break
-            elif self.current_segment_index + 1 < len(self.current_segment_path):
+            # 현재 노드에서 다음 노드로 가는 엣지(연결) 정보를 찾아 예상 그룹을 결정
+            if self.current_segment_index + 1 < len(self.current_segment_path):
                  next_node_key = self.current_segment_path[self.current_segment_index + 1]
-                 expected_group = self.nav_nodes.get(next_node_key, {}).get('group')
+                 edge_data = self.nav_graph.get(current_node_key, {}).get(next_node_key, {})
+                 
+                 # 엣지 데이터에 target_group이 명시된 경우 (예: fall)
+                 if 'target_group' in edge_data:
+                     expected_group = edge_data['target_group']
+                 # 그렇지 않으면 다음 노드의 그룹을 예상 그룹으로 사용
+                 else:
+                     expected_group = self.nav_nodes.get(next_node_key, {}).get('group')
 
         if contact_terrain:
-            if self.navigation_action in ['fall_in_progress', 'down_jump_in_progress']:
+            # [핵심 수정] 모든 '..._in_progress' 상태의 성공 판정을 '예상된 지형 그룹 착지'로 통합
+            current_action = self.navigation_action
+            
+            if current_action.endswith('_in_progress'):
+                # 착지한 지형의 이름과 예상했던 지형의 이름이 같은지 확인
                 if contact_terrain.get('dynamic_name') == expected_group:
                     action_completed = True
-                elif contact_terrain.get('dynamic_name') != expected_group:
+                # 예상과 다른 지형에 착지했다면 실패로 간주 (단, climb은 예외적으로 더 기다려볼 수 있음)
+                elif expected_group is not None and current_action != 'climb_in_progress':
                     action_failed = True
-            
-            elif self.navigation_action == 'climb_in_progress':
-                if self.intermediate_target_pos:
-                    dist_x = abs(final_player_pos.x() - self.intermediate_target_pos.x())
-                    if final_player_pos.y() <= self.intermediate_target_pos.y() and dist_x < self.cfg_ladder_arrival_x_threshold:
-                        action_completed = True
-            
+
+            # 'move_to_target' 상태에서 땅에 닿은 것은 특별한 액션 완료가 아님
             else:
                 action_completed = True
 
@@ -7320,7 +7323,7 @@ class MapTab(QWidget):
             
             # [PATCH] v14.3.9: print문을 조건문으로 감쌈
             if self.debug_basic_pathfinding_checkbox and self.debug_basic_pathfinding_checkbox.isChecked():
-                print(f"[INFO] 행동 실패: {self.navigation_action}, 예상 그룹: {expected_group}, 현재 그룹: {contact_terrain.get('dynamic_name')}")
+                print(f"[INFO] 행동 실패: {self.navigation_action}, 예상 그룹: {expected_group}, 현재 그룹: {contact_terrain.get('dynamic_name') if contact_terrain else 'None'}")
 
             self.navigation_action = 'move_to_target'
             self.navigation_state_locked = False
