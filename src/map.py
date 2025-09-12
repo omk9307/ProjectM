@@ -16,9 +16,16 @@ import shutil
 import copy
 import traceback
 from collections import defaultdict, deque
-import threading # <<< [v11.0.0] 추가
-import hashlib # [NEW] 동일 컨텍스트 판별용
-import math    # [NEW] 0 오프셋 배제용
+import threading 
+import hashlib #  동일 컨텍스트 판별용
+import math    #  0 오프셋 배제용
+import win32gui
+import win32con
+import win32api
+import pygetwindow as gw
+import ctypes
+from ctypes import wintypes
+from PyQt6.QtCore import QAbstractNativeEventFilter
 
 from PyQt6.QtWidgets import (
     QApplication, QWidget, QLabel, QVBoxLayout, QHBoxLayout, QPushButton, QTextEdit,
@@ -3680,7 +3687,7 @@ class AnchorDetectionThread(QThread):
     def __init__(self, all_key_features, capture_thread=None, parent_tab=None): # [MODIFIED] parent_tab 추가
         super().__init__()
         self.capture_thread = capture_thread
-        self.parent_tab = parent_tab # [NEW] MapTab 인스턴스 저장
+        self.parent_tab = parent_tab #  MapTab 인스턴스 저장
         self.all_key_features = all_key_features or {}
         self.is_running = False
         self.feature_templates = {}
@@ -3720,7 +3727,7 @@ class AnchorDetectionThread(QThread):
                     time.sleep(0.005)
                     continue
 
-                # [NEW] 플레이어 탐지를 이 스레드에서 먼저 수행
+                #  플레이어 탐지를 이 스레드에서 먼저 수행
                 my_player_rects = []
                 other_player_rects = []
                 if self.parent_tab: # parent_tab이 전달되었는지 확인
@@ -3797,7 +3804,7 @@ class AnchorDetectionThread(QThread):
 # v14.0.0: 동작 인식을 위한 데이터 수집 다이얼로그
 class ActionLearningDialog(QDialog):
     """플레이어의 동작을 학습시키기 위한 데이터 수집 UI."""
-    # [신규] 삭제 버튼 상태 업데이트를 위한 시그널
+    #  삭제 버튼 상태 업데이트를 위한 시그널
     enable_delete_button_signal = pyqtSignal(bool)
 
     def __init__(self, parent=None):
@@ -4233,7 +4240,7 @@ class StateConfigDialog(QDialog):
         else:
             QMessageBox.warning(self, "측정 실패", "유효한 점프 데이터가 10회 수집되지 않았습니다.\n다시 시도해주세요.")
 
-    # [신규] v14.3.10: 누락되었던 메서드 복원
+    #  v14.3.10: 누락되었던 메서드 복원
     def get_updated_config(self):
         """UI의 현재 값들을 딕셔너리로 반환합니다."""
         updated_config = {}
@@ -4241,7 +4248,7 @@ class StateConfigDialog(QDialog):
             updated_config[key] = spinbox.value()
         return updated_config
 
-    # [신규] v14.3.10: 누락되었던 메서드 복원
+    #  v14.3.10: 누락되었던 메서드 복원
     def restore_defaults(self):
         """모든 설정 값을 코드에 정의된 기본값으로 복원합니다."""
         defaults = {
@@ -4271,6 +4278,102 @@ class StateConfigDialog(QDialog):
         for key, spinbox in self.spinboxes.items():
             if key in defaults:
                 spinbox.setValue(defaults[key])
+
+#  WinEventFilter: PyQt의 네이티브 이벤트 필터를 사용하여 WM_HOTKEY 메시지를 감지
+class WinEventFilter(QAbstractNativeEventFilter):
+    def __init__(self, callback):
+        super().__init__()
+        self.callback = callback
+
+    def nativeEventFilter(self, event_type, message):
+        if event_type == "windows_generic_MSG":
+            msg = ctypes.wintypes.MSG.from_address(int(message))
+            if msg.message == win32con.WM_HOTKEY:
+                self.callback()
+        return False, 0
+
+#  HotkeyManager: 단축키 문자열을 파싱하고 win32api를 호출하여 등록/해제하는 역할만 담당 (스레드 아님)
+class HotkeyManager:
+    def __init__(self):
+        self.hotkey_id = 1
+        self.current_hotkey_str = None
+        self.MOD_MAP = {"alt": win32con.MOD_ALT, "ctrl": win32con.MOD_CONTROL, "shift": win32con.MOD_SHIFT}
+        self.VK_MAP = {f"f{i}": getattr(win32con, f"VK_F{i}") for i in range(1, 13)}
+        
+        # --- [수정] ctypes를 사용하여 user32.dll에서 직접 함수를 가져옴 ---
+        self.user32 = ctypes.windll.user32
+
+    def register_hotkey(self, hotkey_str):
+        self.unregister_hotkey() # 기존 단축키가 있다면 먼저 해제
+        self.current_hotkey_str = hotkey_str.lower()
+        
+        if not self.current_hotkey_str or self.current_hotkey_str == 'none':
+            print("[HotkeyManager] 등록할 단축키가 없습니다.")
+            return
+
+        parts = self.current_hotkey_str.split('+')
+        mods, vk = 0, None
+        for part in parts:
+            if part in self.MOD_MAP:
+                mods |= self.MOD_MAP[part]
+            elif part in self.VK_MAP:
+                vk = self.VK_MAP[part]
+        
+        if vk is not None:
+            # --- [수정] win32api 대신 self.user32.RegisterHotKey 사용 ---
+            if self.user32.RegisterHotKey(None, self.hotkey_id, mods, vk):
+                print(f"[HotkeyManager] 전역 단축키 '{self.current_hotkey_str.upper()}' 등록 성공.")
+            else:
+                # 실패 시 에러 코드 확인
+                error_code = ctypes.windll.kernel32.GetLastError()
+                print(f"[HotkeyManager] 전역 단축키 '{self.current_hotkey_str.upper()}' 등록 실패. (에러 코드: {error_code})")
+
+
+    def unregister_hotkey(self):
+        if self.current_hotkey_str:
+            try:
+                # --- [수정] win32api 대신 self.user32.UnregisterHotKey 사용 ---
+                self.user32.UnregisterHotKey(None, self.hotkey_id)
+                print(f"[HotkeyManager] 단축키 '{self.current_hotkey_str.upper()}' 해제 완료.")
+                self.current_hotkey_str = None
+            except Exception as e:
+                # 프로그램 종료 시 이미 해제되었을 수 있으므로 오류를 무시
+                pass
+
+# HotkeySettingDialog: 사용자로부터 새로운 단축키 입력을 받는 다이얼로그
+class HotkeySettingDialog(QDialog):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("단축키 설정")
+        self.setFixedSize(300, 100)
+        self.hotkey_str = ""
+        
+        layout = QVBoxLayout(self)
+        self.label = QLabel("새로운 단축키를 누르세요...\n(Alt, Ctrl, Shift + F1~F12 조합만 가능)")
+        self.label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        layout.addWidget(self.label)
+        
+    def keyPressEvent(self, event):
+        key = event.key()
+        mods = event.modifiers()
+        
+        mod_map = {
+            Qt.KeyboardModifier.AltModifier: "alt",
+            Qt.KeyboardModifier.ControlModifier: "ctrl",
+            Qt.KeyboardModifier.ShiftModifier: "shift"
+        }
+        
+        vk_map = {getattr(Qt.Key, f"Key_F{i}"): f"f{i}" for i in range(1, 13)}
+
+        if key in vk_map:
+            key_str = vk_map[key]
+            mod_parts = [name for mod, name in mod_map.items() if mods & mod]
+            
+            self.hotkey_str = "+".join(sorted(mod_parts) + [key_str])
+            self.label.setText(f"설정된 키: {self.hotkey_str.upper()}")
+            QTimer.singleShot(500, self.accept) # 0.5초 후 자동 닫기
+        else:
+            self.label.setText("F1~F12 키만 기본 키로 사용할 수 있습니다.")
 
 class MapTab(QWidget):
     # control_command_issued 시그널을 추가합니다. str 타입을 전달합니다.
@@ -4451,14 +4554,26 @@ class MapTab(QWidget):
                 'background': True, 'features': True, 'waypoints': True,
                 'terrain': True, 'objects': True, 'jump_links': True
             }
-            # --- 멈춤 감지 및 자동 복구 시스템 변수 ---
+            
+            # --- [신규] 멈춤 감지 및 자동 복구 시스템 변수 ---
             self.last_action_time = 0.0                      # 마지막으로 'idle'이 아닌 상태였던 시간
             self.last_movement_command = None                # 마지막으로 전송한 이동 명령 (예: '걷기(우)')
             self.stuck_recovery_attempts = 0                 # 복구 시도 횟수
-            self.STUCK_DETECTION_THRESHOLD_S = 1.5           # 멈춤으로 간주할 시간 (초)
+            self.STUCK_DETECTION_THRESHOLD_S = 2.5           # 멈춤으로 간주할 시간 (초)
             self.MAX_STUCK_RECOVERY_ATTEMPTS = 3             # 최대 복구 시도 횟수
             
+            # --- [핵심 수정] 코드 순서 변경 ---
+            # 1. UI를 먼저 생성합니다.
             self.initUI()
+
+            # 2. UI가 생성된 후에 단축키 관리자를 초기화합니다.
+            self.hotkey_manager = HotkeyManager()
+            # self.detect_anchor_btn이 이제 존재하므로 안전하게 참조할 수 있습니다.
+            self.win_event_filter = WinEventFilter(self.detect_anchor_btn.click)
+            QApplication.instance().installNativeEventFilter(self.win_event_filter)
+            self.current_hotkey = "None"
+
+            # 3. 나머지 초기화 작업을 수행합니다.
             self.perform_initial_setup()
         
     def initUI(self):
@@ -4566,19 +4681,29 @@ class MapTab(QWidget):
         detect_groupbox = QGroupBox("7. 탐지 제어")
         detect_v_layout = QVBoxLayout()
 
-        # 상단 설정 라인 (자동 제어, 시작 딜레이)
-        settings_h_layout = QHBoxLayout()
+        # --- [수정] 레이아웃을 2줄로 분리 ---
+        settings_h_layout_1 = QHBoxLayout()
         self.auto_control_checkbox = QCheckBox("자동 제어")
         self.auto_control_checkbox.setChecked(False)
-        settings_h_layout.addWidget(self.auto_control_checkbox)
-        settings_h_layout.addStretch(1)
-        settings_h_layout.addWidget(QLabel("시작 딜레이:"))
+        settings_h_layout_1.addWidget(self.auto_control_checkbox)
+        settings_h_layout_1.addStretch(1)
+        settings_h_layout_1.addWidget(QLabel("시작 딜레이:"))
         self.initial_delay_spinbox = QSpinBox()
         self.initial_delay_spinbox.setRange(0, 10000)
         self.initial_delay_spinbox.setSingleStep(500)
         self.initial_delay_spinbox.setValue(2000)
         self.initial_delay_spinbox.setSuffix(" ms")
-        settings_h_layout.addWidget(self.initial_delay_spinbox)
+        settings_h_layout_1.addWidget(self.initial_delay_spinbox)
+        
+        settings_h_layout_2 = QHBoxLayout()
+        settings_h_layout_2.addStretch(1)
+        settings_h_layout_2.addWidget(QLabel("단축키:"))
+        self.hotkey_display_label = QLabel("None")
+        self.hotkey_display_label.setStyleSheet("font-weight: bold; color: white; padding: 2px 5px; background-color: #333; border: 1px solid #555; border-radius: 3px;")
+        set_hotkey_btn = QPushButton("설정")
+        set_hotkey_btn.clicked.connect(self._open_hotkey_setting_dialog)
+        settings_h_layout_2.addWidget(self.hotkey_display_label)
+        settings_h_layout_2.addWidget(set_hotkey_btn)
         
         # 하단 버튼 라인
         buttons_h_layout = QHBoxLayout()
@@ -4589,13 +4714,14 @@ class MapTab(QWidget):
         self.action_learning_btn.clicked.connect(self.open_action_learning_dialog) 
         self.detect_anchor_btn = QPushButton("탐지 시작")
         self.detect_anchor_btn.setCheckable(True)
-        self.detect_anchor_btn.setStyleSheet("padding: 3px 60px")
+        self.detect_anchor_btn.setStyleSheet("padding: 3px 72px")
         self.detect_anchor_btn.clicked.connect(self.toggle_anchor_detection)
         buttons_h_layout.addWidget(self.state_config_btn)
         buttons_h_layout.addWidget(self.action_learning_btn)
         buttons_h_layout.addWidget(self.detect_anchor_btn)
         
-        detect_v_layout.addLayout(settings_h_layout)
+        detect_v_layout.addLayout(settings_h_layout_1)
+        detect_v_layout.addLayout(settings_h_layout_2)
         detect_v_layout.addLayout(buttons_h_layout)
         detect_groupbox.setLayout(detect_v_layout)
         left_layout.addWidget(detect_groupbox)
@@ -4849,7 +4975,7 @@ class MapTab(QWidget):
     def load_profile_data(self, profile_name):
         self.active_profile_name = profile_name
         
-        # [NEW] 프로필 변경 시 모든 런타임/탐지 관련 상태 변수 완벽 초기화
+        #  프로필 변경 시 모든 런타임/탐지 관련 상태 변수 완벽 초기화
         if self.detection_thread and self.detection_thread.isRunning():
             self.toggle_anchor_detection(False) # 탐지 중이었다면 정지
             self.detect_anchor_btn.setChecked(False)
@@ -5178,14 +5304,22 @@ class MapTab(QWidget):
             try:
                 with open(GLOBAL_MAP_SETTINGS_FILE, 'r', encoding='utf-8') as f:
                     settings = json.load(f)
+                    #  단축키 정보 로드
+                    self.current_hotkey = settings.get('hotkey', 'None')
                     return settings.get('active_profile')
             except json.JSONDecodeError:
+                self.current_hotkey = 'None'
                 return None
+        self.current_hotkey = 'None'
         return None
 
     def save_global_settings(self):
         with open(GLOBAL_MAP_SETTINGS_FILE, 'w', encoding='utf-8') as f:
-            json.dump({'active_profile': self.active_profile_name}, f)
+            settings = {
+                'active_profile': self.active_profile_name,
+                'hotkey': self.current_hotkey #  단축키 정보 저장
+            }
+            json.dump(settings, f)
 
     def add_profile(self):
         profile_name, ok = QInputDialog.getText(self, "새 맵 프로필 추가", "프로필 이름 (폴더명으로 사용, 영문/숫자 권장):")
@@ -5715,6 +5849,22 @@ class MapTab(QWidget):
                 checked = self.detect_anchor_btn.isChecked()
             
             if checked:
+                # --- "maple" 창 탐색 및 활성화 ---
+                try:
+                    maple_windows = gw.getWindowsWithTitle('Maple')
+                    if not maple_windows:
+                        QMessageBox.warning(self, "오류", "MapleStory 클라이언트 창을 찾을 수 없습니다.\n게임을 먼저 실행해주세요.")
+                        self.detect_anchor_btn.setChecked(False)
+                        return
+                    
+                    target_window = maple_windows[0]
+                    if not target_window.isActive:
+                        target_window.activate()
+                        QThread.msleep(100) # 창이 활성화될 시간을 줌
+                except Exception as e:
+                    QMessageBox.warning(self, "창 활성화 오류", f"게임 창을 활성화하는 중 오류가 발생했습니다:\n{e}")
+                    self.detect_anchor_btn.setChecked(False)
+                    return
                 if not self.minimap_region:
                     QMessageBox.warning(self, "오류", "먼저 '미니맵 범위 지정'을 해주세요.")
                     self.detect_anchor_btn.setChecked(False)
@@ -6013,7 +6163,7 @@ class MapTab(QWidget):
         
         print(f"[STATE CHANGE] {prev_color}{previous_state}{C_RESET} -> {new_color}{new_state}{C_RESET} | 이유: {detailed_reason}")
         
-    # [신규] v14.0.2: 마지막 데이터 삭제 메서드
+    #  v14.0.2: 마지막 데이터 삭제 메서드
     def delete_last_action_data(self):
         """가장 최근에 수집된 데이터 파일을 삭제합니다."""
         if self.last_collected_filepath and os.path.exists(self.last_collected_filepath):
@@ -6540,7 +6690,7 @@ class MapTab(QWidget):
             context_pos_key = f"{feature_id}_context"
             if context_pos_key in self.global_positions:
                 context_origin = self.global_positions[context_pos_key]
-                # [NEW] 비정상적인 좌표값 필터링
+                #  비정상적인 좌표값 필터링
                 if abs(context_origin.x()) > 1e6 or abs(context_origin.y()) > 1e6:
                     self.update_general_log(f"경고: 비정상적인 문맥 원점 좌표({context_pos_key})가 감지되어 경계 계산에서 제외합니다.", "orange")
                     continue
@@ -6560,7 +6710,7 @@ class MapTab(QWidget):
         for obj in self.geometry_data.get("transition_objects", []): all_points.extend(obj.get("points", []))
         
         if all_points:
-            # [NEW] 비정상적인 지형 좌표 필터링
+            #  비정상적인 지형 좌표 필터링
             valid_points = [p for p in all_points if abs(p[0]) < 1e6 and abs(p[1]) < 1e6]
             if valid_points:
                 xs = [p[0] for p in valid_points]
@@ -6582,7 +6732,7 @@ class MapTab(QWidget):
             else:
                 bounding_rect = bounding_rect.united(rect)
 
-        # [NEW] 최종 경계 크기 제한 (안전장치)
+        #  최종 경계 크기 제한 (안전장치)
         MAX_DIMENSION = 20000 # 씬의 최대 크기를 20000px로 제한
         if bounding_rect.width() > MAX_DIMENSION or bounding_rect.height() > MAX_DIMENSION:
             self.update_general_log(f"경고: 계산된 맵 경계({bounding_rect.size().toSize()})가 너무 큽니다. 최대 크기로 제한합니다.", "red")
@@ -7252,7 +7402,7 @@ class MapTab(QWidget):
         # Phase 1: 물리적 상태 판정 (유지)
         self.player_state = self._determine_player_physical_state(final_player_pos, contact_terrain)
 
-        # --- [신규] 멈춤 감지 및 자동 복구 로직 ---
+        # ---  멈춤 감지 및 자동 복구 로직 ---
         is_moving_state = self.player_state not in ['idle']
         should_be_moving = self.navigation_action in ['move_to_target', 'prepare_to_climb', 'prepare_to_jump', 'prepare_to_down_jump', 'prepare_to_fall'] and self.start_waypoint_found
 
@@ -7563,7 +7713,7 @@ class MapTab(QWidget):
 
                 # 명령 전송 (테스트 또는 실제)
                 if command_to_send:
-                    # --- [신규] 멈춤 감지 시스템을 위해 마지막 이동 명령 저장 ---
+                    # ---  멈춤 감지 시스템을 위해 마지막 이동 명령 저장 ---
                     movement_related_keywords = ["걷기", "점프", "오르기", "사다리타기"]
                     if any(keyword in command_to_send for keyword in movement_related_keywords):
                         self.last_movement_command = command_to_send
@@ -7736,7 +7886,7 @@ class MapTab(QWidget):
         """
         [MODIFIED] v13.1.0: max_y_diff 인자를 추가하여, 지정된 Y축 거리 내에 있는
                  착지 지형만 필터링하는 기능 추가. (djump 높이 제한용)
-        [NEW] v13.0.9: 주어진 출발 위치에서 수직으로 낙하할 때,
+         v13.0.9: 주어진 출발 위치에서 수직으로 낙하할 때,
         물리적으로 가장 먼저 충돌하는(가장 높은 층에 있는) 지형 라인을 찾아 반환합니다.
         """
         departure_terrain = self._get_contact_terrain(departure_pos)
@@ -8021,7 +8171,7 @@ class MapTab(QWidget):
         
     def update_detection_log_from_features(self, inliers, outliers):
         """정상치와 이상치 피처 목록을 받아 탐지 상태 로그를 업데이트합니다."""
-        # [NEW] 5프레임마다 한 번씩만 업데이트하도록 조절
+        #  5프레임마다 한 번씩만 업데이트하도록 조절
         self.log_update_counter += 1
         if self.log_update_counter % 5 != 0:
             return
@@ -8114,7 +8264,7 @@ class MapTab(QWidget):
                 except IndexError:
                     return {}
             
-            # [NEW] 정책/가드 옵션 및 해시/템플릿 준비
+            #  정책/가드 옵션 및 해시/템플릿 준비
             identical_context_policy = getattr(self, 'identical_context_policy', 'propagate')
             degenerate_match_eps = float(getattr(self, 'degenerate_match_eps', 2.0))
 
@@ -8142,7 +8292,7 @@ class MapTab(QWidget):
             pending_features = set(self.key_features.keys()) - known_features
             global_positions[anchor_id] = QPointF(0, 0)
 
-            # [NEW] 동일 컨텍스트 그룹핑 및 앵커 그룹 사전 전개
+            #  동일 컨텍스트 그룹핑 및 앵커 그룹 사전 전개
             if identical_context_policy in ('propagate', 'forbid'):
                 groups = defaultdict(list)
                 for fid, h in context_hashes.items():
@@ -8217,7 +8367,7 @@ class MapTab(QWidget):
                     
                     if is_found:
                         found_in_iteration.add(pending_id)
-                        # [NEW] 신규 확정 피처의 동일-컨텍스트 그룹 즉시 전개
+                        #  신규 확정 피처의 동일-컨텍스트 그룹 즉시 전개
                         if identical_context_policy == 'propagate':
                             h = context_hashes.get(pending_id)
                             if h and h in groups:
@@ -8276,7 +8426,7 @@ class MapTab(QWidget):
                     center2 = pos2 + QPointF(size2.width()/2, size2.height()/2)
 
                     offset = center2 - center1
-                    # [NEW] 퇴화 방지: 0에 가까운 오프셋은 저장하지 않음
+                    #  퇴화 방지: 0에 가까운 오프셋은 저장하지 않음
                     if math.hypot(offset.x(), offset.y()) < 1e-3:
                         continue
 
@@ -8833,7 +8983,47 @@ class MapTab(QWidget):
             except Exception as e:
                 print(f"Error assigning dynamic names to jump links in MapTab: {e}")
 
-    def cleanup_on_close(self):
+    def _open_hotkey_setting_dialog(self):
+        dialog = HotkeySettingDialog(self)
+        if dialog.exec():
+            new_hotkey = dialog.hotkey_str
+            if new_hotkey:
+                self.update_general_log(f"단축키가 '{new_hotkey.upper()}' (으)로 설정되었습니다.", "blue")
+                self._save_and_reregister_hotkey(new_hotkey)
+
+    def _save_and_reregister_hotkey(self, new_hotkey_str):
+        self.current_hotkey = new_hotkey_str
+        self.save_global_settings()
+        self.hotkey_display_label.setText(self.current_hotkey.upper())
+        if self.hotkey_manager:
+            self.hotkey_manager.register_hotkey(self.current_hotkey)
+
+    def perform_initial_setup(self):
+        os.makedirs(MAPS_DIR, exist_ok=True)
+        self.check_and_migrate_old_config()
+        self.profile_selector.blockSignals(True)
+        self.populate_profile_selector()
+        profile_to_load = None
+        
+        # [수정] 단축키 로드 및 등록 로직
+        last_profile = self.load_global_settings()
+        self.hotkey_display_label.setText(self.current_hotkey.upper())
+        if self.hotkey_manager:
+            self.hotkey_manager.register_hotkey(self.current_hotkey)
+
+        if last_profile and last_profile in [self.profile_selector.itemText(i) for i in range(self.profile_selector.count())]:
+            profile_to_load = last_profile
+        elif self.profile_selector.count() > 0:
+            profile_to_load = self.profile_selector.itemText(0)
+        if profile_to_load:
+            self.profile_selector.setCurrentText(profile_to_load)
+        self.profile_selector.blockSignals(False)
+        if profile_to_load:
+            self.load_profile_data(profile_to_load)
+        else:
+            self.update_ui_for_no_profile()
+
+def cleanup_on_close(self):
         self.save_global_settings()
         # 프로그램 종료 시에도 탐지 상태 플래그를 False로 설정
         self.is_detection_running = False
@@ -8841,4 +9031,11 @@ class MapTab(QWidget):
         if self.detection_thread and self.detection_thread.isRunning():
             self.detection_thread.stop()
             self.detection_thread.wait()
+            
+        # [신규] 단축키 관리자 및 이벤트 필터 정리
+        if self.hotkey_manager:
+            self.hotkey_manager.unregister_hotkey()
+        if hasattr(self, 'win_event_filter'):
+            QApplication.instance().removeNativeEventFilter(self.win_event_filter)
+            
         print("'맵' 탭 정리 완료.")
