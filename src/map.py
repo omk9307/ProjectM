@@ -4555,12 +4555,19 @@ class MapTab(QWidget):
                 'terrain': True, 'objects': True, 'jump_links': True
             }
             
-            # --- [신규] 멈춤 감지 및 자동 복구 시스템 변수 ---
+            # ---  멈춤 감지 및 자동 복구 시스템 변수 ---
             self.last_action_time = 0.0                      # 마지막으로 'idle'이 아닌 상태였던 시간
             self.last_movement_command = None                # 마지막으로 전송한 이동 명령 (예: '걷기(우)')
             self.stuck_recovery_attempts = 0                 # 복구 시도 횟수
-            self.STUCK_DETECTION_THRESHOLD_S = 2.5           # 멈춤으로 간주할 시간 (초)
-            self.MAX_STUCK_RECOVERY_ATTEMPTS = 3             # 최대 복구 시도 횟수
+            self.STUCK_DETECTION_THRESHOLD_S = 1.0           # 멈춤으로 간주할 시간 (초)
+            self.MAX_STUCK_RECOVERY_ATTEMPTS = 30             # 최대 복구 시도 횟수
+            self.CLIMBING_RECOVERY_KEYWORDS = ["오르기", "사다리타기"] # 등반 복구 식별용
+            self.alignment_target_x = None # ---  사다리 앞 정렬(align) 상태 변수 ---
+            self.verify_alignment_start_time = 0.0  # 정렬 확인 시작 시간
+            self.last_align_command_time = 0.0      # 마지막 정렬 명령 전송 시간
+
+            # --- [v.1810] 좁은 발판 착지 판단 유예 플래그 ---
+            self.just_landed_on_narrow_terrain = False
             
             # --- [핵심 수정] 코드 순서 변경 ---
             # 1. UI를 먼저 생성합니다.
@@ -6951,6 +6958,17 @@ class MapTab(QWidget):
 
         # -1순위: 지상 착지 판정
         if contact_terrain:
+            # --- [v.1810] 좁은 발판 착지 감지 로직 ---
+            if previous_state in ['jumping', 'falling']: # 공중에서 착지하는 순간
+                points = contact_terrain.get('points', [])
+                if len(points) >= 2:
+                    terrain_width = abs(points[0][0] - points[-1][0])
+                    if terrain_width < 10.0:
+                        self.just_landed_on_narrow_terrain = True
+                        if self.debug_basic_pathfinding_checkbox and self.debug_basic_pathfinding_checkbox.isChecked():
+                            print(f"[INFO] 좁은 발판(너비: {terrain_width:.1f}px) 착지. 1프레임 판단 유예.")
+            # --- 로직 끝 ---
+
             time_since_move = time.time() - self.last_movement_time
             if time_since_move >= self.cfg_idle_time_threshold:
                 new_state = 'idle'; reason = "규칙: 지상에서 정지"
@@ -7287,41 +7305,47 @@ class MapTab(QWidget):
         action_failed = False
         
         expected_group = None
-        if self.current_segment_index < len(self.current_segment_path):
-            current_node_key = self.current_segment_path[self.current_segment_index]
-            
-            # 현재 노드에서 다음 노드로 가는 엣지(연결) 정보를 찾아 예상 그룹을 결정
-            if self.current_segment_index + 1 < len(self.current_segment_path):
-                 next_node_key = self.current_segment_path[self.current_segment_index + 1]
-                 edge_data = self.nav_graph.get(current_node_key, {}).get(next_node_key, {})
-                 
-                 # 엣지 데이터에 target_group이 명시된 경우 (예: fall)
-                 if 'target_group' in edge_data:
-                     expected_group = edge_data['target_group']
-                 # 그렇지 않으면 다음 노드의 그룹을 예상 그룹으로 사용
-                 else:
-                     expected_group = self.nav_nodes.get(next_node_key, {}).get('group')
+        # [v.1815] 'climb' 액션의 경우, 다음 노드(사다리 출구) 정보를 미리 가져옴
+        next_node = None
+        if self.current_segment_index + 1 < len(self.current_segment_path):
+            next_node_key = self.current_segment_path[self.current_segment_index + 1]
+            next_node = self.nav_nodes.get(next_node_key, {})
+            expected_group = next_node.get('group')
 
         if contact_terrain:
-            # [핵심 수정] 모든 '..._in_progress' 상태의 성공 판정을 '예상된 지형 그룹 착지'로 통합
             current_action = self.navigation_action
             
-            if current_action.endswith('_in_progress'):
-                # 착지한 지형의 이름과 예상했던 지형의 이름이 같은지 확인
+            # [v.1815] 'climb_in_progress'에 대한 특별 성공 조건
+            if current_action == 'climb_in_progress':
+                if next_node and next_node.get('type') == 'ladder_exit':
+                    target_pos = next_node.get('pos')
+                    
+                    is_on_correct_terrain = (contact_terrain.get('dynamic_name') == expected_group)
+                    is_at_correct_height = (final_player_pos.y() <= target_pos.y() + 1.0) # 1px 여유
+                    
+                    if is_on_correct_terrain and is_at_correct_height:
+                        action_completed = True
+                        if self.debug_basic_pathfinding_checkbox and self.debug_basic_pathfinding_checkbox.isChecked():
+                            print("[INFO] Climb complete: 지형 및 높이 조건 모두 충족.")
+                else:
+                    # 경로에 문제가 있는 경우, 일단 착지만 하면 성공으로 간주 (안전장치)
+                    if contact_terrain.get('dynamic_name') == expected_group:
+                        action_completed = True
+
+            # 다른 진행 중인 액션들 (낙하 등)
+            elif current_action.endswith('_in_progress'):
                 if contact_terrain.get('dynamic_name') == expected_group:
                     action_completed = True
-                # 예상과 다른 지형에 착지했다면 실패로 간주 (단, climb은 예외적으로 더 기다려볼 수 있음)
-                elif expected_group is not None and current_action != 'climb_in_progress':
+                elif expected_group is not None:
                     action_failed = True
 
-            # 'move_to_target' 상태에서 땅에 닿은 것은 특별한 액션 완료가 아님
+            # 액션이 아닌 상태에서 땅에 닿은 경우
             else:
                 action_completed = True
 
         if action_failed:
             self.update_general_log(f"행동({self.navigation_action}) 실패. 예상 경로를 벗어났습니다. 경로를 재탐색합니다.", "orange")
             
-            # [PATCH] v14.3.9: print문을 조건문으로 감쌈
             if self.debug_basic_pathfinding_checkbox and self.debug_basic_pathfinding_checkbox.isChecked():
                 print(f"[INFO] 행동 실패: {self.navigation_action}, 예상 그룹: {expected_group}, 현재 그룹: {contact_terrain.get('dynamic_name') if contact_terrain else 'None'}")
 
@@ -7344,7 +7368,6 @@ class MapTab(QWidget):
                 if next_node_type in via_node_types:
                     skipped_node_name = self.nav_nodes.get(next_node_key, {}).get('name', '경유지')
                     
-                    # [PATCH] v14.3.9: print문을 조건문으로 감쌈
                     if self.debug_basic_pathfinding_checkbox and self.debug_basic_pathfinding_checkbox.isChecked():
                         print(f"[INFO] 경유 노드 '{skipped_node_name}' 자동 건너뛰기.")
 
@@ -7358,7 +7381,6 @@ class MapTab(QWidget):
                 self.expected_terrain_group = next_node.get('group')
                 log_message = f"행동({action_name}) 완료. 다음 목표: '{next_node.get('name', '??')}' (그룹: '{self.expected_terrain_group}')"
                 
-                # [PATCH] v14.3.9: print문을 조건문으로 감쌈
                 if self.debug_basic_pathfinding_checkbox and self.debug_basic_pathfinding_checkbox.isChecked():
                     print(f"[INFO] {log_message}")
 
@@ -7366,7 +7388,6 @@ class MapTab(QWidget):
             else:
                 log_message = f"행동({action_name}) 완료. 현재 구간 종료."
                 
-                # [PATCH] v14.3.9: print문을 조건문으로 감쌈
                 if self.debug_basic_pathfinding_checkbox and self.debug_basic_pathfinding_checkbox.isChecked():
                     print(f"[INFO] {log_message}")
 
@@ -7405,46 +7426,65 @@ class MapTab(QWidget):
         # Phase 1: 물리적 상태 판정 (유지)
         self.player_state = self._determine_player_physical_state(final_player_pos, contact_terrain)
 
-        # ---  멈춤 감지 및 자동 복구 로직 ---
+        # --- [v.1813] '선제적 붙기' 자동 복구 로직 ---
         is_moving_state = self.player_state not in ['idle']
-        should_be_moving = self.navigation_action in ['move_to_target', 'prepare_to_climb', 'prepare_to_jump', 'prepare_to_down_jump', 'prepare_to_fall'] and self.start_waypoint_found
+        should_be_moving = self.navigation_action in ['move_to_target', 'prepare_to_climb', 'prepare_to_jump', 'prepare_to_down_jump', 'prepare_to_fall', 'align_for_climb'] and self.start_waypoint_found
 
         if is_moving_state:
-            # 캐릭터가 움직이고 있다면, 복구 상태를 초기화
             self.last_action_time = time.time()
             if self.stuck_recovery_attempts > 0:
                 self.update_general_log("[자동 복구] 캐릭터 움직임 감지. 복구 상태를 초기화합니다.", "green")
                 self.stuck_recovery_attempts = 0
-                self.last_movement_command = None # 복구 성공 시, 이전 명령은 무효화
+                self.last_movement_command = None
 
-        elif should_be_moving: # 움직여야 하는데, is_moving_state가 False (즉, idle 상태)
+        elif should_be_moving:
             time_since_last_action = time.time() - self.last_action_time
             
-            # 마지막 액션 이후 일정 시간이 지났고, 복구 시도 횟수가 남았을 때
             if time_since_last_action > self.STUCK_DETECTION_THRESHOLD_S and self.stuck_recovery_attempts < self.MAX_STUCK_RECOVERY_ATTEMPTS:
                 if self.last_movement_command:
                     self.stuck_recovery_attempts += 1
-                    log_msg = f"[자동 복구] 멈춤 감지 ({self.stuck_recovery_attempts}/{self.MAX_STUCK_RECOVERY_ATTEMPTS}). 마지막 명령 '{self.last_movement_command}' 재전송."
+                    log_msg = f"[자동 복구] 멈춤 감지 ({self.stuck_recovery_attempts}/{self.MAX_STUCK_RECOVERY_ATTEMPTS}). '사다리 멈춤감지' 후 '{self.last_movement_command}' 재시도."
                     self.update_general_log(log_msg, "orange")
-                    
-                    # 마지막 명령 재전송
+
+                    # 1. '사다리 멈춤감지' 명령을 먼저 보냄
                     if self.debug_auto_control_checkbox.isChecked():
-                        print(f"[자동 제어 테스트] RECOVERY: {self.last_movement_command}")
+                        print("[자동 제어 테스트] RECOVERY-PREP: 사다리 멈춤복구")
                     elif self.auto_control_checkbox.isChecked():
-                        self.control_command_issued.emit(self.last_movement_command)
+                        self.control_command_issued.emit("사다리 멈춤복구")
+                    QTimer.singleShot(600, self._execute_recovery_resend)
+                    # 2. 이어서 원래 명령 재전송 (auto_control의 큐에 들어감)
+                    self._execute_recovery_resend()
                     
-                    # 재시도 후 다시 기다리도록 시간 갱신
                     self.last_action_time = time.time()
                 else:
-                    # 재전송할 명령이 없는 경우 (탐지 시작 직후 등)
                     if self.debug_basic_pathfinding_checkbox and self.debug_basic_pathfinding_checkbox.isChecked():
                         print("[자동 복구] 경고: 멈춤이 감지되었으나 재전송할 마지막 명령이 없습니다.")
             
             elif time_since_last_action > self.STUCK_DETECTION_THRESHOLD_S and self.stuck_recovery_attempts >= self.MAX_STUCK_RECOVERY_ATTEMPTS:
-                # 최대 시도 횟수를 초과한 경우, 5초에 한 번씩만 로그를 남겨서 스팸 방지
                 if time.time() - getattr(self, '_last_stuck_log_time', 0) > 5.0:
                     self.update_general_log(f"[자동 복구] 실패: 최대 복구 시도({self.MAX_STUCK_RECOVERY_ATTEMPTS}회)를 초과했습니다. 수동 개입이 필요할 수 있습니다.", "red")
                     setattr(self, '_last_stuck_log_time', time.time())
+        # --- 로직 끝 ---
+
+        # --- [신규] 사다리 앞 정렬 및 확인 상태 처리 로직 ---
+        if self.navigation_action == 'align_for_climb' and self.alignment_target_x is not None:
+            if abs(final_player_pos.x() - self.alignment_target_x) <= 2.0:
+                self.update_general_log("정렬 범위 진입. 0.3초간 위치를 확인합니다.", "gray")
+                self.navigation_action = 'verify_alignment'
+                self.verify_alignment_start_time = time.time() # 확인 시작 시간 기록
+
+        elif self.navigation_action == 'verify_alignment':
+            # 0.3초 동안 대기하며 위치 확인
+            if time.time() - self.verify_alignment_start_time > 0.3:
+                if abs(final_player_pos.x() - self.alignment_target_x) <= 2.0:
+                    # 최종 성공
+                    self.update_general_log("정렬 확인 완료. 위 방향으로 오르기를 시도합니다.", "green")
+                    self.navigation_action = 'prepare_to_climb_upward'
+                    self.alignment_target_x = None
+                else:
+                    # 확인 실패, 다시 정렬 상태로 복귀
+                    self.update_general_log("위치 이탈 감지. 다시 정렬합니다.", "orange")
+                    self.navigation_action = 'align_for_climb'
         # --- 로직 끝 ---
 
         # Phase 2: 행동 완료/실패 판정 (유지)
@@ -7479,13 +7519,17 @@ class MapTab(QWidget):
         if self.journey_plan and self.start_waypoint_found and not self.current_segment_path:
             self._calculate_segment_path(final_player_pos)
 
-        # Phase 4: 상태에 따른 핵심 로직 처리 (유지)
+        # --- [v.1812] BUGFIX: 상태 처리 로직 분리 ---
+        # Phase 4: 상태에 따른 핵심 로직 처리
         if self.navigation_state_locked:
             self._handle_action_in_progress(final_player_pos)
         elif self.navigation_action.startswith('prepare_to_'):
             departure_terrain_group = contact_terrain.get('dynamic_name') if contact_terrain else None
             self._handle_action_preparation(final_player_pos, departure_terrain_group)
-        else: # move_to_target
+        elif self.navigation_action in ['align_for_climb', 'verify_alignment']:
+            # 정렬 관련 상태일 때는 아무것도 하지 않음 (이미 위에서 처리됨)
+            pass
+        else: # 'move_to_target' 상태일 때만 목표 이동 처리
             self._handle_move_to_target(final_player_pos)
 
         # Phase 5: UI 업데이트 (유지)
@@ -7505,6 +7549,14 @@ class MapTab(QWidget):
             self.last_debug_guidance_text = self.guidance_text
             
         self.last_player_pos = final_player_pos
+
+    def _execute_recovery_resend(self):
+        """마지막 이동 명령을 실제로 재전송하는 역할을 합니다."""
+        if self.last_movement_command:
+            if self.debug_auto_control_checkbox.isChecked():
+                print(f"[자동 제어 테스트] RECOVERY: {self.last_movement_command}")
+            elif self.auto_control_checkbox.isChecked():
+                self.control_command_issued.emit(self.last_movement_command)
 
     def _update_navigator_and_view(self, final_player_pos, current_terrain_name):
         """
@@ -7541,8 +7593,8 @@ class MapTab(QWidget):
                 self.guidance_text = "착지 지점 없음"
                 self.intermediate_target_pos = None
         # <<< 핵심 수정 1 >>> prepare_to_climb 상태를 위한 분기 추가
-        elif self.navigation_action == 'prepare_to_climb':
-            # 사다리 오르기 준비 시에는 항상 다음 목표(사다리 출구)를 안내
+        elif self.navigation_action in ['prepare_to_climb', 'align_for_climb', 'verify_alignment', 'prepare_to_climb_upward']:
+            # 사다리 관련 상태에서는 항상 다음 목표(사다리 출구)를 안내
             if self.current_segment_path and self.current_segment_index + 1 < len(self.current_segment_path):
                 target_node_key = self.current_segment_path[self.current_segment_index + 1]
                 target_node = self.nav_nodes.get(target_node_key, {})
@@ -7614,13 +7666,30 @@ class MapTab(QWidget):
                 distance = 0
             nav_action_text = "오르는 중..."
             final_intermediate_type = 'climb'
+        # --- [신규] '정렬' 및 '확인' 상태에 대한 안내 텍스트 설정 ---
+        elif self.navigation_action == 'align_for_climb':
+            if self.alignment_target_x is not None:
+                distance = abs(final_player_pos.x() - self.alignment_target_x)
+                direction = "→" if final_player_pos.x() < self.alignment_target_x else "←"
+            else:
+                distance = 0
+                direction = "-"
+            nav_action_text = "사다리 앞 정렬 중..."
+            final_intermediate_type = 'walk' # 걷는 행동이므로
+        elif self.navigation_action == 'verify_alignment':
+            distance = abs(final_player_pos.x() - self.alignment_target_x) if self.alignment_target_x is not None else 0
+            direction = "-"
+            nav_action_text = "정렬 확인 중..."
+            final_intermediate_type = 'walk'
+        # --- 로직 끝 ---
         else:
             if self.intermediate_target_pos:
                 distance = abs(final_player_pos.x() - self.intermediate_target_pos.x())
                 direction = "→" if final_player_pos.x() < self.intermediate_target_pos.x() else "←"
             action_text_map = {
                 'move_to_target': "다음 목표로 이동",
-                'prepare_to_climb': "점프+↑+방향키를 눌러 오르세요",
+                'prepare_to_climb': "점프+방향키로 오르세요",
+                'prepare_to_climb_upward': "사다리타기(상) 실행",
                 'prepare_to_jump': "점프하세요",
             }
             nav_action_text = action_text_map.get(self.navigation_action, '대기 중')
@@ -7667,72 +7736,88 @@ class MapTab(QWidget):
                         self.control_command_issued.emit("모든 키 떼기")
                     self.initial_delay_active = False
             else:
-                # 공통 로직: 어떤 명령을 보낼지 결정
-                command_to_send = None
-                current_action_key = self.navigation_action
-                current_player_state = self.player_state
-                current_direction = direction
+                # --- [v.1811] BUGFIX: UnboundLocalError 해결 ---
+                if self.just_landed_on_narrow_terrain:
+                    self.just_landed_on_narrow_terrain = False
+                    # 이번 프레임은 아무 명령도 보내지 않고, 상태 업데이트도 건너뜀
+                else:
+                    # 공통 로직: 어떤 명령을 보낼지 결정
+                    command_to_send = None
+                    current_action_key = self.navigation_action
+                    current_player_state = self.player_state
+                    current_direction = direction
 
-                action_changed = current_action_key != self.last_printed_action
-                direction_changed = current_direction != self.last_printed_direction
-                player_state_changed = current_player_state != self.last_printed_player_state
-                is_on_ground = self._get_contact_terrain(final_player_pos) is not None
-                
-                if current_action_key == 'prepare_to_climb':
-                    if self.last_printed_player_state in ['jumping'] and current_player_state in ['on_terrain', 'idle'] and is_on_ground:
-                        if (action_changed or not direction_changed):
+                    action_changed = current_action_key != self.last_printed_action
+                    direction_changed = current_direction != self.last_printed_direction
+                    player_state_changed = current_player_state != self.last_printed_player_state
+                    is_on_ground = self._get_contact_terrain(final_player_pos) is not None
+                    
+                    # --- [신규] '정렬' 및 '위로 오르기' 명령 전송 로직 ---
+                    if current_action_key == 'prepare_to_climb_upward' and action_changed:
+                        command_to_send = "사다리타기(상)"
+                    
+                    elif current_action_key == 'align_for_climb' and is_on_ground:
+                        # '툭 치기' 명령은 0.5초에 한 번씩만 보내도록 제한 (연타 방지)
+                        if time.time() - self.last_align_command_time > 0.5:
+                            command_to_send = "정렬(우)" if current_direction == "→" else "정렬(좌)"
+                            self.last_align_command_time = time.time()
+                    # --- 로직 끝 ---
+
+                    elif current_action_key == 'prepare_to_climb':
+                        if self.last_printed_player_state in ['jumping'] and current_player_state in ['on_terrain', 'idle'] and is_on_ground:
+                            if (action_changed or not direction_changed):
+                                command_to_send = "사다리타기(우)" if current_direction == "→" else "사다리타기(좌)"
+                                self.last_printed_direction = current_direction
+                    
+                        if (action_changed or direction_changed) and is_on_ground:
                             command_to_send = "사다리타기(우)" if current_direction == "→" else "사다리타기(좌)"
                             self.last_printed_direction = current_direction
-                  
-                    if (action_changed or direction_changed) and is_on_ground:
-                        command_to_send = "사다리타기(우)" if current_direction == "→" else "사다리타기(좌)"
-                        self.last_printed_direction = current_direction
 
-                elif action_changed:
-                    # <<< [수정] 점프 명령 분기 처리
-                    if current_action_key == 'prepare_to_jump':
-                        if self.jump_direction == 'left':
-                            command_to_send = "점프(좌)"
-                        elif self.jump_direction == 'right':
-                            command_to_send = "점프(우)"
-                        else:
-                            command_to_send = "점프키 누르기" # Fallback
-                        self.jump_direction = None # 사용 후 초기화
-                    elif current_action_key == 'prepare_to_down_jump': 
-                        command_to_send = "아래점프"
-                    self.last_printed_direction = None
-
-                if player_state_changed:
-                    if current_player_state == 'climbing_up': command_to_send = "오르기"
-                    if current_player_state == 'falling':
-                        if 'prepare_to_' not in current_action_key: command_to_send = "모든 키 떼기"
-                    if self.last_printed_player_state == 'falling' and current_player_state in ['on_terrain', 'idle']:
+                    elif action_changed:
+                        # <<< [수정] 점프 명령 분기 처리
+                        if current_action_key == 'prepare_to_jump':
+                            if self.jump_direction == 'left':
+                                command_to_send = "점프(좌)"
+                            elif self.jump_direction == 'right':
+                                command_to_send = "점프(우)"
+                            else:
+                                command_to_send = "점프키 누르기" # Fallback
+                            self.jump_direction = None # 사용 후 초기화
+                        elif current_action_key == 'prepare_to_down_jump': 
+                            command_to_send = "아래점프"
                         self.last_printed_direction = None
 
-                if current_action_key == 'move_to_target' and direction_changed and is_on_ground:
-                    if current_direction in ["→", "←"]:
-                        command_to_send = "걷기(우)" if current_direction == "→" else "걷기(좌)"
-                        self.last_printed_direction = current_direction
+                    if player_state_changed:
+                        if current_player_state == 'climbing_up': command_to_send = "오르기"
+                        if current_player_state == 'falling':
+                            if 'prepare_to_' not in current_action_key: command_to_send = "모든 키 떼기"
+                        if self.last_printed_player_state == 'falling' and current_player_state in ['on_terrain', 'idle']:
+                            self.last_printed_direction = None
 
-                # 명령 전송 (테스트 또는 실제)
-                if command_to_send:
-                    # ---  멈춤 감지 시스템을 위해 마지막 이동 명령 저장 ---
-                    movement_related_keywords = ["걷기", "점프", "오르기", "사다리타기"]
-                    if any(keyword in command_to_send for keyword in movement_related_keywords):
-                        self.last_movement_command = command_to_send
-                    # --- 저장 로직 끝 ---
-                    
-                    if self.debug_auto_control_checkbox.isChecked():
-                        print(f"[자동 제어 테스트] {command_to_send}")
-                    elif self.auto_control_checkbox.isChecked():
-                        self.control_command_issued.emit(command_to_send)
+                    if (current_action_key == 'move_to_target' or self.guidance_text == "안전 지점으로 이동") and direction_changed and is_on_ground:
+                        if current_direction in ["→", "←"]:
+                            command_to_send = "걷기(우)" if current_direction == "→" else "걷기(좌)"
+                            self.last_printed_direction = current_direction
 
-                # 상태 업데이트
-                if action_changed:
-                    self.last_printed_action = current_action_key
-                    self.last_printed_player_state = None 
-                if player_state_changed:
-                    self.last_printed_player_state = current_player_state
+                    # 명령 전송 (테스트 또는 실제)
+                    if command_to_send:
+                        # --- [신규] 멈춤 감지 시스템을 위해 마지막 이동 명령 저장 ---
+                        movement_related_keywords = ["걷기", "점프", "오르기", "사다리타기", "정렬"]
+                        if any(keyword in command_to_send for keyword in movement_related_keywords):
+                            self.last_movement_command = command_to_send
+                        # --- 저장 로직 끝 ---
+                        
+                        if self.debug_auto_control_checkbox.isChecked():
+                            print(f"[자동 제어 테스트] {command_to_send}")
+                        elif self.auto_control_checkbox.isChecked():
+                            self.control_command_issued.emit(command_to_send)
+
+                    # 상태 업데이트
+                    if action_changed:
+                        self.last_printed_action = current_action_key
+                        self.last_printed_player_state = None 
+                    if player_state_changed:
+                        self.last_printed_player_state = current_player_state
         
         # UI 업데이트는 항상 실행
         self.navigator_display.update_data(
@@ -7819,7 +7904,24 @@ class MapTab(QWidget):
                     action = edge_data.get('action') if edge_data else None
                     
                     next_action_state = None
-                    if action == 'climb': next_action_state = 'prepare_to_climb'
+                    # --- [신규] 좁은 발판 감지 및 정렬 상태 전환 로직 ---
+                    if action == 'climb':
+                        contact_terrain = self._get_contact_terrain(final_player_pos)
+                        if contact_terrain:
+                            points = contact_terrain.get('points', [])
+                            if len(points) >= 2:
+                                terrain_width = abs(points[0][0] - points[-1][0])
+                                if terrain_width < 10.0:
+                                    # 좁은 발판이므로 '정렬' 상태로 진입
+                                    self.navigation_action = 'align_for_climb'
+                                    self.alignment_target_x = self.intermediate_target_pos.x() # 사다리의 X좌표를 목표로 설정
+                                    self.update_general_log(f"좁은 발판 감지 (너비: {terrain_width:.1f}px). 사다리 앞 정렬을 시작합니다.", "gray")
+                                    return # 상태 전환 후 즉시 종료
+                        
+                        # 넓은 발판이거나, 발판 정보가 없으면 기존 로직 수행
+                        next_action_state = 'prepare_to_climb'
+                    # --- 로직 끝 ---
+
                     elif action == 'jump':
                         # <<< [추가] 점프 방향 계산 및 저장
                         next_node_pos = self.nav_nodes.get(next_node_key, {}).get('pos')
@@ -9035,7 +9137,7 @@ def cleanup_on_close(self):
             self.detection_thread.stop()
             self.detection_thread.wait()
             
-        # [신규] 단축키 관리자 및 이벤트 필터 정리
+        #  단축키 관리자 및 이벤트 필터 정리
         if self.hotkey_manager:
             self.hotkey_manager.unregister_hotkey()
         if hasattr(self, 'win_event_filter'):
