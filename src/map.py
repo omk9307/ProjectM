@@ -128,8 +128,8 @@ LADDER_ARRIVAL_X_THRESHOLD = 8.0   # 사다리 도착 x축 허용 오차 (px)
 JUMP_LINK_ARRIVAL_X_THRESHOLD = 4.0 # 점프 링크/낭떠러지 도착 x축 허용 오차 (px)
 LADDER_AVOIDANCE_WIDTH = 3.0 # 아래 점프 시 사다리 회피 X축 반경 (px)
 # ==================== v11.5.0 상태 머신 상수 ====================
-MAX_LOCK_DURATION = 60.0      # 행동 잠금(locked) 상태의 최대 지속 시간 (초)
-PREPARE_TIMEOUT = 60.0         # 행동 준비(prepare_to_*) 상태의 최대 지속 시간 (초)
+MAX_LOCK_DURATION = 5.0      # 행동 잠금(locked) 상태의 최대 지속 시간 (초)
+PREPARE_TIMEOUT = 5.0         # 행동 준비(prepare_to_*) 상태의 최대 지속 시간 (초)
 HYSTERESIS_EXIT_OFFSET = 4.0  # 도착 판정 히스테리시스 오프셋 (px)
 # =================================================================
 
@@ -4559,9 +4559,11 @@ class MapTab(QWidget):
             self.last_action_time = 0.0                      # 마지막으로 'idle'이 아닌 상태였던 시간
             self.last_movement_command = None                # 마지막으로 전송한 이동 명령 (예: '걷기(우)')
             self.stuck_recovery_attempts = 0                 # 복구 시도 횟수
-            self.STUCK_DETECTION_THRESHOLD_S = 1.0           # 멈춤으로 간주할 시간 (초)
+            self.STUCK_DETECTION_THRESHOLD_S = 0.3           # 멈춤으로 간주할 시간 (초)
             self.MAX_STUCK_RECOVERY_ATTEMPTS = 30             # 최대 복구 시도 횟수
             self.CLIMBING_RECOVERY_KEYWORDS = ["오르기", "사다리타기"] # 등반 복구 식별용
+            self.recovery_cooldown_until = 0.0 # 복구 후 판단을 유예할 시간
+            self.last_command_sent_time = 0.0 # 마지막으로 명령을 보낸 시간
             self.alignment_target_x = None # ---  사다리 앞 정렬(align) 상태 변수 ---
             self.verify_alignment_start_time = 0.0  # 정렬 확인 시작 시간
             self.last_align_command_time = 0.0      # 마지막 정렬 명령 전송 시간
@@ -7396,8 +7398,7 @@ class MapTab(QWidget):
     
     def _update_player_state_and_navigation(self, final_player_pos):
         """
-        v12.7.0: [수정] 경로 이탈 판정 로직을 폐기하고,
-        목표에서 일정 거리 이상 멀어졌을 때만 경로를 재탐색하는 방식으로 변경.
+        [MODIFIED] v1819: '의도된 움직임'만 복구 성공으로 간주하도록 수정.
         """
         # [수정 시작] current_terrain_name 변수 초기화 위치 변경 및 로직 수정
         contact_terrain = self._get_contact_terrain(final_player_pos)
@@ -7426,45 +7427,51 @@ class MapTab(QWidget):
         # Phase 1: 물리적 상태 판정 (유지)
         self.player_state = self._determine_player_physical_state(final_player_pos, contact_terrain)
 
-        # --- [v.1813] '선제적 붙기' 자동 복구 로직 ---
+        # --- [v.1819] '의도된 움직임' 감지 및 복구 로직 ---
         is_moving_state = self.player_state not in ['idle']
-        should_be_moving = self.navigation_action in ['move_to_target', 'prepare_to_climb', 'prepare_to_jump', 'prepare_to_down_jump', 'prepare_to_fall', 'align_for_climb'] and self.start_waypoint_found
-
+        
+        # 1. 캐릭터가 움직였을 때, '의도된' 움직임인지 확인 후 처리
         if is_moving_state:
             self.last_action_time = time.time()
-            if self.stuck_recovery_attempts > 0:
-                self.update_general_log("[자동 복구] 캐릭터 움직임 감지. 복구 상태를 초기화합니다.", "green")
+            # [핵심 수정] 명령을 보낸 지 0.5초 이내에 발생한 움직임만 '의도된' 것으로 간주
+            is_intentional_move = (time.time() - self.last_command_sent_time < 0.5)
+            
+            if self.stuck_recovery_attempts > 0 and is_intentional_move:
+                self.update_general_log("[자동 복구] 의도된 움직임 감지. 복구 상태를 초기화합니다.", "green")
                 self.stuck_recovery_attempts = 0
                 self.last_movement_command = None
-
-        elif should_be_moving:
+        
+        # 2. 움직여야 하는데 멈춰있고, 현재 복구 쿨다운 상태가 아닐 때만 멈춤 감지
+        should_be_moving = self.navigation_action in ['move_to_target', 'prepare_to_climb', 'prepare_to_jump', 'prepare_to_down_jump', 'prepare_to_fall', 'align_for_climb'] and self.start_waypoint_found
+        
+        if should_be_moving and not is_moving_state and time.time() > self.recovery_cooldown_until:
             time_since_last_action = time.time() - self.last_action_time
             
             if time_since_last_action > self.STUCK_DETECTION_THRESHOLD_S and self.stuck_recovery_attempts < self.MAX_STUCK_RECOVERY_ATTEMPTS:
                 if self.last_movement_command:
                     self.stuck_recovery_attempts += 1
-                    log_msg = f"[자동 복구] 멈춤 감지 ({self.stuck_recovery_attempts}/{self.MAX_STUCK_RECOVERY_ATTEMPTS}). '사다리 멈춤감지' 후 '{self.last_movement_command}' 재시도."
+                    log_msg = f"[자동 복구] 멈춤 감지 ({self.stuck_recovery_attempts}/{self.MAX_STUCK_RECOVERY_ATTEMPTS}). '붙기' 후 '{self.last_movement_command}' 재시도."
                     self.update_general_log(log_msg, "orange")
-
-                    # 1. '사다리 멈춤감지' 명령을 먼저 보냄
+                    
+                    self.recovery_cooldown_until = time.time() + 1.5
+                    
                     if self.debug_auto_control_checkbox.isChecked():
                         print("[자동 제어 테스트] RECOVERY-PREP: 사다리 멈춤복구")
                     elif self.auto_control_checkbox.isChecked():
                         self.control_command_issued.emit("사다리 멈춤복구")
-                    QTimer.singleShot(600, self._execute_recovery_resend)
-                    # 2. 이어서 원래 명령 재전송 (auto_control의 큐에 들어감)
-                    self._execute_recovery_resend()
                     
-                    self.last_action_time = time.time()
-                else:
-                    if self.debug_basic_pathfinding_checkbox and self.debug_basic_pathfinding_checkbox.isChecked():
-                        print("[자동 복구] 경고: 멈춤이 감지되었으나 재전송할 마지막 명령이 없습니다.")
+                    QTimer.singleShot(1000, self._execute_recovery_resend)
+                    
+                    self.last_player_pos = final_player_pos
+                    return
             
             elif time_since_last_action > self.STUCK_DETECTION_THRESHOLD_S and self.stuck_recovery_attempts >= self.MAX_STUCK_RECOVERY_ATTEMPTS:
                 if time.time() - getattr(self, '_last_stuck_log_time', 0) > 5.0:
                     self.update_general_log(f"[자동 복구] 실패: 최대 복구 시도({self.MAX_STUCK_RECOVERY_ATTEMPTS}회)를 초과했습니다. 수동 개입이 필요할 수 있습니다.", "red")
                     setattr(self, '_last_stuck_log_time', time.time())
         # --- 로직 끝 ---
+        
+        # [이하 일반 내비게이션 로직]
 
         # --- [신규] 사다리 앞 정렬 및 확인 상태 처리 로직 ---
         if self.navigation_action == 'align_for_climb' and self.alignment_target_x is not None:
@@ -7550,6 +7557,7 @@ class MapTab(QWidget):
             
         self.last_player_pos = final_player_pos
 
+
     def _execute_recovery_resend(self):
         """마지막 이동 명령을 실제로 재전송하는 역할을 합니다."""
         if self.last_movement_command:
@@ -7560,11 +7568,7 @@ class MapTab(QWidget):
 
     def _update_navigator_and_view(self, final_player_pos, current_terrain_name):
         """
-        [MODIFIED] v13.1.14: 내비게이션 상태(낙하/등반/이동)에 따라 거리/방향 안내를 다르게 표시하도록 수정.
-        [MODIFIED] v13.1.1: "안전 지대로 이동" 상태 처리 로직을 강화하여,
-                 intermediate_target_pos가 유효할 때만 거리/방향을 계산하도록 수정.
-        v13.0.8: [REFACTOR] UI 피드백 일관성 확보.
-        계산된 모든 상태를 기반으로 UI 위젯들을 업데이트합니다.
+        [MODIFIED] v1819: '의도된 움직임' 감지를 위해 명령 전송 시각 기록.
         """
         all_waypoints_map = {wp['id']: wp for wp in self.geometry_data.get("waypoints", [])}
         prev_name, next_name, direction, distance = "", "", "-", 0
@@ -7801,11 +7805,12 @@ class MapTab(QWidget):
 
                     # 명령 전송 (테스트 또는 실제)
                     if command_to_send:
-                        # --- [신규] 멈춤 감지 시스템을 위해 마지막 이동 명령 저장 ---
+                        # --- [v.1819] '의도된 움직임' 감지를 위해 명령 전송 시각 기록 ---
+                        self.last_command_sent_time = time.time()
+                        
                         movement_related_keywords = ["걷기", "점프", "오르기", "사다리타기", "정렬"]
                         if any(keyword in command_to_send for keyword in movement_related_keywords):
                             self.last_movement_command = command_to_send
-                        # --- 저장 로직 끝 ---
                         
                         if self.debug_auto_control_checkbox.isChecked():
                             print(f"[자동 제어 테스트] {command_to_send}")
