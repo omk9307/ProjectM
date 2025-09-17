@@ -95,7 +95,7 @@ class AutoControlTab(QWidget):
 
         self.is_processing_step = False                 # 중복 _process_next_step 재진입 방지 플래그
         self.last_sent_timestamps = {}                  # 전송한 키의 타임스탬프 (에코 무시용)
-        self.ECHO_IGNORE_MS = 10                        # 기본 60ms, 필요하면 40~120 범위로 조절 권장
+        self.ECHO_IGNORE_MS = 30                        # 기본 60ms, 필요하면 40~120 범위로 조절 권장
         self.last_command_start_time = 0.0              # 마지막 시퀀스 시작 시각
         self.sequence_watchdog = QTimer(self)           # 시퀀스가 멈추는 경우 복구용 와치독
         self.sequence_watchdog.setSingleShot(True)
