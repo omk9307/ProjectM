@@ -79,6 +79,7 @@ class MainWindow(QMainWindow):
         """
         tabs_to_load = [
             ('Learning', 'LearningTab', '학습'),
+            ('hunt', 'HuntTab', '사냥'),
             ('map', 'MapTab', '맵'),
             ('auto_control', 'AutoControlTab', '자동 제어') # [추가]
         ]
@@ -120,10 +121,40 @@ class MainWindow(QMainWindow):
         """
         로드된 탭들 간의 필요한 시그널-슬롯을 연결합니다.
         """
+        if '학습' in self.loaded_tabs and '사냥' in self.loaded_tabs:
+            learning_tab = self.loaded_tabs['학습']
+            hunt_tab = self.loaded_tabs['사냥']
+
+            data_manager = None
+            if hasattr(learning_tab, 'get_data_manager'):
+                data_manager = learning_tab.get_data_manager()
+            elif hasattr(learning_tab, 'data_manager'):
+                data_manager = getattr(learning_tab, 'data_manager')
+
+            if data_manager:
+                hunt_tab.attach_data_manager(data_manager)
+                print("성공: '학습' 탭의 데이터 매니저를 '사냥' 탭에 연결했습니다.")
+            else:
+                print("경고: '학습' 탭에서 데이터 매니저를 찾을 수 없어 '사냥' 탭 연동을 건너뜁니다.")
+
+        if '사냥' in self.loaded_tabs and '자동 제어' in self.loaded_tabs:
+            hunt_tab = self.loaded_tabs['사냥']
+            auto_control_tab = self.loaded_tabs['자동 제어']
+
+            hunt_tab.control_command_issued.connect(auto_control_tab.receive_control_command)
+            auto_control_tab.log_generated.connect(hunt_tab.append_log)
+
+            if hasattr(hunt_tab, 'append_log'):
+                hunt_tab.append_log("자동 제어 탭과 연동이 설정되었습니다.")
+
+            print("성공: '사냥' 탭과 '자동 제어' 탭을 연결했습니다.")
+        else:
+            print("경고: '사냥' 또는 '자동 제어' 탭을 찾을 수 없어 연결하지 못했습니다.")
+
         if '맵' in self.loaded_tabs and '자동 제어' in self.loaded_tabs:
             map_tab = self.loaded_tabs['맵']
             auto_control_tab = self.loaded_tabs['자동 제어']
-            
+
             map_tab.control_command_issued.connect(auto_control_tab.receive_control_command)
             map_tab.detection_status_changed.connect(auto_control_tab.update_map_detection_status)
             

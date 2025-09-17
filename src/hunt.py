@@ -1,0 +1,2003 @@
+﻿from __future__ import annotations
+
+import json
+import os
+import random
+from dataclasses import dataclass
+import time
+from typing import List, Optional
+
+import pygetwindow as gw
+
+from PyQt6.QtCore import Qt, QTimer, pyqtSignal, QRect
+from PyQt6.QtWidgets import (
+    QCheckBox,
+    QComboBox,
+    QDialog,
+    QDialogButtonBox,
+    QFormLayout,
+    QGroupBox,
+    QHBoxLayout,
+    QLabel,
+    QLineEdit,
+    QDoubleSpinBox,
+    QMessageBox,
+    QPushButton,
+    QRadioButton,
+    QSpinBox,
+    QTextEdit,
+    QTreeWidget,
+    QTreeWidgetItem,
+    QVBoxLayout,
+    QWidget,
+    QSizePolicy,
+)
+
+from PyQt6.QtGui import QPixmap, QPainter, QPen, QColor, QBrush
+
+from detection_runtime import DetectionPopup, DetectionThread, ScreenSnipper
+
+
+CHARACTER_CLASS_NAME = "캐릭터"
+
+SRC_ROOT = os.path.dirname(os.path.abspath(__file__))
+WORKSPACE_ROOT = os.path.abspath(os.path.join(SRC_ROOT, '..', 'workspace'))
+CONFIG_ROOT = os.path.join(WORKSPACE_ROOT, 'config')
+HUNT_SETTINGS_FILE = os.path.join(CONFIG_ROOT, 'hunt_settings.json')
+
+HUNT_AREA_COLOR = QColor(0, 170, 255, 70)
+HUNT_AREA_EDGE = QPen(QColor(0, 120, 200, 200), 2, Qt.PenStyle.DashLine)
+HUNT_AREA_BRUSH = QBrush(HUNT_AREA_COLOR)
+PRIMARY_AREA_COLOR = QColor(255, 140, 0, 70)
+PRIMARY_AREA_EDGE = QPen(QColor(230, 110, 0, 220), 2, Qt.PenStyle.SolidLine)
+PRIMARY_AREA_BRUSH = QBrush(PRIMARY_AREA_COLOR)
+
+
+@dataclass
+class DetectionBox:
+    x: float
+    y: float
+    width: float
+    height: float
+    score: float = 0.0
+    label: str = ""
+
+    @property
+    def right(self) -> float:
+        return self.x + self.width
+
+    @property
+    def bottom(self) -> float:
+        return self.y + self.height
+
+    @property
+    def center_x(self) -> float:
+        return self.x + self.width / 2.0
+
+    def intersects(self, rect: "AreaRect") -> bool:
+        return not (
+            self.right <= rect.x
+            or rect.right <= self.x
+            or self.bottom <= rect.y
+            or rect.bottom <= self.y
+        )
+
+
+@dataclass
+class DetectionSnapshot:
+    character_boxes: List[DetectionBox]
+    monster_boxes: List[DetectionBox]
+    timestamp: float
+
+
+@dataclass
+class AreaRect:
+    x: float
+    y: float
+    width: float
+    height: float
+
+    @property
+    def right(self) -> float:
+        return self.x + self.width
+
+    @property
+    def bottom(self) -> float:
+        return self.y + self.height
+
+
+@dataclass
+class AttackSkill:
+    name: str
+    command: str
+    enabled: bool = True
+    is_primary: bool = False
+    min_monsters: int = 1
+    probability: int = 100
+
+
+@dataclass
+class BuffSkill:
+    name: str
+    command: str
+    cooldown_seconds: int
+    enabled: bool = True
+    jitter_percent: int = 15
+    last_triggered_ts: float = 0.0
+    next_ready_ts: float = 0.0
+
+
+class AttackSkillDialog(QDialog):
+    """공격 스킬 정보를 입력/수정하기 위한 대화상자."""
+
+    def __init__(
+        self,
+        parent: Optional[QWidget] = None,
+        skill: Optional[AttackSkill] = None,
+    ) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("공격 스킬")
+
+        self.name_input = QLineEdit()
+        self.command_input = QLineEdit()
+        self.enabled_checkbox = QCheckBox("사용")
+        self.enabled_checkbox.setChecked(True)
+        self.primary_checkbox = QCheckBox("주 공격 스킬로 설정")
+        self.primary_checkbox.setChecked(False)
+
+        self.min_monsters_spinbox = QSpinBox()
+        self.min_monsters_spinbox.setRange(1, 50)
+        self.min_monsters_spinbox.setValue(1)
+
+        self.probability_spinbox = QSpinBox()
+        self.probability_spinbox.setRange(0, 100)
+        self.probability_spinbox.setValue(100)
+        self.probability_spinbox.setSuffix(" %")
+
+        if skill:
+            self.name_input.setText(skill.name)
+            self.command_input.setText(skill.command)
+            self.enabled_checkbox.setChecked(skill.enabled)
+            self.primary_checkbox.setChecked(skill.is_primary)
+            self.min_monsters_spinbox.setValue(skill.min_monsters)
+            self.probability_spinbox.setValue(skill.probability)
+
+        form = QFormLayout()
+        form.addRow("이름", self.name_input)
+        form.addRow("명령", self.command_input)
+        form.addRow("사용", self.enabled_checkbox)
+        form.addRow("주 스킬", self.primary_checkbox)
+        form.addRow("사용 최소 몬스터 수", self.min_monsters_spinbox)
+        form.addRow("사용 확률", self.probability_spinbox)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+
+        layout = QVBoxLayout()
+        layout.addLayout(form)
+        layout.addWidget(buttons)
+        self.setLayout(layout)
+
+    def get_skill(self) -> Optional[AttackSkill]:
+        name = self.name_input.text().strip()
+        command = self.command_input.text().strip()
+        if not name or not command:
+            return None
+        return AttackSkill(
+            name=name,
+            command=command,
+            enabled=self.enabled_checkbox.isChecked(),
+            is_primary=self.primary_checkbox.isChecked(),
+            min_monsters=self.min_monsters_spinbox.value(),
+            probability=self.probability_spinbox.value(),
+        )
+
+
+class BuffSkillDialog(QDialog):
+    """버프 스킬 정보를 입력/수정하기 위한 대화상자."""
+
+    def __init__(self, parent: Optional[QWidget] = None, skill: Optional[BuffSkill] = None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("버프 스킬")
+
+        self.name_input = QLineEdit()
+        self.command_input = QLineEdit()
+        self.enabled_checkbox = QCheckBox("사용")
+        self.enabled_checkbox.setChecked(True)
+
+        self.cooldown_spinbox = QSpinBox()
+        self.cooldown_spinbox.setRange(1, 3600)
+        self.cooldown_spinbox.setValue(60)
+        self.cooldown_spinbox.setSuffix(" s")
+
+        self.jitter_spinbox = QSpinBox()
+        self.jitter_spinbox.setRange(0, 50)
+        self.jitter_spinbox.setValue(15)
+        self.jitter_spinbox.setSuffix(" %")
+
+        if skill:
+            self.name_input.setText(skill.name)
+            self.command_input.setText(skill.command)
+            self.enabled_checkbox.setChecked(skill.enabled)
+            self.cooldown_spinbox.setValue(skill.cooldown_seconds)
+            self.jitter_spinbox.setValue(skill.jitter_percent)
+
+        form = QFormLayout()
+        form.addRow("이름", self.name_input)
+        form.addRow("명령", self.command_input)
+        form.addRow("사용", self.enabled_checkbox)
+        form.addRow("쿨타임", self.cooldown_spinbox)
+        form.addRow("오차 허용", self.jitter_spinbox)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+
+        layout = QVBoxLayout()
+        layout.addLayout(form)
+        layout.addWidget(buttons)
+        self.setLayout(layout)
+
+    def get_skill(self) -> Optional[BuffSkill]:
+        name = self.name_input.text().strip()
+        command = self.command_input.text().strip()
+        if not name or not command:
+            return None
+        return BuffSkill(
+            name=name,
+            command=command,
+            cooldown_seconds=self.cooldown_spinbox.value(),
+            enabled=self.enabled_checkbox.isChecked(),
+            jitter_percent=self.jitter_spinbox.value(),
+        )
+
+
+class HuntTab(QWidget):
+    """사냥 조건과 스킬 실행을 관리하는 임시 탭."""
+
+    CONTROL_RELEASE_TIMEOUT_SEC = 30
+
+    control_command_issued = pyqtSignal(str)
+    control_authority_requested = pyqtSignal(dict)
+    control_authority_released = pyqtSignal(dict)
+    hunt_area_updated = pyqtSignal(object)
+    primary_skill_area_updated = pyqtSignal(object)
+    monster_stats_updated = pyqtSignal(int, int)
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.data_manager = None
+        self.current_authority: str = "map"
+        self.attack_skills: List[AttackSkill] = []
+        self.buff_skills: List[BuffSkill] = []
+
+        self.latest_snapshot: Optional[DetectionSnapshot] = None
+        self.current_hunt_area: Optional[AreaRect] = None
+        self.current_primary_area: Optional[AreaRect] = None
+        self.latest_monster_count = 0
+        self.latest_primary_monster_count = 0
+        self.control_release_timeout = self.CONTROL_RELEASE_TIMEOUT_SEC
+        self.last_control_acquired_ts = 0.0
+        self.last_release_attempt_ts = 0.0
+        self.auto_hunt_enabled = True
+        self.overlay_preferences = {
+            'hunt_area': True,
+            'primary_area': True,
+        }
+
+        self.attack_interval_sec = 0.35
+        self.last_attack_ts = 0.0
+        self.last_facing: Optional[str] = None
+        self.hunting_active = False
+        self._pending_skill_timer: Optional[QTimer] = None
+        self._pending_skill: Optional[AttackSkill] = None
+        self._pending_direction_timer: Optional[QTimer] = None
+        self._pending_direction_side: Optional[str] = None
+        self._pending_direction_skill: Optional[AttackSkill] = None
+        self._last_monster_seen_ts = time.time()
+
+        self.detection_thread: Optional[DetectionThread] = None
+        self.detection_popup: Optional[DetectionPopup] = None
+        self.is_popup_active = False
+        self.last_popup_scale = 50
+        self.manual_capture_region: Optional[dict] = None
+        self.last_used_model: Optional[str] = None
+        self._authority_request_connected = False
+        self._authority_release_connected = False
+        self._release_pending = False
+        self._settings_path = HUNT_SETTINGS_FILE
+        self._suppress_settings_save = False
+        os.makedirs(CONFIG_ROOT, exist_ok=True)
+        self.latest_detection_details: dict[str, list] = {
+            'characters': [],
+            'monsters': [],
+        }
+
+        self._build_ui()
+        self._update_facing_label()
+        self._load_settings()
+        self._setup_timers()
+
+    def _build_ui(self) -> None:
+        main_layout = QHBoxLayout()
+        main_layout.setContentsMargins(8, 8, 8, 8)
+        main_layout.setSpacing(12)
+
+        left_column = QVBoxLayout()
+        left_column.setSpacing(10)
+
+        detection_group = self._create_detection_group()
+        left_column.addWidget(detection_group, 1)
+        left_column.addStretch(1)
+
+        right_column = QVBoxLayout()
+        right_column.setSpacing(10)
+
+        self.authority_label = QLabel("현재 권한: 이동 탭")
+        self.authority_label.setAlignment(Qt.AlignmentFlag.AlignLeft)
+        right_column.addWidget(self.authority_label)
+
+        range_group = self._create_range_group()
+        condition_group = self._create_condition_group()
+        range_condition_row = QWidget()
+        range_condition_layout = QHBoxLayout(range_condition_row)
+        range_condition_layout.setContentsMargins(0, 0, 0, 0)
+        range_condition_layout.setSpacing(10)
+        range_condition_layout.addWidget(range_group, 1)
+        range_condition_layout.addWidget(condition_group, 1)
+        right_column.addWidget(range_condition_row)
+
+        model_group = self._create_model_group()
+        right_column.addWidget(model_group)
+
+        skill_group = self._create_skill_group()
+        right_column.addWidget(skill_group)
+
+        summary_group = self._create_detection_summary_group()
+        right_column.addWidget(summary_group)
+
+        right_column.addStretch(1)
+
+        main_layout.addLayout(left_column, 1)
+        main_layout.addLayout(right_column, 1)
+
+        self.setLayout(main_layout)
+        self._refresh_attack_tree()
+        self._refresh_buff_tree()
+        self._update_monster_count_label()
+        self._update_detection_summary()
+        self._update_authority_ui()
+
+    def _create_range_group(self) -> QGroupBox:
+        group = QGroupBox("사냥 범위 설정")
+        area_form = QFormLayout()
+
+        self.enemy_range_spinbox = QSpinBox()
+        self.enemy_range_spinbox.setRange(20, 2000)
+        self.enemy_range_spinbox.setSingleStep(10)
+        self.enemy_range_spinbox.setValue(400)
+        area_form.addRow("X 범위(±px)", self.enemy_range_spinbox)
+
+        self.y_band_height_spinbox = QSpinBox()
+        self.y_band_height_spinbox.setRange(10, 400)
+        self.y_band_height_spinbox.setSingleStep(5)
+        self.y_band_height_spinbox.setValue(40)
+        area_form.addRow("Y 범위 높이(px)", self.y_band_height_spinbox)
+
+        self.y_band_offset_spinbox = QSpinBox()
+        self.y_band_offset_spinbox.setRange(-200, 200)
+        self.y_band_offset_spinbox.setSingleStep(5)
+        self.y_band_offset_spinbox.setValue(0)
+        area_form.addRow("Y 오프셋(px)", self.y_band_offset_spinbox)
+
+        self.primary_skill_range_spinbox = QSpinBox()
+        self.primary_skill_range_spinbox.setRange(10, 1200)
+        self.primary_skill_range_spinbox.setSingleStep(10)
+        self.primary_skill_range_spinbox.setValue(200)
+        area_form.addRow("주 스킬 X 범위(±px)", self.primary_skill_range_spinbox)
+
+        toggles_layout = QHBoxLayout()
+        self.show_hunt_area_checkbox = QCheckBox("사냥 범위 표시")
+        self.show_hunt_area_checkbox.setChecked(True)
+        self.show_primary_skill_checkbox = QCheckBox("주 스킬 범위 표시")
+        self.show_primary_skill_checkbox.setChecked(True)
+        toggles_layout.addWidget(self.show_hunt_area_checkbox)
+        toggles_layout.addWidget(self.show_primary_skill_checkbox)
+        toggles_layout.addStretch(1)
+
+        self.monster_count_label = QLabel("범위 내 몬스터: 0 | 주 스킬 범위: 0")
+        self.facing_label = QLabel("현재 방향: 미정")
+
+        info_row = QHBoxLayout()
+        info_row.addWidget(self.monster_count_label)
+        info_row.addStretch(1)
+        info_row.addWidget(self.facing_label)
+
+        area_layout = QVBoxLayout()
+        area_layout.addLayout(area_form)
+        area_layout.addLayout(toggles_layout)
+        area_layout.addLayout(info_row)
+        group.setLayout(area_layout)
+        group.setSizePolicy(QSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed))
+
+        for spin in (
+            self.enemy_range_spinbox,
+            self.y_band_height_spinbox,
+            self.y_band_offset_spinbox,
+            self.primary_skill_range_spinbox,
+        ):
+            spin.valueChanged.connect(self._on_area_config_changed)
+            spin.valueChanged.connect(self._handle_setting_changed)
+        self.show_hunt_area_checkbox.toggled.connect(self._on_overlay_toggle_changed)
+        self.show_primary_skill_checkbox.toggled.connect(self._on_overlay_toggle_changed)
+
+        return group
+
+    def _create_condition_group(self) -> QGroupBox:
+        group = QGroupBox("사냥 조건")
+        condition_form = QFormLayout()
+
+        self.monster_threshold_spinbox = QSpinBox()
+        self.monster_threshold_spinbox.setRange(1, 50)
+        self.monster_threshold_spinbox.setValue(3)
+        condition_form.addRow("기준 몬스터 수", self.monster_threshold_spinbox)
+        self.monster_threshold_spinbox.valueChanged.connect(self._handle_setting_changed)
+
+        self.auto_request_checkbox = QCheckBox("조건 충족 시 자동 요청")
+        condition_form.addRow(self.auto_request_checkbox)
+        self.auto_request_checkbox.toggled.connect(self._handle_setting_changed)
+        group.setLayout(condition_form)
+        group.setSizePolicy(QSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed))
+        return group
+
+    def _create_model_group(self) -> QGroupBox:
+        group = QGroupBox("사용 모델")
+        model_layout = QHBoxLayout()
+        self.model_selector = QComboBox()
+        self.model_selector.setPlaceholderText("학습 탭과 연동 필요")
+        self.refresh_model_btn = QPushButton("새로고침")
+        self.refresh_model_btn.clicked.connect(self.refresh_model_choices)
+        model_layout.addWidget(self.model_selector, 1)
+        model_layout.addWidget(self.refresh_model_btn)
+        group.setLayout(model_layout)
+        return group
+
+    def _create_detection_group(self) -> QGroupBox:
+        group = QGroupBox("탐지 실행")
+        outer_layout = QVBoxLayout()
+        outer_layout.setContentsMargins(8, 8, 8, 8)
+        outer_layout.setSpacing(8)
+
+        control_container = QWidget()
+        control_layout = QVBoxLayout(control_container)
+        control_layout.setContentsMargins(0, 0, 0, 0)
+        control_layout.setSpacing(8)
+
+        target_layout = QHBoxLayout()
+        self.auto_target_radio = QRadioButton("자동 (Maple 창)")
+        self.auto_target_radio.setChecked(True)
+        self.manual_target_radio = QRadioButton("수동 (영역 지정)")
+        target_layout.addWidget(self.auto_target_radio)
+        target_layout.addWidget(self.manual_target_radio)
+
+        self.set_area_btn = QPushButton("영역 지정")
+        self.set_area_btn.setEnabled(False)
+        self.set_area_btn.clicked.connect(self._set_manual_area)
+        self.manual_target_radio.toggled.connect(self._handle_capture_mode_toggle)
+        self.auto_target_radio.toggled.connect(self._handle_setting_changed)
+        target_layout.addWidget(self.set_area_btn)
+        target_layout.addStretch(1)
+        control_layout.addLayout(target_layout)
+
+        conf_layout = QHBoxLayout()
+        conf_layout.addWidget(QLabel(f"{CHARACTER_CLASS_NAME} 신뢰도:"))
+        self.conf_char_spinbox = QDoubleSpinBox()
+        self.conf_char_spinbox.setRange(0.05, 0.95)
+        self.conf_char_spinbox.setSingleStep(0.05)
+        self.conf_char_spinbox.setValue(0.5)
+        conf_layout.addWidget(self.conf_char_spinbox)
+        self.conf_char_spinbox.valueChanged.connect(self._handle_setting_changed)
+
+        conf_layout.addWidget(QLabel("몬스터 신뢰도:"))
+        self.conf_monster_spinbox = QDoubleSpinBox()
+        self.conf_monster_spinbox.setRange(0.05, 0.95)
+        self.conf_monster_spinbox.setSingleStep(0.05)
+        self.conf_monster_spinbox.setValue(0.5)
+        conf_layout.addWidget(self.conf_monster_spinbox)
+        self.conf_monster_spinbox.valueChanged.connect(self._handle_setting_changed)
+
+        self.debug_checkbox = QCheckBox("디버그 로그")
+        conf_layout.addWidget(self.debug_checkbox)
+        self.debug_checkbox.toggled.connect(self._handle_setting_changed)
+        conf_layout.addStretch(1)
+        control_layout.addLayout(conf_layout)
+
+        button_row = QHBoxLayout()
+        self.detect_btn = QPushButton("실시간 탐지 시작")
+        self.detect_btn.setCheckable(True)
+        self.detect_btn.clicked.connect(self._toggle_detection)
+        button_row.addWidget(self.detect_btn)
+
+        self.popup_btn = QPushButton("↗")
+        self.popup_btn.setFixedSize(24, 24)
+        self.popup_btn.setToolTip("탐지 화면을 팝업으로 열기")
+        self.popup_btn.clicked.connect(self._toggle_detection_popup)
+        button_row.addWidget(self.popup_btn)
+        button_row.addStretch(1)
+        control_layout.addLayout(button_row)
+
+        control_container.setSizePolicy(QSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed))
+        outer_layout.addWidget(control_container)
+
+        self.detection_view = QLabel("탐지 화면")
+        self.detection_view.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.detection_view.setStyleSheet("background-color: black; color: white;")
+        self.detection_view.setMinimumSize(360, 240)
+        self.detection_view.setSizePolicy(QSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding))
+        outer_layout.addWidget(self.detection_view, 1)
+
+        control_log_container = QVBoxLayout()
+        control_log_label = QLabel("입력 로그")
+        self.control_log_view = QTextEdit()
+        self.control_log_view.setReadOnly(True)
+        self.control_log_view.setMinimumHeight(100)
+        self.control_log_view.setStyleSheet("font-family: Consolas, monospace;")
+        control_log_container.addWidget(control_log_label)
+        control_log_container.addWidget(self.control_log_view)
+        outer_layout.addLayout(control_log_container)
+
+        keyboard_log_container = QVBoxLayout()
+        keyboard_log_label = QLabel("키보드 입력 로그")
+        self.keyboard_log_view = QTextEdit()
+        self.keyboard_log_view.setReadOnly(True)
+        self.keyboard_log_view.setMinimumHeight(100)
+        self.keyboard_log_view.setStyleSheet("font-family: Consolas, monospace;")
+        keyboard_log_container.addWidget(keyboard_log_label)
+        keyboard_log_container.addWidget(self.keyboard_log_view)
+        outer_layout.addLayout(keyboard_log_container)
+
+        log_container = QVBoxLayout()
+        log_label = QLabel("로그")
+        self.log_view = QTextEdit()
+        self.log_view.setReadOnly(True)
+        self.log_view.setMinimumHeight(120)
+        self.log_view.setStyleSheet("font-family: Consolas, monospace;")
+        log_container.addWidget(log_label)
+        log_container.addWidget(self.log_view)
+        outer_layout.addLayout(log_container)
+
+        group.setLayout(outer_layout)
+        group.setSizePolicy(QSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding))
+        return group
+
+    def _resolve_detection_targets(self) -> tuple[List[int], int]:
+        if not self.data_manager or not hasattr(self.data_manager, "get_class_list"):
+            return [], -1
+        class_list = self.data_manager.get_class_list()
+        target_indices = list(range(len(class_list)))
+        char_index = (
+            class_list.index(CHARACTER_CLASS_NAME)
+            if CHARACTER_CLASS_NAME in class_list
+            else -1
+        )
+        return target_indices, char_index
+
+    def _set_manual_area(self) -> None:
+        snipper = ScreenSnipper(self)
+        if snipper.exec():
+            roi = snipper.get_roi()
+            self.manual_capture_region = {
+                'top': roi.top(),
+                'left': roi.left(),
+                'width': roi.width(),
+                'height': roi.height(),
+            }
+            self.append_log(f"수동 탐지 영역 설정 완료: {self.manual_capture_region}")
+            self._save_settings()
+
+    def _toggle_detection(self, checked: bool) -> None:
+        if checked:
+            if not self.data_manager:
+                QMessageBox.warning(self, "오류", "학습 탭과의 연동이 필요합니다.")
+                self.detect_btn.setChecked(False)
+                return
+
+            selected_model = self.model_selector.currentText().strip()
+            if not selected_model or not self.model_selector.isEnabled():
+                QMessageBox.warning(self, "오류", "사용할 모델을 선택하세요.")
+                self.detect_btn.setChecked(False)
+                return
+
+            models_root = getattr(self.data_manager, 'models_path', None)
+            if not models_root:
+                QMessageBox.warning(self, "오류", "모델 경로를 찾을 수 없습니다.")
+                self.detect_btn.setChecked(False)
+                return
+
+            model_weights_dir = os.path.join(models_root, selected_model, 'weights')
+            engine_path = os.path.join(model_weights_dir, 'best.engine')
+            pt_path = os.path.join(model_weights_dir, 'best.pt')
+            model_path = engine_path if os.path.exists(engine_path) else pt_path
+            if not os.path.exists(model_path):
+                QMessageBox.warning(self, "오류", "가중치 파일을 찾을 수 없습니다.")
+                self.detect_btn.setChecked(False)
+                return
+
+            target_indices, char_index = self._resolve_detection_targets()
+            if char_index == -1:
+                QMessageBox.warning(self, "오류", f"'{CHARACTER_CLASS_NAME}' 클래스를 찾을 수 없습니다.")
+                self.detect_btn.setChecked(False)
+                return
+            if not target_indices:
+                QMessageBox.warning(self, "오류", "탐지할 클래스를 하나 이상 확보하세요.")
+                self.detect_btn.setChecked(False)
+                return
+
+            if self.auto_target_radio.isChecked():
+                target_windows = gw.getWindowsWithTitle('Maple') or gw.getWindowsWithTitle('메이플')
+                if not target_windows:
+                    QMessageBox.warning(self, '오류', '메이플스토리 창을 찾을 수 없습니다.')
+                    self.detect_btn.setChecked(False)
+                    return
+                win = target_windows[0]
+                if win.isMinimized:
+                    win.restore()
+                capture_region = {
+                    'top': win.top,
+                    'left': win.left,
+                    'width': win.width,
+                    'height': win.height,
+                }
+            else:
+                if not self.manual_capture_region:
+                    QMessageBox.warning(self, '오류', "'영역 지정'으로 탐지 영역을 설정해주세요.")
+                    self.detect_btn.setChecked(False)
+                    return
+                capture_region = self.manual_capture_region
+
+            if capture_region['width'] <= 0 or capture_region['height'] <= 0:
+                QMessageBox.warning(self, '오류', '탐지 영역 크기가 유효하지 않습니다.')
+                self.detect_btn.setChecked(False)
+                return
+
+            self.detection_thread = DetectionThread(
+                model_path=model_path,
+                capture_region=capture_region,
+                target_class_indices=target_indices,
+                conf_char=self.conf_char_spinbox.value(),
+                conf_monster=self.conf_monster_spinbox.value(),
+                char_class_index=char_index,
+                is_debug_mode=self.debug_checkbox.isChecked(),
+            )
+
+            self.detection_thread.frame_ready.connect(self._handle_detection_frame)
+
+            self.detection_thread.detections_ready.connect(self.handle_detection_payload)
+            self.detection_thread.detection_logged.connect(self._handle_detection_log)
+            self.detection_thread.finished.connect(self._on_detection_thread_finished)
+
+            self.detection_thread.start()
+            self.detection_view.setText("탐지 준비 중...")
+            self.detect_btn.setText("실시간 탐지 중단")
+
+            if hasattr(self.data_manager, 'save_settings'):
+                self.data_manager.save_settings({'last_used_model': selected_model})
+            self.last_used_model = selected_model
+            self.append_log(f"탐지 시작: 모델={selected_model}, 범위={capture_region}")
+        else:
+            thread_active = self.detection_thread is not None and self.detection_thread.isRunning()
+            self._release_pending = True
+            self._stop_detection_thread()
+            self.detect_btn.setText("실시간 탐지 시작")
+            self.detection_view.setText("탐지 중단됨")
+            self.detection_view.setPixmap(QPixmap())
+            self.clear_detection_snapshot()
+            if not thread_active:
+                self._issue_all_keys_release()
+
+    def _stop_detection_thread(self) -> None:
+        if self.detection_thread:
+            try:
+                self.detection_thread.frame_ready.disconnect(self._handle_detection_frame)
+            except TypeError:
+                pass
+            try:
+                self.detection_thread.detections_ready.disconnect(self.handle_detection_payload)
+            except TypeError:
+                pass
+            try:
+                self.detection_thread.detection_logged.disconnect(self._handle_detection_log)
+            except TypeError:
+                pass
+            try:
+                self.detection_thread.finished.disconnect(self._on_detection_thread_finished)
+            except TypeError:
+                pass
+            self.detection_thread.stop()
+            self.detection_thread.wait()
+            self.detection_thread = None
+
+        if self.detection_popup:
+            self.detection_popup.close()
+        self._clear_pending_skill()
+        self._clear_pending_direction()
+
+    def _on_detection_thread_finished(self) -> None:
+        self.detect_btn.setChecked(False)
+        self.detect_btn.setText("실시간 탐지 시작")
+        if not self.is_popup_active:
+            self.detection_view.setText("탐지 중단됨")
+            self.detection_view.setPixmap(QPixmap())
+        self.detection_thread = None
+        self._issue_all_keys_release()
+        self.clear_detection_snapshot()
+
+    def _handle_detection_log(self, messages: List[str]) -> None:
+        for msg in messages:
+            self.append_log(msg, "debug")
+
+    def _handle_detection_frame(self, q_image) -> None:
+        image = q_image.copy()
+        self._paint_overlays(image)
+        if self.is_popup_active and self.detection_popup:
+            self.detection_popup.update_frame(image)
+        if not self.is_popup_active:
+            self._update_detection_frame(image)
+
+    def _paint_overlays(self, image) -> None:
+        if image is None or image.isNull():
+            return
+        if not (self.current_hunt_area or self.current_primary_area):
+            return
+        painter = QPainter(image)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        try:
+            if (
+                self.current_hunt_area
+                and self.overlay_preferences.get('hunt_area', True)
+                and self.show_hunt_area_checkbox.isChecked()
+            ):
+                rect = self._area_to_rect(self.current_hunt_area, image.width(), image.height())
+                if not rect.isNull():
+                    painter.setPen(HUNT_AREA_EDGE)
+                    painter.setBrush(HUNT_AREA_BRUSH)
+                    painter.drawRect(rect)
+            if (
+                self.current_primary_area
+                and self.overlay_preferences.get('primary_area', True)
+                and self.show_primary_skill_checkbox.isChecked()
+            ):
+                rect = self._area_to_rect(self.current_primary_area, image.width(), image.height())
+                if not rect.isNull():
+                    painter.setPen(PRIMARY_AREA_EDGE)
+                    painter.setBrush(PRIMARY_AREA_BRUSH)
+                    painter.drawRect(rect)
+        finally:
+            painter.end()
+
+    @staticmethod
+    def _area_to_rect(area: AreaRect, max_width: int, max_height: int) -> QRect:
+        width = max(0.0, area.width)
+        height = max(0.0, area.height)
+        x1 = max(0.0, area.x)
+        y1 = max(0.0, area.y)
+        x2 = min(float(max_width), area.x + width)
+        y2 = min(float(max_height), area.y + height)
+        if x2 <= x1 or y2 <= y1:
+            return QRect()
+        return QRect(int(x1), int(y1), int(x2 - x1), int(y2 - y1))
+
+    def _update_detection_summary(self) -> None:
+        if not hasattr(self, 'summary_view'):
+            return
+
+        characters = self.latest_detection_details.get('characters', [])
+        monsters = self.latest_detection_details.get('monsters', [])
+
+        lines: List[str] = []
+
+        if characters:
+            best_char = max(characters, key=lambda item: float(item.get('score', 0.0)))
+            lines.append(f"캐릭터 (신뢰도: {float(best_char.get('score', 0.0)):.2f})")
+        else:
+            lines.append("캐릭터 없음")
+
+        if monsters:
+            grouped: dict[str, List[float]] = {}
+            for item in monsters:
+                name = str(item.get('class_name', '???'))
+                grouped.setdefault(name, []).append(float(item.get('score', 0.0)))
+            for name in sorted(grouped.keys()):
+                scores = grouped[name]
+                score_text = ', '.join(f"{score:.2f}" for score in scores)
+                lines.append(f"{name}: {len(scores)}마리 (신뢰도: {score_text})")
+        else:
+            lines.append("몬스터 없음")
+
+        self.summary_view.setPlainText('\n'.join(lines))
+
+    def _update_detection_frame(self, q_image) -> None:
+        self.detection_view.setPixmap(
+            QPixmap.fromImage(q_image).scaled(
+                self.detection_view.size(),
+                Qt.AspectRatioMode.KeepAspectRatio,
+                Qt.TransformationMode.SmoothTransformation,
+            )
+        )
+
+    def _toggle_detection_popup(self) -> None:
+        if self.is_popup_active:
+            if self.detection_popup:
+                self.detection_popup.close()
+            return
+
+        self.is_popup_active = True
+        self.popup_btn.setText("↙")
+        self.popup_btn.setToolTip("탐지 화면을 메인 창으로 복귀")
+
+        if not self.detection_popup:
+            self.detection_popup = DetectionPopup(self.last_popup_scale, self)
+            self.detection_popup.closed.connect(self._handle_popup_closed)
+            self.detection_popup.scale_changed.connect(self._on_popup_scale_changed)
+
+        self.detection_popup.set_waiting_message()
+
+        self.detection_view.setText("탐지 화면이 팝업으로 표시 중입니다.")
+        self.detection_view.setPixmap(QPixmap())
+        self.detection_popup.show()
+
+    def _on_popup_scale_changed(self, value: int) -> None:
+        self.last_popup_scale = value
+        self._save_settings()
+
+    def _handle_popup_closed(self) -> None:
+        self.is_popup_active = False
+        self.popup_btn.setText("↗")
+        self.popup_btn.setToolTip("탐지 화면을 팝업으로 열기")
+        if self.detect_btn.isChecked():
+            self.detection_view.setText("탐지 준비 중...")
+            self.detection_view.setPixmap(QPixmap())
+        else:
+            self.detection_view.setText("탐지 중단됨")
+            self.detection_view.setPixmap(QPixmap())
+
+        self.detection_popup = None
+
+    def _create_skill_group(self) -> QGroupBox:
+        group = QGroupBox("스킬 관리")
+        layout = QVBoxLayout()
+        layout.setSpacing(8)
+
+        attack_section = self._create_attack_section()
+        buff_section = self._create_buff_section()
+        attack_section.setSizePolicy(QSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred))
+        buff_section.setSizePolicy(QSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred))
+        layout.addWidget(attack_section)
+        layout.addWidget(buff_section)
+
+        group.setLayout(layout)
+        return group
+
+    def _create_detection_summary_group(self) -> QGroupBox:
+        group = QGroupBox("탐지 요약")
+        layout = QVBoxLayout(group)
+        layout.setContentsMargins(8, 8, 8, 8)
+        self.summary_view = QTextEdit()
+        self.summary_view.setReadOnly(True)
+        self.summary_view.setMinimumHeight(120)
+        self.summary_view.setStyleSheet("font-family: Consolas, monospace;")
+        layout.addWidget(self.summary_view)
+        return group
+
+    def _create_attack_section(self) -> QGroupBox:
+        box = QGroupBox("공격 스킬")
+        layout = QVBoxLayout()
+
+        self.attack_tree = QTreeWidget()
+        self.attack_tree.setColumnCount(5)
+        self.attack_tree.setHeaderLabels(["사용", "이름", "명령", "주 공격", "조건"])
+        self.attack_tree.setRootIsDecorated(False)
+        self.attack_tree.setAlternatingRowColors(True)
+        self.attack_tree.itemChanged.connect(self._handle_attack_item_changed)
+        self.attack_tree.itemSelectionChanged.connect(self._update_attack_buttons)
+        layout.addWidget(self.attack_tree)
+
+        button_layout = QHBoxLayout()
+        self.add_attack_btn = QPushButton("추가")
+        self.add_attack_btn.clicked.connect(self.add_attack_skill)
+        self.edit_attack_btn = QPushButton("편집")
+        self.edit_attack_btn.clicked.connect(self.edit_attack_skill)
+        self.remove_attack_btn = QPushButton("삭제")
+        self.remove_attack_btn.clicked.connect(self.remove_attack_skill)
+        self.set_primary_attack_btn = QPushButton("주 스킬 지정")
+        self.set_primary_attack_btn.clicked.connect(self.set_primary_attack_skill)
+        self.test_attack_btn = QPushButton("테스트 실행")
+        self.test_attack_btn.clicked.connect(self.run_attack_skill)
+        button_layout.addWidget(self.add_attack_btn)
+        button_layout.addWidget(self.edit_attack_btn)
+        button_layout.addWidget(self.remove_attack_btn)
+        button_layout.addWidget(self.set_primary_attack_btn)
+        button_layout.addWidget(self.test_attack_btn)
+        button_layout.addStretch(1)
+        layout.addLayout(button_layout)
+
+        box.setLayout(layout)
+        return box
+
+    def _create_buff_section(self) -> QGroupBox:
+        box = QGroupBox("버프 스킬")
+        layout = QVBoxLayout()
+
+        self.buff_tree = QTreeWidget()
+        self.buff_tree.setColumnCount(5)
+        self.buff_tree.setHeaderLabels(["사용", "이름", "명령", "쿨타임(s)", "오차(%)"])
+        self.buff_tree.setRootIsDecorated(False)
+        self.buff_tree.setAlternatingRowColors(True)
+        self.buff_tree.itemChanged.connect(self._handle_buff_item_changed)
+        self.buff_tree.itemSelectionChanged.connect(self._update_buff_buttons)
+        layout.addWidget(self.buff_tree)
+
+        button_layout = QHBoxLayout()
+        self.add_buff_btn = QPushButton("추가")
+        self.add_buff_btn.clicked.connect(self.add_buff_skill)
+        self.edit_buff_btn = QPushButton("편집")
+        self.edit_buff_btn.clicked.connect(self.edit_buff_skill)
+        self.remove_buff_btn = QPushButton("삭제")
+        self.remove_buff_btn.clicked.connect(self.remove_buff_skill)
+        self.test_buff_btn = QPushButton("테스트 실행")
+        self.test_buff_btn.clicked.connect(self.run_buff_skill)
+        button_layout.addWidget(self.add_buff_btn)
+        button_layout.addWidget(self.edit_buff_btn)
+        button_layout.addWidget(self.remove_buff_btn)
+        button_layout.addWidget(self.test_buff_btn)
+        button_layout.addStretch(1)
+        layout.addLayout(button_layout)
+
+        box.setLayout(layout)
+        return box
+
+    def _on_area_config_changed(self) -> None:
+        if self.latest_snapshot:
+            self._recalculate_hunt_metrics()
+        else:
+            self._emit_area_overlays()
+
+    def _emit_area_overlays(self) -> None:
+        if not hasattr(self, "show_hunt_area_checkbox"):
+            return
+        show_hunt = self.overlay_preferences.get('hunt_area', True)
+        show_primary = self.overlay_preferences.get('primary_area', True)
+        hunt_rect = None
+        primary_rect = None
+        if self.current_hunt_area and self.show_hunt_area_checkbox.isChecked() and show_hunt:
+            hunt_rect = self.current_hunt_area
+        if self.current_primary_area and self.show_primary_skill_checkbox.isChecked() and show_primary:
+            primary_rect = self.current_primary_area
+        self.hunt_area_updated.emit(hunt_rect)
+        self.primary_skill_area_updated.emit(primary_rect)
+
+    def _on_overlay_toggle_changed(self, _checked: bool) -> None:
+        self.overlay_preferences['hunt_area'] = self.show_hunt_area_checkbox.isChecked()
+        self.overlay_preferences['primary_area'] = self.show_primary_skill_checkbox.isChecked()
+        self._emit_area_overlays()
+        self._save_settings()
+
+    def set_overlay_preferences(self, options: dict | None) -> None:
+        if not isinstance(options, dict):
+            return
+        if 'hunt_area' in options:
+            new_state = bool(options['hunt_area'])
+            self.overlay_preferences['hunt_area'] = new_state
+            if hasattr(self, 'show_hunt_area_checkbox') and self.show_hunt_area_checkbox.isChecked() != new_state:
+                self.show_hunt_area_checkbox.blockSignals(True)
+                self.show_hunt_area_checkbox.setChecked(new_state)
+                self.show_hunt_area_checkbox.blockSignals(False)
+        if 'primary_area' in options:
+            new_state = bool(options['primary_area'])
+            self.overlay_preferences['primary_area'] = new_state
+            if hasattr(self, 'show_primary_skill_checkbox') and self.show_primary_skill_checkbox.isChecked() != new_state:
+                self.show_primary_skill_checkbox.blockSignals(True)
+                self.show_primary_skill_checkbox.setChecked(new_state)
+                self.show_primary_skill_checkbox.blockSignals(False)
+        self._emit_area_overlays()
+        self._save_settings()
+
+    def _log_control_request(self, payload: dict, reason: str | None) -> None:
+        threshold = payload.get("monster_threshold")
+        range_px = payload.get("range_px")
+        primary_range = payload.get("primary_skill_range")
+        model = payload.get("model") or "-"
+        attack_count = payload.get("attack_skill_count", 0)
+        buff_count = payload.get("buff_skill_count", 0)
+        latest_total = payload.get("latest_monster_count")
+        latest_primary = payload.get("latest_primary_monster_count")
+
+        detail_parts = [
+            f"현재 몬스터 {latest_total}마리 / 주 스킬 {latest_primary}마리",
+            f"기준 {threshold}마리, 사냥범위 ±{range_px}px, 주 스킬 범위 ±{primary_range}px",
+            f"모델 '{model}', 공격 스킬 {attack_count}개, 버프 스킬 {buff_count}개",
+        ]
+        if reason:
+            detail_parts.append(f"요청 사유: {reason}")
+        self.append_log("사냥 권한 요청", "info")
+        if hasattr(self, 'log_view'):
+            for line in detail_parts:
+                self.log_view.append(f"    {line}")
+
+    def _handle_capture_mode_toggle(self, checked: bool) -> None:
+        if hasattr(self, 'set_area_btn'):
+            self.set_area_btn.setEnabled(bool(checked))
+        self._save_settings()
+
+    def _handle_setting_changed(self, *args, **kwargs) -> None:
+        self._save_settings()
+
+    def _emit_control_command(self, command: str) -> None:
+        if not command:
+            return
+        normalized = str(command).strip()
+        if normalized.startswith("방향설정("):
+            if "좌" in normalized:
+                self._set_current_facing('left')
+            elif "우" in normalized:
+                self._set_current_facing('right')
+        else:
+            lower = normalized.lower()
+            if "key.left" in lower and "key.right" not in lower:
+                self._set_current_facing('left', save=False)
+            elif "key.right" in lower and "key.left" not in lower:
+                self._set_current_facing('right', save=False)
+        self.control_command_issued.emit(command)
+        self._append_control_log(normalized)
+
+    def _append_control_log(self, message: str) -> None:
+        timestamp = time.strftime("%H:%M:%S", time.localtime())
+        if hasattr(self, 'control_log_view'):
+            self.control_log_view.append(f"[{timestamp}] {message}")
+        self._append_keyboard_log(message, timestamp)
+
+    def _append_keyboard_log(self, message: str, timestamp: Optional[str] = None) -> None:
+        if not hasattr(self, 'keyboard_log_view'):
+            return
+        if timestamp is None:
+            timestamp = time.strftime("%H:%M:%S", time.localtime())
+        self.keyboard_log_view.append(f"[{timestamp}] {message}")
+
+    def handle_detection_payload(self, payload: dict) -> None:
+        if not isinstance(payload, dict):
+            return
+
+        characters_data = payload.get('characters') or []
+        monsters_data = payload.get('monsters') or []
+
+        def _to_box(data):
+            try:
+                return DetectionBox(
+                    x=float(data.get('x', 0.0)),
+                    y=float(data.get('y', 0.0)),
+                    width=float(data.get('width', 0.0)),
+                    height=float(data.get('height', 0.0)),
+                    score=float(data.get('score', 0.0)),
+                    label=str(data.get('class_name', '')),
+                )
+            except Exception:
+                return None
+
+        characters = [box for box in (_to_box(item) for item in characters_data) if box]
+        monsters = [box for box in (_to_box(item) for item in monsters_data) if box]
+
+        snapshot = DetectionSnapshot(
+            character_boxes=characters,
+            monster_boxes=monsters,
+            timestamp=float(payload.get('timestamp', time.time())),
+        )
+        self.latest_detection_details = {
+            'characters': characters_data,
+            'monsters': monsters_data,
+        }
+        self.update_detection_snapshot(snapshot)
+        self._update_detection_summary()
+
+    def update_detection_snapshot(self, snapshot: DetectionSnapshot) -> None:
+        self.latest_snapshot = snapshot
+        self._recalculate_hunt_metrics()
+
+    def clear_detection_snapshot(self) -> None:
+        self.latest_snapshot = None
+        self._clear_detection_metrics()
+        self.latest_detection_details = {'characters': [], 'monsters': []}
+        self._update_detection_summary()
+
+    def _recalculate_hunt_metrics(self) -> None:
+        if not self.latest_snapshot or not self.latest_snapshot.character_boxes:
+            self._clear_detection_metrics()
+            return
+
+        character_box = self._select_reference_character_box(self.latest_snapshot.character_boxes)
+        hunt_area = self._compute_hunt_area_rect(character_box)
+        primary_area = self._compute_primary_skill_rect(character_box, hunt_area)
+
+        self.current_hunt_area = hunt_area
+        self.current_primary_area = primary_area
+
+        monsters = self.latest_snapshot.monster_boxes
+        hunt_count = sum(1 for box in monsters if box.intersects(hunt_area))
+        primary_count = sum(1 for box in monsters if primary_area and box.intersects(primary_area))
+
+        self.latest_monster_count = hunt_count
+        self.latest_primary_monster_count = primary_count
+
+        if primary_count > 0 or self.latest_monster_count >= max(1, self.monster_threshold_spinbox.value() if hasattr(self, 'monster_threshold_spinbox') else 1):
+            self._last_monster_seen_ts = time.time()
+
+        self._update_monster_count_label()
+        self._emit_area_overlays()
+        self.monster_stats_updated.emit(hunt_count, primary_count)
+
+    def _clear_detection_metrics(self) -> None:
+        self.current_hunt_area = None
+        self.current_primary_area = None
+        self.latest_monster_count = 0
+        self.latest_primary_monster_count = 0
+        self._update_monster_count_label()
+        self._emit_area_overlays()
+        self.monster_stats_updated.emit(0, 0)
+
+    def _select_reference_character_box(self, boxes: List[DetectionBox]) -> DetectionBox:
+        return max(boxes, key=lambda box: box.score)
+
+    def _compute_hunt_area_rect(self, character_box: DetectionBox) -> AreaRect:
+        radius_x = float(self.enemy_range_spinbox.value())
+        width = max(1.0, radius_x * 2.0)
+        height = max(1.0, float(self.y_band_height_spinbox.value()))
+        offset = float(self.y_band_offset_spinbox.value())
+        base_y = character_box.bottom
+        top = base_y - height + offset
+        return AreaRect(x=character_box.center_x - radius_x, y=top, width=width, height=height)
+
+    def _compute_primary_skill_rect(self, character_box: DetectionBox, hunt_area: AreaRect) -> Optional[AreaRect]:
+        radius = float(self.primary_skill_range_spinbox.value())
+        if radius <= 0:
+            return None
+        width = max(1.0, radius * 2.0)
+        return AreaRect(x=character_box.center_x - radius, y=hunt_area.y, width=width, height=hunt_area.height)
+
+    def _update_monster_count_label(self) -> None:
+        if hasattr(self, "monster_count_label"):
+            text = f"범위 내 몬스터: {self.latest_monster_count} | 주 스킬 범위: {self.latest_primary_monster_count}"
+            self.monster_count_label.setText(text)
+
+    def _update_facing_label(self) -> None:
+        if not hasattr(self, "facing_label"):
+            return
+        if self.last_facing == 'left':
+            text = "현재 방향: 좌측"
+        elif self.last_facing == 'right':
+            text = "현재 방향: 우측"
+        else:
+            text = "현재 방향: 미정"
+        self.facing_label.setText(text)
+
+    def _set_current_facing(self, side: Optional[str], *, save: bool = True) -> None:
+        if side not in ('left', 'right'):
+            self.last_facing = None
+        else:
+            self.last_facing = side
+        self._update_facing_label()
+        if save:
+            self._save_settings()
+
+    def _setup_timers(self) -> None:
+        self.condition_timer = QTimer(self)
+        self.condition_timer.setInterval(2000)
+        self.condition_timer.timeout.connect(self._poll_hunt_conditions)
+        self.condition_timer.start()
+
+        self.hunt_loop_timer = QTimer(self)
+        self.hunt_loop_timer.setInterval(300)
+        self.hunt_loop_timer.timeout.connect(self._run_hunt_loop)
+        self.hunt_loop_timer.start()
+
+    def attach_data_manager(self, data_manager) -> None:
+        self.data_manager = data_manager
+        self.refresh_model_choices()
+        if hasattr(self.data_manager, 'load_settings'):
+            settings = self.data_manager.load_settings()
+            self.last_used_model = settings.get('last_used_model')
+            if self.last_used_model:
+                index = self.model_selector.findText(self.last_used_model)
+                if index >= 0:
+                    self.model_selector.setCurrentIndex(index)
+        self.append_log("학습 데이터 연동 완료", "info")
+        self._save_settings()
+
+    def set_authority_bridge_active(self, request_connected: bool, release_connected: bool) -> None:
+        self._authority_request_connected = bool(request_connected)
+        self._authority_release_connected = bool(release_connected)
+
+    def _load_settings(self) -> None:
+        self._suppress_settings_save = True
+        data = {}
+        try:
+            with open(self._settings_path, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+        except FileNotFoundError:
+            data = {}
+        except json.JSONDecodeError as exc:
+            self.append_log(f"사냥 설정 파일 파싱 실패: {exc}", "warn")
+            data = {}
+
+        ranges = data.get('ranges', {})
+        if ranges:
+            self.enemy_range_spinbox.setValue(int(ranges.get('enemy_range', self.enemy_range_spinbox.value())))
+            self.y_band_height_spinbox.setValue(int(ranges.get('y_band_height', self.y_band_height_spinbox.value())))
+            self.y_band_offset_spinbox.setValue(int(ranges.get('y_band_offset', self.y_band_offset_spinbox.value())))
+            self.primary_skill_range_spinbox.setValue(int(ranges.get('primary_range', self.primary_skill_range_spinbox.value())))
+
+        confidence = data.get('confidence', {})
+        if confidence:
+            self.conf_char_spinbox.setValue(float(confidence.get('char', self.conf_char_spinbox.value())))
+            self.conf_monster_spinbox.setValue(float(confidence.get('monster', self.conf_monster_spinbox.value())))
+
+        conditions = data.get('conditions', {})
+        if conditions:
+            self.monster_threshold_spinbox.setValue(int(conditions.get('monster_threshold', self.monster_threshold_spinbox.value())))
+            self.auto_request_checkbox.setChecked(bool(conditions.get('auto_request', self.auto_request_checkbox.isChecked())))
+
+        display = data.get('display', {})
+        if display:
+            show_hunt = bool(display.get('show_hunt_area', self.show_hunt_area_checkbox.isChecked()))
+            show_primary = bool(display.get('show_primary_area', self.show_primary_skill_checkbox.isChecked()))
+            auto_target = bool(display.get('auto_target', self.auto_target_radio.isChecked()))
+            debug_enabled = bool(display.get('debug', self.debug_checkbox.isChecked()))
+
+            self.show_hunt_area_checkbox.setChecked(show_hunt)
+            self.show_primary_skill_checkbox.setChecked(show_primary)
+            self.auto_target_radio.setChecked(auto_target)
+            self.manual_target_radio.setChecked(not auto_target)
+            self.debug_checkbox.setChecked(debug_enabled)
+
+        self.manual_capture_region = data.get('manual_capture_region', self.manual_capture_region)
+        self.set_area_btn.setEnabled(self.manual_target_radio.isChecked())
+
+        self.overlay_preferences['hunt_area'] = self.show_hunt_area_checkbox.isChecked()
+        self.overlay_preferences['primary_area'] = self.show_primary_skill_checkbox.isChecked()
+
+        facing_state = data.get('last_facing')
+        self._set_current_facing(facing_state if facing_state in ('left', 'right') else None, save=False)
+
+        attack_skill_data = data.get('attack_skills', [])
+        if attack_skill_data:
+            self.attack_skills = []
+            for item in attack_skill_data:
+                name = item.get('name')
+                command = item.get('command')
+                if not name or not command:
+                    continue
+                self.attack_skills.append(
+                    AttackSkill(
+                        name=name,
+                        command=command,
+                        enabled=bool(item.get('enabled', True)),
+                        is_primary=bool(item.get('is_primary', False)),
+                        min_monsters=int(item.get('min_monsters', 1)),
+                        probability=int(item.get('probability', 100)),
+                    )
+                )
+            self._ensure_primary_skill()
+            self._refresh_attack_tree()
+
+        buff_skill_data = data.get('buff_skills', [])
+        if buff_skill_data:
+            self.buff_skills = []
+            for item in buff_skill_data:
+                name = item.get('name')
+                command = item.get('command')
+                if not name or not command:
+                    continue
+                self.buff_skills.append(
+                    BuffSkill(
+                        name=name,
+                        command=command,
+                        cooldown_seconds=int(item.get('cooldown_seconds', 60)),
+                        enabled=bool(item.get('enabled', True)),
+                        jitter_percent=int(item.get('jitter_percent', 15)),
+                    )
+                )
+            self._refresh_buff_tree()
+
+        self.auto_hunt_enabled = bool(data.get('auto_hunt_enabled', self.auto_hunt_enabled))
+        interval = data.get('attack_interval_sec')
+        if interval is not None:
+            try:
+                self.attack_interval_sec = float(interval)
+            except (TypeError, ValueError):
+                pass
+
+        self.last_popup_scale = int(data.get('last_popup_scale', self.last_popup_scale))
+
+        self._suppress_settings_save = False
+        self._emit_area_overlays()
+        self._save_settings()
+
+    def _save_settings(self) -> None:
+        if getattr(self, '_suppress_settings_save', False):
+            return
+
+        settings_data = {
+            'ranges': {
+                'enemy_range': self.enemy_range_spinbox.value(),
+                'y_band_height': self.y_band_height_spinbox.value(),
+                'y_band_offset': self.y_band_offset_spinbox.value(),
+                'primary_range': self.primary_skill_range_spinbox.value(),
+            },
+            'confidence': {
+                'char': self.conf_char_spinbox.value(),
+                'monster': self.conf_monster_spinbox.value(),
+            },
+            'conditions': {
+                'monster_threshold': self.monster_threshold_spinbox.value(),
+                'auto_request': self.auto_request_checkbox.isChecked(),
+            },
+            'display': {
+                'show_hunt_area': self.show_hunt_area_checkbox.isChecked(),
+                'show_primary_area': self.show_primary_skill_checkbox.isChecked(),
+                'auto_target': self.auto_target_radio.isChecked(),
+                'debug': self.debug_checkbox.isChecked(),
+            },
+            'attack_skills': [
+                {
+                    'name': skill.name,
+                    'command': skill.command,
+                    'enabled': skill.enabled,
+                    'is_primary': skill.is_primary,
+                    'min_monsters': skill.min_monsters,
+                    'probability': skill.probability,
+                }
+                for skill in self.attack_skills
+            ],
+            'buff_skills': [
+                {
+                    'name': skill.name,
+                    'command': skill.command,
+                    'enabled': skill.enabled,
+                    'cooldown_seconds': skill.cooldown_seconds,
+                    'jitter_percent': skill.jitter_percent,
+                }
+                for skill in self.buff_skills
+            ],
+            'manual_capture_region': self.manual_capture_region,
+            'auto_hunt_enabled': self.auto_hunt_enabled,
+            'attack_interval_sec': self.attack_interval_sec,
+            'last_popup_scale': self.last_popup_scale,
+            'last_facing': self.last_facing,
+        }
+
+        try:
+            with open(self._settings_path, 'w', encoding='utf-8') as f:
+                json.dump(settings_data, f, ensure_ascii=False, indent=2)
+        except Exception as exc:
+            self.append_log(f"설정 저장 실패: {exc}", "warn")
+
+    def refresh_model_choices(self) -> None:
+        self.model_selector.clear()
+        if not self.data_manager:
+            self.model_selector.addItem("연동 필요")
+            self.model_selector.setEnabled(False)
+            return
+
+        models = sorted(self.data_manager.get_saved_models()) if hasattr(self.data_manager, "get_saved_models") else []
+        if not models:
+            self.model_selector.addItem("사용 가능한 모델 없음")
+            self.model_selector.setEnabled(False)
+        else:
+            self.model_selector.addItems(models)
+            self.model_selector.setEnabled(True)
+            if self.last_used_model and self.last_used_model in models:
+                self.model_selector.setCurrentText(self.last_used_model)
+
+    def request_control(self, reason: str | None = None) -> None:
+        if self.current_authority == "hunt":
+            self.append_log("이미 사냥 권한을 보유 중입니다.", "warn")
+            return
+
+        payload = {
+            "monster_threshold": self.monster_threshold_spinbox.value(),
+            "range_px": self.enemy_range_spinbox.value(),
+            "y_band_height": self.y_band_height_spinbox.value(),
+            "y_offset": self.y_band_offset_spinbox.value(),
+            "primary_skill_range": self.primary_skill_range_spinbox.value(),
+            "model": self.model_selector.currentText(),
+            "attack_skill_count": len(self.attack_skills),
+            "buff_skill_count": len(self.buff_skills),
+            "latest_monster_count": self.latest_monster_count,
+            "latest_primary_monster_count": self.latest_primary_monster_count,
+        }
+        self.control_authority_requested.emit(payload)
+        self._log_control_request(payload, reason)
+        if not self._authority_request_connected:
+            self.on_map_authority_changed("hunt")
+
+    def release_control(self, reason: str | None = None) -> None:
+        if self.current_authority != "hunt":
+            self.append_log("현재 사냥 권한이 없습니다.", "warn")
+            return
+
+        payload = {"reason": reason or "manual"}
+        self.control_authority_released.emit(payload)
+        if reason:
+            self.append_log(f"사냥 권한 반환 요청 ({reason})", "info")
+        else:
+            self.append_log("사냥 권한 반환 요청", "info")
+        if not self._authority_release_connected:
+            self.on_map_authority_changed("map")
+
+    def on_map_authority_changed(self, owner: str) -> None:
+        self.current_authority = owner
+        if owner == "hunt":
+            self.last_control_acquired_ts = time.time()
+            self.last_release_attempt_ts = 0.0
+            self._last_monster_seen_ts = time.time()
+        else:
+            self.last_control_acquired_ts = 0.0
+            self.last_release_attempt_ts = 0.0
+            self._last_monster_seen_ts = time.time()
+        self._update_authority_ui()
+        if owner == "hunt":
+            self.append_log("사냥 탭이 조작 권한을 획득했습니다.", "success")
+        elif owner == "map":
+            self.append_log("맵 탭으로 권한이 반환되었습니다.", "info")
+        else:
+            self.append_log(f"권한 소유자 변경: {owner}", "info")
+
+    def _update_authority_ui(self) -> None:
+        if not hasattr(self, "authority_label"):
+            return
+        if self.current_authority == "hunt":
+            self.authority_label.setText("현재 권한: 사냥 탭")
+        else:
+            self.authority_label.setText("현재 권한: 맵 탭")
+        self._update_attack_buttons()
+        self._update_buff_buttons()
+
+    def _poll_hunt_conditions(self) -> None:
+        if not self.auto_request_checkbox.isChecked():
+            return
+        if not self.auto_hunt_enabled:
+            return
+
+        threshold = self.monster_threshold_spinbox.value()
+
+        if (
+            self.latest_primary_monster_count > 0
+            or self.latest_monster_count >= threshold
+        ):
+            self._last_monster_seen_ts = time.time()
+
+        if self.current_authority == "hunt":
+            elapsed = time.time() - self.last_control_acquired_ts if self.last_control_acquired_ts else 0.0
+            idle_elapsed = (
+                time.time() - self._last_monster_seen_ts
+                if self._last_monster_seen_ts
+                else float("inf")
+            )
+            should_release = False
+            if self.latest_primary_monster_count == 0 and self.latest_monster_count < threshold:
+                if idle_elapsed >= 2.0:
+                    should_release = True
+            timeout = self.control_release_timeout or 0
+            if timeout and elapsed >= timeout:
+                should_release = True
+            if should_release and (time.time() - self.last_release_attempt_ts) >= 1.0:
+                self.last_release_attempt_ts = time.time()
+                reason_parts = []
+                if self.latest_primary_monster_count == 0:
+                    reason_parts.append("주 스킬 범위 몬스터 없음")
+                if self.latest_monster_count < threshold:
+                    reason_parts.append(f"전체 {self.latest_monster_count}마리 < 기준 {threshold}")
+                reason_parts.append(f"최근 몬스터 미탐지 {idle_elapsed:.1f}s")
+                if timeout and elapsed >= timeout:
+                    reason_parts.append(f"타임아웃 {timeout}s 초과")
+                reason_text = ", ".join(reason_parts)
+                self.append_log(f"자동 조건 해제 → 사냥 권한 반환 ({reason_text})", "info")
+                self.release_control(reason_text)
+            return
+
+        if (
+            self.latest_monster_count >= threshold
+            or self.latest_primary_monster_count > 0
+        ):
+            reason_parts = []
+            if self.latest_monster_count >= threshold:
+                reason_parts.append(f"전체 {self.latest_monster_count}마리 ≥ 기준 {threshold}")
+            if self.latest_primary_monster_count > 0:
+                reason_parts.append(f"주 스킬 범위 {self.latest_primary_monster_count}마리")
+            reason_text = ", ".join(reason_parts)
+            self.append_log(f"자동 조건 충족 → 사냥 권한 요청 ({reason_text})", "info")
+            self.request_control(reason_text)
+
+    def _run_hunt_loop(self) -> None:
+        if not self.auto_hunt_enabled:
+            self._ensure_idle_keys()
+            return
+        if self.current_authority != "hunt":
+            self._ensure_idle_keys()
+            return
+        if self._pending_skill_timer or self._pending_direction_timer:
+            return
+        now = time.time()
+        if self._evaluate_buff_usage(now):
+            return
+        if not self.attack_skills:
+            self._ensure_idle_keys()
+            return
+        if self.latest_primary_monster_count == 0:
+            self._ensure_idle_keys()
+            return
+        if not self.latest_snapshot or not self.latest_snapshot.character_boxes:
+            self._ensure_idle_keys()
+            return
+
+        if now - self.last_attack_ts < self.attack_interval_sec:
+            return
+
+        skill = self._select_attack_skill()
+        if not skill:
+            self._ensure_idle_keys()
+            return
+
+        character_box = self._select_reference_character_box(self.latest_snapshot.character_boxes)
+        target_box = self._select_target_monster(character_box)
+        if not target_box:
+            self._ensure_idle_keys()
+            return
+
+        target_side = 'left' if target_box.center_x < character_box.center_x else 'right'
+        direction_changed = self._ensure_direction(target_side, skill)
+        if direction_changed:
+            return
+
+        self._execute_attack_skill(skill)
+
+    def _evaluate_buff_usage(self, now: float) -> bool:
+        for buff in self.buff_skills:
+            if not buff.enabled or buff.cooldown_seconds <= 0:
+                continue
+
+            ready_ts = buff.next_ready_ts or 0.0
+            if buff.last_triggered_ts == 0.0 or now >= ready_ts:
+                self._emit_control_command(buff.command)
+                self.append_log(f"버프 사용: {buff.name}", "debug")
+                buff.last_triggered_ts = now
+                jitter_ratio = max(0, min(buff.jitter_percent, 90)) / 100.0
+                jitter_window = buff.cooldown_seconds * jitter_ratio
+                next_delay = buff.cooldown_seconds - random.uniform(0, jitter_window)
+                buff.next_ready_ts = now + max(0.0, next_delay)
+                self.last_attack_ts = now
+                self.hunting_active = True
+                return True
+
+        return False
+
+    def _execute_attack_skill(self, skill: AttackSkill) -> None:
+        if not skill.enabled:
+            return
+        self._emit_control_command(skill.command)
+        self.last_attack_ts = time.time()
+        self.hunting_active = True
+
+    def _select_attack_skill(self) -> Optional[AttackSkill]:
+        enabled_skills = [s for s in self.attack_skills if s.enabled]
+        if not enabled_skills:
+            return None
+
+        primary_skill = next((s for s in enabled_skills if s.is_primary), None)
+        if not primary_skill:
+            primary_skill = enabled_skills[0]
+
+        chosen = primary_skill
+        primary_count = self.latest_primary_monster_count
+        for skill in enabled_skills:
+            if skill.is_primary:
+                continue
+            if primary_count < max(1, skill.min_monsters):
+                continue
+            probability = max(0, min(skill.probability, 100))
+            if random.randint(1, 100) <= probability:
+                chosen = skill
+                break
+
+        return chosen
+
+    def _select_target_monster(self, character_box: DetectionBox) -> Optional[DetectionBox]:
+        if not self.latest_snapshot:
+            return None
+        monsters = self.latest_snapshot.monster_boxes
+        if not monsters:
+            return None
+        candidates = monsters
+        if self.current_primary_area:
+            primary_monsters = [box for box in monsters if box.intersects(self.current_primary_area)]
+            if primary_monsters:
+                candidates = primary_monsters
+            else:
+                return None
+        char_x = character_box.center_x
+        facing = self.last_facing if self.last_facing in ('left', 'right') else None
+        if facing:
+            if facing == 'left':
+                same_side = [box for box in candidates if box.center_x <= char_x]
+            else:
+                same_side = [box for box in candidates if box.center_x >= char_x]
+            if same_side:
+                candidates = same_side
+        return min(candidates, key=lambda box: abs(box.center_x - char_x))
+
+    def _ensure_direction(self, target_side: str, next_skill: Optional[AttackSkill] = None) -> bool:
+        current = self.last_facing if self.last_facing in ('left', 'right') else None
+        if current == target_side:
+            return False
+        self._schedule_direction_command(target_side, next_skill)
+        return True
+
+    def _schedule_direction_command(self, target_side: str, next_skill: Optional[AttackSkill]) -> None:
+        self._clear_pending_direction()
+        delay_sec = random.uniform(0.460, 0.480)
+        elapsed = time.time() - self.last_attack_ts if self.last_attack_ts else float('inf')
+        remaining = max(0.0, delay_sec - max(0.0, elapsed))
+        if remaining <= 0.0:
+            self._execute_direction_command(target_side, next_skill)
+            return
+
+        timer = QTimer(self)
+        timer.setSingleShot(True)
+        timer.setInterval(max(1, int(remaining * 1000)))
+        timer.timeout.connect(lambda side=target_side, skill=next_skill: self._on_direction_timer_timeout(side, skill))
+        timer.start()
+        self._pending_direction_timer = timer
+        self._pending_direction_side = target_side
+        self._pending_direction_skill = next_skill
+        self.hunting_active = True
+
+    def _on_direction_timer_timeout(self, target_side: str, next_skill: Optional[AttackSkill]) -> None:
+        self._pending_direction_timer = None
+        self._pending_direction_side = None
+        self._pending_direction_skill = None
+        self._execute_direction_command(target_side, next_skill)
+
+    def _execute_direction_command(self, target_side: str, next_skill: Optional[AttackSkill]) -> None:
+        self._pending_direction_timer = None
+        self._pending_direction_side = None
+        self._pending_direction_skill = None
+        command = '방향설정(좌)' if target_side == 'left' else '방향설정(우)'
+        self._emit_control_command(command)
+        if next_skill:
+            self._schedule_skill_after_direction(next_skill)
+        else:
+            self.hunting_active = True
+
+    def _schedule_skill_after_direction(self, skill: AttackSkill) -> None:
+        self._clear_pending_skill()
+        delay_sec = random.uniform(0.035, 0.050)
+        timer = QTimer(self)
+        timer.setSingleShot(True)
+        timer.setInterval(max(1, int(delay_sec * 1000)))
+        timer.timeout.connect(lambda skill=skill: self._execute_scheduled_skill(skill))
+        timer.start()
+        self._pending_skill_timer = timer
+        self._pending_skill = skill
+        self.hunting_active = True
+
+    def _execute_scheduled_skill(self, skill: AttackSkill) -> None:
+        pending_skill = self._pending_skill
+        self._clear_pending_skill()
+        if pending_skill is not None and pending_skill is not skill:
+            return
+        if not self.auto_hunt_enabled or self.current_authority != "hunt":
+            return
+        if self.latest_primary_monster_count == 0:
+            return
+        if skill not in self.attack_skills or not skill.enabled:
+            return
+        self._execute_attack_skill(skill)
+
+    def _clear_pending_skill(self) -> None:
+        if self._pending_skill_timer:
+            try:
+                self._pending_skill_timer.stop()
+            finally:
+                self._pending_skill_timer.deleteLater()
+        self._pending_skill_timer = None
+        self._pending_skill = None
+
+    def _clear_pending_direction(self) -> None:
+        if self._pending_direction_timer:
+            try:
+                self._pending_direction_timer.stop()
+            finally:
+                self._pending_direction_timer.deleteLater()
+        self._pending_direction_timer = None
+        self._pending_direction_side = None
+        self._pending_direction_skill = None
+
+    def set_auto_hunt_enabled(self, enabled: bool) -> None:
+        self.auto_hunt_enabled = bool(enabled)
+        state = "ON" if self.auto_hunt_enabled else "OFF"
+        self.append_log(f"자동 사냥 모드 {state}", "info")
+        if not self.auto_hunt_enabled and self.current_authority == "hunt":
+            self.release_control("사용자에 의해 자동 사냥 비활성화")
+        self._save_settings()
+
+    def add_attack_skill(self) -> None:
+        dialog = AttackSkillDialog(self)
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            skill = dialog.get_skill()
+            if not skill:
+                return
+            if not self.attack_skills:
+                skill.is_primary = True
+            elif skill.is_primary:
+                for existing in self.attack_skills:
+                    existing.is_primary = False
+            self.attack_skills.append(skill)
+            self._ensure_primary_skill()
+            self._refresh_attack_tree()
+            self._save_settings()
+
+    def edit_attack_skill(self) -> None:
+        index = self._get_selected_attack_index()
+        if index is None:
+            return
+        dialog = AttackSkillDialog(self, self.attack_skills[index])
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            updated = dialog.get_skill()
+            if not updated:
+                return
+            if updated.is_primary:
+                for existing in self.attack_skills:
+                    existing.is_primary = False
+            self.attack_skills[index] = updated
+            self._ensure_primary_skill()
+            self._refresh_attack_tree()
+            self._save_settings()
+
+    def remove_attack_skill(self) -> None:
+        index = self._get_selected_attack_index()
+        if index is None:
+            return
+        del self.attack_skills[index]
+        self._ensure_primary_skill()
+        self._refresh_attack_tree()
+        self._save_settings()
+
+    def set_primary_attack_skill(self) -> None:
+        index = self._get_selected_attack_index()
+        if index is None:
+            return
+        for i, skill in enumerate(self.attack_skills):
+            skill.is_primary = i == index
+            if skill.is_primary:
+                skill.enabled = True
+        self._refresh_attack_tree()
+        self._save_settings()
+
+    def run_attack_skill(self) -> None:
+        index = self._get_selected_attack_index()
+        if index is None:
+            return
+        skill = self.attack_skills[index]
+        self._emit_control_command(skill.command)
+        self.append_log(f"테스트 실행 (공격): {skill.name}", "info")
+
+    def add_buff_skill(self) -> None:
+        dialog = BuffSkillDialog(self)
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            skill = dialog.get_skill()
+            if skill:
+                self.buff_skills.append(skill)
+                self._refresh_buff_tree()
+                self._save_settings()
+
+    def edit_buff_skill(self) -> None:
+        index = self._get_selected_buff_index()
+        if index is None:
+            return
+        dialog = BuffSkillDialog(self, self.buff_skills[index])
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            updated = dialog.get_skill()
+            if updated:
+                updated.last_triggered_ts = self.buff_skills[index].last_triggered_ts
+                updated.next_ready_ts = self.buff_skills[index].next_ready_ts
+                self.buff_skills[index] = updated
+                self._refresh_buff_tree()
+                self._save_settings()
+
+    def remove_buff_skill(self) -> None:
+        index = self._get_selected_buff_index()
+        if index is None:
+            return
+        del self.buff_skills[index]
+        self._refresh_buff_tree()
+        self._save_settings()
+
+    def run_buff_skill(self) -> None:
+        index = self._get_selected_buff_index()
+        if index is None:
+            return
+        skill = self.buff_skills[index]
+        self._emit_control_command(skill.command)
+        self.append_log(f"테스트 실행 (버프): {skill.name}", "info")
+        now = time.time()
+        skill.last_triggered_ts = now
+        jitter_ratio = max(0, min(skill.jitter_percent, 90)) / 100.0
+        jitter_window = skill.cooldown_seconds * jitter_ratio
+        next_delay = skill.cooldown_seconds - random.uniform(0, jitter_window)
+        skill.next_ready_ts = now + max(0.0, next_delay)
+
+    def _refresh_attack_tree(self) -> None:
+        if not hasattr(self, "attack_tree"):
+            return
+        self._ensure_primary_skill()
+        self.attack_tree.blockSignals(True)
+        self.attack_tree.clear()
+        for idx, skill in enumerate(self.attack_skills):
+            item = QTreeWidgetItem(self.attack_tree)
+            item.setData(0, Qt.ItemDataRole.UserRole, idx)
+            item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable | Qt.ItemFlag.ItemIsSelectable | Qt.ItemFlag.ItemIsEnabled)
+            item.setCheckState(0, Qt.CheckState.Checked if skill.enabled else Qt.CheckState.Unchecked)
+            item.setText(1, skill.name)
+            item.setText(2, skill.command)
+            item.setText(3, "주 스킬" if skill.is_primary else "-")
+            item.setText(4, f">= {skill.min_monsters}마리 | {skill.probability}%")
+        self.attack_tree.blockSignals(False)
+        self._update_attack_buttons()
+
+    def _refresh_buff_tree(self) -> None:
+        if not hasattr(self, "buff_tree"):
+            return
+        self.buff_tree.blockSignals(True)
+        self.buff_tree.clear()
+        for idx, skill in enumerate(self.buff_skills):
+            item = QTreeWidgetItem(self.buff_tree)
+            item.setData(0, Qt.ItemDataRole.UserRole, idx)
+            item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable | Qt.ItemFlag.ItemIsSelectable | Qt.ItemFlag.ItemIsEnabled)
+            item.setCheckState(0, Qt.CheckState.Checked if skill.enabled else Qt.CheckState.Unchecked)
+            item.setText(1, skill.name)
+            item.setText(2, skill.command)
+            item.setText(3, str(skill.cooldown_seconds))
+            item.setText(4, f"{skill.jitter_percent}%")
+        self.buff_tree.blockSignals(False)
+        self._update_buff_buttons()
+
+    def _get_selected_attack_index(self) -> Optional[int]:
+        if not hasattr(self, "attack_tree"):
+            return None
+        item = self.attack_tree.currentItem()
+        if item is None:
+            return None
+        value = item.data(0, Qt.ItemDataRole.UserRole)
+        return int(value) if value is not None else None
+
+    def _get_selected_buff_index(self) -> Optional[int]:
+        if not hasattr(self, "buff_tree"):
+            return None
+        item = self.buff_tree.currentItem()
+        if item is None:
+            return None
+        value = item.data(0, Qt.ItemDataRole.UserRole)
+        return int(value) if value is not None else None
+
+    def _ensure_primary_skill(self) -> None:
+        if not self.attack_skills:
+            return
+        primary_indices = [i for i, s in enumerate(self.attack_skills) if s.is_primary]
+        if not primary_indices:
+            self.attack_skills[0].is_primary = True
+            self.attack_skills[0].enabled = True
+        else:
+            first = primary_indices[0]
+            self.attack_skills[first].enabled = True
+            for i in primary_indices[1:]:
+                self.attack_skills[i].is_primary = False
+
+    def _update_attack_buttons(self) -> None:
+        if not hasattr(self, "add_attack_btn"):
+            return
+        index = self._get_selected_attack_index()
+        has_selection = index is not None
+        self.edit_attack_btn.setEnabled(has_selection)
+        self.remove_attack_btn.setEnabled(has_selection)
+        if has_selection:
+            skill = self.attack_skills[index]
+            self.set_primary_attack_btn.setEnabled(not skill.is_primary)
+            self.test_attack_btn.setEnabled(self.current_authority == "hunt")
+        else:
+            self.set_primary_attack_btn.setEnabled(False)
+            self.test_attack_btn.setEnabled(False)
+
+    def _update_buff_buttons(self) -> None:
+        if not hasattr(self, "add_buff_btn"):
+            return
+        index = self._get_selected_buff_index()
+        has_selection = index is not None
+        self.edit_buff_btn.setEnabled(has_selection)
+        self.remove_buff_btn.setEnabled(has_selection)
+        self.test_buff_btn.setEnabled(has_selection and self.current_authority == "hunt")
+
+    def _handle_attack_item_changed(self, item: QTreeWidgetItem, column: int) -> None:
+        if column != 0:
+            return
+        index = item.data(0, Qt.ItemDataRole.UserRole)
+        if index is None:
+            return
+        idx = int(index)
+        if 0 <= idx < len(self.attack_skills):
+            self.attack_skills[idx].enabled = item.checkState(0) == Qt.CheckState.Checked
+            if self.attack_skills[idx].is_primary and not self.attack_skills[idx].enabled:
+                self.attack_skills[idx].enabled = True
+                self.attack_tree.blockSignals(True)
+                item.setCheckState(0, Qt.CheckState.Checked)
+                self.attack_tree.blockSignals(False)
+            self._update_attack_buttons()
+            self._save_settings()
+
+    def _handle_buff_item_changed(self, item: QTreeWidgetItem, column: int) -> None:
+        if column != 0:
+            return
+        index = item.data(0, Qt.ItemDataRole.UserRole)
+        if index is None:
+            return
+        idx = int(index)
+        if 0 <= idx < len(self.buff_skills):
+            self.buff_skills[idx].enabled = item.checkState(0) == Qt.CheckState.Checked
+            self._update_buff_buttons()
+            self._save_settings()
+
+    def append_log(self, message: str, level: str = "info") -> None:
+        if level == "debug":
+            return
+        valid_levels = {"info", "warn", "success", "debug"}
+        if level not in valid_levels:
+            self._append_keyboard_log(message)
+            return
+        if level == "info" and message.lstrip().startswith("("):
+            self._append_keyboard_log(message)
+            return
+        prefix_map = {
+            "info": "[INFO]",
+            "warn": "[WARN]",
+            "success": "[OK]",
+            "debug": "[DEBUG]",
+        }
+        prefix = prefix_map.get(level, "[INFO]")
+        if hasattr(self, 'log_view'):
+            self.log_view.append(f"{prefix} {message}")
+
+    def cleanup_on_close(self) -> None:
+        self.condition_timer.stop()
+        if hasattr(self, 'hunt_loop_timer'):
+            self.hunt_loop_timer.stop()
+        self._stop_detection_thread()
+        if hasattr(self, 'detect_btn'):
+            self.detect_btn.setChecked(False)
+            self.detect_btn.setText("실시간 탐지 시작")
+        self._authority_request_connected = False
+        self._authority_release_connected = False
+        self._save_settings()
+
+    def _issue_all_keys_release(self) -> None:
+        if not getattr(self, 'control_command_issued', None):
+            return
+        self._clear_pending_skill()
+        self._clear_pending_direction()
+        self._emit_control_command("모든 키 떼기")
+        self.append_log("모든 키 떼기 명령 전송", "debug")
+        self._release_pending = False
+        self.hunting_active = False
+
+    def _ensure_idle_keys(self) -> None:
+        self._clear_pending_skill()
+        self._clear_pending_direction()
+        if self.hunting_active:
+            self._issue_all_keys_release()

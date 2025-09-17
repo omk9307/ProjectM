@@ -27,12 +27,12 @@ import time
 import requests
 
 from PyQt6.QtWidgets import (
-    QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
+    QApplication, QWidget, QVBoxLayout, QHBoxLayout,
     QPushButton, QListWidget, QLabel, QDialog, QMessageBox, QFileDialog,
     QListWidgetItem, QInputDialog, QTextEdit, QDialogButtonBox, QCheckBox,
-    QComboBox, QDoubleSpinBox, QRadioButton, QGroupBox, QScrollArea, QSpinBox,
+    QComboBox, QDoubleSpinBox, QGroupBox, QScrollArea, QSpinBox,
     QProgressBar, QStatusBar, QAbstractItemView, QTreeWidget, QTreeWidgetItem,
-    QHeaderView, QLineEdit, QSlider
+    QHeaderView, QLineEdit
 )
 from PyQt6.QtGui import QPixmap, QImage, QIcon, QPainter, QPen, QColor, QBrush, QCursor, QPolygon, QDropEvent
 from PyQt6.QtCore import Qt, QThread, pyqtSignal, QSize, QRect, QPoint, QObject, QMimeData
@@ -216,63 +216,6 @@ class ClassTreeWidget(QTreeWidget):
         # 모든 규칙을 통과하면 기본 드롭 이벤트 실행
         super().dropEvent(event)
         self.drop_completed.emit()
-
-# --- 1.7. 위젯: 탐지 화면 팝업 ---
-class DetectionPopup(QDialog):
-    """실시간 탐지 화면을 표시하고 크기 조절이 가능한 별도의 팝업 창."""
-    closed = pyqtSignal()
-    scale_changed = pyqtSignal(int)
-
-    def __init__(self, initial_scale=50, parent=None):
-        super().__init__(parent)
-        self.setWindowTitle("탐지 팝업")
-        self.setMinimumSize(320, 240)
-        self.original_frame_size = None
-
-        # 메인 레이아웃
-        layout = QVBoxLayout(self)
-
-        # 화면 표시 라벨
-        self.view_label = QLabel("탐지 시작 대기 중...")
-        self.view_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.view_label.setStyleSheet("background-color: black; color: white;")
-        layout.addWidget(self.view_label, 1) # 남는 공간 모두 차지
-
-        # 슬라이더 추가
-        self.slider = QSlider(Qt.Orientation.Horizontal)
-        self.slider.setRange(20, 80) # 20% ~ 80%
-        self.slider.setValue(initial_scale)
-        self.slider.valueChanged.connect(self.on_scale_changed)
-        layout.addWidget(self.slider)
-
-        self.setLayout(layout)
-
-    def on_scale_changed(self, value):
-        """슬라이더 값 변경 시 창 크기 조절 및 시그널 발생."""
-        self.scale_changed.emit(value)
-        if self.original_frame_size:
-            new_width = int(self.original_frame_size.width() * (value / 100))
-            new_height = int(self.original_frame_size.height() * (value / 100))
-            # 위젯들의 최소 크기를 고려하여 너무 작아지지 않도록 함
-            self.resize(max(new_width, self.minimumWidth()), max(new_height, self.minimumHeight()))
-
-    def update_frame(self, q_image: QImage):
-        """탐지 스레드로부터 받은 프레임을 업데이트합니다."""
-        if self.original_frame_size is None:
-            self.original_frame_size = q_image.size()
-            self.on_scale_changed(self.slider.value()) # 첫 프레임 수신 시 초기 크기 설정
-
-        scaled_pixmap = QPixmap.fromImage(q_image).scaled(
-            self.view_label.size(),
-            Qt.AspectRatioMode.KeepAspectRatio,
-            Qt.TransformationMode.SmoothTransformation
-        )
-        self.view_label.setPixmap(scaled_pixmap)
-
-    def closeEvent(self, event):
-        """창이 닫힐 때 'closed' 시그널을 발생시킵니다."""
-        self.closed.emit()
-        super().closeEvent(event)
 
 # --- 2. 위젯: 다각형 편집기의 캔버스 (공통 로직 추가) ---
 class BaseCanvasLabel(QLabel):
@@ -1418,101 +1361,26 @@ class ExportThread(QThread):
             self.finished.emit(True, "모델 최적화 성공!")
         except Exception as e: self.finished.emit(False, f"모델 최적화 오류: {e}")
 
-class DetectionThread(QThread):
-    frame_ready = pyqtSignal(QImage)
-    detection_logged = pyqtSignal(list)
-    def __init__(self, model_path, capture_region, target_class_indices, conf_char, conf_monster, char_class_index, is_debug_mode=False):
-        super().__init__()
-        self.model_path, self.capture_region, self.target_class_indices = model_path, capture_region, target_class_indices
-        self.conf_char, self.conf_monster, self.char_class_index, self.is_debug_mode = conf_char, conf_monster, char_class_index, is_debug_mode
-        self.is_running = True
-    def run(self):
-        try:
-            model = YOLO(self.model_path)
-            sct = mss.mss()
-            low_conf = min(self.conf_char, self.conf_monster)
-            while self.is_running:
-                frame_np = np.array(sct.grab(self.capture_region))
-                frame = cv2.cvtColor(frame_np, cv2.COLOR_BGRA2BGR)
-                results = model(frame, conf=low_conf, classes=self.target_class_indices, verbose=False)
-
-                result = results[0]
-
-                # --- [v4.5.18] 캐릭터 단일 탐지 및 텐서 오류 수정 로직 ---
-                if len(result.boxes) > 0:
-                    char_indices_with_conf = []
-                    other_indices = []
-
-                    # 1. 모든 탐지 결과를 순회하며 캐릭터와 기타 객체로 분리하고 신뢰도 필터링
-                    for i, box in enumerate(result.boxes):
-                        cls_id = int(box.cls)
-                        conf = float(box.conf.item())
-
-                        if cls_id == self.char_class_index:
-                            if conf >= self.conf_char:
-                                # (원본 인덱스, 신뢰도) 쌍으로 저장
-                                char_indices_with_conf.append((i, conf))
-                        else:
-                            if conf >= self.conf_monster:
-                                other_indices.append(i)
-
-                    final_indices = []
-                    # 2. 캐릭터가 하나 이상 탐지되었다면, 그 중 신뢰도가 가장 높은 것 하나만 선택
-                    if char_indices_with_conf:
-                        # 신뢰도(conf)를 기준으로 가장 높은 값의 원본 인덱스(i)를 찾음
-                        best_char_index = max(char_indices_with_conf, key=lambda item: item[1])[0]
-                        final_indices.append(best_char_index)
-
-                    # 3. 신뢰도를 통과한 다른 모든 객체들의 인덱스를 추가
-                    final_indices.extend(other_indices)
-
-                    # 4. 최종 선택된 인덱스들을 사용하여 result 객체 전체를 필터링 (오류 해결 지점)
-                    #    이렇게 하면 boxes, masks 등 모든 관련 데이터가 함께 필터링됩니다.
-                    if final_indices:
-                        result = result[final_indices]
-                    else:
-                        # 표시할 객체가 하나도 없으면 빈 결과 객체로 만듦
-                        result = result[:0]
-                # --- 로직 수정 끝 ---
-
-                if self.is_debug_mode:
-                    log_messages = []
-                    boxes = result.boxes
-                    timestamp = time.strftime('%H:%M:%S')
-                    if boxes is not None and len(boxes) > 0:
-                        log_messages.append(f"[{timestamp}] 탐지된 객체: {len(boxes)}개")
-                        for box in boxes: log_messages.append(f"  - {model.names[int(box.cls)]} (신뢰도: {box.conf.item():.2f})")
-                    else: log_messages.append(f"[{timestamp}] 탐색 완료. 객체 없음.")
-                    self.detection_logged.emit(log_messages)
-
-                annotated_frame = result.plot()
-                rgb_image = cv2.cvtColor(annotated_frame, cv2.COLOR_BGR2RGB)
-                h, w, ch = rgb_image.shape
-                bytes_per_line = ch * w
-                qt_image = QImage(rgb_image.data, w, h, bytes_per_line, QImage.Format.Format_RGB888)
-                self.frame_ready.emit(qt_image.copy())
-                self.msleep(10)
-        except Exception as e: print(f"탐지 스레드 오류: {e}")
-    def stop(self): self.is_running = False
-
 # --- 7. GUI 클래스 (프론트엔드) ---
 class LearningTab(QWidget):
     def __init__(self):
         super().__init__()
         # (v1.2) DataManager를 새로운 workspace 경로 기준으로 초기화
         self.data_manager = DataManager(workspace_root=WORKSPACE_ROOT)
-        self.training_thread, self.export_thread, self.detection_thread = None, None, None
-        self.latest_run_dir, self.manual_capture_region = None, None
+        self.training_thread = None
+        self.export_thread = None
+        self.latest_run_dir = None
         self.sam_predictor = None
         self.current_image_sort_mode = 'date'
-        self.detection_popup = None
-        self.is_popup_active = False
-        self.last_popup_scale = 50 # 팝업창 크기 기억을 위한 변수
         # v1.4: 마지막 사용 모델 로드
         settings = self.data_manager.load_settings()
         self.last_used_model = settings.get('last_used_model', None)
         self.initUI()
         self.init_sam()
+
+    def get_data_manager(self):
+        """Hunt 등 다른 탭에서 데이터 매니저를 참조할 때 사용."""
+        return self.data_manager
 
     def initUI(self):
         # [BUG FIX] 레이아웃을 위젯에 할당하지 않고 생성한 뒤, 마지막에 한 번만 설정합니다.
@@ -1668,58 +1536,12 @@ class LearningTab(QWidget):
         model_manage_group.setLayout(model_manage_layout)
         right_layout.addWidget(model_manage_group)
 
-        self.log_viewer = QTextEdit(); self.log_viewer.setReadOnly(True)
-        detection_options_group = QGroupBox("탐지 옵션")
-        detection_options_layout = QVBoxLayout()
-        target_layout = QHBoxLayout()
-        self.auto_target_radio = QRadioButton("자동 (Maple 창)"); self.auto_target_radio.setChecked(True)
-        self.manual_target_radio = QRadioButton("수동 (영역 지정)")
-        self.set_area_btn = QPushButton("영역 지정"); self.set_area_btn.clicked.connect(self.set_manual_area); self.set_area_btn.setEnabled(False)
-        self.manual_target_radio.toggled.connect(self.set_area_btn.setEnabled)
-        target_layout.addWidget(self.auto_target_radio); target_layout.addWidget(self.manual_target_radio); target_layout.addWidget(self.set_area_btn)
-
-        conf_layout = QHBoxLayout()
-        conf_layout.addWidget(QLabel(f"{CHARACTER_CLASS_NAME} 신뢰도:"))
-        self.conf_char_spinbox = QDoubleSpinBox(); self.conf_char_spinbox.setRange(0.05, 0.95); self.conf_char_spinbox.setSingleStep(0.05); self.conf_char_spinbox.setValue(0.5)
-        conf_layout.addWidget(self.conf_char_spinbox)
-        conf_layout.addWidget(QLabel("몬스터 신뢰도:"))
-        self.conf_monster_spinbox = QDoubleSpinBox(); self.conf_monster_spinbox.setRange(0.05, 0.95); self.conf_monster_spinbox.setSingleStep(0.05); self.conf_monster_spinbox.setValue(0.5)
-        conf_layout.addWidget(self.conf_monster_spinbox)
-        self.debug_checkbox = QCheckBox('디버그 로그')
-        conf_layout.addWidget(self.debug_checkbox)
-
-        detection_options_layout.addLayout(target_layout); detection_options_layout.addLayout(conf_layout)
-        detection_options_group.setLayout(detection_options_layout)
-        self.detect_btn = QPushButton('실시간 탐지 시작'); self.detect_btn.setCheckable(True); self.detect_btn.clicked.connect(self.toggle_detection)
-
-        detection_container = QWidget()
-        detection_container.setStyleSheet("background-color: black;")
-        detection_layout = QVBoxLayout(detection_container)
-        detection_layout.setContentsMargins(0, 0, 0, 0)
-        detection_layout.setSpacing(0)
-
-        header_widget = QWidget()
-        header_layout = QHBoxLayout(header_widget)
-        header_layout.setContentsMargins(2, 2, 2, 2)
-        header_layout.addStretch(1)
-        self.popup_btn = QPushButton("↗")
-        self.popup_btn.setToolTip("탐지 화면을 팝업으로 열기")
-        self.popup_btn.setFixedSize(24, 24)
-        self.popup_btn.clicked.connect(self.toggle_detection_popup)
-        header_layout.addWidget(self.popup_btn)
-
-        self.detection_view = QLabel('탐지 화면')
-        self.detection_view.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.detection_view.setStyleSheet("color: white;")
-
-        detection_layout.addWidget(header_widget)
-        detection_layout.addWidget(self.detection_view, 1)
+        self.log_viewer = QTextEdit()
+        self.log_viewer.setReadOnly(True)
 
         right_layout.addWidget(QLabel('로그'))
-        right_layout.addWidget(self.log_viewer)
-        right_layout.addWidget(detection_options_group)
-        right_layout.addWidget(self.detect_btn)
-        right_layout.addWidget(detection_container, 1)
+        right_layout.addWidget(self.log_viewer, 1)
+        right_layout.addStretch(1)
         
         main_layout.addLayout(right_layout, 2)
 
@@ -2242,14 +2064,6 @@ class LearningTab(QWidget):
             q_image = QImage(img_rgb.data, w, h, bytes_per_line, QImage.Format.Format_RGB888)
             self.open_editor_mode_dialog(QPixmap.fromImage(q_image), image_path=image_path, initial_polygons=initial_polygons, initial_class_name=initial_class_name)
 
-    def set_manual_area(self):
-        # 메인 윈도우를 숨기지 않고 스니퍼를 실행합니다.
-        snipper = ScreenSnipper(self) # 부모를 self로 지정
-        if snipper.exec():
-            roi = snipper.get_roi()
-            self.manual_capture_region = {'top': roi.top(), 'left': roi.left(), 'width': roi.width(), 'height': roi.height()}
-            self.log_viewer.append(f"수동 탐지 영역 설정 완료: {self.manual_capture_region}")
-
     def start_training(self):
         if len(self.data_manager.get_class_list()) == 0:
             QMessageBox.warning(self, "오류", "훈련할 클래스가 하나 이상 있어야 합니다.")
@@ -2328,103 +2142,6 @@ class LearningTab(QWidget):
                     if class_name in all_classes:
                         checked_indices.append(all_classes.index(class_name))
         return checked_indices
-
-    def toggle_detection(self, checked):
-        if checked:
-            selected_model = self.model_selector.currentText()
-            if not selected_model: self.detect_btn.setChecked(False); QMessageBox.warning(self, '오류', "사용할 모델을 선택하세요."); return
-            # v1.4: 탐지 시작 시, 선택된 모델을 설정에 저장
-            self.data_manager.save_settings({'last_used_model': selected_model})
-            self.last_used_model = selected_model # 내부 변수도 갱신
-            model_path_engine = os.path.join(self.data_manager.models_path, selected_model, 'weights', 'best.engine')
-            model_path_pt = os.path.join(self.data_manager.models_path, selected_model, 'weights', 'best.pt')
-            model_to_use = model_path_engine if os.path.exists(model_path_engine) else model_path_pt
-            if not os.path.exists(model_to_use): QMessageBox.warning(self, '오류', f"가중치 파일을 찾을 수 없습니다."); self.detect_btn.setChecked(False); return
-            target_indices = self.get_checked_class_indices()
-            if not target_indices: QMessageBox.warning(self, '오류', "탐지할 클래스를 하나 이상 체크해주세요."); self.detect_btn.setChecked(False); return
-
-            all_classes = self.data_manager.get_class_list()
-            char_class_index = all_classes.index(CHARACTER_CLASS_NAME) if CHARACTER_CLASS_NAME in all_classes else -1
-
-            capture_region = None
-            if self.auto_target_radio.isChecked():
-                target_windows = gw.getWindowsWithTitle('Maple') or gw.getWindowsWithTitle('메이플')
-                if not target_windows: QMessageBox.warning(self, '오류', '메이플스토리 창을 찾을 수 없습니다.'); self.detect_btn.setChecked(False); return
-                win = target_windows[0]
-                if win.isMinimized: win.restore(); QThread.msleep(500)
-                capture_region = {'top': win.top, 'left': win.left, 'width': win.width, 'height': win.height}
-            else:
-                if not self.manual_capture_region: QMessageBox.warning(self, '오류', "'영역 지정'으로 탐지 영역을 설정해주세요."); self.detect_btn.setChecked(False); return
-                capture_region = self.manual_capture_region
-            if capture_region['width'] <= 0 or capture_region['height'] <= 0: QMessageBox.warning(self, '오류', "탐지 영역 크기가 유효하지 않습니다."); self.detect_btn.setChecked(False); return
-
-            self.detection_thread = DetectionThread(model_to_use, capture_region, target_indices,
-                                                    self.conf_char_spinbox.value(), self.conf_monster_spinbox.value(),
-                                                    char_class_index, self.debug_checkbox.isChecked())
-
-            if self.is_popup_active and self.detection_popup:
-                self.detection_thread.frame_ready.connect(self.detection_popup.update_frame)
-            else:
-                self.detection_thread.frame_ready.connect(self.update_detection_frame)
-
-            self.detection_thread.detection_logged.connect(self.log_detection_results)
-            self.detection_thread.start()
-            self.detect_btn.setText('실시간 탐지 중단')
-        else:
-            if self.detection_thread: self.detection_thread.stop(); self.detection_thread.wait()
-            self.detect_btn.setText('실시간 탐지 시작')
-            self.detection_view.setText('탐지 중단됨');
-            self.detection_view.setPixmap(QPixmap())
-
-    def toggle_detection_popup(self):
-        if self.is_popup_active:
-            if self.detection_popup:
-                self.detection_popup.close()
-        else:
-            self.is_popup_active = True
-            self.popup_btn.setText("↙")
-            self.popup_btn.setToolTip("탐지 화면을 메인 창으로 복귀")
-
-            self.detection_popup = DetectionPopup(self.last_popup_scale, self)
-            self.detection_popup.closed.connect(self.handle_popup_closed)
-            self.detection_popup.scale_changed.connect(self.on_popup_scale_changed)
-
-            if self.detection_thread and self.detection_thread.isRunning():
-                try: self.detection_thread.frame_ready.disconnect(self.update_detection_frame)
-                except TypeError: pass
-                self.detection_thread.frame_ready.connect(self.detection_popup.update_frame)
-
-            self.detection_view.setText("탐지 화면이 팝업으로 표시 중입니다.")
-            self.detection_view.setPixmap(QPixmap())
-            self.detection_popup.show()
-
-    def on_popup_scale_changed(self, value):
-        """팝업의 스케일 값이 변경되면 저장합니다."""
-        self.last_popup_scale = value
-
-    def handle_popup_closed(self):
-        self.is_popup_active = False
-        self.popup_btn.setText("↗")
-        self.popup_btn.setToolTip("탐지 화면을 팝업으로 열기")
-
-        if self.detection_thread and self.detection_thread.isRunning():
-            try: self.detection_thread.frame_ready.disconnect(self.detection_popup.update_frame)
-            except TypeError: pass
-            self.detection_thread.frame_ready.connect(self.update_detection_frame)
-
-        if self.detect_btn.isChecked():
-            self.detection_view.setText("")
-        else:
-            self.detection_view.setText("탐지 중단됨")
-
-        self.detection_popup = None
-
-    def log_detection_results(self, log_messages):
-        for msg in log_messages: self.log_viewer.append(msg)
-        self.log_viewer.verticalScrollBar().setValue(self.log_viewer.verticalScrollBar().maximum())
-
-    def update_detection_frame(self, q_image):
-        self.detection_view.setPixmap(QPixmap.fromImage(q_image).scaled(self.detection_view.size(), Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation))
 
     def populate_preset_list(self):
         self.preset_selector.blockSignals(True)
@@ -2553,11 +2270,6 @@ class LearningTab(QWidget):
         애플리케이션 종료 시 호출될 정리 메서드.
         실행 중인 모든 스레드를 안전하게 종료합니다.
         """
-        if self.detection_popup:
-            self.detection_popup.close()
-        if self.detection_thread and self.detection_thread.isRunning():
-            self.detection_thread.stop()
-            self.detection_thread.wait()
         if hasattr(self, 'sam_thread') and self.sam_thread.isRunning():
             self.sam_thread.quit()
             self.sam_thread.wait()
