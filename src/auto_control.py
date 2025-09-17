@@ -27,6 +27,8 @@ FULL_KEY_MAP = {
     'a': 4, 'b': 5, 'c': 6, 'd': 7, 'e': 8, 'f': 9, 'g': 10, 'h': 11, 'i': 12, 'j': 13, 'k': 14, 'l': 15, 'm': 16, 'n': 17, 'o': 18, 'p': 19, 'q': 20, 'r': 21, 's': 22, 't': 23, 'u': 24, 'v': 25, 'w': 26, 'x': 27, 'y': 28, 'z': 29,
     '1': 30, '2': 31, '3': 32, '4': 33, '5': 34, '6': 35, '7': 36, '8': 37, '9': 38, '0': 39,
     Key.enter: 40, Key.esc: 41, Key.backspace: 42, Key.tab: 43, Key.space: 44,
+    Key.insert: 73, Key.delete: 76, Key.home: 74, Key.end: 77,
+    Key.page_up: 75, Key.page_down: 78,
     Key.right: 79, Key.left: 80, Key.down: 81, Key.up: 82,
     # 수식 키(Modifier)들의 표준 HID 코드를 추가
     Key.ctrl: 224, Key.ctrl_l: 224,
@@ -95,7 +97,7 @@ class AutoControlTab(QWidget):
 
         self.is_processing_step = False                 # 중복 _process_next_step 재진입 방지 플래그
         self.last_sent_timestamps = {}                  # 전송한 키의 타임스탬프 (에코 무시용)
-        self.ECHO_IGNORE_MS = 30                        # 기본 60ms, 필요하면 40~120 범위로 조절 권장
+        self.ECHO_IGNORE_MS = 10                        # 기본 60ms, 필요하면 40~120 범위로 조절 권장
         self.last_command_start_time = 0.0              # 마지막 시퀀스 시작 시각
         self.sequence_watchdog = QTimer(self)           # 시퀀스가 멈추는 경우 복구용 와치독
         self.sequence_watchdog.setSingleShot(True)
@@ -1213,6 +1215,9 @@ class AutoControlTab(QWidget):
             'Key.shift_l': 'Shift_L', 'Key.shift_r': 'Shift_R', 'Key.shift': 'Shift',
             'Key.cmd': 'Win', 'Key.cmd_l': 'Win_L', 'Key.cmd_r': 'Win_R',
             'Key.tab': 'Tab', 'Key.backspace': 'Backspace',
+            'Key.insert': 'Insert', 'Key.delete': 'Delete',
+            'Key.home': 'Home', 'Key.end': 'End',
+            'Key.page_up': 'PageUp', 'Key.page_down': 'PageDown',
         }
         # 맵에 키가 있으면 변환된 값을, 없으면 원래 값을 반환
         return translation_map.get(key_str, key_str)
