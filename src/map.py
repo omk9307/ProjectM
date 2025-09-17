@@ -37,7 +37,7 @@ from PyQt6.QtWidgets import (
     QGraphicsLineItem, QGraphicsTextItem, QGraphicsEllipseItem, QTabWidget,
     QGraphicsSimpleTextItem, QFormLayout, QProgressDialog
 )
-from PyQt6.QtGui import QPixmap, QImage, QPainter, QPen, QColor, QBrush, QFont, QCursor, QIcon, QPolygonF, QFontMetrics, QFontMetricsF
+from PyQt6.QtGui import QPixmap, QImage, QPainter, QPen, QColor, QBrush, QFont, QCursor, QIcon, QPolygonF, QFontMetrics, QFontMetricsF, QGuiApplication
 from PyQt6.QtCore import Qt, QThread, pyqtSignal, QRect, QPoint, QRectF, QPointF, QSize, QSizeF, QTimer
 try:
     import numpy as np
@@ -56,6 +56,156 @@ except ImportError:
             QMessageBox.critical(self, "오류", "Learning.py 모듈을 찾을 수 없어\n화면 영역 지정 기능을 사용할 수 없습니다.")
         def exec(self): return 0
         def get_roi(self): return QRect(0, 0, 100, 100)
+
+
+class MultiScreenSnipper(QDialog):
+    """여러 모니터를 포함한 전체 가상 화면에서 영역을 드래그로 선택합니다."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowFlags(Qt.WindowType.FramelessWindowHint | Qt.WindowType.WindowStaysOnTopHint)
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        self.setCursor(QCursor(Qt.CursorShape.CrossCursor))
+
+        user32 = ctypes.windll.user32
+        SM_XVIRTUALSCREEN = 76
+        SM_YVIRTUALSCREEN = 77
+        SM_CXVIRTUALSCREEN = 78
+        SM_CYVIRTUALSCREEN = 79
+
+        virtual_left = user32.GetSystemMetrics(SM_XVIRTUALSCREEN)
+        virtual_top = user32.GetSystemMetrics(SM_YVIRTUALSCREEN)
+        virtual_width = user32.GetSystemMetrics(SM_CXVIRTUALSCREEN)
+        virtual_height = user32.GetSystemMetrics(SM_CYVIRTUALSCREEN)
+
+        screens = QGuiApplication.screens()
+        if not screens or virtual_width <= 0 or virtual_height <= 0:
+            raise RuntimeError("모니터 정보를 가져올 수 없습니다.")
+
+        self.virtual_origin = QPoint(virtual_left, virtual_top)
+        self.virtual_size = QSize(virtual_width, virtual_height)
+
+        # 가상 화면 전체를 덮도록 창을 이동/크기 조정
+        self.setGeometry(virtual_left, virtual_top, virtual_width, virtual_height)
+        self.setWindowModality(Qt.WindowModality.ApplicationModal)
+
+        self._screenshot = self._build_virtual_screenshot()
+        if self._screenshot is None:
+            raise RuntimeError("가상 화면 캡처에 실패했습니다.")
+        self._begin = QPoint()
+        self._end = QPoint()
+        self._is_selecting = False
+        self._global_roi = QRect()
+        self._target_screen = None
+
+    def _build_virtual_screenshot(self):
+        """Windows 가상 화면 전체를 캡처해 Pixmap으로 반환합니다."""
+        monitor = {
+            "left": self.virtual_origin.x(),
+            "top": self.virtual_origin.y(),
+            "width": self.virtual_size.width(),
+            "height": self.virtual_size.height(),
+        }
+
+        try:
+            with mss.mss() as sct:
+                sct_img = sct.grab(monitor)
+
+            self._screenshot_buffer = np.array(sct_img, copy=True)
+
+            # PyQt6 환경에서 지원되는 포맷을 우선 사용 (BGRA → ARGB32 호환)
+            image_format = QImage.Format.Format_ARGB32
+            if hasattr(QImage.Format, "Format_BGRA8888"):
+                image_format = QImage.Format.Format_BGRA8888
+
+            qimage = QImage(
+                self._screenshot_buffer.data,
+                monitor["width"],
+                monitor["height"],
+                self._screenshot_buffer.strides[0],
+                image_format,
+            )
+            return QPixmap.fromImage(qimage)
+        except Exception as capture_error:
+            # mss 캡처에 실패할 경우 Qt 스크린 API로 폴백
+            size = self.virtual_size
+            pixmap = QPixmap(size)
+            pixmap.fill(QColor(0, 0, 0))
+
+            offset_origin = self.virtual_origin
+            painter = QPainter(pixmap)
+
+            for screen in QGuiApplication.screens():
+                geo = screen.geometry()
+                grab = screen.grabWindow(0)
+                if grab.width() != geo.width() or grab.height() != geo.height():
+                    target_size = QSize(geo.width(), geo.height())
+                    grab = grab.scaled(target_size, Qt.AspectRatioMode.IgnoreAspectRatio, Qt.TransformationMode.SmoothTransformation)
+
+                top_left = geo.topLeft() - offset_origin
+                painter.drawPixmap(QRect(top_left, geo.size()), grab)
+
+            painter.end()
+            self._screenshot_buffer = None
+            print(f"[MultiScreenSnipper] mss 캡처 실패, Qt 스크린으로 폴백: {capture_error}")
+            return pixmap
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.drawPixmap(QPoint(0, 0), self._screenshot)
+        painter.fillRect(self.rect(), QColor(0, 0, 0, 100))
+
+        if self._is_selecting:
+            selected_rect = QRect(self._begin, self._end).normalized()
+            painter.drawPixmap(selected_rect, self._screenshot, selected_rect)
+            painter.setPen(QPen(Qt.GlobalColor.red, 2, Qt.PenStyle.SolidLine))
+            painter.drawRect(selected_rect)
+
+    def _resolve_target_screen(self, global_rect):
+        best_screen = None
+        best_area = 0
+        for screen in QGuiApplication.screens():
+            intersection = screen.geometry().intersected(global_rect)
+            area = intersection.width() * intersection.height()
+            if area > best_area:
+                best_screen = screen
+                best_area = area
+        return best_screen
+
+    def mousePressEvent(self, event):
+        self._is_selecting = True
+        self._begin = event.position().toPoint()
+        self._end = self._begin
+        self.update()
+
+    def mouseMoveEvent(self, event):
+        self._end = event.position().toPoint()
+        self.update()
+
+    def mouseReleaseEvent(self, event):
+        self._is_selecting = False
+        self._end = event.position().toPoint()
+        selected_rect = QRect(self._begin, self._end).normalized()
+
+        if selected_rect.width() <= 5 or selected_rect.height() <= 5:
+            self.reject()
+            return
+
+        top_left = QPoint(self.virtual_origin.x() + selected_rect.left(), self.virtual_origin.y() + selected_rect.top())
+        self._global_roi = QRect(top_left, selected_rect.size())
+        self._target_screen = self._resolve_target_screen(self._global_roi)
+
+        if not self._target_screen:
+            self.reject()
+            return
+
+        self.accept()
+
+    def get_global_roi(self):
+        return self._global_roi
+
+    def get_target_screen(self):
+        return self._target_screen
 
 # === [v11.0.0] 런타임 의존성 체크 (추가) ===
 try:
@@ -5685,21 +5835,51 @@ class MapTab(QWidget):
     def set_minimap_area(self):
         self.update_general_log("화면에서 미니맵 영역을 드래그하여 선택하세요...", "black")
         QApplication.processEvents()
-        QThread.msleep(200)
-        snipper = ScreenSnipper(self)
-        if snipper.exec():
-            roi = snipper.get_roi()
-            dpr = self.screen().devicePixelRatio()
-            self.minimap_region = {
-                'top': int(roi.top() * dpr),
-                'left': int(roi.left() * dpr),
-                'width': int(roi.width() * dpr),
-                'height': int(roi.height() * dpr)
-            }
-            self.update_general_log(f"새 미니맵 범위 지정 완료: {self.minimap_region}", "black")
-            self.save_profile_data()
-        else:
-            self.update_general_log("미니맵 범위 지정이 취소되었습니다.", "black")
+
+        top_window = self.window()
+        was_visible = bool(top_window and top_window.isVisible())
+
+        try:
+            if top_window and was_visible:
+                top_window.hide()
+                QApplication.processEvents()
+
+            snipper = MultiScreenSnipper(None)
+            if snipper.exec():
+                roi = snipper.get_global_roi()
+                target_screen = snipper.get_target_screen() or self.screen() or QGuiApplication.primaryScreen()
+
+                if roi.isNull() or not target_screen:
+                    self.update_general_log("미니맵 범위 지정이 실패했습니다.", "red")
+                    return
+
+                logical_geometry = target_screen.geometry()
+                native_geometry = target_screen.nativeGeometry() if hasattr(target_screen, "nativeGeometry") else logical_geometry
+
+                scale_x = native_geometry.width() / logical_geometry.width() if logical_geometry.width() else 1.0
+                scale_y = native_geometry.height() / logical_geometry.height() if logical_geometry.height() else 1.0
+
+                clamped_roi = roi.intersected(logical_geometry)
+                if clamped_roi.isEmpty():
+                    self.update_general_log("선택한 영역이 모니터 경계를 벗어났습니다.", "red")
+                    return
+
+                top = int(native_geometry.top() + (clamped_roi.top() - logical_geometry.top()) * scale_y)
+                left = int(native_geometry.left() + (clamped_roi.left() - logical_geometry.left()) * scale_x)
+                width = int(clamped_roi.width() * scale_x)
+                height = int(clamped_roi.height() * scale_y)
+
+                self.minimap_region = {'top': top, 'left': left, 'width': width, 'height': height}
+                self.update_general_log(f"새 미니맵 범위 지정 완료: {self.minimap_region}", "black")
+                self.save_profile_data()
+            else:
+                self.update_general_log("미니맵 범위 지정이 취소되었습니다.", "black")
+        finally:
+            if top_window and was_visible:
+                top_window.show()
+                QApplication.processEvents()
+                top_window.raise_()
+                top_window.activateWindow()
 
     def populate_waypoint_list(self):
         """v10.0.0: 새로운 경로 구조에 맞게 웨이포인트 목록을 채웁니다."""
