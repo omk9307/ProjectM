@@ -36,6 +36,7 @@ from PyQt6.QtWidgets import (
 from PyQt6.QtGui import QPixmap, QPainter, QPen, QColor, QBrush
 
 from detection_runtime import DetectionPopup, DetectionThread, ScreenSnipper
+from nickname_detection import NicknameDetector
 
 
 CHARACTER_CLASS_NAME = "캐릭터"
@@ -53,6 +54,7 @@ PRIMARY_AREA_EDGE = QPen(QColor(230, 110, 0, 220), 2, Qt.PenStyle.SolidLine)
 PRIMARY_AREA_BRUSH = QBrush(PRIMARY_AREA_COLOR)
 FALLBACK_CHARACTER_EDGE = QPen(QColor(0, 255, 120, 220), 2, Qt.PenStyle.SolidLine)
 FALLBACK_CHARACTER_BRUSH = QBrush(QColor(0, 255, 120, 60))
+NICKNAME_EDGE = QPen(QColor(255, 255, 0, 220), 2, Qt.PenStyle.DotLine)
 
 try:
     COMPOSITION_MODE_DEST_OVER = QPainter.CompositionMode.CompositionMode_DestinationOver
@@ -346,6 +348,10 @@ class HuntTab(QWidget):
         self._last_character_details: List[dict] = []
         self._last_character_seen_ts: float = 0.0
         self._using_character_fallback: bool = False
+        self._nickname_config: dict = {}
+        self._nickname_templates: list[dict] = []
+        self._latest_nickname_box: Optional[dict] = None
+        self._last_nickname_match: Optional[dict] = None
 
         self.attack_interval_sec = 0.35
         self.last_attack_ts = 0.0
@@ -378,6 +384,7 @@ class HuntTab(QWidget):
         self.latest_detection_details: dict[str, list] = {
             'characters': [],
             'monsters': [],
+            'nickname': None,
         }
         self._active_target_names: List[str] = []
 
@@ -774,8 +781,8 @@ class HuntTab(QWidget):
             if CHARACTER_CLASS_NAME in class_list
             else -1
         )
-        if char_index != -1 and char_index not in target_indices:
-            target_indices.append(char_index)
+        if char_index != -1:
+            target_indices = [idx for idx in target_indices if idx != char_index]
         target_indices = sorted({idx for idx in target_indices if 0 <= idx < len(class_list)})
         self._active_target_names = [class_list[idx] for idx in target_indices]
         return target_indices, char_index
@@ -821,13 +828,9 @@ class HuntTab(QWidget):
                 self.detect_btn.setChecked(False)
                 return
 
-            target_indices, char_index = self._resolve_detection_targets()
-            if char_index == -1:
-                QMessageBox.warning(self, "오류", f"'{CHARACTER_CLASS_NAME}' 클래스를 찾을 수 없습니다.")
-                self.detect_btn.setChecked(False)
-                return
+            target_indices, _char_index = self._resolve_detection_targets()
             if not target_indices:
-                QMessageBox.warning(self, "오류", "탐지할 클래스를 하나 이상 확보하세요.")
+                QMessageBox.warning(self, "오류", "탐지할 몬스터 클래스를 하나 이상 확보하세요.")
                 self.detect_btn.setChecked(False)
                 return
 
@@ -858,7 +861,16 @@ class HuntTab(QWidget):
                 self.detect_btn.setChecked(False)
                 return
 
+            self._load_nickname_configuration()
+            nickname_detector_instance = self._build_thread_nickname_detector()
+            if nickname_detector_instance is None:
+                self.append_log("닉네임 템플릿을 찾을 수 없어 탐지를 시작할 수 없습니다.", "warn")
+                QMessageBox.warning(self, "오류", "닉네임 템플릿을 찾을 수 없어 탐지를 시작할 수 없습니다.")
+                self.detect_btn.setChecked(False)
+                return
+
             self._reset_character_cache()
+            self.append_log("YOLO 캐릭터 탐지를 사용하지 않고 닉네임 기반 탐지에 의존합니다.", "info")
 
             self.detection_thread = DetectionThread(
                 model_path=model_path,
@@ -866,8 +878,9 @@ class HuntTab(QWidget):
                 target_class_indices=target_indices,
                 conf_char=self.conf_char_spinbox.value(),
                 conf_monster=self.conf_monster_spinbox.value(),
-                char_class_index=char_index,
+                char_class_index=-1,
                 is_debug_mode=self.debug_checkbox.isChecked(),
+                nickname_detector=nickname_detector_instance,
             )
 
             self.detection_thread.frame_ready.connect(self._handle_detection_frame)
@@ -955,12 +968,10 @@ class HuntTab(QWidget):
     def _paint_overlays(self, image) -> None:
         if image is None or image.isNull():
             return
-        if not (self.current_hunt_area or self.current_primary_area):
-            return
         painter = QPainter(image)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         try:
-            painter.setCompositionMode(COMPOSITION_MODE_DEST_OVER)
+            painter.setCompositionMode(COMPOSITION_MODE_SOURCE_OVER)
             if (
                 self.current_hunt_area
                 and self.overlay_preferences.get('hunt_area', True)
@@ -982,6 +993,12 @@ class HuntTab(QWidget):
                     painter.setBrush(PRIMARY_AREA_BRUSH)
                     painter.drawRect(rect)
             painter.setCompositionMode(COMPOSITION_MODE_SOURCE_OVER)
+            if self._latest_nickname_box:
+                nick_rect = self._dict_to_rect(self._latest_nickname_box, image.width(), image.height())
+                if not nick_rect.isNull():
+                    painter.setPen(NICKNAME_EDGE)
+                    painter.setBrush(QBrush(Qt.BrushStyle.NoBrush))
+                    painter.drawRect(nick_rect)
             if self._using_character_fallback and self._last_character_boxes:
                 painter.setPen(FALLBACK_CHARACTER_EDGE)
                 painter.setBrush(FALLBACK_CHARACTER_BRUSH)
@@ -1016,14 +1033,37 @@ class HuntTab(QWidget):
             return QRect()
         return QRect(int(x1), int(y1), int(x2 - x1), int(y2 - y1))
 
+    @staticmethod
+    def _dict_to_rect(box_data: dict, max_width: int, max_height: int) -> QRect:
+        try:
+            x = float(box_data.get('x', 0.0))
+            y = float(box_data.get('y', 0.0))
+            width = float(box_data.get('width', 0.0))
+            height = float(box_data.get('height', 0.0))
+        except (TypeError, ValueError):
+            return QRect()
+        x1 = max(0.0, x)
+        y1 = max(0.0, y)
+        x2 = min(float(max_width), x + max(0.0, width))
+        y2 = min(float(max_height), y + max(0.0, height))
+        if x2 <= x1 or y2 <= y1:
+            return QRect()
+        return QRect(int(x1), int(y1), int(x2 - x1), int(y2 - y1))
+
     def _update_detection_summary(self) -> None:
         if not hasattr(self, 'summary_view'):
             return
 
+        nickname = self.latest_detection_details.get('nickname')
         characters = self.latest_detection_details.get('characters', [])
         monsters = self.latest_detection_details.get('monsters', [])
 
         lines: List[str] = []
+
+        if nickname and isinstance(nickname, dict) and nickname.get('score') is not None:
+            lines.append(f"닉네임 매칭: {float(nickname.get('score', 0.0)):.2f}")
+        else:
+            lines.append("닉네임 매칭 없음")
 
         if characters:
             best_char = max(characters, key=lambda item: float(item.get('score', 0.0)))
@@ -1350,6 +1390,7 @@ class HuntTab(QWidget):
 
         characters_data = payload.get('characters') or []
         monsters_data = payload.get('monsters') or []
+        nickname_data = payload.get('nickname')
 
         def _to_box(data):
             try:
@@ -1369,19 +1410,59 @@ class HuntTab(QWidget):
 
         now = time.time()
         fallback_used = False
-        if characters:
-            self._update_character_cache(characters, characters_data, seen_ts=now)
-        else:
-            if (
-                self._last_character_boxes
-                and now - self._last_character_seen_ts <= self.CHARACTER_PERSISTENCE_SEC
-            ):
-                characters = [DetectionBox(**vars(box)) for box in self._last_character_boxes]
-                if not characters_data and self._last_character_details:
-                    characters_data = [dict(item) for item in self._last_character_details]
-                fallback_used = True
+        nickname_used = False
+        nickname_record = None
+
+        if isinstance(nickname_data, dict):
+            char_box_info = nickname_data.get('character_box') or {}
+            if char_box_info and char_box_info.get('width', 0) and char_box_info.get('height', 0):
+                try:
+                    nickname_box = DetectionBox(
+                        x=float(char_box_info.get('x', 0.0)),
+                        y=float(char_box_info.get('y', 0.0)),
+                        width=float(char_box_info.get('width', 0.0)),
+                        height=float(char_box_info.get('height', 0.0)),
+                        score=float(nickname_data.get('score', 0.0)),
+                        label='nickname',
+                    )
+                except Exception:
+                    nickname_box = None
+                if nickname_box is not None:
+                    characters = [nickname_box]
+                    characters_data = [{
+                        'x': nickname_box.x,
+                        'y': nickname_box.y,
+                        'width': nickname_box.width,
+                        'height': nickname_box.height,
+                        'score': nickname_box.score,
+                        'class_name': '닉네임',
+                    }]
+                    self._update_character_cache(characters, characters_data, seen_ts=now)
+                    fallback_used = False
+                    nickname_used = True
+                    nickname_record = nickname_data
+                    self._latest_nickname_box = nickname_data.get('nickname_box')
+                else:
+                    self._latest_nickname_box = None
             else:
-                self._reset_character_cache()
+                self._latest_nickname_box = None
+        else:
+            self._latest_nickname_box = None
+
+        if not nickname_used:
+            if characters:
+                self._update_character_cache(characters, characters_data, seen_ts=now)
+            else:
+                if (
+                    self._last_character_boxes
+                    and now - self._last_character_seen_ts <= self.CHARACTER_PERSISTENCE_SEC
+                ):
+                    characters = [DetectionBox(**vars(box)) for box in self._last_character_boxes]
+                    if not characters_data and self._last_character_details:
+                        characters_data = [dict(item) for item in self._last_character_details]
+                    fallback_used = True
+                else:
+                    self._reset_character_cache()
 
         snapshot_ts = float(payload.get('timestamp', now))
         if fallback_used and self._last_character_seen_ts:
@@ -1395,10 +1476,27 @@ class HuntTab(QWidget):
         self.latest_detection_details = {
             'characters': characters_data if characters_data else [],
             'monsters': monsters_data,
+            'nickname': nickname_record,
         }
         if fallback_used and not characters_data and self._last_character_details:
             self.latest_detection_details['characters'] = [dict(item) for item in self._last_character_details]
+        if nickname_used:
+            self._last_nickname_match = nickname_data
+        elif not fallback_used:
+            self._last_nickname_match = None
+        if fallback_used and not nickname_used and self._last_nickname_match:
+            self.latest_detection_details['nickname'] = self._last_nickname_match
+            if not self._latest_nickname_box:
+                self._latest_nickname_box = self._last_nickname_match.get('nickname_box')
+        if not nickname_used and not fallback_used:
+            if self._last_nickname_match is None:
+                self.latest_detection_details['nickname'] = None
+            self._latest_nickname_box = None
         self._using_character_fallback = fallback_used
+        if nickname_used:
+            self._last_nickname_match = nickname_record
+        elif not fallback_used and nickname_record is None:
+            self._last_nickname_match = None
         self.update_detection_snapshot(snapshot)
         self._update_detection_summary()
         self._schedule_condition_poll()
@@ -1428,7 +1526,7 @@ class HuntTab(QWidget):
     def clear_detection_snapshot(self) -> None:
         self.latest_snapshot = None
         self._clear_detection_metrics()
-        self.latest_detection_details = {'characters': [], 'monsters': []}
+        self.latest_detection_details = {'characters': [], 'monsters': [], 'nickname': None}
         self._reset_character_cache()
         self._update_detection_summary()
 
@@ -1463,6 +1561,7 @@ class HuntTab(QWidget):
         self.current_primary_area = None
         self.latest_monster_count = 0
         self.latest_primary_monster_count = 0
+        self._latest_nickname_box = None
         self._update_monster_count_label()
         self._emit_area_overlays()
         self.monster_stats_updated.emit(0, 0)
@@ -1532,6 +1631,40 @@ class HuntTab(QWidget):
         self._request_timeout_timer.setSingleShot(True)
         self._request_timeout_timer.timeout.connect(self._handle_request_timeout)
 
+    def _load_nickname_configuration(self) -> None:
+        if not self.data_manager or not hasattr(self.data_manager, 'get_nickname_config'):
+            self._nickname_config = {}
+            self._nickname_templates = []
+            self._latest_nickname_box = None
+            return
+        try:
+            self._nickname_config = self.data_manager.get_nickname_config()
+            templates = self.data_manager.list_nickname_templates()
+            self._nickname_templates = templates if isinstance(templates, list) else []
+        except Exception as exc:  # pragma: no cover - 안전장치
+            self._nickname_config = {}
+            self._nickname_templates = []
+            self.append_log(f"닉네임 설정을 불러오지 못했습니다: {exc}", "warn")
+        if not self._nickname_templates:
+            self._latest_nickname_box = None
+
+    def _build_thread_nickname_detector(self) -> Optional[NicknameDetector]:
+        if not self._nickname_templates:
+            return None
+        config = self._nickname_config or {}
+        try:
+            detector = NicknameDetector(
+                target_text=config.get('target_text', ''),
+                match_threshold=float(config.get('match_threshold', 0.72)),
+                offset_x=float(config.get('char_offset_x', 0.0)),
+                offset_y=float(config.get('char_offset_y', 0.0)),
+            )
+            detector.load_templates(self._nickname_templates)
+            return detector
+        except Exception as exc:
+            self.append_log(f"닉네임 탐지기를 초기화하지 못했습니다: {exc}", "warn")
+            return None
+
     def attach_data_manager(self, data_manager) -> None:
         self.data_manager = data_manager
         self.refresh_model_choices()
@@ -1544,6 +1677,7 @@ class HuntTab(QWidget):
                     self.model_selector.setCurrentIndex(index)
         self.append_log("학습 데이터 연동 완료", "info")
         self._save_settings()
+        self._load_nickname_configuration()
 
     def set_authority_bridge_active(self, request_connected: bool, release_connected: bool) -> None:
         self._authority_request_connected = bool(request_connected)

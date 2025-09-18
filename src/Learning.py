@@ -24,6 +24,7 @@ import numpy as np
 import mss
 import pygetwindow as gw
 import time
+import uuid
 import requests
 
 from PyQt6.QtWidgets import (
@@ -911,6 +912,9 @@ class DataManager:
         self.config_path = os.path.join(self.workspace_root, 'config')
         self.presets_path = os.path.join(self.config_path, 'presets.json')
         self.settings_path = os.path.join(self.config_path, 'settings.json') # 설정 파일 경로 추가
+        self.nickname_dir = os.path.join(self.config_path, 'nickname')
+        self.nickname_templates_dir = os.path.join(self.nickname_dir, 'templates')
+        self.nickname_config_path = os.path.join(self.nickname_dir, 'config.json')
         self.ensure_dirs_and_files()
         self.migrate_manifest_if_needed()
 
@@ -919,6 +923,8 @@ class DataManager:
         os.makedirs(self.labels_path, exist_ok=True)
         os.makedirs(self.models_path, exist_ok=True)
         os.makedirs(self.config_path, exist_ok=True)
+        os.makedirs(self.nickname_dir, exist_ok=True)
+        os.makedirs(self.nickname_templates_dir, exist_ok=True)
         # v1.3: manifest 생성/확인 시 네거티브 샘플 항목 추가
         if not os.path.exists(self.manifest_path):
             initial_manifest = {category: {} for category in CATEGORIES}
@@ -944,7 +950,38 @@ class DataManager:
             with open(self.presets_path, 'w', encoding='utf-8') as f: json.dump({}, f)
         if not os.path.exists(self.settings_path):
             with open(self.settings_path, 'w', encoding='utf-8') as f: json.dump({}, f)
-            
+        # 닉네임 템플릿 설정 초기화
+        default_nickname_config = self._default_nickname_config()
+        if not os.path.exists(self.nickname_config_path):
+            self._write_nickname_config(default_nickname_config)
+        else:
+            try:
+                with open(self.nickname_config_path, 'r', encoding='utf-8') as f:
+                    nickname_config = json.load(f)
+            except (json.JSONDecodeError, FileNotFoundError):
+                self._write_nickname_config(default_nickname_config)
+            else:
+                changed = False
+                for key, value in default_nickname_config.items():
+                    if key not in nickname_config:
+                        nickname_config[key] = value if key != 'templates' else list(value)
+                        changed = True
+                if changed:
+                    self._write_nickname_config(nickname_config)
+
+    def _default_nickname_config(self):
+        return {
+            "target_text": "버프몬",
+            "match_threshold": 0.72,
+            "char_offset_x": 0,
+            "char_offset_y": 46,
+            "templates": [],
+        }
+
+    def _write_nickname_config(self, config_data):
+        with open(self.nickname_config_path, 'w', encoding='utf-8') as f:
+            json.dump(config_data, f, indent=4, ensure_ascii=False)
+
     def migrate_manifest_if_needed(self):
         """이전 버전의 manifest.json(플랫 구조)을 새 계층 구조로 자동 변환합니다."""
         try:
@@ -1199,6 +1236,126 @@ class DataManager:
         with open(self.settings_path, 'w', encoding='utf-8') as f:
             json.dump(current_settings, f, indent=4, ensure_ascii=False)
 
+    # --- 닉네임 템플릿 관리 ---
+    def get_nickname_config(self):
+        try:
+            with open(self.nickname_config_path, 'r', encoding='utf-8') as f:
+                config = json.load(f)
+        except (json.JSONDecodeError, FileNotFoundError):
+            config = self._default_nickname_config()
+            self._write_nickname_config(config)
+        else:
+            default_cfg = self._default_nickname_config()
+            changed = False
+            for key, default_value in default_cfg.items():
+                if key not in config:
+                    config[key] = default_value if key != 'templates' else list(default_value)
+                    changed = True
+            if 'templates' not in config or not isinstance(config['templates'], list):
+                config['templates'] = []
+                changed = True
+            if changed:
+                self._write_nickname_config(config)
+        return config
+
+    def update_nickname_config(self, updates: dict):
+        if not isinstance(updates, dict):
+            return self.get_nickname_config()
+        config = self.get_nickname_config()
+        forbidden_keys = {'templates'}
+        for key, value in updates.items():
+            if key in forbidden_keys:
+                continue
+            config[key] = value
+        self._write_nickname_config(config)
+        return config
+
+    def list_nickname_templates(self):
+        config = self.get_nickname_config()
+        templates = config.get('templates', [])
+        resolved_templates = []
+        for entry in templates:
+            filename = entry.get('filename')
+            if not filename:
+                continue
+            path = os.path.join(self.nickname_templates_dir, filename)
+            if not os.path.exists(path):
+                continue
+            resolved_entry = dict(entry)
+            resolved_entry['path'] = path
+            resolved_templates.append(resolved_entry)
+        return resolved_templates
+
+    def add_nickname_template(self, image_bgr, *, source='capture', original_name=None):
+        if image_bgr is None or not hasattr(image_bgr, 'shape'):
+            raise ValueError('유효한 이미지 배열이 필요합니다.')
+
+        if image_bgr.ndim == 3 and image_bgr.shape[2] == 4:
+            image_bgr = cv2.cvtColor(image_bgr, cv2.COLOR_BGRA2BGR)
+        elif image_bgr.ndim == 2:
+            image_bgr = cv2.cvtColor(image_bgr, cv2.COLOR_GRAY2BGR)
+
+        timestamp = time.strftime('%Y%m%d_%H%M%S')
+        template_id = f"tpl_{int(time.time()*1000)%1_000_000:06d}_{uuid.uuid4().hex[:6]}"
+        filename = f"{template_id}.png"
+        save_path = os.path.join(self.nickname_templates_dir, filename)
+        if not cv2.imwrite(save_path, image_bgr):
+            raise IOError('닉네임 템플릿을 저장하지 못했습니다.')
+
+        config = self.get_nickname_config()
+        template_entry = {
+            'id': template_id,
+            'filename': filename,
+            'source': source,
+            'original_name': original_name,
+            'created_at': time.time(),
+            'width': int(image_bgr.shape[1]),
+            'height': int(image_bgr.shape[0]),
+        }
+        templates = config.get('templates', [])
+        templates.append(template_entry)
+        config['templates'] = templates
+        self._write_nickname_config(config)
+        return template_entry
+
+    def import_nickname_template(self, file_path: str):
+        if not file_path:
+            raise ValueError('파일 경로가 필요합니다.')
+        image = cv2.imread(file_path, cv2.IMREAD_UNCHANGED)
+        if image is None:
+            raise IOError(f"이미지를 불러올 수 없습니다: {file_path}")
+        return self.add_nickname_template(image, source='import', original_name=os.path.basename(file_path))
+
+    def delete_nickname_templates(self, template_ids):
+        if not template_ids:
+            return 0
+        if isinstance(template_ids, str):
+            template_ids = [template_ids]
+        template_ids = set(template_ids)
+
+        config = self.get_nickname_config()
+        templates = config.get('templates', [])
+        remaining = []
+        removed_count = 0
+        for entry in templates:
+            if entry.get('id') in template_ids:
+                filename = entry.get('filename')
+                if filename:
+                    path = os.path.join(self.nickname_templates_dir, filename)
+                    if os.path.exists(path):
+                        try:
+                            os.remove(path)
+                        except OSError:
+                            pass
+                removed_count += 1
+            else:
+                remaining.append(entry)
+
+        if removed_count:
+            config['templates'] = remaining
+            self._write_nickname_config(config)
+        return removed_count
+
     # v1.3: 방해 요소 추가 메서드 신설
     def add_distractor(self, cropped_image_data):
         """
@@ -1376,6 +1533,8 @@ class LearningTab(QWidget):
         settings = self.data_manager.load_settings()
         self.last_used_model = settings.get('last_used_model', None)
         self._checked_class_names: set[str] = set(settings.get('hunt_checked_classes', []))
+        self.nickname_config = self.data_manager.get_nickname_config()
+        self._nickname_ui_updating = False
         self.initUI()
         self.init_sam()
 
@@ -1537,6 +1696,56 @@ class LearningTab(QWidget):
         model_manage_group.setLayout(model_manage_layout)
         right_layout.addWidget(model_manage_group)
 
+        nickname_group = QGroupBox("닉네임 탐지 설정")
+        nickname_layout = QVBoxLayout()
+
+        nickname_text_layout = QHBoxLayout()
+        nickname_text_layout.addWidget(QLabel("대상 닉네임:"))
+        self.nickname_text_input = QLineEdit()
+        self.nickname_text_input.setPlaceholderText("예: 버프몬")
+        nickname_text_layout.addWidget(self.nickname_text_input, 1)
+        nickname_layout.addLayout(nickname_text_layout)
+
+        nickname_threshold_layout = QHBoxLayout()
+        nickname_threshold_layout.addWidget(QLabel("템플릿 임계값:"))
+        self.nickname_threshold_spin = QDoubleSpinBox()
+        self.nickname_threshold_spin.setRange(0.1, 0.99)
+        self.nickname_threshold_spin.setSingleStep(0.01)
+        nickname_threshold_layout.addWidget(self.nickname_threshold_spin)
+        nickname_threshold_layout.addSpacing(8)
+        nickname_threshold_layout.addWidget(QLabel("X 오프셋:"))
+        self.nickname_offset_x_spin = QSpinBox()
+        self.nickname_offset_x_spin.setRange(-400, 400)
+        nickname_threshold_layout.addWidget(self.nickname_offset_x_spin)
+        nickname_threshold_layout.addSpacing(8)
+        nickname_threshold_layout.addWidget(QLabel("Y 오프셋:"))
+        self.nickname_offset_y_spin = QSpinBox()
+        self.nickname_offset_y_spin.setRange(-400, 400)
+        nickname_threshold_layout.addWidget(self.nickname_offset_y_spin)
+        nickname_layout.addLayout(nickname_threshold_layout)
+
+        self.nickname_template_list = QListWidget()
+        self.nickname_template_list.setViewMode(QListWidget.ViewMode.IconMode)
+        self.nickname_template_list.setIconSize(QSize(160, 64))
+        self.nickname_template_list.setResizeMode(QListWidget.ResizeMode.Adjust)
+        self.nickname_template_list.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
+        nickname_layout.addWidget(self.nickname_template_list, 1)
+
+        nickname_buttons_layout = QHBoxLayout()
+        self.capture_nickname_btn = QPushButton("영역 캡처")
+        self.capture_nickname_btn.clicked.connect(self.capture_nickname_template)
+        self.import_nickname_btn = QPushButton("파일 추가")
+        self.import_nickname_btn.clicked.connect(self.import_nickname_templates)
+        self.delete_nickname_btn = QPushButton("선택 삭제")
+        self.delete_nickname_btn.clicked.connect(self.delete_selected_nickname_templates)
+        nickname_buttons_layout.addWidget(self.capture_nickname_btn)
+        nickname_buttons_layout.addWidget(self.import_nickname_btn)
+        nickname_buttons_layout.addWidget(self.delete_nickname_btn)
+        nickname_layout.addLayout(nickname_buttons_layout)
+
+        nickname_group.setLayout(nickname_layout)
+        right_layout.addWidget(nickname_group)
+
         self.log_viewer = QTextEdit()
         self.log_viewer.setReadOnly(True)
 
@@ -1564,9 +1773,16 @@ class LearningTab(QWidget):
         self.setLayout(overall_layout)
 
 
+        self._apply_nickname_config_to_ui()
+        self.nickname_text_input.editingFinished.connect(self.on_nickname_text_changed)
+        self.nickname_threshold_spin.valueChanged.connect(self.on_nickname_threshold_changed)
+        self.nickname_offset_x_spin.valueChanged.connect(self.on_nickname_offset_changed)
+        self.nickname_offset_y_spin.valueChanged.connect(self.on_nickname_offset_changed)
+
         self.populate_class_list()
         self.populate_model_list()
         self.populate_preset_list()
+        self.populate_nickname_template_list()
 
     def update_status_message(self, message):
         """상태바 메시지 업데이트를 위한 슬롯."""
@@ -1607,6 +1823,141 @@ class LearningTab(QWidget):
             # v1.4: 마지막으로 사용한 모델이 목록에 있으면 선택
             if self.last_used_model and self.last_used_model in saved_models:
                 self.model_selector.setCurrentText(self.last_used_model)
+
+    def _refresh_nickname_config_cache(self):
+        self.nickname_config = self.data_manager.get_nickname_config()
+
+    def _apply_nickname_config_to_ui(self):
+        self._nickname_ui_updating = True
+        config = self.data_manager.get_nickname_config()
+        self.nickname_config = config
+        self.nickname_text_input.setText(config.get('target_text', ''))
+        threshold = float(config.get('match_threshold', 0.72))
+        self.nickname_threshold_spin.setValue(max(self.nickname_threshold_spin.minimum(), min(self.nickname_threshold_spin.maximum(), threshold)))
+        self.nickname_offset_x_spin.setValue(int(config.get('char_offset_x', 0)))
+        self.nickname_offset_y_spin.setValue(int(config.get('char_offset_y', 0)))
+        self._nickname_ui_updating = False
+
+    def populate_nickname_template_list(self):
+        self.nickname_template_list.clear()
+        templates = self.data_manager.list_nickname_templates()
+        if not templates:
+            empty_item = QListWidgetItem(QIcon(), "등록된 템플릿이 없습니다")
+            empty_item.setFlags(Qt.ItemFlag.NoItemFlags)
+            self.nickname_template_list.addItem(empty_item)
+            self.delete_nickname_btn.setEnabled(False)
+            return
+
+        self.delete_nickname_btn.setEnabled(True)
+        for entry in templates:
+            pixmap = QPixmap(entry['path'])
+            if pixmap.isNull():
+                pixmap = QPixmap(self.nickname_template_list.iconSize())
+                pixmap.fill(Qt.GlobalColor.darkGray)
+            icon = QIcon(pixmap)
+            label = entry.get('original_name') or entry.get('id', '템플릿')
+            item = QListWidgetItem(icon, label)
+            item.setData(Qt.ItemDataRole.UserRole, entry.get('id'))
+            tooltip_lines = [f"ID: {entry.get('id')}"]
+            if entry.get('original_name'):
+                tooltip_lines.append(f"원본: {entry.get('original_name')}")
+            size_text = f"크기: {entry.get('width', '?')}x{entry.get('height', '?')}"
+            tooltip_lines.append(size_text)
+            score = entry.get('created_at')
+            if score:
+                tooltip_lines.append(time.strftime('등록 시각: %Y-%m-%d %H:%M:%S', time.localtime(score)))
+            item.setToolTip('\n'.join(tooltip_lines))
+            self.nickname_template_list.addItem(item)
+
+    def on_nickname_text_changed(self):
+        if self._nickname_ui_updating:
+            return
+        text = self.nickname_text_input.text().strip()
+        if not text:
+            text = '버프몬'
+            self.nickname_text_input.setText(text)
+        self.nickname_config = self.data_manager.update_nickname_config({'target_text': text})
+        self.log_viewer.append(f"닉네임 기준 문자열을 '{text}'(으)로 설정했습니다.")
+
+    def on_nickname_threshold_changed(self, value: float):
+        if self._nickname_ui_updating:
+            return
+        self.nickname_config = self.data_manager.update_nickname_config({'match_threshold': float(value)})
+
+    def on_nickname_offset_changed(self):
+        if self._nickname_ui_updating:
+            return
+        updates = {
+            'char_offset_x': int(self.nickname_offset_x_spin.value()),
+            'char_offset_y': int(self.nickname_offset_y_spin.value()),
+        }
+        self.nickname_config = self.data_manager.update_nickname_config(updates)
+
+    def capture_nickname_template(self):
+        try:
+            snipper = ScreenSnipper(self)
+            if snipper.exec():
+                roi = snipper.get_roi()
+                if roi.width() < 5 or roi.height() < 5:
+                    QMessageBox.warning(self, '캡처 오류', '선택한 영역이 너무 작습니다. 닉네임 영역을 다시 선택해주세요.')
+                    return
+                region = {
+                    'top': roi.top(),
+                    'left': roi.left(),
+                    'width': roi.width(),
+                    'height': roi.height(),
+                }
+                with mss.mss() as sct:
+                    sct_img = sct.grab(region)
+                frame = np.array(sct_img)
+                template_entry = self.data_manager.add_nickname_template(cv2.cvtColor(frame, cv2.COLOR_BGRA2BGR), source='capture')
+                self._refresh_nickname_config_cache()
+                self.populate_nickname_template_list()
+                self.log_viewer.append(f"닉네임 템플릿 '{template_entry['id']}'을(를) 추가했습니다.")
+        except Exception as exc:
+            QMessageBox.critical(self, '닉네임 템플릿 추가 오류', str(exc))
+
+    def import_nickname_templates(self):
+        file_paths, _ = QFileDialog.getOpenFileNames(self, '닉네임 템플릿 불러오기', '', '이미지 파일 (*.png *.jpg *.jpeg *.bmp *.webp)')
+        if not file_paths:
+            return
+        added = 0
+        errors = []
+        for path in file_paths:
+            try:
+                entry = self.data_manager.import_nickname_template(path)
+                added += 1
+                self.log_viewer.append(f"닉네임 템플릿 '{entry['id']}' 추가 (파일: {os.path.basename(path)})")
+            except Exception as exc:
+                errors.append((path, str(exc)))
+        if added:
+            self._refresh_nickname_config_cache()
+            self.populate_nickname_template_list()
+        if errors:
+            error_text = '\n'.join(f"- {os.path.basename(p)}: {msg}" for p, msg in errors)
+            QMessageBox.warning(self, '일부 템플릿 추가 실패', error_text)
+
+    def delete_selected_nickname_templates(self):
+        selected_items = [item for item in self.nickname_template_list.selectedItems() if item.flags() != Qt.ItemFlag.NoItemFlags]
+        if not selected_items:
+            QMessageBox.information(self, '삭제', '삭제할 닉네임 템플릿을 선택하세요.')
+            return
+        ids = [item.data(Qt.ItemDataRole.UserRole) for item in selected_items if item.data(Qt.ItemDataRole.UserRole)]
+        if not ids:
+            return
+        if QMessageBox.question(
+            self,
+            '삭제 확인',
+            f"선택한 템플릿 {len(ids)}개를 삭제하시겠습니까?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        ) != QMessageBox.StandardButton.Yes:
+            return
+        removed = self.data_manager.delete_nickname_templates(ids)
+        if removed:
+            self._refresh_nickname_config_cache()
+            self.populate_nickname_template_list()
+            self.log_viewer.append(f"닉네임 템플릿 {removed}개를 삭제했습니다.")
 
     def populate_class_list(self):
         """manifest.json 데이터를 기반으로 QTreeWidget을 채웁니다."""
