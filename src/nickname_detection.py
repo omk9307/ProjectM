@@ -38,8 +38,9 @@ class NicknameDetector:
         self._last_result: Optional[dict] = None
         self._lost_frames: int = 0
         self.max_roi_lost_frames = 8
-        self.search_margin = 96.0
-
+        self.search_margin_x = 210.0  # 가로(텔레포트) 검색 여백
+        self.search_margin_y = 100.0  # 세로(점프) 검색 여백
+        
     def configure(
         self,
         *,
@@ -95,8 +96,8 @@ class NicknameDetector:
                 box_y = float(prev_box.get('y', 0.0))
                 box_w = float(prev_box.get('width', 0.0))
                 box_h = float(prev_box.get('height', 0.0))
-                margin_x = max(self.search_margin, box_w * 1.5)
-                margin_y = max(self.search_margin, box_h * 1.5)
+                margin_x = max(self.search_margin_x, box_w * 1.5)
+                margin_y = max(self.search_margin_y, box_h * 1.5)
                 x1 = int(np.clip(box_x - margin_x, 0.0, frame_w))
                 y1 = int(np.clip(box_y - margin_y, 0.0, frame_h))
                 x2 = int(np.clip(box_x + box_w + margin_x, 0.0, frame_w))
