@@ -4526,8 +4526,8 @@ class HotkeySettingDialog(QDialog):
             self.label.setText("F1~F12 키만 기본 키로 사용할 수 있습니다.")
 
 class MapTab(QWidget):
-    # control_command_issued 시그널을 추가합니다. str 타입을 전달합니다.
-    control_command_issued = pyqtSignal(str) 
+    # control_command_issued 시그널은 명령과 선택적 원인을 전달합니다.
+    control_command_issued = pyqtSignal(str, object)
     # [추가] 탐지 상태 변경을 알리는 신호 (True: 시작, False: 중단)
     detection_status_changed = pyqtSignal(bool)
     global_pos_updated = pyqtSignal(QPointF)
@@ -6130,7 +6130,7 @@ class MapTab(QWidget):
                 if self.debug_auto_control_checkbox.isChecked():
                     print("[자동 제어 테스트] 모든 키 떼기")
                 elif self.auto_control_checkbox.isChecked():
-                    self.control_command_issued.emit("모든 키 떼기")
+                    self.control_command_issued.emit("모든 키 떼기", None)
 
                 self.update_general_log("탐지를 중단합니다.", "black")
                 self.detect_anchor_btn.setText("탐지 시작")
@@ -7638,7 +7638,7 @@ class MapTab(QWidget):
                     if self.debug_auto_control_checkbox.isChecked():
                         print("[자동 제어 테스트] RECOVERY-PREP: 사다리 멈춤복구")
                     elif self.auto_control_checkbox.isChecked():
-                        self.control_command_issued.emit("사다리 멈춤복구")
+                        self.control_command_issued.emit("사다리 멈춤복구", None)
                     
                     QTimer.singleShot(1000, self._execute_recovery_resend)
                     
@@ -7744,7 +7744,7 @@ class MapTab(QWidget):
             if self.debug_auto_control_checkbox.isChecked():
                 print(f"[자동 제어 테스트] RECOVERY: {self.last_movement_command}")
             elif self.auto_control_checkbox.isChecked():
-                self.control_command_issued.emit(self.last_movement_command)
+                self.control_command_issued.emit(self.last_movement_command, None)
 
     def _update_navigator_and_view(self, final_player_pos, current_terrain_name):
         """
@@ -7917,7 +7917,7 @@ class MapTab(QWidget):
                     if self.debug_auto_control_checkbox.isChecked():
                         print("[자동 제어 테스트] 모든 키 떼기")
                     elif self.auto_control_checkbox.isChecked():
-                        self.control_command_issued.emit("모든 키 떼기")
+                        self.control_command_issued.emit("모든 키 떼기", None)
                     self.initial_delay_active = False
             else:
                 # --- [v.1811] BUGFIX: UnboundLocalError 해결 ---
@@ -7995,7 +7995,7 @@ class MapTab(QWidget):
                         if self.debug_auto_control_checkbox.isChecked():
                             print(f"[자동 제어 테스트] {command_to_send}")
                         elif self.auto_control_checkbox.isChecked():
-                            self.control_command_issued.emit(command_to_send)
+                            self.control_command_issued.emit(command_to_send, None)
 
                     # 상태 업데이트
                     if action_changed:

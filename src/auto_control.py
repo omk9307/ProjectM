@@ -93,11 +93,12 @@ class AutoControlTab(QWidget):
         self.current_sequence = []
         self.current_sequence_index = 0
         self.current_command_name = ""
+        self.current_command_reason = None
         self.is_test_mode = False
 
         self.is_processing_step = False                 # 중복 _process_next_step 재진입 방지 플래그
         self.last_sent_timestamps = {}                  # 전송한 키의 타임스탬프 (에코 무시용)
-        self.ECHO_IGNORE_MS = 10                        # 기본 60ms, 필요하면 40~120 범위로 조절 권장
+        self.ECHO_IGNORE_MS = 30                        # 기본 60ms, 필요하면 40~120 범위로 조절 권장
         self.last_command_start_time = 0.0              # 마지막 시퀀스 시작 시각
         self.sequence_watchdog = QTimer(self)           # 시퀀스가 멈추는 경우 복구용 와치독
         self.sequence_watchdog.setSingleShot(True)
@@ -790,7 +791,7 @@ class AutoControlTab(QWidget):
         QTimer.singleShot(2000, lambda: self._start_sequence_execution(sequence, f"TEST: {command_text}", is_test=True))
     
     # --- [핵심 수정] time.sleep()을 QTimer 기반의 비동기 방식으로 변경 ---
-    def _start_sequence_execution(self, sequence, command_name, is_test=False):
+    def _start_sequence_execution(self, sequence, command_name, is_test=False, reason=None):
         """
         시퀀스 실행 시작.
         기존: 동일 명령 중복이면 무시 -> 문제: 실패 복구 시 재시도가 막힘.
@@ -810,6 +811,7 @@ class AutoControlTab(QWidget):
             # 내부 상태 초기화
             self.is_sequence_running = False
             self.is_processing_step = False
+            self.current_command_reason = None
 
         # 만약 다른 시퀀스가 실행 중이면 기존 시퀀스 중단(이전 동작 취소)
         elif self.is_sequence_running:
@@ -821,6 +823,7 @@ class AutoControlTab(QWidget):
                 pass
             # 안전하게 키들만 해제 (기본 동작: 강제 해제는 하지 않음)
             self._release_all_keys()
+            self.current_command_reason = None
 
         # 이제 새 시퀀스 초기화
         self.status_label.setText(f"'{command_name}' 실행 중.")
@@ -829,13 +832,17 @@ class AutoControlTab(QWidget):
 
         self.current_sequence = sequence
         self.current_command_name = command_name
+        self.current_command_reason = reason.strip() if isinstance(reason, str) and reason.strip() else None
         self.is_test_mode = is_test
         self.current_sequence_index = 0
         self.is_sequence_running = True
         self.is_first_key_event_in_sequence = True
         self.last_command_start_time = time.time()
         
-        start_msg = f"--- (시작) {self.current_command_name} ---"              # <<< (추가) UI에 '(시작)' 로그를 즉시 남기기 위해 생성
+        if self.current_command_reason:
+            start_msg = f"--- (시작) {self.current_command_name} (원인: {self.current_command_reason}) ---"
+        else:
+            start_msg = f"--- (시작) {self.current_command_name} ---"              # <<< (추가) UI에 '(시작)' 로그를 즉시 남기기 위해 생성
         self.log_generated.emit(start_msg, "magenta")                        # <<< (추가) UI 로그 시그널로 즉시 표시
 
         # (와치독) 시퀀스가 멈추는 걸 감지하기 위해 재시작
@@ -865,11 +872,15 @@ class AutoControlTab(QWidget):
             if self.current_sequence_index >= len(self.current_sequence):
                 self.is_sequence_running = False
                 self.sequence_watchdog.stop()
-                log_msg = f"--- (완료) {self.current_command_name} ---"
+                if self.current_command_reason:
+                    log_msg = f"--- (완료) {self.current_command_name} (원인: {self.current_command_reason}) ---"
+                else:
+                    log_msg = f"--- (완료) {self.current_command_name} ---"
                 self.log_generated.emit(log_msg, "lightgreen")
                 # 테스트 모드 후 키 남아있으면 안전 해제
                 if self.is_test_mode and self.held_keys:
                     QTimer.singleShot(2000, lambda: self._release_all_keys(force=True))
+                self.current_command_reason = None
                 return
 
             step = self.current_sequence[self.current_sequence_index]
@@ -906,7 +917,10 @@ class AutoControlTab(QWidget):
         
             elif action_type == "release_all":
                 self._release_all_keys(force=True)
-                self.log_generated.emit("(모든 키 떼기)", "white")
+                if self.current_command_reason:
+                    self.log_generated.emit(f"(모든 키 떼기) (원인: {self.current_command_reason})", "white")
+                else:
+                    self.log_generated.emit("(모든 키 떼기)", "white")
 
             # 다음 스텝로 이동 및 타이머 재시작
             self.current_sequence_index += 1
@@ -922,19 +936,20 @@ class AutoControlTab(QWidget):
             self.log_generated.emit(f"오류: _process_next_step 예외 발생 - {e}", "red")
             self._release_all_keys(force=True)
             self.is_sequence_running = False
+            self.current_command_reason = None
             self.sequence_watchdog.stop()
         finally:
             self.is_processing_step = False
 
-    @pyqtSlot(str)
-    def receive_control_command(self, command_text):
+    @pyqtSlot(str, object)
+    def receive_control_command(self, command_text, reason=None):
         sequence = self.mappings.get(command_text)
         if not sequence:
             print(f"[AutoControl] 경고: '{command_text}'에 대한 매핑이 없습니다.")
             return
 
         # 새 동작: 만약 동일 명령이 이미 실행 중이라면 강제 재시작하도록 _start_sequence_execution이 처리
-        self._start_sequence_execution(sequence, command_text, is_test=False)
+        self._start_sequence_execution(sequence, command_text, is_test=False, reason=reason)
 
     def _on_sequence_stuck(self):
         """(신규) 시퀀스가 일정 시간 진행이 없을 때 호출되어 안전 복구를 시도합니다."""
@@ -948,6 +963,7 @@ class AutoControlTab(QWidget):
         self._release_all_keys(force=True)
         self.is_sequence_running = False
         self.is_processing_step = False
+        self.current_command_reason = None
 
     def toggle_recording(self):
         if self.is_recording or self.is_waiting_for_start_key:
@@ -1226,6 +1242,7 @@ class AutoControlTab(QWidget):
         print("'자동 제어' 탭 정리 중...")
         self.is_sequence_running = False
         self.sequence_timer.stop()
+        self.current_command_reason = None
         
         # 녹화용 리스너 중지
         if self.keyboard_listener:

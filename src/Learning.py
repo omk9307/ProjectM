@@ -1375,6 +1375,7 @@ class LearningTab(QWidget):
         # v1.4: 마지막 사용 모델 로드
         settings = self.data_manager.load_settings()
         self.last_used_model = settings.get('last_used_model', None)
+        self._checked_class_names: set[str] = set(settings.get('hunt_checked_classes', []))
         self.initUI()
         self.init_sam()
 
@@ -1648,7 +1649,51 @@ class LearningTab(QWidget):
         # except Exception:
         #     pass
 
+        if self._checked_class_names:
+            self._apply_checked_classes_to_tree()
         self.class_tree_widget.blockSignals(False)
+        self._persist_checked_classes()
+
+    def _apply_checked_classes_to_tree(self):
+        """저장된 체크 정보에 맞게 QTreeWidget의 체크 상태를 맞춘다."""
+        if not hasattr(self, "class_tree_widget"):
+            return
+        was_blocked = self.class_tree_widget.signalsBlocked()
+        self.class_tree_widget.blockSignals(True)
+        for i in range(self.class_tree_widget.topLevelItemCount()):
+            category_item = self.class_tree_widget.topLevelItem(i)
+            if category_item.text(0) == NEGATIVE_SAMPLES_NAME:
+                continue
+            for j in range(category_item.childCount()):
+                class_item = category_item.child(j)
+                name = class_item.text(0)
+                is_checked = name in self._checked_class_names if self._checked_class_names else True
+                class_item.setCheckState(0, Qt.CheckState.Checked if is_checked else Qt.CheckState.Unchecked)
+        self.class_tree_widget.blockSignals(was_blocked)
+
+    def _collect_checked_class_names(self) -> list[str]:
+        names: list[str] = []
+        if not hasattr(self, "class_tree_widget"):
+            return names
+        for i in range(self.class_tree_widget.topLevelItemCount()):
+            category_item = self.class_tree_widget.topLevelItem(i)
+            if category_item.text(0) == NEGATIVE_SAMPLES_NAME:
+                continue
+            for j in range(category_item.childCount()):
+                class_item = category_item.child(j)
+                if class_item.checkState(0) == Qt.CheckState.Checked:
+                    names.append(class_item.text(0))
+        return names
+
+    def _persist_checked_classes(self) -> None:
+        if not hasattr(self, "data_manager") or not self.data_manager:
+            return
+        checked_names = self._collect_checked_class_names()
+        self._checked_class_names = set(checked_names)
+        try:
+            self.data_manager.save_settings({'hunt_checked_classes': checked_names})
+        except Exception:
+            pass
 
     def set_image_sort_mode(self, mode):
         self.current_image_sort_mode = mode
@@ -2197,6 +2242,7 @@ class LearningTab(QWidget):
                 else:
                     class_item.setCheckState(0, Qt.CheckState.Unchecked)
         self.class_tree_widget.blockSignals(False)
+        self._persist_checked_classes()
 
     def save_tree_state_to_manifest(self):
         old_manifest = self.data_manager.get_manifest()
@@ -2249,6 +2295,7 @@ class LearningTab(QWidget):
 
     def set_checked_states(self, states):
         """ 저장된 체크 상태를 트리에 복원합니다. """
+        was_blocked = self.class_tree_widget.signalsBlocked()
         self.class_tree_widget.blockSignals(True)
         for i in range(self.class_tree_widget.topLevelItemCount()):
             category_item = self.class_tree_widget.topLevelItem(i)
@@ -2256,7 +2303,8 @@ class LearningTab(QWidget):
                 class_item = category_item.child(j)
                 if class_item.text(0) in states:
                     class_item.setCheckState(0, states[class_item.text(0)])
-        self.class_tree_widget.blockSignals(False)
+        self.class_tree_widget.blockSignals(was_blocked)
+        self._persist_checked_classes()
 
     def handle_item_check(self, item, column):
         """체크박스 상태 변경 시, 프리셋을 '사용자 설정'으로 변경"""
@@ -2264,6 +2312,7 @@ class LearningTab(QWidget):
             self.preset_selector.blockSignals(True)
             self.preset_selector.setCurrentIndex(-1)
             self.preset_selector.blockSignals(False)
+        self._persist_checked_classes()
 
     def cleanup_on_close(self):
         """

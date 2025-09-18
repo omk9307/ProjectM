@@ -51,6 +51,15 @@ HUNT_AREA_BRUSH = QBrush(HUNT_AREA_COLOR)
 PRIMARY_AREA_COLOR = QColor(255, 140, 0, 70)
 PRIMARY_AREA_EDGE = QPen(QColor(230, 110, 0, 220), 2, Qt.PenStyle.SolidLine)
 PRIMARY_AREA_BRUSH = QBrush(PRIMARY_AREA_COLOR)
+FALLBACK_CHARACTER_EDGE = QPen(QColor(0, 255, 120, 220), 2, Qt.PenStyle.SolidLine)
+FALLBACK_CHARACTER_BRUSH = QBrush(QColor(0, 255, 120, 60))
+
+try:
+    COMPOSITION_MODE_DEST_OVER = QPainter.CompositionMode.CompositionMode_DestinationOver
+    COMPOSITION_MODE_SOURCE_OVER = QPainter.CompositionMode.CompositionMode_SourceOver
+except AttributeError:  # PyQt5 호환성
+    COMPOSITION_MODE_DEST_OVER = QPainter.CompositionMode_DestinationOver
+    COMPOSITION_MODE_SOURCE_OVER = QPainter.CompositionMode_SourceOver
 
 
 @dataclass
@@ -301,8 +310,12 @@ class HuntTab(QWidget):
     """사냥 조건과 스킬 실행을 관리하는 임시 탭."""
 
     CONTROL_RELEASE_TIMEOUT_SEC = 30
+    CONDITION_POLL_DEBOUNCE_MS = 10
+    CONDITION_POLL_MIN_INTERVAL_SEC = 0.12
+    CONTROL_REQUEST_TIMEOUT_MS = 5000
+    CHARACTER_PERSISTENCE_SEC = 5.0
 
-    control_command_issued = pyqtSignal(str)
+    control_command_issued = pyqtSignal(str, object)
     control_authority_requested = pyqtSignal(dict)
     control_authority_released = pyqtSignal(dict)
     hunt_area_updated = pyqtSignal(object)
@@ -329,6 +342,10 @@ class HuntTab(QWidget):
             'hunt_area': True,
             'primary_area': True,
         }
+        self._last_character_boxes: List[DetectionBox] = []
+        self._last_character_details: List[dict] = []
+        self._last_character_seen_ts: float = 0.0
+        self._using_character_fallback: bool = False
 
         self.attack_interval_sec = 0.35
         self.last_attack_ts = 0.0
@@ -341,6 +358,8 @@ class HuntTab(QWidget):
         self._pending_direction_skill: Optional[AttackSkill] = None
         self._last_monster_seen_ts = time.time()
         self._next_command_ready_ts = 0.0
+        self._last_condition_poll_ts = 0.0
+        self._request_pending = False
 
         self.detection_thread: Optional[DetectionThread] = None
         self.detection_popup: Optional[DetectionPopup] = None
@@ -353,16 +372,49 @@ class HuntTab(QWidget):
         self._release_pending = False
         self._settings_path = HUNT_SETTINGS_FILE
         self._suppress_settings_save = False
+        self._condition_debounce_timer: Optional[QTimer] = None
+        self._request_timeout_timer: Optional[QTimer] = None
         os.makedirs(CONFIG_ROOT, exist_ok=True)
         self.latest_detection_details: dict[str, list] = {
             'characters': [],
             'monsters': [],
         }
+        self._active_target_names: List[str] = []
 
         self._build_ui()
         self._update_facing_label()
         self._load_settings()
         self._setup_timers()
+        self._setup_facing_reset_timer()
+
+    def _setup_facing_reset_timer(self) -> None:
+        self.facing_reset_timer = QTimer(self)
+        self.facing_reset_timer.setSingleShot(True)
+        self.facing_reset_timer.timeout.connect(self._handle_facing_reset_timeout)
+
+    def _is_detection_active(self) -> bool:
+        return bool(self.detect_btn.isChecked())
+
+    def _schedule_facing_reset(self) -> None:
+        if not hasattr(self, 'facing_reset_timer'):
+            return
+        self.facing_reset_timer.stop()
+        if not self._is_detection_active():
+            return
+        min_val = max(0.5, float(self.facing_reset_min_spinbox.value())) if hasattr(self, 'facing_reset_min_spinbox') else 1.0
+        max_val = max(min_val, float(self.facing_reset_max_spinbox.value())) if hasattr(self, 'facing_reset_max_spinbox') else 4.0
+        interval = random.uniform(min_val, max_val)
+        self.facing_reset_timer.start(max(1, int(interval * 1000)))
+
+    def _cancel_facing_reset_timer(self) -> None:
+        if hasattr(self, 'facing_reset_timer'):
+            self.facing_reset_timer.stop()
+
+    def _handle_facing_reset_timeout(self) -> None:
+        if not self._is_detection_active():
+            return
+        self._set_current_facing(None, save=False)
+        self._schedule_facing_reset()
 
     def _format_timestamp_ms(self) -> str:
         now = time.time()
@@ -401,14 +453,19 @@ class HuntTab(QWidget):
         range_group = self._create_range_group()
         condition_group = self._create_condition_group()
         misc_group = self._create_misc_group()
+        condition_stack = QWidget()
+        condition_stack_layout = QVBoxLayout(condition_stack)
+        condition_stack_layout.setContentsMargins(0, 0, 0, 0)
+        condition_stack_layout.setSpacing(10)
+        condition_stack_layout.addWidget(condition_group)
+        condition_stack_layout.addWidget(misc_group)
         range_condition_row = QWidget()
         range_condition_layout = QHBoxLayout(range_condition_row)
         range_condition_layout.setContentsMargins(0, 0, 0, 0)
         range_condition_layout.setSpacing(10)
         range_condition_layout.addWidget(range_group, 1)
-        range_condition_layout.addWidget(condition_group, 1)
+        range_condition_layout.addWidget(condition_stack, 1)
         right_column.addWidget(range_condition_row)
-        right_column.addWidget(misc_group)
 
         model_group = self._create_model_group()
         right_column.addWidget(model_group)
@@ -515,6 +572,14 @@ class HuntTab(QWidget):
         condition_form.addRow("최근 미탐지 후 반납(초)", self.idle_release_spinbox)
         self.idle_release_spinbox.valueChanged.connect(self._handle_setting_changed)
 
+        self.max_authority_hold_spinbox = QDoubleSpinBox()
+        self.max_authority_hold_spinbox.setRange(1.0, 600.0)
+        self.max_authority_hold_spinbox.setSingleStep(1.0)
+        self.max_authority_hold_spinbox.setDecimals(1)
+        self.max_authority_hold_spinbox.setValue(float(self.CONTROL_RELEASE_TIMEOUT_SEC))
+        condition_form.addRow("최대 이동권한 보유 시간(초)", self.max_authority_hold_spinbox)
+        self.max_authority_hold_spinbox.valueChanged.connect(self._handle_max_hold_changed)
+
         group.setLayout(condition_form)
         group.setSizePolicy(QSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed))
         return group
@@ -522,6 +587,25 @@ class HuntTab(QWidget):
     def _create_misc_group(self) -> QGroupBox:
         group = QGroupBox("기타 조건")
         misc_form = QFormLayout()
+
+        self.facing_reset_min_spinbox = QDoubleSpinBox()
+        self.facing_reset_min_spinbox.setRange(1.0, 10.0)
+        self.facing_reset_min_spinbox.setSingleStep(0.5)
+        self.facing_reset_min_spinbox.setDecimals(1)
+        self.facing_reset_min_spinbox.setValue(1.0)
+        self.facing_reset_min_spinbox.setSuffix(" s")
+
+        self.facing_reset_max_spinbox = QDoubleSpinBox()
+        self.facing_reset_max_spinbox.setRange(1.0, 10.0)
+        self.facing_reset_max_spinbox.setSingleStep(0.5)
+        self.facing_reset_max_spinbox.setDecimals(1)
+        self.facing_reset_max_spinbox.setValue(4.0)
+        self.facing_reset_max_spinbox.setSuffix(" s")
+
+        misc_form.addRow("방향 초기화 최소", self.facing_reset_min_spinbox)
+        misc_form.addRow("방향 초기화 최대", self.facing_reset_max_spinbox)
+        self.facing_reset_min_spinbox.valueChanged.connect(self._handle_facing_reset_changed)
+        self.facing_reset_max_spinbox.valueChanged.connect(self._handle_facing_reset_changed)
 
         self.direction_delay_min_spinbox = QDoubleSpinBox()
         self.direction_delay_min_spinbox.setRange(0.01, 5.0)
@@ -671,14 +755,29 @@ class HuntTab(QWidget):
 
     def _resolve_detection_targets(self) -> tuple[List[int], int]:
         if not self.data_manager or not hasattr(self.data_manager, "get_class_list"):
+            self._active_target_names = []
             return [], -1
         class_list = self.data_manager.get_class_list()
         target_indices = list(range(len(class_list)))
+        checked_names: list[str] = []
+        if hasattr(self.data_manager, "load_settings"):
+            try:
+                settings = self.data_manager.load_settings()
+                checked_names = list(settings.get('hunt_checked_classes', []))
+            except Exception:
+                checked_names = []
+        if checked_names:
+            name_to_index = {name: idx for idx, name in enumerate(class_list)}
+            target_indices = [name_to_index[name] for name in checked_names if name in name_to_index]
         char_index = (
             class_list.index(CHARACTER_CLASS_NAME)
             if CHARACTER_CLASS_NAME in class_list
             else -1
         )
+        if char_index != -1 and char_index not in target_indices:
+            target_indices.append(char_index)
+        target_indices = sorted({idx for idx in target_indices if 0 <= idx < len(class_list)})
+        self._active_target_names = [class_list[idx] for idx in target_indices]
         return target_indices, char_index
 
     def _set_manual_area(self) -> None:
@@ -759,6 +858,8 @@ class HuntTab(QWidget):
                 self.detect_btn.setChecked(False)
                 return
 
+            self._reset_character_cache()
+
             self.detection_thread = DetectionThread(
                 model_path=model_path,
                 capture_region=capture_region,
@@ -783,6 +884,11 @@ class HuntTab(QWidget):
                 self.data_manager.save_settings({'last_used_model': selected_model})
             self.last_used_model = selected_model
             self.append_log(f"탐지 시작: 모델={selected_model}, 범위={capture_region}")
+            if self._active_target_names:
+                target_list_text = ", ".join(self._active_target_names)
+                self.append_log(f"탐지 대상: {target_list_text}", "info")
+            self._set_current_facing(None, save=False)
+            self._schedule_facing_reset()
         else:
             thread_active = self.detection_thread is not None and self.detection_thread.isRunning()
             self._release_pending = True
@@ -791,8 +897,9 @@ class HuntTab(QWidget):
             self.detection_view.setText("탐지 중단됨")
             self.detection_view.setPixmap(QPixmap())
             self.clear_detection_snapshot()
+            self._cancel_facing_reset_timer()
             if not thread_active:
-                self._issue_all_keys_release()
+                self._issue_all_keys_release("실시간 탐지 중단")
 
     def _stop_detection_thread(self) -> None:
         if self.detection_thread:
@@ -820,6 +927,7 @@ class HuntTab(QWidget):
             self.detection_popup.close()
         self._clear_pending_skill()
         self._clear_pending_direction()
+        self._cancel_facing_reset_timer()
 
     def _on_detection_thread_finished(self) -> None:
         self.detect_btn.setChecked(False)
@@ -828,7 +936,8 @@ class HuntTab(QWidget):
             self.detection_view.setText("탐지 중단됨")
             self.detection_view.setPixmap(QPixmap())
         self.detection_thread = None
-        self._issue_all_keys_release()
+        self._cancel_facing_reset_timer()
+        self._issue_all_keys_release("탐지 스레드 종료")
         self.clear_detection_snapshot()
 
     def _handle_detection_log(self, messages: List[str]) -> None:
@@ -851,6 +960,7 @@ class HuntTab(QWidget):
         painter = QPainter(image)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         try:
+            painter.setCompositionMode(COMPOSITION_MODE_DEST_OVER)
             if (
                 self.current_hunt_area
                 and self.overlay_preferences.get('hunt_area', True)
@@ -871,6 +981,14 @@ class HuntTab(QWidget):
                     painter.setPen(PRIMARY_AREA_EDGE)
                     painter.setBrush(PRIMARY_AREA_BRUSH)
                     painter.drawRect(rect)
+            painter.setCompositionMode(COMPOSITION_MODE_SOURCE_OVER)
+            if self._using_character_fallback and self._last_character_boxes:
+                painter.setPen(FALLBACK_CHARACTER_EDGE)
+                painter.setBrush(FALLBACK_CHARACTER_BRUSH)
+                for box in self._last_character_boxes:
+                    rect = self._box_to_rect(box, image.width(), image.height())
+                    if not rect.isNull():
+                        painter.drawRect(rect)
         finally:
             painter.end()
 
@@ -882,6 +1000,18 @@ class HuntTab(QWidget):
         y1 = max(0.0, area.y)
         x2 = min(float(max_width), area.x + width)
         y2 = min(float(max_height), area.y + height)
+        if x2 <= x1 or y2 <= y1:
+            return QRect()
+        return QRect(int(x1), int(y1), int(x2 - x1), int(y2 - y1))
+
+    @staticmethod
+    def _box_to_rect(box: DetectionBox, max_width: int, max_height: int) -> QRect:
+        width = max(0.0, box.width)
+        height = max(0.0, box.height)
+        x1 = max(0.0, box.x)
+        y1 = max(0.0, box.y)
+        x2 = min(float(max_width), box.x + width)
+        y2 = min(float(max_height), box.y + height)
         if x2 <= x1 or y2 <= y1:
             return QRect()
         return QRect(int(x1), int(y1), int(x2 - x1), int(y2 - y1))
@@ -1131,7 +1261,39 @@ class HuntTab(QWidget):
     def _handle_setting_changed(self, *args, **kwargs) -> None:
         self._save_settings()
 
-    def _emit_control_command(self, command: str) -> None:
+    def _schedule_condition_poll(self, delay_ms: Optional[int] = None) -> None:
+        if not self._condition_debounce_timer:
+            return
+        if delay_ms is None:
+            delay_ms = self.CONDITION_POLL_DEBOUNCE_MS
+        self._condition_debounce_timer.stop()
+        self._condition_debounce_timer.start(max(1, int(delay_ms)))
+
+    def _on_condition_debounce_timeout(self) -> None:
+        self._poll_hunt_conditions()
+
+    def _handle_request_timeout(self) -> None:
+        self._request_pending = False
+        if self.current_authority != "hunt":
+            self.append_log("사냥 권한 요청 응답이 지연되어 재평가합니다.", "warn")
+            self._poll_hunt_conditions(force=True)
+
+    def _handle_max_hold_changed(self, value: float) -> None:
+        self.control_release_timeout = max(1.0, float(value))
+        self._save_settings()
+
+    def _handle_facing_reset_changed(self, value: float) -> None:
+        min_val = self.facing_reset_min_spinbox.value()
+        max_val = self.facing_reset_max_spinbox.value()
+        if min_val > max_val:
+            if value == min_val:
+                self.facing_reset_max_spinbox.setValue(min_val)
+            else:
+                self.facing_reset_min_spinbox.setValue(max_val)
+        self._schedule_facing_reset()
+        self._save_settings()
+
+    def _emit_control_command(self, command: str, reason: Optional[str] = None) -> None:
         normalized = str(command).strip()
         if (
             self._get_command_delay_remaining() > 0
@@ -1152,8 +1314,11 @@ class HuntTab(QWidget):
                 self._set_current_facing('left', save=False)
             elif "key.right" in lower and "key.left" not in lower:
                 self._set_current_facing('right', save=False)
-        self.control_command_issued.emit(command)
-        self._append_control_log(normalized)
+        self.control_command_issued.emit(command, reason)
+
+        reason_text = reason.strip() if isinstance(reason, str) else ""
+        log_message = f"{normalized} (원인: {reason_text})" if reason_text else normalized
+        self._append_control_log(log_message)
 
     def _append_control_log(self, message: str) -> None:
         timestamp = self._format_timestamp_ms()
@@ -1202,17 +1367,59 @@ class HuntTab(QWidget):
         characters = [box for box in (_to_box(item) for item in characters_data) if box]
         monsters = [box for box in (_to_box(item) for item in monsters_data) if box]
 
+        now = time.time()
+        fallback_used = False
+        if characters:
+            self._update_character_cache(characters, characters_data, seen_ts=now)
+        else:
+            if (
+                self._last_character_boxes
+                and now - self._last_character_seen_ts <= self.CHARACTER_PERSISTENCE_SEC
+            ):
+                characters = [DetectionBox(**vars(box)) for box in self._last_character_boxes]
+                if not characters_data and self._last_character_details:
+                    characters_data = [dict(item) for item in self._last_character_details]
+                fallback_used = True
+            else:
+                self._reset_character_cache()
+
+        snapshot_ts = float(payload.get('timestamp', now))
+        if fallback_used and self._last_character_seen_ts:
+            snapshot_ts = max(snapshot_ts, self._last_character_seen_ts)
+
         snapshot = DetectionSnapshot(
             character_boxes=characters,
             monster_boxes=monsters,
-            timestamp=float(payload.get('timestamp', time.time())),
+            timestamp=snapshot_ts,
         )
         self.latest_detection_details = {
-            'characters': characters_data,
+            'characters': characters_data if characters_data else [],
             'monsters': monsters_data,
         }
+        if fallback_used and not characters_data and self._last_character_details:
+            self.latest_detection_details['characters'] = [dict(item) for item in self._last_character_details]
+        self._using_character_fallback = fallback_used
         self.update_detection_snapshot(snapshot)
         self._update_detection_summary()
+        self._schedule_condition_poll()
+
+    def _update_character_cache(
+        self,
+        characters: List[DetectionBox],
+        details: List[dict],
+        *,
+        seen_ts: Optional[float] = None,
+    ) -> None:
+        self._last_character_boxes = [DetectionBox(**vars(box)) for box in characters]
+        self._last_character_details = [dict(item) for item in details] if details else []
+        self._last_character_seen_ts = float(seen_ts) if seen_ts is not None else time.time()
+        self._using_character_fallback = False
+
+    def _reset_character_cache(self) -> None:
+        self._last_character_boxes = []
+        self._last_character_details = []
+        self._last_character_seen_ts = 0.0
+        self._using_character_fallback = False
 
     def update_detection_snapshot(self, snapshot: DetectionSnapshot) -> None:
         self.latest_snapshot = snapshot
@@ -1222,6 +1429,7 @@ class HuntTab(QWidget):
         self.latest_snapshot = None
         self._clear_detection_metrics()
         self.latest_detection_details = {'characters': [], 'monsters': []}
+        self._reset_character_cache()
         self._update_detection_summary()
 
     def _recalculate_hunt_metrics(self) -> None:
@@ -1300,6 +1508,8 @@ class HuntTab(QWidget):
         else:
             self.last_facing = side
         self._update_facing_label()
+        if side in ('left', 'right'):
+            self._schedule_facing_reset()
         if save:
             self._save_settings()
 
@@ -1313,6 +1523,14 @@ class HuntTab(QWidget):
         self.hunt_loop_timer.setInterval(300)
         self.hunt_loop_timer.timeout.connect(self._run_hunt_loop)
         self.hunt_loop_timer.start()
+
+        self._condition_debounce_timer = QTimer(self)
+        self._condition_debounce_timer.setSingleShot(True)
+        self._condition_debounce_timer.timeout.connect(self._on_condition_debounce_timeout)
+
+        self._request_timeout_timer = QTimer(self)
+        self._request_timeout_timer.setSingleShot(True)
+        self._request_timeout_timer.timeout.connect(self._handle_request_timeout)
 
     def attach_data_manager(self, data_manager) -> None:
         self.data_manager = data_manager
@@ -1365,6 +1583,12 @@ class HuntTab(QWidget):
                     self.idle_release_spinbox.setValue(float(idle_value))
                 except (TypeError, ValueError):
                     pass
+            max_hold = conditions.get('max_authority_hold_sec')
+            if max_hold is not None:
+                try:
+                    self.max_authority_hold_spinbox.setValue(float(max_hold))
+                except (TypeError, ValueError):
+                    pass
 
         display = data.get('display', {})
         if display:
@@ -1395,9 +1619,18 @@ class HuntTab(QWidget):
                 self.direction_delay_max_spinbox.setValue(float(misc.get('direction_delay_max', self.direction_delay_max_spinbox.value())))
             except (TypeError, ValueError):
                 pass
+            try:
+                self.facing_reset_min_spinbox.setValue(float(misc.get('facing_reset_min_sec', self.facing_reset_min_spinbox.value())))
+            except (TypeError, ValueError):
+                pass
+            try:
+                self.facing_reset_max_spinbox.setValue(float(misc.get('facing_reset_max_sec', self.facing_reset_max_spinbox.value())))
+            except (TypeError, ValueError):
+                pass
 
         facing_state = data.get('last_facing')
         self._set_current_facing(facing_state if facing_state in ('left', 'right') else None, save=False)
+        self.control_release_timeout = max(1.0, self.max_authority_hold_spinbox.value())
 
         attack_skill_data = data.get('attack_skills', [])
         if attack_skill_data:
@@ -1476,6 +1709,7 @@ class HuntTab(QWidget):
                 'monster_threshold': self.monster_threshold_spinbox.value(),
                 'auto_request': self.auto_request_checkbox.isChecked(),
                 'idle_release_sec': self.idle_release_spinbox.value(),
+                'max_authority_hold_sec': self.max_authority_hold_spinbox.value(),
             },
             'display': {
                 'show_hunt_area': self.show_hunt_area_checkbox.isChecked(),
@@ -1486,6 +1720,8 @@ class HuntTab(QWidget):
             'misc': {
                 'direction_delay_min': self.direction_delay_min_spinbox.value(),
                 'direction_delay_max': self.direction_delay_max_spinbox.value(),
+                'facing_reset_min_sec': self.facing_reset_min_spinbox.value(),
+                'facing_reset_max_sec': self.facing_reset_max_spinbox.value(),
             },
             'attack_skills': [
                 {
@@ -1546,6 +1782,12 @@ class HuntTab(QWidget):
         if self.current_authority == "hunt":
             self.append_log("이미 사냥 권한을 보유 중입니다.", "warn")
             return
+        if self._request_pending:
+            return
+
+        self._request_pending = True
+        if self._request_timeout_timer:
+            self._request_timeout_timer.start(self.CONTROL_REQUEST_TIMEOUT_MS)
 
         payload = {
             "monster_threshold": self.monster_threshold_spinbox.value(),
@@ -1568,6 +1810,9 @@ class HuntTab(QWidget):
         if self.current_authority != "hunt":
             self.append_log("현재 사냥 권한이 없습니다.", "warn")
             return
+        if self._request_timeout_timer:
+            self._request_timeout_timer.stop()
+        self._request_pending = False
 
         payload = {"reason": reason or "manual"}
         self.control_authority_released.emit(payload)
@@ -1579,6 +1824,9 @@ class HuntTab(QWidget):
             self.on_map_authority_changed("map")
 
     def on_map_authority_changed(self, owner: str) -> None:
+        if self._request_timeout_timer:
+            self._request_timeout_timer.stop()
+        self._request_pending = False
         self.current_authority = owner
         if owner == "hunt":
             self.last_control_acquired_ts = time.time()
@@ -1595,6 +1843,8 @@ class HuntTab(QWidget):
             self.append_log("맵 탭으로 권한이 반환되었습니다.", "info")
         else:
             self.append_log(f"권한 소유자 변경: {owner}", "info")
+        if owner != "hunt":
+            self._schedule_condition_poll()
 
     def _update_authority_ui(self) -> None:
         if not hasattr(self, "authority_label"):
@@ -1606,7 +1856,15 @@ class HuntTab(QWidget):
         self._update_attack_buttons()
         self._update_buff_buttons()
 
-    def _poll_hunt_conditions(self) -> None:
+    def _poll_hunt_conditions(self, *, force: bool = False) -> None:
+        now = time.time()
+        if not force:
+            if self._request_pending:
+                return
+            if now - self._last_condition_poll_ts < self.CONDITION_POLL_MIN_INTERVAL_SEC:
+                return
+        self._last_condition_poll_ts = now
+
         if not self.auto_request_checkbox.isChecked():
             return
         if not self.auto_hunt_enabled:
@@ -1665,10 +1923,10 @@ class HuntTab(QWidget):
 
     def _run_hunt_loop(self) -> None:
         if not self.auto_hunt_enabled:
-            self._ensure_idle_keys()
+            self._ensure_idle_keys("자동 사냥 비활성화")
             return
         if self.current_authority != "hunt":
-            self._ensure_idle_keys()
+            self._ensure_idle_keys("사냥 권한 없음")
             return
         if self._pending_skill_timer or self._pending_direction_timer:
             return
@@ -1678,13 +1936,13 @@ class HuntTab(QWidget):
         if self._evaluate_buff_usage(now):
             return
         if not self.attack_skills:
-            self._ensure_idle_keys()
+            self._ensure_idle_keys("공격 스킬 미등록")
             return
         if self.latest_primary_monster_count == 0:
-            self._ensure_idle_keys()
+            self._ensure_idle_keys("주 스킬 범위 몬스터 없음")
             return
         if not self.latest_snapshot or not self.latest_snapshot.character_boxes:
-            self._ensure_idle_keys()
+            self._ensure_idle_keys("탐지 데이터 없음")
             return
 
         if now - self.last_attack_ts < self.attack_interval_sec:
@@ -1692,13 +1950,13 @@ class HuntTab(QWidget):
 
         skill = self._select_attack_skill()
         if not skill:
-            self._ensure_idle_keys()
+            self._ensure_idle_keys("공격 스킬 선택 실패")
             return
 
         character_box = self._select_reference_character_box(self.latest_snapshot.character_boxes)
         target_box = self._select_target_monster(character_box)
         if not target_box:
-            self._ensure_idle_keys()
+            self._ensure_idle_keys("목표 몬스터 탐지 실패")
             return
 
         target_side = 'left' if target_box.center_x < character_box.center_x else 'right'
@@ -2154,6 +2412,12 @@ class HuntTab(QWidget):
         self.condition_timer.stop()
         if hasattr(self, 'hunt_loop_timer'):
             self.hunt_loop_timer.stop()
+        self._cancel_facing_reset_timer()
+        if self._condition_debounce_timer:
+            self._condition_debounce_timer.stop()
+        if self._request_timeout_timer:
+            self._request_timeout_timer.stop()
+        self._request_pending = False
         self._stop_detection_thread()
         if hasattr(self, 'detect_btn'):
             self.detect_btn.setChecked(False)
@@ -2162,18 +2426,21 @@ class HuntTab(QWidget):
         self._authority_release_connected = False
         self._save_settings()
 
-    def _issue_all_keys_release(self) -> None:
+    def _issue_all_keys_release(self, reason: Optional[str] = None) -> None:
         if not getattr(self, 'control_command_issued', None):
             return
         self._clear_pending_skill()
         self._clear_pending_direction()
-        self._emit_control_command("모든 키 떼기")
-        self.append_log("모든 키 떼기 명령 전송", "debug")
+        self._emit_control_command("모든 키 떼기", reason=reason)
+        if reason:
+            self.append_log(f"모든 키 떼기 명령 전송 (원인: {reason})", "debug")
+        else:
+            self.append_log("모든 키 떼기 명령 전송", "debug")
         self._release_pending = False
         self.hunting_active = False
 
-    def _ensure_idle_keys(self) -> None:
+    def _ensure_idle_keys(self, reason: Optional[str] = None) -> None:
         self._clear_pending_skill()
         self._clear_pending_direction()
         if self.hunting_active:
-            self._issue_all_keys_release()
+            self._issue_all_keys_release(reason)
