@@ -114,6 +114,8 @@ class AttackSkill:
     is_primary: bool = False
     min_monsters: int = 1
     probability: int = 100
+    post_delay_min: float = 0.43
+    post_delay_max: float = 0.46
 
 
 @dataclass
@@ -125,6 +127,8 @@ class BuffSkill:
     jitter_percent: int = 15
     last_triggered_ts: float = 0.0
     next_ready_ts: float = 0.0
+    post_delay_min: float = 0.43
+    post_delay_max: float = 0.46
 
 
 class AttackSkillDialog(QDialog):
@@ -154,6 +158,20 @@ class AttackSkillDialog(QDialog):
         self.probability_spinbox.setValue(100)
         self.probability_spinbox.setSuffix(" %")
 
+        self.delay_min_spinbox = QDoubleSpinBox()
+        self.delay_min_spinbox.setRange(0.05, 5.0)
+        self.delay_min_spinbox.setSingleStep(0.05)
+        self.delay_min_spinbox.setDecimals(3)
+        self.delay_min_spinbox.setValue(0.43)
+        self.delay_min_spinbox.setSuffix(" s")
+
+        self.delay_max_spinbox = QDoubleSpinBox()
+        self.delay_max_spinbox.setRange(0.05, 5.0)
+        self.delay_max_spinbox.setSingleStep(0.05)
+        self.delay_max_spinbox.setDecimals(3)
+        self.delay_max_spinbox.setValue(0.46)
+        self.delay_max_spinbox.setSuffix(" s")
+
         if skill:
             self.name_input.setText(skill.name)
             self.command_input.setText(skill.command)
@@ -161,6 +179,8 @@ class AttackSkillDialog(QDialog):
             self.primary_checkbox.setChecked(skill.is_primary)
             self.min_monsters_spinbox.setValue(skill.min_monsters)
             self.probability_spinbox.setValue(skill.probability)
+            self.delay_min_spinbox.setValue(skill.post_delay_min)
+            self.delay_max_spinbox.setValue(skill.post_delay_max)
 
         form = QFormLayout()
         form.addRow("이름", self.name_input)
@@ -169,6 +189,8 @@ class AttackSkillDialog(QDialog):
         form.addRow("주 스킬", self.primary_checkbox)
         form.addRow("사용 최소 몬스터 수", self.min_monsters_spinbox)
         form.addRow("사용 확률", self.probability_spinbox)
+        form.addRow("후속 대기 최소", self.delay_min_spinbox)
+        form.addRow("후속 대기 최대", self.delay_max_spinbox)
 
         buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
         buttons.accepted.connect(self.accept)
@@ -191,6 +213,8 @@ class AttackSkillDialog(QDialog):
             is_primary=self.primary_checkbox.isChecked(),
             min_monsters=self.min_monsters_spinbox.value(),
             probability=self.probability_spinbox.value(),
+            post_delay_min=min(self.delay_min_spinbox.value(), self.delay_max_spinbox.value()),
+            post_delay_max=max(self.delay_min_spinbox.value(), self.delay_max_spinbox.value()),
         )
 
 
@@ -216,12 +240,28 @@ class BuffSkillDialog(QDialog):
         self.jitter_spinbox.setValue(15)
         self.jitter_spinbox.setSuffix(" %")
 
+        self.delay_min_spinbox = QDoubleSpinBox()
+        self.delay_min_spinbox.setRange(0.05, 10.0)
+        self.delay_min_spinbox.setSingleStep(0.05)
+        self.delay_min_spinbox.setDecimals(3)
+        self.delay_min_spinbox.setValue(0.43)
+        self.delay_min_spinbox.setSuffix(" s")
+
+        self.delay_max_spinbox = QDoubleSpinBox()
+        self.delay_max_spinbox.setRange(0.05, 10.0)
+        self.delay_max_spinbox.setSingleStep(0.05)
+        self.delay_max_spinbox.setDecimals(3)
+        self.delay_max_spinbox.setValue(0.46)
+        self.delay_max_spinbox.setSuffix(" s")
+
         if skill:
             self.name_input.setText(skill.name)
             self.command_input.setText(skill.command)
             self.enabled_checkbox.setChecked(skill.enabled)
             self.cooldown_spinbox.setValue(skill.cooldown_seconds)
             self.jitter_spinbox.setValue(skill.jitter_percent)
+            self.delay_min_spinbox.setValue(skill.post_delay_min)
+            self.delay_max_spinbox.setValue(skill.post_delay_max)
 
         form = QFormLayout()
         form.addRow("이름", self.name_input)
@@ -229,6 +269,8 @@ class BuffSkillDialog(QDialog):
         form.addRow("사용", self.enabled_checkbox)
         form.addRow("쿨타임", self.cooldown_spinbox)
         form.addRow("오차 허용", self.jitter_spinbox)
+        form.addRow("후속 대기 최소", self.delay_min_spinbox)
+        form.addRow("후속 대기 최대", self.delay_max_spinbox)
 
         buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
         buttons.accepted.connect(self.accept)
@@ -250,6 +292,8 @@ class BuffSkillDialog(QDialog):
             cooldown_seconds=self.cooldown_spinbox.value(),
             enabled=self.enabled_checkbox.isChecked(),
             jitter_percent=self.jitter_spinbox.value(),
+            post_delay_min=min(self.delay_min_spinbox.value(), self.delay_max_spinbox.value()),
+            post_delay_max=max(self.delay_min_spinbox.value(), self.delay_max_spinbox.value()),
         )
 
 
@@ -296,6 +340,7 @@ class HuntTab(QWidget):
         self._pending_direction_side: Optional[str] = None
         self._pending_direction_skill: Optional[AttackSkill] = None
         self._last_monster_seen_ts = time.time()
+        self._next_command_ready_ts = 0.0
 
         self.detection_thread: Optional[DetectionThread] = None
         self.detection_popup: Optional[DetectionPopup] = None
@@ -319,6 +364,21 @@ class HuntTab(QWidget):
         self._load_settings()
         self._setup_timers()
 
+    def _format_timestamp_ms(self) -> str:
+        now = time.time()
+        local = time.localtime(now)
+        millis = int((now - int(now)) * 1000)
+        return f"{time.strftime('%H:%M:%S', local)}.{millis:03d}"
+
+    def _format_delay_ms(self, delay_sec: float) -> str:
+        return f"{max(0.0, delay_sec) * 1000:.0f}ms"
+
+    def _log_delay_message(self, context: str, delay_sec: float) -> None:
+        if delay_sec <= 0:
+            return
+        message = f"{context} 후 대기 {self._format_delay_ms(delay_sec)}"
+        self._append_control_log(message)
+
     def _build_ui(self) -> None:
         main_layout = QHBoxLayout()
         main_layout.setContentsMargins(8, 8, 8, 8)
@@ -340,6 +400,7 @@ class HuntTab(QWidget):
 
         range_group = self._create_range_group()
         condition_group = self._create_condition_group()
+        misc_group = self._create_misc_group()
         range_condition_row = QWidget()
         range_condition_layout = QHBoxLayout(range_condition_row)
         range_condition_layout.setContentsMargins(0, 0, 0, 0)
@@ -347,15 +408,13 @@ class HuntTab(QWidget):
         range_condition_layout.addWidget(range_group, 1)
         range_condition_layout.addWidget(condition_group, 1)
         right_column.addWidget(range_condition_row)
+        right_column.addWidget(misc_group)
 
         model_group = self._create_model_group()
         right_column.addWidget(model_group)
 
         skill_group = self._create_skill_group()
         right_column.addWidget(skill_group)
-
-        summary_group = self._create_detection_summary_group()
-        right_column.addWidget(summary_group)
 
         right_column.addStretch(1)
 
@@ -447,7 +506,43 @@ class HuntTab(QWidget):
         self.auto_request_checkbox = QCheckBox("조건 충족 시 자동 요청")
         condition_form.addRow(self.auto_request_checkbox)
         self.auto_request_checkbox.toggled.connect(self._handle_setting_changed)
+
+        self.idle_release_spinbox = QDoubleSpinBox()
+        self.idle_release_spinbox.setRange(0.5, 30.0)
+        self.idle_release_spinbox.setSingleStep(0.5)
+        self.idle_release_spinbox.setDecimals(1)
+        self.idle_release_spinbox.setValue(2.0)
+        condition_form.addRow("최근 미탐지 후 반납(초)", self.idle_release_spinbox)
+        self.idle_release_spinbox.valueChanged.connect(self._handle_setting_changed)
+
         group.setLayout(condition_form)
+        group.setSizePolicy(QSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed))
+        return group
+
+    def _create_misc_group(self) -> QGroupBox:
+        group = QGroupBox("기타 조건")
+        misc_form = QFormLayout()
+
+        self.direction_delay_min_spinbox = QDoubleSpinBox()
+        self.direction_delay_min_spinbox.setRange(0.01, 5.0)
+        self.direction_delay_min_spinbox.setSingleStep(0.01)
+        self.direction_delay_min_spinbox.setDecimals(3)
+        self.direction_delay_min_spinbox.setValue(0.035)
+        self.direction_delay_min_spinbox.setSuffix(" s")
+
+        self.direction_delay_max_spinbox = QDoubleSpinBox()
+        self.direction_delay_max_spinbox.setRange(0.01, 5.0)
+        self.direction_delay_max_spinbox.setSingleStep(0.01)
+        self.direction_delay_max_spinbox.setDecimals(3)
+        self.direction_delay_max_spinbox.setValue(0.050)
+        self.direction_delay_max_spinbox.setSuffix(" s")
+
+        misc_form.addRow("방향설정 후 대기 최소", self.direction_delay_min_spinbox)
+        misc_form.addRow("방향설정 후 대기 최대", self.direction_delay_max_spinbox)
+        self.direction_delay_min_spinbox.valueChanged.connect(self._handle_setting_changed)
+        self.direction_delay_max_spinbox.valueChanged.connect(self._handle_setting_changed)
+
+        group.setLayout(misc_form)
         group.setSizePolicy(QSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed))
         return group
 
@@ -566,6 +661,9 @@ class HuntTab(QWidget):
         log_container.addWidget(log_label)
         log_container.addWidget(self.log_view)
         outer_layout.addLayout(log_container)
+
+        summary_group = self._create_detection_summary_group()
+        outer_layout.addWidget(summary_group)
 
         group.setLayout(outer_layout)
         group.setSizePolicy(QSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding))
@@ -1034,9 +1132,15 @@ class HuntTab(QWidget):
         self._save_settings()
 
     def _emit_control_command(self, command: str) -> None:
+        normalized = str(command).strip()
+        if (
+            self._get_command_delay_remaining() > 0
+            and command not in ("모든 키 떼기",)
+            and not normalized.startswith("방향설정(")
+        ):
+            return
         if not command:
             return
-        normalized = str(command).strip()
         if normalized.startswith("방향설정("):
             if "좌" in normalized:
                 self._set_current_facing('left')
@@ -1052,16 +1156,27 @@ class HuntTab(QWidget):
         self._append_control_log(normalized)
 
     def _append_control_log(self, message: str) -> None:
-        timestamp = time.strftime("%H:%M:%S", time.localtime())
+        timestamp = self._format_timestamp_ms()
         if hasattr(self, 'control_log_view'):
             self.control_log_view.append(f"[{timestamp}] {message}")
         self._append_keyboard_log(message, timestamp)
+
+    def _set_command_cooldown(self, delay_sec: float) -> None:
+        delay_sec = max(0.0, float(delay_sec))
+        if delay_sec <= 0.0:
+            self._next_command_ready_ts = max(self._next_command_ready_ts, time.time())
+            return
+        ready_time = time.time() + delay_sec
+        self._next_command_ready_ts = max(self._next_command_ready_ts, ready_time)
+
+    def _get_command_delay_remaining(self) -> float:
+        return max(0.0, self._next_command_ready_ts - time.time())
 
     def _append_keyboard_log(self, message: str, timestamp: Optional[str] = None) -> None:
         if not hasattr(self, 'keyboard_log_view'):
             return
         if timestamp is None:
-            timestamp = time.strftime("%H:%M:%S", time.localtime())
+            timestamp = self._format_timestamp_ms()
         self.keyboard_log_view.append(f"[{timestamp}] {message}")
 
     def handle_detection_payload(self, payload: dict) -> None:
@@ -1244,6 +1359,12 @@ class HuntTab(QWidget):
         if conditions:
             self.monster_threshold_spinbox.setValue(int(conditions.get('monster_threshold', self.monster_threshold_spinbox.value())))
             self.auto_request_checkbox.setChecked(bool(conditions.get('auto_request', self.auto_request_checkbox.isChecked())))
+            idle_value = conditions.get('idle_release_sec')
+            if idle_value is not None:
+                try:
+                    self.idle_release_spinbox.setValue(float(idle_value))
+                except (TypeError, ValueError):
+                    pass
 
         display = data.get('display', {})
         if display:
@@ -1264,6 +1385,17 @@ class HuntTab(QWidget):
         self.overlay_preferences['hunt_area'] = self.show_hunt_area_checkbox.isChecked()
         self.overlay_preferences['primary_area'] = self.show_primary_skill_checkbox.isChecked()
 
+        misc = data.get('misc', {})
+        if misc:
+            try:
+                self.direction_delay_min_spinbox.setValue(float(misc.get('direction_delay_min', self.direction_delay_min_spinbox.value())))
+            except (TypeError, ValueError):
+                pass
+            try:
+                self.direction_delay_max_spinbox.setValue(float(misc.get('direction_delay_max', self.direction_delay_max_spinbox.value())))
+            except (TypeError, ValueError):
+                pass
+
         facing_state = data.get('last_facing')
         self._set_current_facing(facing_state if facing_state in ('left', 'right') else None, save=False)
 
@@ -1283,6 +1415,8 @@ class HuntTab(QWidget):
                         is_primary=bool(item.get('is_primary', False)),
                         min_monsters=int(item.get('min_monsters', 1)),
                         probability=int(item.get('probability', 100)),
+                        post_delay_min=float(item.get('post_delay_min', 0.43)),
+                        post_delay_max=float(item.get('post_delay_max', 0.46)),
                     )
                 )
             self._ensure_primary_skill()
@@ -1303,6 +1437,8 @@ class HuntTab(QWidget):
                         cooldown_seconds=int(item.get('cooldown_seconds', 60)),
                         enabled=bool(item.get('enabled', True)),
                         jitter_percent=int(item.get('jitter_percent', 15)),
+                        post_delay_min=float(item.get('post_delay_min', 0.43)),
+                        post_delay_max=float(item.get('post_delay_max', 0.46)),
                     )
                 )
             self._refresh_buff_tree()
@@ -1339,12 +1475,17 @@ class HuntTab(QWidget):
             'conditions': {
                 'monster_threshold': self.monster_threshold_spinbox.value(),
                 'auto_request': self.auto_request_checkbox.isChecked(),
+                'idle_release_sec': self.idle_release_spinbox.value(),
             },
             'display': {
                 'show_hunt_area': self.show_hunt_area_checkbox.isChecked(),
                 'show_primary_area': self.show_primary_skill_checkbox.isChecked(),
                 'auto_target': self.auto_target_radio.isChecked(),
                 'debug': self.debug_checkbox.isChecked(),
+            },
+            'misc': {
+                'direction_delay_min': self.direction_delay_min_spinbox.value(),
+                'direction_delay_max': self.direction_delay_max_spinbox.value(),
             },
             'attack_skills': [
                 {
@@ -1354,6 +1495,8 @@ class HuntTab(QWidget):
                     'is_primary': skill.is_primary,
                     'min_monsters': skill.min_monsters,
                     'probability': skill.probability,
+                    'post_delay_min': skill.post_delay_min,
+                    'post_delay_max': skill.post_delay_max,
                 }
                 for skill in self.attack_skills
             ],
@@ -1364,6 +1507,8 @@ class HuntTab(QWidget):
                     'enabled': skill.enabled,
                     'cooldown_seconds': skill.cooldown_seconds,
                     'jitter_percent': skill.jitter_percent,
+                    'post_delay_min': skill.post_delay_min,
+                    'post_delay_max': skill.post_delay_max,
                 }
                 for skill in self.buff_skills
             ],
@@ -1483,8 +1628,9 @@ class HuntTab(QWidget):
                 else float("inf")
             )
             should_release = False
+            idle_limit = self.idle_release_spinbox.value()
             if self.latest_primary_monster_count == 0 and self.latest_monster_count < threshold:
-                if idle_elapsed >= 2.0:
+                if idle_elapsed >= idle_limit:
                     should_release = True
             timeout = self.control_release_timeout or 0
             if timeout and elapsed >= timeout:
@@ -1496,7 +1642,7 @@ class HuntTab(QWidget):
                     reason_parts.append("주 스킬 범위 몬스터 없음")
                 if self.latest_monster_count < threshold:
                     reason_parts.append(f"전체 {self.latest_monster_count}마리 < 기준 {threshold}")
-                reason_parts.append(f"최근 몬스터 미탐지 {idle_elapsed:.1f}s")
+                reason_parts.append(f"최근 몬스터 미탐지 {idle_elapsed:.1f}s (기준 {idle_limit:.1f}s)")
                 if timeout and elapsed >= timeout:
                     reason_parts.append(f"타임아웃 {timeout}s 초과")
                 reason_text = ", ".join(reason_parts)
@@ -1525,6 +1671,8 @@ class HuntTab(QWidget):
             self._ensure_idle_keys()
             return
         if self._pending_skill_timer or self._pending_direction_timer:
+            return
+        if self._get_command_delay_remaining() > 0:
             return
         now = time.time()
         if self._evaluate_buff_usage(now):
@@ -1561,6 +1709,8 @@ class HuntTab(QWidget):
         self._execute_attack_skill(skill)
 
     def _evaluate_buff_usage(self, now: float) -> bool:
+        if self._get_command_delay_remaining() > 0:
+            return False
         for buff in self.buff_skills:
             if not buff.enabled or buff.cooldown_seconds <= 0:
                 continue
@@ -1576,6 +1726,9 @@ class HuntTab(QWidget):
                 buff.next_ready_ts = now + max(0.0, next_delay)
                 self.last_attack_ts = now
                 self.hunting_active = True
+                delay = random.uniform(buff.post_delay_min, buff.post_delay_max)
+                self._set_command_cooldown(delay)
+                self._log_delay_message(f"버프 '{buff.name}'", delay)
                 return True
 
         return False
@@ -1583,9 +1736,16 @@ class HuntTab(QWidget):
     def _execute_attack_skill(self, skill: AttackSkill) -> None:
         if not skill.enabled:
             return
+        remaining = self._get_command_delay_remaining()
+        if remaining > 0:
+            self._schedule_skill_execution(skill, remaining)
+            return
         self._emit_control_command(skill.command)
         self.last_attack_ts = time.time()
         self.hunting_active = True
+        delay = random.uniform(skill.post_delay_min, skill.post_delay_max)
+        self._set_command_cooldown(delay)
+        self._log_delay_message(f"스킬 '{skill.name}'", delay)
 
     def _select_attack_skill(self) -> Optional[AttackSkill]:
         enabled_skills = [s for s in self.attack_skills if s.enabled]
@@ -1643,9 +1803,7 @@ class HuntTab(QWidget):
 
     def _schedule_direction_command(self, target_side: str, next_skill: Optional[AttackSkill]) -> None:
         self._clear_pending_direction()
-        delay_sec = random.uniform(0.460, 0.480)
-        elapsed = time.time() - self.last_attack_ts if self.last_attack_ts else float('inf')
-        remaining = max(0.0, delay_sec - max(0.0, elapsed))
+        remaining = self._get_command_delay_remaining()
         if remaining <= 0.0:
             self._execute_direction_command(target_side, next_skill)
             return
@@ -1672,17 +1830,25 @@ class HuntTab(QWidget):
         self._pending_direction_skill = None
         command = '방향설정(좌)' if target_side == 'left' else '방향설정(우)'
         self._emit_control_command(command)
+        delay_min = min(self.direction_delay_min_spinbox.value(), self.direction_delay_max_spinbox.value())
+        delay_max = max(self.direction_delay_min_spinbox.value(), self.direction_delay_max_spinbox.value())
+        delay_sec = random.uniform(delay_min, delay_max)
+        self._set_command_cooldown(delay_sec)
+        self._log_delay_message("방향설정", delay_sec)
         if next_skill:
             self._schedule_skill_after_direction(next_skill)
         else:
             self.hunting_active = True
 
     def _schedule_skill_after_direction(self, skill: AttackSkill) -> None:
-        self._clear_pending_skill()
         delay_sec = random.uniform(0.035, 0.050)
+        self._schedule_skill_execution(skill, delay_sec)
+
+    def _schedule_skill_execution(self, skill: AttackSkill, delay_sec: float) -> None:
+        self._clear_pending_skill()
         timer = QTimer(self)
         timer.setSingleShot(True)
-        timer.setInterval(max(1, int(delay_sec * 1000)))
+        timer.setInterval(max(1, int(max(0.0, delay_sec) * 1000)))
         timer.timeout.connect(lambda skill=skill: self._execute_scheduled_skill(skill))
         timer.start()
         self._pending_skill_timer = timer
@@ -1693,6 +1859,10 @@ class HuntTab(QWidget):
         pending_skill = self._pending_skill
         self._clear_pending_skill()
         if pending_skill is not None and pending_skill is not skill:
+            return
+        remaining = self._get_command_delay_remaining()
+        if remaining > 0:
+            self._schedule_skill_execution(skill, remaining)
             return
         if not self.auto_hunt_enabled or self.current_authority != "hunt":
             return
@@ -1789,6 +1959,9 @@ class HuntTab(QWidget):
         skill = self.attack_skills[index]
         self._emit_control_command(skill.command)
         self.append_log(f"테스트 실행 (공격): {skill.name}", "info")
+        delay = random.uniform(skill.post_delay_min, skill.post_delay_max)
+        self._set_command_cooldown(delay)
+        self._log_delay_message(f"테스트 스킬 '{skill.name}'", delay)
 
     def add_buff_skill(self) -> None:
         dialog = BuffSkillDialog(self)
@@ -1834,6 +2007,9 @@ class HuntTab(QWidget):
         jitter_window = skill.cooldown_seconds * jitter_ratio
         next_delay = skill.cooldown_seconds - random.uniform(0, jitter_window)
         skill.next_ready_ts = now + max(0.0, next_delay)
+        delay = random.uniform(skill.post_delay_min, skill.post_delay_max)
+        self._set_command_cooldown(delay)
+        self._log_delay_message(f"테스트 버프 '{skill.name}'", delay)
 
     def _refresh_attack_tree(self) -> None:
         if not hasattr(self, "attack_tree"):
