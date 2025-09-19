@@ -180,6 +180,18 @@ class DetectionThread(QThread):
         self.is_debug_mode = is_debug_mode
         self.nickname_detector = nickname_detector
         self.is_running = True
+        
+        # FPS 계산 변수
+        self.fps = 0.0
+        self.frame_count = 0
+        self.start_time = time.time()
+        
+        # [추가] 성능 분석을 위한 통계 변수
+        self.perf_stats = {
+            "nickname_ms": 0.0,
+            "yolo_ms": 0.0,
+            "total_ms": 0.0,
+        }
 
     def run(self) -> None:  # noqa: D401
         try:
@@ -191,10 +203,24 @@ class DetectionThread(QThread):
                 if use_char_class
                 else self.conf_monster
             )
+            # 클래스 ID별 색상을 저장할 딕셔너리
+            class_color_map = {}
+
             while self.is_running:
+                loop_start_time = time.perf_counter()
+
+                self.frame_count += 1
+                current_time = time.time()
+                elapsed_time = current_time - self.start_time
+                if elapsed_time >= 1.0:
+                    self.fps = self.frame_count / elapsed_time
+                    self.frame_count = 0
+                    self.start_time = current_time
+
                 frame_np = np.array(sct.grab(self.capture_region))
                 frame = cv2.cvtColor(frame_np, cv2.COLOR_BGRA2BGR)
 
+                nick_start = time.perf_counter()
                 nickname_info = None
                 if self.nickname_detector is not None:
                     try:
@@ -207,30 +233,32 @@ class DetectionThread(QThread):
                             self.nickname_detector.notify_missed()
                         except Exception:
                             pass
+                nick_end = time.perf_counter()
+                self.perf_stats["nickname_ms"] = (nick_end - nick_start) * 1000
 
+                yolo_start = time.perf_counter()
                 results = model(
                     frame,
                     conf=low_conf,
                     classes=self.target_class_indices,
                     verbose=False,
                 )
+                yolo_end = time.perf_counter()
+                self.perf_stats["yolo_ms"] = (yolo_end - yolo_start) * 1000
 
                 result = results[0]
 
                 if len(result.boxes) > 0 and use_char_class:
                     char_indices_with_conf: List[tuple[int, float]] = []
                     other_indices: List[int] = []
-
                     for i, box in enumerate(result.boxes):
                         cls_id = int(box.cls)
                         conf = float(box.conf.item())
-
                         if cls_id == self.char_class_index:
                             if conf >= self.conf_char:
                                 char_indices_with_conf.append((i, conf))
                         elif conf >= self.conf_monster:
                             other_indices.append(i)
-
                     final_indices: List[int] = []
                     if char_indices_with_conf and nickname_info is None:
                         best_char_index = max(
@@ -238,7 +266,6 @@ class DetectionThread(QThread):
                         )[0]
                         final_indices.append(best_char_index)
                     final_indices.extend(other_indices)
-
                     if final_indices:
                         result = result[final_indices]
                     else:
@@ -251,20 +278,47 @@ class DetectionThread(QThread):
                 }
                 payload["nickname"] = nickname_info
 
+                annotated_frame = frame
+                if not annotated_frame.flags.writeable:
+                    annotated_frame = annotated_frame.copy()
+
                 if len(result.boxes) > 0:
                     boxes_for_payload: List[Dict[str, float]] = []
                     for box in result.boxes:
-                        x1, y1, x2, y2 = box.xyxy[0].tolist()
+                        x1, y1, x2, y2 = [int(coord) for coord in box.xyxy[0].tolist()]
+                        class_id = int(box.cls)
                         item = {
                             "x": float(x1),
                             "y": float(y1),
                             "width": float(x2 - x1),
                             "height": float(y2 - y1),
                             "score": float(box.conf.item()),
-                            "class_id": int(box.cls),
-                            "class_name": model.names[int(box.cls)],
+                            "class_id": class_id,
+                            "class_name": model.names[class_id],
                         }
                         boxes_for_payload.append(item)
+
+                        # 몬스터별 색상 및 텍스트 그리기
+                        if class_id not in class_color_map:
+                            class_color_map[class_id] = np.random.randint(0, 256, size=3).tolist()
+                        color = class_color_map[class_id]
+                        
+                        cv2.rectangle(annotated_frame, (x1, y1), (x2, y2), color, 2)
+                        
+                        # [핵심 수정] 표시할 텍스트에서 한글 클래스 이름을 제외
+                        label = f"{item['score']:.2f}"
+                        
+                        (w, h), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 2)
+                        text_bg_y2 = y1 - 5
+                        text_bg_y1 = text_bg_y2 - h - 5
+                        if text_bg_y1 < 0:
+                            text_bg_y1 = y1 + 5
+                            text_bg_y2 = text_bg_y1 + h + 5
+
+                        cv2.rectangle(annotated_frame, (x1, text_bg_y1), (x1 + w, text_bg_y2), color, -1)
+                        
+                        text_y = y1 - 10 if text_bg_y1 < y1 else y1 + h + 5
+                        cv2.putText(annotated_frame, label, (x1 + 2, text_y), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 2)
 
                     for item in boxes_for_payload:
                         if item["class_id"] == self.char_class_index:
@@ -289,30 +343,35 @@ class DetectionThread(QThread):
                     else:
                         log_messages.append(f"[{timestamp}] 탐색 완료. 객체 없음.")
                     self.detection_logged.emit(log_messages)
-
-                annotated_frame = result.plot()
-                if not annotated_frame.flags.writeable:
-                    annotated_frame = annotated_frame.copy()
+                
                 if nickname_info and nickname_info.get('nickname_box'):
                     nick_box = nickname_info['nickname_box']
-                    x1 = int(nick_box.get('x', 0))
-                    y1 = int(nick_box.get('y', 0))
+                    x1, y1 = int(nick_box.get('x', 0)), int(nick_box.get('y', 0))
                     x2 = int(x1 + nick_box.get('width', 0))
                     y2 = int(y1 + nick_box.get('height', 0))
                     cv2.rectangle(annotated_frame, (x1, y1), (x2, y2), (0, 255, 255), 2)
+                
+                loop_end_time = time.perf_counter()
+                self.perf_stats["total_ms"] = (loop_end_time - loop_start_time) * 1000
+
+                y_pos = 30
+                cv2.rectangle(annotated_frame, (5, 5), (230, 115), (0,0,0), -1)
+                fps_text = f"FPS : {self.fps:.1f}"
+                total_text = f"TOTAL: {self.perf_stats['total_ms']:.1f} ms"
+                nick_text = f" NICK: {self.perf_stats['nickname_ms']:.1f} ms"
+                yolo_text = f" YOLO: {self.perf_stats['yolo_ms']:.1f} ms"
+                cv2.putText(annotated_frame, fps_text, (10, y_pos), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2); y_pos += 25
+                cv2.putText(annotated_frame, total_text, (10, y_pos), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2); y_pos += 25
+                cv2.putText(annotated_frame, nick_text, (10, y_pos), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2); y_pos += 25
+                cv2.putText(annotated_frame, yolo_text, (10, y_pos), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
+
                 rgb_image = cv2.cvtColor(annotated_frame, cv2.COLOR_BGR2RGB)
                 h, w, ch = rgb_image.shape
                 bytes_per_line = ch * w
-                qt_image = QImage(
-                    rgb_image.data,
-                    w,
-                    h,
-                    bytes_per_line,
-                    QImage.Format.Format_RGB888,
-                )
+                qt_image = QImage(rgb_image.data, w, h, bytes_per_line, QImage.Format.Format_RGB888)
                 self.frame_ready.emit(qt_image.copy())
                 self.msleep(15)
-        except Exception as exc:  # pragma: no cover - GUI 스레드 예외 로깅
+        except Exception as exc:
             print(f"탐지 스레드 오류: {exc}")
 
     def stop(self) -> None:
