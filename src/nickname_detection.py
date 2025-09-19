@@ -41,6 +41,7 @@ class NicknameDetector:
         self.search_margin_x = 210.0  # 가로(텔레포트) 검색 여백
         self.search_margin_y = 100.0  # 세로(점프) 검색 여백
         self._last_successful_template: Optional[NicknameTemplate] = None # 마지막으로 성공한 템플릿을 기억하기 위한 변수
+        self._full_scan_template_index: int = 0 #  전체 화면 스캔 시 순환할 템플릿 인덱스
         
     def configure(
         self,
@@ -79,7 +80,8 @@ class NicknameDetector:
         self._last_result = None
         self._lost_frames = 0
         self._last_successful_template = None # 선호 템플릿 초기화
-
+        self._full_scan_template_index = 0
+        
     def detect(self, frame_bgr: np.ndarray) -> Optional[dict]:
         if not self.templates:
             return None
@@ -90,100 +92,92 @@ class NicknameDetector:
         frame_h, frame_w = frame_gray.shape
         origin_x = 0
         origin_y = 0
+        
+        # is_full_scan 플래그로 현재 탐색 모드 구분
+        is_full_scan = True
         roi_gray = frame_gray
+
         if self._last_result and self._lost_frames < self.max_roi_lost_frames:
+            # ROI 추적 모드일 경우
+            is_full_scan = False
             prev_box = self._last_result.get('nickname_box')
             if prev_box:
-                box_x = float(prev_box.get('x', 0.0))
-                box_y = float(prev_box.get('y', 0.0))
-                box_w = float(prev_box.get('width', 0.0))
-                box_h = float(prev_box.get('height', 0.0))
-                margin_x = max(self.search_margin_x, box_w * 1.5)
-                margin_y = max(self.search_margin_y, box_h * 1.5)
-                x1 = int(np.clip(box_x - margin_x, 0.0, frame_w))
-                y1 = int(np.clip(box_y - margin_y, 0.0, frame_h))
-                x2 = int(np.clip(box_x + box_w + margin_x, 0.0, frame_w))
-                y2 = int(np.clip(box_y + box_h + margin_y, 0.0, frame_h))
+                box_x, box_y = float(prev_box.get('x', 0.0)), float(prev_box.get('y', 0.0))
+                box_w, box_h = float(prev_box.get('width', 0.0)), float(prev_box.get('height', 0.0))
+                margin_x, margin_y = max(self.search_margin_x, box_w * 1.5), max(self.search_margin_y, box_h * 1.5)
+                x1, y1 = int(np.clip(box_x - margin_x, 0.0, frame_w)), int(np.clip(box_y - margin_y, 0.0, frame_h))
+                x2, y2 = int(np.clip(box_x + box_w + margin_x, 0.0, frame_w)), int(np.clip(box_y + box_h + margin_y, 0.0, frame_h))
                 if x2 - x1 > 10 and y2 - y1 > 10:
                     roi_gray = frame_gray[y1:y2, x1:x2]
-                    origin_x = x1
-                    origin_y = y1
-
+                    origin_x, origin_y = x1, y1
+                else: # ROI가 너무 작으면 안전하게 전체 스캔으로 전환
+                    is_full_scan = True
+                    roi_gray = frame_gray
+        
         best_score = 0.0
         best_template: Optional[NicknameTemplate] = None
         best_location = (0, 0)
 
-        # 최적화 로직 적용
-        # 1. 빠른 경로: 이전에 성공한 템플릿이 있다면 그것부터 시도
-        if self._last_successful_template is not None:
+        # 1. 빠른 경로: ROI 추적 모드일 때
+        if not is_full_scan and self._last_successful_template is not None:
             template = self._last_successful_template
             roi_h, roi_w = roi_gray.shape
             if roi_w >= template.width and roi_h >= template.height:
                 result = cv2.matchTemplate(roi_gray, template.image, cv2.TM_CCOEFF_NORMED)
                 _, max_val, _, max_loc = cv2.minMaxLoc(result)
                 if max_val >= self.match_threshold:
-                    best_score = float(max_val)
-                    best_template = template
-                    best_location = max_loc
+                    best_score, best_template, best_location = float(max_val), template, max_loc
 
-        # 2. 느린 경로: 빠른 경로에서 못 찾았을 경우에만 모든 템플릿 검사
+        # 2. 느린 경로: 빠른 경로에서 못 찾았거나, 전체 스캔 모드일 때
         if best_template is None:
-            roi_h, roi_w = roi_gray.shape
-            # 이전에 성공했던 템플릿은 이미 위에서 실패했으므로 제외하고 검사
-            other_templates = [t for t in self.templates if t is not self._last_successful_template]
-            for template in other_templates:
-                if roi_w < template.width or roi_h < template.height:
-                    continue
-                result = cv2.matchTemplate(roi_gray, template.image, cv2.TM_CCOEFF_NORMED)
-                _, max_val, _, max_loc = cv2.minMaxLoc(result)
-                if max_val >= self.match_threshold and max_val > best_score:
-                    best_score = float(max_val)
-                    best_template = template
-                    best_location = max_loc
+            # 분할 탐색 로직
+            if is_full_scan:
+                # 전체 화면 스캔: 한 프레임에 하나씩 순환하며 검사
+                if self._full_scan_template_index < len(self.templates):
+                    template = self.templates[self._full_scan_template_index]
+                    roi_h, roi_w = roi_gray.shape
+                    if roi_w >= template.width and roi_h >= template.height:
+                        result = cv2.matchTemplate(roi_gray, template.image, cv2.TM_CCOEFF_NORMED)
+                        _, max_val, _, max_loc = cv2.minMaxLoc(result)
+                        if max_val >= self.match_threshold and max_val > best_score:
+                            best_score, best_template, best_location = float(max_val), template, max_loc
+                # 다음 프레임을 위해 인덱스 증가 (순환)
+                self._full_scan_template_index = (self._full_scan_template_index + 1) % len(self.templates) if self.templates else 0
+            else:
+                # ROI 스캔 실패 시: 나머지 템플릿들을 모두 검사 (이 영역은 이미 빠름)
+                other_templates = [t for t in self.templates if t is not self._last_successful_template]
+                for template in other_templates:
+                    roi_h, roi_w = roi_gray.shape
+                    if roi_w < template.width or roi_h < template.height: continue
+                    result = cv2.matchTemplate(roi_gray, template.image, cv2.TM_CCOEFF_NORMED)
+                    _, max_val, _, max_loc = cv2.minMaxLoc(result)
+                    if max_val >= self.match_threshold and max_val > best_score:
+                        best_score, best_template, best_location = float(max_val), template, max_loc
 
         if not best_template:
             self.notify_missed()
             return None
         
-        #  성공한 템플릿을 "선호 템플릿"으로 기록
+        # 성공 시, 성공한 템플릿과 전체 스캔 인덱스를 기록/초기화
         self._last_successful_template = best_template
+        self._full_scan_template_index = 0 # 성공했으므로 다음 전체 스캔은 처음부터 다시 시작
 
-        nick_x = origin_x + best_location[0]
-        nick_y = origin_y + best_location[1]
+        nick_x, nick_y = origin_x + best_location[0], origin_y + best_location[1]
         nick_w, nick_h = best_template.width, best_template.height
-
         center_x = nick_x + nick_w / 2.0 + self.offset_x
         center_y = nick_y + nick_h + self.offset_y
-
-        center_x = float(np.clip(center_x, 0.0, frame_w - 1.0))
-        center_y = float(np.clip(center_y, 0.0, frame_h - 1.0))
-
+        center_x, center_y = float(np.clip(center_x, 0.0, frame_w - 1.0)), float(np.clip(center_y, 0.0, frame_h - 1.0))
         char_width = max(nick_w * self.WIDTH_SCALE, nick_w + 12.0)
         char_height = max(nick_h * self.HEIGHT_SCALE, nick_h + abs(self.offset_y) + 20.0)
-        char_width = float(min(char_width, frame_w))
-        char_height = float(min(char_height, frame_h))
-
+        char_width, char_height = float(min(char_width, frame_w)), float(min(char_height, frame_h))
         char_x = float(np.clip(center_x - char_width / 2.0, 0.0, frame_w - char_width))
         char_y = float(np.clip(center_y - char_height / 2.0, 0.0, frame_h - char_height))
+        
         detection = {
-            'template_id': best_template.template_id,
-            'score': best_score,
-            'nickname_box': {
-                'x': float(nick_x),
-                'y': float(nick_y),
-                'width': float(nick_w),
-                'height': float(nick_h),
-            },
-            'character_center': {
-                'x': center_x,
-                'y': center_y,
-            },
-            'character_box': {
-                'x': char_x,
-                'y': char_y,
-                'width': char_width,
-                'height': char_height,
-            },
+            'template_id': best_template.template_id, 'score': best_score,
+            'nickname_box': {'x': float(nick_x), 'y': float(nick_y), 'width': float(nick_w), 'height': float(nick_h)},
+            'character_center': {'x': center_x, 'y': center_y},
+            'character_box': {'x': char_x, 'y': char_y, 'width': char_width, 'height': char_height},
         }
         self._last_result = detection
         self._lost_frames = 0
