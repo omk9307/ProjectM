@@ -40,6 +40,7 @@ class NicknameDetector:
         self.max_roi_lost_frames = 8
         self.search_margin_x = 210.0  # 가로(텔레포트) 검색 여백
         self.search_margin_y = 100.0  # 세로(점프) 검색 여백
+        self._last_successful_template: Optional[NicknameTemplate] = None # 마지막으로 성공한 템플릿을 기억하기 위한 변수
         
     def configure(
         self,
@@ -77,6 +78,7 @@ class NicknameDetector:
             self.templates.append(template)
         self._last_result = None
         self._lost_frames = 0
+        self._last_successful_template = None # 선호 템플릿 초기화
 
     def detect(self, frame_bgr: np.ndarray) -> Optional[dict]:
         if not self.templates:
@@ -111,20 +113,40 @@ class NicknameDetector:
         best_template: Optional[NicknameTemplate] = None
         best_location = (0, 0)
 
-        roi_h, roi_w = roi_gray.shape
-        for template in self.templates:
-            if roi_w < template.width or roi_h < template.height:
-                continue
-            result = cv2.matchTemplate(roi_gray, template.image, cv2.TM_CCOEFF_NORMED)
-            _, max_val, _, max_loc = cv2.minMaxLoc(result)
-            if max_val >= self.match_threshold and max_val > best_score:
-                best_score = float(max_val)
-                best_template = template
-                best_location = max_loc
+        # 최적화 로직 적용
+        # 1. 빠른 경로: 이전에 성공한 템플릿이 있다면 그것부터 시도
+        if self._last_successful_template is not None:
+            template = self._last_successful_template
+            roi_h, roi_w = roi_gray.shape
+            if roi_w >= template.width and roi_h >= template.height:
+                result = cv2.matchTemplate(roi_gray, template.image, cv2.TM_CCOEFF_NORMED)
+                _, max_val, _, max_loc = cv2.minMaxLoc(result)
+                if max_val >= self.match_threshold:
+                    best_score = float(max_val)
+                    best_template = template
+                    best_location = max_loc
+
+        # 2. 느린 경로: 빠른 경로에서 못 찾았을 경우에만 모든 템플릿 검사
+        if best_template is None:
+            roi_h, roi_w = roi_gray.shape
+            # 이전에 성공했던 템플릿은 이미 위에서 실패했으므로 제외하고 검사
+            other_templates = [t for t in self.templates if t is not self._last_successful_template]
+            for template in other_templates:
+                if roi_w < template.width or roi_h < template.height:
+                    continue
+                result = cv2.matchTemplate(roi_gray, template.image, cv2.TM_CCOEFF_NORMED)
+                _, max_val, _, max_loc = cv2.minMaxLoc(result)
+                if max_val >= self.match_threshold and max_val > best_score:
+                    best_score = float(max_val)
+                    best_template = template
+                    best_location = max_loc
 
         if not best_template:
             self.notify_missed()
             return None
+        
+        #  성공한 템플릿을 "선호 템플릿"으로 기록
+        self._last_successful_template = best_template
 
         nick_x = origin_x + best_location[0]
         nick_y = origin_y + best_location[1]
@@ -174,3 +196,5 @@ class NicknameDetector:
         if self._lost_frames >= self.max_roi_lost_frames:
             self._last_result = None
             self._lost_frames = 0
+            #  캐릭터를 완전히 놓쳤으므로 선호 템플릿도 초기화
+            self._last_successful_template = None
