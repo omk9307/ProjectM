@@ -994,6 +994,7 @@ class HuntTab(QWidget):
 
             self.detection_thread.start()
             self._update_detection_thread_overlay_flags()
+            self._sync_detection_thread_status()
             if self.detection_view:
                 self.detection_view.setText("탐지 준비 중...")
                 self.detection_view.setPixmap(QPixmap())
@@ -1584,6 +1585,15 @@ class HuntTab(QWidget):
         self.detection_thread.show_nickname_overlay = bool(self._is_nickname_overlay_active())
         self.detection_thread.show_direction_overlay = bool(self._is_direction_range_overlay_active())
 
+    def _sync_detection_thread_status(self) -> None:
+        if not self.detection_thread:
+            return
+        try:
+            self.detection_thread.set_authority(self.current_authority)
+            self.detection_thread.set_facing(self.last_facing)
+        except AttributeError:
+            pass
+
     def set_overlay_preferences(self, options: dict | None) -> None:
         if not isinstance(options, dict):
             return
@@ -2064,6 +2074,7 @@ class HuntTab(QWidget):
         self._update_facing_label()
         if side in ('left', 'right') and not from_direction and not getattr(self, '_direction_active', False):
             self._schedule_facing_reset()
+        self._sync_detection_thread_status()
         if save and not from_direction:
             self._save_settings()
 
@@ -2580,6 +2591,7 @@ class HuntTab(QWidget):
             self.last_release_attempt_ts = 0.0
             self._last_monster_seen_ts = time.time()
         self._update_authority_ui()
+        self._sync_detection_thread_status()
         if owner == "hunt":
             self.append_log("사냥 탭이 조작 권한을 획득했습니다.", "success")
         elif owner == "map":

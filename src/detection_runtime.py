@@ -191,6 +191,8 @@ class DetectionThread(QThread):
         self.show_direction_overlay = bool(show_direction_overlay)
         self.is_running = True
         self.min_monster_box_size = MIN_MONSTER_BOX_SIZE
+        self.current_authority: str = "map"
+        self.current_facing: Optional[str] = None
         
         # FPS 계산 변수
         self.fps = 0.0
@@ -204,6 +206,16 @@ class DetectionThread(QThread):
             "yolo_ms": 0.0,
             "total_ms": 0.0,
         }
+
+    def set_authority(self, owner: Optional[str]) -> None:
+        if isinstance(owner, str):
+            self.current_authority = owner
+
+    def set_facing(self, side: Optional[str]) -> None:
+        if side in ("left", "right"):
+            self.current_facing = side
+        else:
+            self.current_facing = None
 
     def run(self) -> None:  # noqa: D401
         try:
@@ -387,11 +399,12 @@ class DetectionThread(QThread):
                         log_messages.append(f"[{timestamp}] 탐색 완료. 객체 없음.")
                     self.detection_logged.emit(log_messages)
                 
-                if self.show_nickname_overlay and nickname_info and nickname_info.get('nickname_box'):
-                    nick_box = nickname_info['nickname_box']
-                    x1, y1 = int(nick_box.get('x', 0)), int(nick_box.get('y', 0))
-                    x2 = int(x1 + nick_box.get('width', 0))
-                    y2 = int(y1 + nick_box.get('height', 0))
+                nick_box_data = nickname_info.get('nickname_box') if isinstance(nickname_info, dict) else None
+
+                if self.show_nickname_overlay and nick_box_data:
+                    x1, y1 = int(nick_box_data.get('x', 0)), int(nick_box_data.get('y', 0))
+                    x2 = int(x1 + nick_box_data.get('width', 0))
+                    y2 = int(y1 + nick_box_data.get('height', 0))
                     cv2.rectangle(annotated_frame, (x1, y1), (x2, y2), (0, 255, 255), 2)
 
                 if self.show_direction_overlay and direction_info and isinstance(direction_info, dict):
@@ -410,6 +423,34 @@ class DetectionThread(QThread):
                         my2 = int(my1 + match_rect.get('height', 0))
                         color = (0, 200, 255) if direction_info.get('side') == 'left' else (255, 200, 0)
                         cv2.rectangle(annotated_frame, (mx1, my1), (mx2, my2), color, 2)
+
+                if nick_box_data and self.current_facing in ("left", "right"):
+                    frame_height, frame_width = annotated_frame.shape[:2]
+                    x1 = int(nick_box_data.get('x', 0))
+                    y1 = int(nick_box_data.get('y', 0))
+                    width = int(nick_box_data.get('width', 0))
+                    height = int(nick_box_data.get('height', 0))
+                    mid_x = x1 + width // 2
+                    arrow_length = max(20, int(width * 0.6))
+                    arrow_y = y1 + height + 15
+                    if arrow_y >= frame_height - 5:
+                        arrow_y = max(10, y1 - 10)
+                    arrow_y = int(np.clip(arrow_y, 5, frame_height - 5))
+                    half_len = arrow_length // 2
+                    if self.current_facing == "left":
+                        start_point = (min(frame_width - 5, mid_x + half_len), arrow_y)
+                        end_point = (max(5, mid_x - half_len), arrow_y)
+                    else:
+                        start_point = (max(5, mid_x - half_len), arrow_y)
+                        end_point = (min(frame_width - 5, mid_x + half_len), arrow_y)
+                    cv2.arrowedLine(
+                        annotated_frame,
+                        start_point,
+                        end_point,
+                        (0, 255, 0),
+                        3,
+                        tipLength=0.35,
+                    )
                 
                 loop_end_time = time.perf_counter()
                 self.perf_stats["total_ms"] = (loop_end_time - loop_start_time) * 1000
@@ -421,18 +462,41 @@ class DetectionThread(QThread):
                     "direction_ms": float(self.perf_stats["direction_ms"]),
                 }
 
-                y_pos = 30
-                cv2.rectangle(annotated_frame, (5, 5), (250, 140), (0,0,0), -1)
-                fps_text = f"FPS : {self.fps:.1f}"
-                total_text = f"TOTAL: {self.perf_stats['total_ms']:.1f} ms"
-                nick_text = f" NICK: {self.perf_stats['nickname_ms']:.1f} ms"
-                yolo_text = f" YOLO: {self.perf_stats['yolo_ms']:.1f} ms"
-                dir_text = f" DIR: {self.perf_stats['direction_ms']:.1f} ms"
-                cv2.putText(annotated_frame, fps_text, (10, y_pos), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2); y_pos += 25
-                cv2.putText(annotated_frame, total_text, (10, y_pos), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2); y_pos += 25
-                cv2.putText(annotated_frame, nick_text, (10, y_pos), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2); y_pos += 25
-                cv2.putText(annotated_frame, yolo_text, (10, y_pos), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2); y_pos += 25
-                cv2.putText(annotated_frame, dir_text, (10, y_pos), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
+                cv2.rectangle(annotated_frame, (5, 5), (180, 80), (0, 0, 0), -1)
+                fps_text = f"FPS {self.fps:.1f}"
+                cv2.putText(
+                    annotated_frame,
+                    fps_text,
+                    (12, 32),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.7,
+                    (0, 255, 0),
+                    2,
+                )
+
+                authority_key = (self.current_authority or "").lower()
+                if authority_key == "hunt":
+                    authority_display = "Hunt"
+                    authority_color = (0, 0, 255)
+                elif authority_key == "map":
+                    authority_display = "Map"
+                    authority_color = (255, 0, 0)
+                elif authority_key:
+                    authority_display = authority_key.title()
+                    authority_color = (200, 200, 200)
+                else:
+                    authority_display = "-"
+                    authority_color = (200, 200, 200)
+
+                cv2.putText(
+                    annotated_frame,
+                    authority_display,
+                    (12, 60),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.7,
+                    authority_color,
+                    2,
+                )
 
                 self.detections_ready.emit(payload)
 
