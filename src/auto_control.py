@@ -6,12 +6,14 @@ import json
 import os
 import random
 import copy
+from pathlib import Path
+
 from PyQt6.QtWidgets import (
     QApplication, QWidget, QVBoxLayout, QHBoxLayout, QLabel, QListWidget, QPushButton,
     QGroupBox, QFormLayout, QComboBox, QSpinBox, QMessageBox, QFrame, QCheckBox,
-    QListWidgetItem, QInputDialog, QAbstractItemView
+    QListWidgetItem, QInputDialog, QAbstractItemView, QTabWidget, QFileDialog
 )
-from PyQt6.QtCore import pyqtSlot, Qt, QTimer, pyqtSignal
+from PyQt6.QtCore import pyqtSlot, Qt, QTimer, pyqtSignal, QMimeData
 from PyQt6.QtGui import QIcon, QColor
 from pynput.keyboard import Key, Listener
 from datetime import datetime
@@ -21,7 +23,7 @@ SERIAL_PORT = 'COM6'
 BAUD_RATE = 115200
 CMD_PRESS = 0x01
 CMD_RELEASE = 0x02
-KEY_MAPPINGS_FILE = os.path.join('Project_Maple','workspace', 'config', 'key_mappings.json')
+BASE_DIR = Path(__file__).resolve().parents[1]
 
 #  모든 키의 표준 HID 코드를 담는 통합 맵
 FULL_KEY_MAP = {
@@ -40,6 +42,45 @@ FULL_KEY_MAP = {
     Key.alt_r: 230,
     Key.cmd_r: 231,
 }
+
+CATEGORY_NAMES = ("이동", "스킬", "기타", "이벤트")
+
+PROFILE_MIME_TYPE = "application/x-autocontrol-profile"
+
+CATEGORY_KEYWORDS = {
+    "스킬": ["스킬", "skill", "버프", "필살", "텔레포트", "teleport", "공격", "strike", "slash"],
+    "이벤트": ["이벤트", "event", "퀘스트", "quest"],
+    "기타": ["기타", "other", "포션", "물약", "아이템", "item", "설정", "config"],
+}
+
+
+def _resolve_key_mappings_path():
+    legacy_relative = Path(os.path.join('Project_Maple', 'workspace', 'config', 'key_mappings.json'))
+    module_workspace = Path(__file__).resolve().parents[1] / 'workspace' / 'config' / 'key_mappings.json'
+    workspace_relative = Path('workspace') / 'config' / 'key_mappings.json'
+
+    candidates = [
+        legacy_relative,
+        Path.cwd() / legacy_relative,
+        module_workspace,
+        workspace_relative,
+        Path.cwd() / workspace_relative,
+    ]
+
+    for candidate in candidates:
+        try:
+            candidate_path = candidate if candidate.is_absolute() else (Path.cwd() / candidate)
+            if candidate_path.is_file():
+                return candidate_path.resolve()
+        except OSError:
+            continue
+
+    fallback = candidates[1] if len(candidates) > 1 else module_workspace
+    fallback_path = fallback if fallback.is_absolute() else (Path.cwd() / fallback)
+    return fallback_path.resolve()
+
+
+KEY_MAPPINGS_FILE = _resolve_key_mappings_path()
 
 class CopyableListWidget(QListWidget):
     def __init__(self, parent=None):
@@ -60,6 +101,83 @@ class CopyableListWidget(QListWidget):
             super().keyPressEvent(event)
 
 
+class CommandProfileListWidget(QListWidget):
+    def __init__(self, category, parent=None):
+        super().__init__(parent)
+        self.category = category
+        self.parent_tab = parent
+        self.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
+        self.setDragEnabled(True)
+        self.setAcceptDrops(False)
+        self.setDropIndicatorShown(False)
+        self.setDragDropMode(QAbstractItemView.DragDropMode.DragOnly)
+
+    def mimeTypes(self):
+        return [PROFILE_MIME_TYPE]
+
+    def mimeData(self, items):
+        names = [item.text() for item in items if item]
+        mime_data = QMimeData()
+        mime_data.setData(PROFILE_MIME_TYPE, json.dumps(names, ensure_ascii=False).encode('utf-8'))
+        return mime_data
+
+
+class CommandCategoryTabWidget(QTabWidget):
+    profileDropped = pyqtSignal(list, str)
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setAcceptDrops(True)
+
+    def dragEnterEvent(self, event):
+        if event.mimeData().hasFormat(PROFILE_MIME_TYPE):
+            event.acceptProposedAction()
+        else:
+            super().dragEnterEvent(event)
+
+    def dragMoveEvent(self, event):
+        if event.mimeData().hasFormat(PROFILE_MIME_TYPE):
+            event.acceptProposedAction()
+        else:
+            super().dragMoveEvent(event)
+
+    def dropEvent(self, event):
+        if event.mimeData().hasFormat(PROFILE_MIME_TYPE):
+            try:
+                data = event.mimeData().data(PROFILE_MIME_TYPE)
+                names = json.loads(bytes(data).decode('utf-8'))
+            except (ValueError, json.JSONDecodeError):
+                names = []
+            valid_names = []
+            seen = set()
+            for name in names:
+                if isinstance(name, str) and name not in seen:
+                    seen.add(name)
+                    valid_names.append(name)
+            if not valid_names:
+                event.ignore()
+                return
+
+            tab_index = self.tabBar().tabAt(event.position().toPoint())
+            if tab_index < 0:
+                event.ignore()
+                return
+
+            target_widget = self.widget(tab_index)
+            category = getattr(target_widget, 'category', None)
+            if not category:
+                event.ignore()
+                return
+
+            self.profileDropped.emit(valid_names, category)
+            event.acceptProposedAction()
+        else:
+            super().dropEvent(event)
+
+    def supportedDropActions(self):
+        return Qt.DropAction.MoveAction
+
+
 class AutoControlTab(QWidget):
     recording_status_changed = pyqtSignal(str)
     reset_auto_stop_timer_signal = pyqtSignal()
@@ -72,7 +190,13 @@ class AutoControlTab(QWidget):
         self.ser = None
         self.held_keys = set()
         self.mappings = {}
+        self.profile_categories = {}
         self.key_list_str = self._generate_key_list()
+        self.active_category = CATEGORY_NAMES[0]
+        self.category_lists = {}
+        self.command_tab_widget = None
+        self._is_syncing_selection = False
+        self.key_mappings_path = KEY_MAPPINGS_FILE
 
         # --- 녹화 관련 변수 ---
         self.is_recording = False
@@ -146,12 +270,26 @@ class AutoControlTab(QWidget):
         
         # --- 명령 목록 ---
         cmd_group_layout = QVBoxLayout()
+        cmd_title_layout = QHBoxLayout()
         cmd_title = QLabel("명령 프로필"); cmd_title.setObjectName("TitleLabel")
-        cmd_group_layout.addWidget(cmd_title)
+        load_btn = QPushButton(QIcon.fromTheme("document-open"), " 불러오기")
+        load_btn.clicked.connect(self.prompt_load_mappings)
+        cmd_title_layout.addWidget(cmd_title)
+        cmd_title_layout.addStretch()
+        cmd_title_layout.addWidget(load_btn)
+        cmd_group_layout.addLayout(cmd_title_layout)
         
-        self.command_list = QListWidget()
-        self.command_list.currentItemChanged.connect(self.on_command_selected)
-        cmd_group_layout.addWidget(self.command_list)
+        self.command_tab_widget = CommandCategoryTabWidget(self)
+        self.command_tab_widget.currentChanged.connect(self._on_category_tab_changed)
+        self.command_tab_widget.profileDropped.connect(self.handle_profile_drop)
+        for category in CATEGORY_NAMES:
+            list_widget = CommandProfileListWidget(category, self)
+            list_widget.currentItemChanged.connect(lambda curr, prev, cat=category: self.on_command_selected(curr, prev, cat))
+            self.category_lists[category] = list_widget
+            self.command_tab_widget.addTab(list_widget, category)
+
+        self.command_list = self.category_lists[self.active_category]
+        cmd_group_layout.addWidget(self.command_tab_widget)
 
         cmd_buttons_layout = QHBoxLayout()
         add_cmd_btn = QPushButton(QIcon.fromTheme("list-add"), " 추가"); add_cmd_btn.clicked.connect(self.add_command_profile)
@@ -352,23 +490,126 @@ class AutoControlTab(QWidget):
                 print("[AutoControl] 전역 키보드 리스너를 중지합니다.")
 
     def load_mappings(self):
-        if os.path.exists(KEY_MAPPINGS_FILE):
-            try:
-                with open(KEY_MAPPINGS_FILE, 'r', encoding='utf-8') as f:
-                    self.mappings = json.load(f)
-            except json.JSONDecodeError:
-                self.mappings = self.create_default_mappings()
+        if self._load_mappings_from_path(self.key_mappings_path):
+            if hasattr(self, 'status_label'):
+                self.status_label.setText(f"'{self.key_mappings_path.name}' 매핑을 불러왔습니다.")
         else:
             self.mappings = self.create_default_mappings()
-        self.populate_command_list()
+            self._ensure_profile_categories()
+            self.populate_command_list()
+            if hasattr(self, 'status_label'):
+                self.status_label.setText("기본 매핑을 불러왔습니다.")
+
+    def prompt_load_mappings(self):
+        start_dir = str(self.key_mappings_path.parent) if self.key_mappings_path and self.key_mappings_path.exists() else str(Path.cwd())
+        file_path, _ = QFileDialog.getOpenFileName(
+            self,
+            "키 매핑 불러오기",
+            start_dir,
+            "JSON Files (*.json);;All Files (*)",
+        )
+        if not file_path:
+            return
+
+        if self._load_mappings_from_path(file_path):
+            if hasattr(self, 'status_label'):
+                self.status_label.setText(f"'{Path(file_path).name}' 매핑을 불러왔습니다.")
+        else:
+            QMessageBox.warning(self, "불러오기 실패", "선택한 파일에서 매핑을 불러올 수 없습니다. JSON 구조를 확인해주세요.")
+
+    def _ensure_profile_categories(self, categories=None):
+        if not isinstance(categories, dict):
+            categories = {}
+
+        valid_categories = set(CATEGORY_NAMES)
+        if not isinstance(self.mappings, dict):
+            self.mappings = {}
+
+        self.profile_categories = {}
+        for name in self.mappings.keys():
+            category = categories.get(name)
+            if category not in valid_categories:
+                category = CATEGORY_NAMES[0]
+            self.profile_categories[name] = category
 
     def save_mappings(self):
         try:
-            with open(KEY_MAPPINGS_FILE, 'w', encoding='utf-8') as f:
-                json.dump(self.mappings, f, indent=4, ensure_ascii=False)
+            categories_to_save = {
+                name: self.profile_categories.get(name, CATEGORY_NAMES[0])
+                for name in self.mappings.keys()
+            }
+            data_to_save = {
+                '_categories': categories_to_save,
+                'profiles': self.mappings,
+            }
+            self.key_mappings_path.parent.mkdir(parents=True, exist_ok=True)
+            with self.key_mappings_path.open('w', encoding='utf-8') as f:
+                json.dump(data_to_save, f, indent=4, ensure_ascii=False)
             self.status_label.setText("키 매핑이 성공적으로 저장되었습니다.")
         except Exception as e:
             QMessageBox.critical(self, "오류", f"키 매핑 저장에 실패했습니다:\n{e}")
+    def _load_mappings_from_path(self, path):
+        try:
+            target_path = Path(path)
+        except TypeError:
+            return False
+
+        if not target_path.is_file():
+            return False
+
+        raw_data = None
+        for encoding in ('utf-8', 'utf-8-sig', 'cp949', 'euc-kr'):
+            try:
+                with target_path.open('r', encoding=encoding) as f:
+                    raw_data = json.load(f)
+                break
+            except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+                raw_data = None
+        if not isinstance(raw_data, dict):
+            return False
+
+        meta = raw_data.get('_meta') if isinstance(raw_data.get('_meta'), dict) else {}
+        categories = raw_data.get('_categories') or meta.get('categories') or {}
+
+        if isinstance(raw_data.get('profiles'), dict):
+            new_mappings = raw_data.get('profiles', {})
+        else:
+            new_mappings = {
+                key: value
+                for key, value in raw_data.items()
+                if not key.startswith('_')
+            }
+
+        if not isinstance(new_mappings, dict):
+            return False
+
+        self.mappings = new_mappings
+        self.key_mappings_path = target_path.resolve()
+        self._ensure_profile_categories(categories)
+        self._apply_category_heuristics()
+        self.populate_command_list()
+        return True
+
+    def _apply_category_heuristics(self):
+        for name in self.mappings.keys():
+            current_category = self.profile_categories.get(name)
+            if current_category in CATEGORY_NAMES and current_category != CATEGORY_NAMES[0]:
+                continue
+
+            lowered = name.lower()
+            chosen = None
+            for category, keywords in CATEGORY_KEYWORDS.items():
+                if any(keyword in lowered for keyword in keywords):
+                    chosen = category
+                    break
+
+            if not chosen and any(keyword in name for keyword in CATEGORY_KEYWORDS.get("스킬", [])):
+                chosen = "스킬"
+
+            if chosen and chosen in CATEGORY_NAMES:
+                self.profile_categories[name] = chosen
+            else:
+                self.profile_categories[name] = CATEGORY_NAMES[0]
 
     def create_default_mappings(self):
         return {
@@ -435,18 +676,154 @@ class AutoControlTab(QWidget):
                                      QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel)
         if reply == QMessageBox.StandardButton.Yes:
             self.mappings = self.create_default_mappings()
+            self._ensure_profile_categories()
             self.populate_command_list()
-            if self.command_list.count() > 0:
-                self.command_list.setCurrentRow(0)
+            current_list = self._current_command_list()
+            if current_list and current_list.count() > 0:
+                current_list.setCurrentRow(0)
 
     def populate_command_list(self):
-        current_selection = self.command_list.currentItem().text() if self.command_list.currentItem() else None
-        self.command_list.clear()
-        self.command_list.addItems(sorted(self.mappings.keys()))
-        if current_selection:
-            items = self.command_list.findItems(current_selection, Qt.MatchFlag.MatchExactly)
+        if not self.category_lists:
+            return
+
+        self._ensure_profile_categories(self.profile_categories)
+        current_selection = self._current_command_name()
+
+        for list_widget in self.category_lists.values():
+            list_widget.blockSignals(True)
+            list_widget.clear()
+            list_widget.blockSignals(False)
+
+        sorted_names = sorted(self.mappings.keys())
+        for name in sorted_names:
+            category = self.profile_categories.get(name, CATEGORY_NAMES[0])
+            list_widget = self.category_lists.get(category)
+            if list_widget is None:
+                list_widget = self.category_lists.get(CATEGORY_NAMES[0])
+                self.profile_categories[name] = CATEGORY_NAMES[0]
+            if list_widget is None:
+                continue
+            list_widget.addItem(name)
+
+        if current_selection and self._select_command_in_lists(current_selection):
+            return
+
+        for category in CATEGORY_NAMES:
+            list_widget = self.category_lists.get(category)
+            if list_widget and list_widget.count() > 0:
+                list_widget.setCurrentRow(0)
+                return
+
+        self.editor_group.setEnabled(False)
+        self.action_sequence_list.clear()
+
+    def _on_category_tab_changed(self, index):
+        if self._is_syncing_selection:
+            return
+
+        if not self.command_tab_widget:
+            return
+
+        if not hasattr(self, 'editor_group'):
+            return
+
+        widget = self.command_tab_widget.widget(index)
+        if widget is None:
+            self.active_category = CATEGORY_NAMES[0]
+            self.command_list = None
+            self.editor_group.setEnabled(False)
+            self.action_sequence_list.clear()
+            return
+
+        for category, list_widget in self.category_lists.items():
+            if list_widget is widget:
+                self.active_category = category
+                self.command_list = list_widget
+                break
+
+        current_item = widget.currentItem() if hasattr(widget, 'currentItem') else None
+        if current_item is not None:
+            self.on_command_selected(current_item, None, self.active_category)
+        elif widget.count() > 0:
+            widget.setCurrentRow(0)
+        else:
+            self.editor_group.setEnabled(False)
+            self.action_sequence_list.clear()
+
+    def _current_command_list(self):
+        return self.category_lists.get(self.active_category)
+
+    def _current_command_item(self):
+        current_list = self._current_command_list()
+        return current_list.currentItem() if current_list else None
+
+    def _current_command_name(self):
+        item = self._current_command_item()
+        return item.text() if item else None
+
+    def _find_command_item(self, command_name):
+        for category, list_widget in self.category_lists.items():
+            if not list_widget:
+                continue
+            items = list_widget.findItems(command_name, Qt.MatchFlag.MatchExactly)
             if items:
-                self.command_list.setCurrentItem(items[0])
+                return category, items[0]
+        return None, None
+
+    def _select_command_in_lists(self, command_name):
+        category, item = self._find_command_item(command_name)
+        if not item:
+            return False
+        target_list = self.category_lists[category]
+        if target_list.currentItem() is item:
+            self.on_command_selected(item, None, category)
+        else:
+            target_list.setCurrentItem(item)
+        return True
+
+    def handle_profile_drop(self, profile_names, target_category):
+        if isinstance(profile_names, str):
+            profile_names = [profile_names]
+
+        if not profile_names or target_category not in CATEGORY_NAMES:
+            return
+
+        unique_names = []
+        seen = set()
+        for name in profile_names:
+            if isinstance(name, str) and name in self.mappings and name not in seen:
+                unique_names.append(name)
+                seen.add(name)
+
+        if not unique_names:
+            return
+
+        changed = False
+        for name in unique_names:
+            previous_category = self.profile_categories.get(name, CATEGORY_NAMES[0])
+            if previous_category != target_category:
+                self.profile_categories[name] = target_category
+                changed = True
+
+        if changed:
+            self.populate_command_list()
+
+        focused_name = None
+        for name in unique_names:
+            if self.profile_categories.get(name) == target_category:
+                focused_name = name
+                break
+
+        if focused_name:
+            self._select_command_in_lists(focused_name)
+            if changed and getattr(self, 'status_label', None):
+                count = len(unique_names)
+                if count == 1:
+                    self.status_label.setText(f"'{focused_name}' 프로필을 '{target_category}' 탭으로 이동했습니다.")
+                else:
+                    self.status_label.setText(f"{count}개 프로필을 '{target_category}' 탭으로 이동했습니다.")
+
+
 
     def _generate_key_list(self):
         """FULL_KEY_MAP에서 UI 콤보박스에 표시할 그룹화된 문자열 리스트 생성"""
@@ -507,12 +884,40 @@ class AutoControlTab(QWidget):
                 final_key_list.extend(sorted(list(set(key_list))))
                 
         return final_key_list
-    def on_command_selected(self, current_item, previous_item):
-        self.editor_group.setEnabled(False) 
+    def on_command_selected(self, current_item, previous_item, category=None):
+        if self._is_syncing_selection:
+            return
+
+        if not hasattr(self, 'editor_group'):
+            return
+
+        if current_item is not None and category is None:
+            widget = current_item.listWidget()
+            for cat, list_widget in self.category_lists.items():
+                if list_widget is widget:
+                    category = cat
+                    break
+
+        if category in self.category_lists:
+            target_list = self.category_lists[category]
+            if self.command_tab_widget.currentWidget() is not target_list:
+                self._is_syncing_selection = True
+                self.command_tab_widget.setCurrentWidget(target_list)
+                self._is_syncing_selection = False
+            self.active_category = category
+            self.command_list = target_list
+
+        self._is_syncing_selection = True
+        for cat, list_widget in self.category_lists.items():
+            if cat != category:
+                list_widget.clearSelection()
+        self._is_syncing_selection = False
+
+        self.editor_group.setEnabled(False)
         self.action_sequence_list.clear()
         if not current_item:
             return
-        
+
         command_text = current_item.text()
         self._populate_action_sequence_list(command_text)
 
@@ -521,7 +926,7 @@ class AutoControlTab(QWidget):
             self.editor_group.setEnabled(False)
             return
             
-        command_item = self.command_list.currentItem()
+        command_item = self._current_command_item()
         if not command_item: return
         
         command_text = command_item.text()
@@ -563,7 +968,7 @@ class AutoControlTab(QWidget):
         self.action_type_combo.blockSignals(False); self.key_combo.blockSignals(False); self.min_delay_spin.blockSignals(False); self.max_delay_spin.blockSignals(False)
 
     def _update_action_from_editor(self, _=None):
-        command_item = self.command_list.currentItem(); action_item = self.action_sequence_list.currentItem()
+        command_item = self._current_command_item(); action_item = self.action_sequence_list.currentItem()
         if not command_item or not action_item: return
         command_text = command_item.text(); row = self.action_sequence_list.currentRow()
         action_type = self.action_type_combo.currentText()
@@ -600,21 +1005,22 @@ class AutoControlTab(QWidget):
                 QMessageBox.warning(self, "오류", "이미 존재하는 명령어입니다.")
                 return
             self.mappings[text] = []
+            self.profile_categories[text] = self.active_category
             self.populate_command_list()
-            items = self.command_list.findItems(text, Qt.MatchFlag.MatchExactly)
-            if items: self.command_list.setCurrentItem(items[0])
+            self._select_command_in_lists(text)
 
     def remove_command_profile(self):
-        current_item = self.command_list.currentItem()
+        current_item = self._current_command_item()
         if not current_item: return
         command_text = current_item.text()
         reply = QMessageBox.question(self, "명령 프로필 삭제", f"'{command_text}' 명령 프로필을 삭제하시겠습니까?", QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel)
         if reply == QMessageBox.StandardButton.Yes:
-            del self.mappings[command_text]
+            self.mappings.pop(command_text, None)
+            self.profile_categories.pop(command_text, None)
             self.populate_command_list()
 
     def add_action_step(self):
-        command_item = self.command_list.currentItem()
+        command_item = self._current_command_item()
         if not command_item:
             QMessageBox.warning(self, "오류", "먼저 좌측에서 명령을 선택하세요.")
             return
@@ -625,7 +1031,7 @@ class AutoControlTab(QWidget):
         self.action_sequence_list.setCurrentRow(self.action_sequence_list.count() - 1)
 
     def remove_action_step(self):
-        command_item = self.command_list.currentItem(); row = self.action_sequence_list.currentRow()
+        command_item = self._current_command_item(); row = self.action_sequence_list.currentRow()
         if not command_item or row < 0: return
         command_text = command_item.text()
         del self.mappings[command_text][row]
@@ -633,7 +1039,7 @@ class AutoControlTab(QWidget):
 
     def randomize_delays(self):
         """선택된 명령 프로필의 모든 delay 액션에 랜덤성을 부여합니다."""
-        command_item = self.command_list.currentItem()
+        command_item = self._current_command_item()
         if not command_item:
             QMessageBox.warning(self, "알림", "지연 시간을 변경할 명령 프로필을 선택하세요.")
             return
@@ -663,7 +1069,7 @@ class AutoControlTab(QWidget):
             QMessageBox.information(self, "알림", "선택된 프로필에 지연(delay) 액션이 없습니다.")
 
     def move_action_step(self, direction):
-        command_item = self.command_list.currentItem(); row = self.action_sequence_list.currentRow()
+        command_item = self._current_command_item(); row = self.action_sequence_list.currentRow()
         if not command_item or row < 0: return
         new_row = row + direction
         if not (0 <= new_row < self.action_sequence_list.count()): return
@@ -676,7 +1082,7 @@ class AutoControlTab(QWidget):
 
     def copy_sequence_to_clipboard(self):
         """현재 선택된 명령 프로필의 액션 시퀀스를 JSON 문자열로 클립보드에 복사합니다."""
-        command_item = self.command_list.currentItem()
+        command_item = self._current_command_item()
         if not command_item:
             QMessageBox.warning(self, "알림", "복사할 명령 프로필을 선택하세요.")
             return
@@ -704,7 +1110,7 @@ class AutoControlTab(QWidget):
             QMessageBox.critical(self, "오류", f"클립보드 복사 중 오류가 발생했습니다:\n{e}")
 
     def paste_sequence_from_clipboard(self):
-        command_item = self.command_list.currentItem()
+        command_item = self._current_command_item()
         if not command_item:
             QMessageBox.warning(self, "알림", "붙여넣을 명령 프로필을 선택하세요.")
             return
@@ -822,7 +1228,7 @@ class AutoControlTab(QWidget):
         self.status_label.setText("테스트 후 모든 키가 자동으로 해제되었습니다.")
 
     def test_selected_sequence(self):
-        command_item = self.command_list.currentItem()
+        command_item = self._current_command_item()
         if not command_item:
             QMessageBox.warning(self, "알림", "테스트할 명령 프로필을 선택하세요.")
             return
@@ -1017,7 +1423,7 @@ class AutoControlTab(QWidget):
             self.start_recording()
 
     def start_recording(self):
-        if not self.command_list.currentItem():
+        if not self._current_command_item():
             QMessageBox.warning(self, "알림", "녹화할 명령 프로필을 먼저 선택하세요.")
             self.record_btn.setChecked(False)
             return
@@ -1059,7 +1465,7 @@ class AutoControlTab(QWidget):
         self.is_recording = False
         self.is_waiting_for_start_key = False
         
-        command_item = self.command_list.currentItem()
+        command_item = self._current_command_item()
         if command_item and self.recorded_sequence:
             command_text = command_item.text()
             self.mappings[command_text] = self.recorded_sequence
