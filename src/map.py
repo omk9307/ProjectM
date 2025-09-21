@@ -5936,6 +5936,19 @@ class MapTab(QWidget):
         if self.event_in_progress:
             return True
 
+        auto_checkbox = getattr(self, "auto_control_checkbox", None)
+        debug_checkbox = getattr(self, "debug_auto_control_checkbox", None)
+        is_auto_enabled = bool(auto_checkbox and auto_checkbox.isChecked())
+        is_debug_enabled = bool(debug_checkbox and debug_checkbox.isChecked())
+
+        if not (is_auto_enabled or is_debug_enabled):
+            waypoint_name = waypoint_data.get('name', '')
+            self.update_general_log(
+                f"[이벤트] '{waypoint_name}' 자동 제어가 비활성화되어 실행을 건너뜁니다.",
+                "orange"
+            )
+            return False
+
         profile_name = waypoint_data.get('event_profile') or ""
         waypoint_name = waypoint_data.get('name', '')
 
