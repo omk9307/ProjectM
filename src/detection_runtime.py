@@ -326,8 +326,6 @@ class DetectionThread(QThread):
                         else:
                             payload["monsters"].append(item)
 
-                self.detections_ready.emit(payload)
-
                 if self.is_debug_mode:
                     log_messages: List[str] = []
                     boxes = result.boxes
@@ -353,6 +351,12 @@ class DetectionThread(QThread):
                 
                 loop_end_time = time.perf_counter()
                 self.perf_stats["total_ms"] = (loop_end_time - loop_start_time) * 1000
+                payload["perf"] = {
+                    "fps": float(self.fps),
+                    "total_ms": float(self.perf_stats["total_ms"]),
+                    "yolo_ms": float(self.perf_stats["yolo_ms"]),
+                    "nickname_ms": float(self.perf_stats["nickname_ms"]),
+                }
 
                 y_pos = 30
                 cv2.rectangle(annotated_frame, (5, 5), (230, 115), (0,0,0), -1)
@@ -364,6 +368,8 @@ class DetectionThread(QThread):
                 cv2.putText(annotated_frame, total_text, (10, y_pos), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2); y_pos += 25
                 cv2.putText(annotated_frame, nick_text, (10, y_pos), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2); y_pos += 25
                 cv2.putText(annotated_frame, yolo_text, (10, y_pos), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
+
+                self.detections_ready.emit(payload)
 
                 rgb_image = cv2.cvtColor(annotated_frame, cv2.COLOR_BGR2RGB)
                 h, w, ch = rgb_image.shape

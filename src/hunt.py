@@ -386,6 +386,12 @@ class HuntTab(QWidget):
             'monsters': [],
             'nickname': None,
         }
+        self.latest_perf_stats = {
+            'fps': 0.0,
+            'total_ms': 0.0,
+            'yolo_ms': 0.0,
+            'nickname_ms': 0.0,
+        }
         self._active_target_names: List[str] = []
 
         self._build_ui()
@@ -447,43 +453,39 @@ class HuntTab(QWidget):
         left_column.setSpacing(10)
 
         detection_group = self._create_detection_group()
-        left_column.addWidget(detection_group, 1)
+        range_group = self._create_range_group()
+        condition_group = self._create_condition_group()
+        misc_group = self._create_misc_group()
+
+        left_column.addWidget(detection_group)
+
+        range_misc_row = QHBoxLayout()
+        range_misc_row.setSpacing(10)
+        range_misc_row.addWidget(range_group, 1)
+        range_misc_row.addWidget(misc_group, 1)
+        left_column.addLayout(range_misc_row)
+
+        condition_row = QHBoxLayout()
+        condition_row.setSpacing(10)
+        condition_row.addWidget(condition_group, 1)
+        condition_row.addStretch(1)
+        left_column.addLayout(condition_row)
         left_column.addStretch(1)
 
         right_column = QVBoxLayout()
         right_column.setSpacing(10)
 
-        self.authority_label = QLabel("현재 권한: 이동 탭")
-        self.authority_label.setAlignment(Qt.AlignmentFlag.AlignLeft)
-        right_column.addWidget(self.authority_label)
-
-        range_group = self._create_range_group()
-        condition_group = self._create_condition_group()
-        misc_group = self._create_misc_group()
-        condition_stack = QWidget()
-        condition_stack_layout = QVBoxLayout(condition_stack)
-        condition_stack_layout.setContentsMargins(0, 0, 0, 0)
-        condition_stack_layout.setSpacing(10)
-        condition_stack_layout.addWidget(condition_group)
-        condition_stack_layout.addWidget(misc_group)
-        range_condition_row = QWidget()
-        range_condition_layout = QHBoxLayout(range_condition_row)
-        range_condition_layout.setContentsMargins(0, 0, 0, 0)
-        range_condition_layout.setSpacing(10)
-        range_condition_layout.addWidget(range_group, 1)
-        range_condition_layout.addWidget(condition_stack, 1)
-        right_column.addWidget(range_condition_row)
-
         model_group = self._create_model_group()
-        right_column.addWidget(model_group)
-
         skill_group = self._create_skill_group()
-        right_column.addWidget(skill_group)
 
+        right_column.addWidget(model_group)
+        right_column.addWidget(skill_group, 1)
         right_column.addStretch(1)
 
-        main_layout.addLayout(left_column, 1)
-        main_layout.addLayout(right_column, 1)
+        main_layout.addLayout(left_column, 5)
+        main_layout.addLayout(right_column, 5)
+        main_layout.setStretch(0, 5)
+        main_layout.setStretch(1, 5)
 
         self.setLayout(main_layout)
         self._refresh_attack_tree()
@@ -494,6 +496,10 @@ class HuntTab(QWidget):
 
     def _create_range_group(self) -> QGroupBox:
         group = QGroupBox("사냥 범위 설정")
+        group.setSizePolicy(
+            QSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+        )
+        group.setMinimumWidth(0)
         area_form = QFormLayout()
 
         self.enemy_range_spinbox = QSpinBox()
@@ -520,27 +526,8 @@ class HuntTab(QWidget):
         self.primary_skill_range_spinbox.setValue(200)
         area_form.addRow("주 스킬 X 범위(±px)", self.primary_skill_range_spinbox)
 
-        toggles_layout = QHBoxLayout()
-        self.show_hunt_area_checkbox = QCheckBox("사냥 범위 표시")
-        self.show_hunt_area_checkbox.setChecked(True)
-        self.show_primary_skill_checkbox = QCheckBox("주 스킬 범위 표시")
-        self.show_primary_skill_checkbox.setChecked(True)
-        toggles_layout.addWidget(self.show_hunt_area_checkbox)
-        toggles_layout.addWidget(self.show_primary_skill_checkbox)
-        toggles_layout.addStretch(1)
-
-        self.monster_count_label = QLabel("범위 내 몬스터: 0 | 주 스킬 범위: 0")
-        self.facing_label = QLabel("현재 방향: 미정")
-
-        info_row = QHBoxLayout()
-        info_row.addWidget(self.monster_count_label)
-        info_row.addStretch(1)
-        info_row.addWidget(self.facing_label)
-
         area_layout = QVBoxLayout()
         area_layout.addLayout(area_form)
-        area_layout.addLayout(toggles_layout)
-        area_layout.addLayout(info_row)
         group.setLayout(area_layout)
         group.setSizePolicy(QSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed))
 
@@ -552,13 +539,15 @@ class HuntTab(QWidget):
         ):
             spin.valueChanged.connect(self._on_area_config_changed)
             spin.valueChanged.connect(self._handle_setting_changed)
-        self.show_hunt_area_checkbox.toggled.connect(self._on_overlay_toggle_changed)
-        self.show_primary_skill_checkbox.toggled.connect(self._on_overlay_toggle_changed)
 
         return group
 
     def _create_condition_group(self) -> QGroupBox:
         group = QGroupBox("사냥 조건")
+        group.setSizePolicy(
+            QSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+        )
+        group.setMinimumWidth(0)
         condition_form = QFormLayout()
 
         self.monster_threshold_spinbox = QSpinBox()
@@ -566,10 +555,6 @@ class HuntTab(QWidget):
         self.monster_threshold_spinbox.setValue(3)
         condition_form.addRow("기준 몬스터 수", self.monster_threshold_spinbox)
         self.monster_threshold_spinbox.valueChanged.connect(self._handle_setting_changed)
-
-        self.auto_request_checkbox = QCheckBox("조건 충족 시 자동 요청")
-        condition_form.addRow(self.auto_request_checkbox)
-        self.auto_request_checkbox.toggled.connect(self._handle_setting_changed)
 
         self.idle_release_spinbox = QDoubleSpinBox()
         self.idle_release_spinbox.setRange(0.5, 30.0)
@@ -593,6 +578,10 @@ class HuntTab(QWidget):
 
     def _create_misc_group(self) -> QGroupBox:
         group = QGroupBox("기타 조건")
+        group.setSizePolicy(
+            QSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+        )
+        group.setMinimumWidth(0)
         misc_form = QFormLayout()
 
         self.facing_reset_min_spinbox = QDoubleSpinBox()
@@ -651,6 +640,9 @@ class HuntTab(QWidget):
 
     def _create_detection_group(self) -> QGroupBox:
         group = QGroupBox("탐지 실행")
+        group.setSizePolicy(
+            QSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+        )
         outer_layout = QVBoxLayout()
         outer_layout.setContentsMargins(8, 8, 8, 8)
         outer_layout.setSpacing(8)
@@ -673,31 +665,55 @@ class HuntTab(QWidget):
         self.manual_target_radio.toggled.connect(self._handle_capture_mode_toggle)
         self.auto_target_radio.toggled.connect(self._handle_setting_changed)
         target_layout.addWidget(self.set_area_btn)
-        target_layout.addStretch(1)
-        control_layout.addLayout(target_layout)
 
-        conf_layout = QHBoxLayout()
-        conf_layout.addWidget(QLabel(f"{CHARACTER_CLASS_NAME} 신뢰도:"))
+        control_row = QHBoxLayout()
+        control_row.setSpacing(12)
+
+        control_row.addLayout(target_layout)
+
+        control_row.addWidget(QLabel(f"{CHARACTER_CLASS_NAME} 신뢰도:"))
         self.conf_char_spinbox = QDoubleSpinBox()
         self.conf_char_spinbox.setRange(0.05, 0.95)
         self.conf_char_spinbox.setSingleStep(0.05)
         self.conf_char_spinbox.setValue(0.5)
-        conf_layout.addWidget(self.conf_char_spinbox)
         self.conf_char_spinbox.valueChanged.connect(self._on_conf_char_changed)
+        control_row.addWidget(self.conf_char_spinbox)
 
-        conf_layout.addWidget(QLabel("몬스터 신뢰도:"))
+        control_row.addWidget(QLabel("몬스터 신뢰도:"))
         self.conf_monster_spinbox = QDoubleSpinBox()
         self.conf_monster_spinbox.setRange(0.05, 0.95)
         self.conf_monster_spinbox.setSingleStep(0.05)
         self.conf_monster_spinbox.setValue(0.5)
-        conf_layout.addWidget(self.conf_monster_spinbox)
         self.conf_monster_spinbox.valueChanged.connect(self._handle_setting_changed)
+        control_row.addWidget(self.conf_monster_spinbox)
 
-        self.debug_checkbox = QCheckBox("디버그 로그")
-        conf_layout.addWidget(self.debug_checkbox)
-        self.debug_checkbox.toggled.connect(self._handle_setting_changed)
-        conf_layout.addStretch(1)
-        control_layout.addLayout(conf_layout)
+        control_row.addStretch(1)
+        control_layout.addLayout(control_row)
+
+        self.screen_output_checkbox = QCheckBox("화면 출력")
+        self.screen_output_checkbox.setChecked(False)
+        self.screen_output_checkbox.toggled.connect(self._on_screen_output_toggled)
+
+        self.show_hunt_area_checkbox = QCheckBox("사냥 범위 표시")
+        self.show_hunt_area_checkbox.setChecked(True)
+        self.show_hunt_area_checkbox.toggled.connect(self._on_overlay_toggle_changed)
+
+        self.show_primary_skill_checkbox = QCheckBox("주 스킬 범위 표시")
+        self.show_primary_skill_checkbox.setChecked(True)
+        self.show_primary_skill_checkbox.toggled.connect(self._on_overlay_toggle_changed)
+
+        self.auto_request_checkbox = QCheckBox("조건 충족 시 자동 요청")
+        self.auto_request_checkbox.toggled.connect(self._handle_setting_changed)
+
+        for checkbox in (
+            self.screen_output_checkbox,
+            self.show_hunt_area_checkbox,
+            self.show_primary_skill_checkbox,
+            self.auto_request_checkbox,
+        ):
+            checkbox.setSizePolicy(
+                QSizePolicy(QSizePolicy.Policy.Maximum, QSizePolicy.Policy.Fixed)
+            )
 
         button_row = QHBoxLayout()
         self.detect_btn = QPushButton("실시간 탐지 시작")
@@ -710,6 +726,13 @@ class HuntTab(QWidget):
         self.popup_btn.setToolTip("탐지 화면을 팝업으로 열기")
         self.popup_btn.clicked.connect(self._toggle_detection_popup)
         button_row.addWidget(self.popup_btn)
+
+        button_row.addSpacing(12)
+        button_row.addWidget(self.screen_output_checkbox)
+        button_row.addWidget(self.show_hunt_area_checkbox)
+        button_row.addWidget(self.show_primary_skill_checkbox)
+        button_row.addWidget(self.auto_request_checkbox)
+
         button_row.addStretch(1)
         control_layout.addLayout(button_row)
 
@@ -874,7 +897,7 @@ class HuntTab(QWidget):
                 conf_char=self.conf_char_spinbox.value(),
                 conf_monster=self.conf_monster_spinbox.value(),
                 char_class_index=-1,
-                is_debug_mode=self.debug_checkbox.isChecked(),
+                is_debug_mode=False,
                 nickname_detector=nickname_detector_instance,
             )
 
@@ -899,6 +922,9 @@ class HuntTab(QWidget):
                 self.append_log(f"탐지 대상: {target_list_text}", "info")
             self._set_current_facing(None, save=False)
             self._schedule_facing_reset()
+
+            if self.screen_output_checkbox.isChecked() and not self.is_popup_active:
+                self._toggle_detection_popup()
         else:
             thread_active = self.detection_thread is not None and self.detection_thread.isRunning()
             self._release_pending = True
@@ -1098,39 +1124,83 @@ class HuntTab(QWidget):
         return QRect(int(x1), int(y1), int(x2 - x1), int(y2 - y1))
 
     def _update_detection_summary(self) -> None:
-        if not hasattr(self, 'summary_view'):
+        if not hasattr(self, 'confidence_summary_view'):
             return
 
-        nickname = self.latest_detection_details.get('nickname')
-        characters = self.latest_detection_details.get('characters', [])
-        monsters = self.latest_detection_details.get('monsters', [])
+        show_confidence = self.show_confidence_summary_checkbox.isChecked()
+        show_info = self.show_info_summary_checkbox.isChecked()
 
-        lines: List[str] = []
+        if show_confidence:
+            characters = self.latest_detection_details.get('characters', [])
+            monsters = self.latest_detection_details.get('monsters', [])
 
-        if nickname and isinstance(nickname, dict) and nickname.get('score') is not None:
-            lines.append(f"닉네임 매칭: {float(nickname.get('score', 0.0)):.2f}")
+            lines: List[str] = []
+
+            if characters:
+                best_char = max(characters, key=lambda item: float(item.get('score', 0.0)))
+                lines.append(
+                    f"캐릭터: 신뢰도 {float(best_char.get('score', 0.0)):.2f}"
+                )
+            else:
+                lines.append("캐릭터 없음")
+
+            if monsters:
+                grouped: dict[str, List[float]] = {}
+                for item in monsters:
+                    name = str(item.get('class_name', '???'))
+                    grouped.setdefault(name, []).append(float(item.get('score', 0.0)))
+                for name in sorted(grouped.keys()):
+                    scores = grouped[name]
+                    score_text = ', '.join(f"{score:.2f}" for score in scores)
+                    lines.append(
+                        f"{name}: {len(scores)}마리 (신뢰도: {score_text})"
+                    )
+            else:
+                lines.append("몬스터 없음")
+
+            self.confidence_summary_view.setPlainText('\n'.join(lines))
         else:
-            lines.append("닉네임 매칭 없음")
+            self.confidence_summary_view.clear()
 
-        if characters:
-            best_char = max(characters, key=lambda item: float(item.get('score', 0.0)))
-            lines.append(f"캐릭터 (신뢰도: {float(best_char.get('score', 0.0)):.2f})")
+        if show_info:
+            perf = getattr(self, 'latest_perf_stats', {}) or {}
+            fps = float(perf.get('fps', 0.0))
+            total_ms = float(perf.get('total_ms', 0.0))
+            yolo_ms = float(perf.get('yolo_ms', 0.0))
+            nickname_ms = float(perf.get('nickname_ms', 0.0))
+
+            fps_text = f"FPS: {fps:.0f}"
+            perf_line = (
+                f"{fps_text} | Total: {total_ms:.1f} ms ( {yolo_ms:.1f} ms + {nickname_ms:.1f} ms)"
+            )
+
+            if self.current_authority == "hunt":
+                authority_text = "사냥 탭"
+            elif self.current_authority == "map":
+                authority_text = "Map 탭"
+            else:
+                authority_text = str(self.current_authority)
+
+            info_lines = [
+                perf_line,
+                f"이동권한: {authority_text}",
+                f"X축 범위 내 몬스터: {self.latest_monster_count}",
+                f"스킬 범위 몬스터: {self.latest_primary_monster_count}",
+                f"캐릭터 방향: {self._format_facing_text()}",
+            ]
+
+            self.info_summary_view.setPlainText('\n'.join(info_lines))
         else:
-            lines.append("캐릭터 없음")
+            self.info_summary_view.clear()
 
-        if monsters:
-            grouped: dict[str, List[float]] = {}
-            for item in monsters:
-                name = str(item.get('class_name', '???'))
-                grouped.setdefault(name, []).append(float(item.get('score', 0.0)))
-            for name in sorted(grouped.keys()):
-                scores = grouped[name]
-                score_text = ', '.join(f"{score:.2f}" for score in scores)
-                lines.append(f"{name}: {len(scores)}마리 (신뢰도: {score_text})")
-        else:
-            lines.append("몬스터 없음")
+    def _on_summary_checkbox_changed(self, _checked: bool) -> None:
+        self._update_detection_summary()
+        self._save_settings()
 
-        self.summary_view.setPlainText('\n'.join(lines))
+    def _on_screen_output_toggled(self, checked: bool) -> None:
+        if checked and self.detect_btn.isChecked() and not self.is_popup_active:
+            self._toggle_detection_popup()
+        self._handle_setting_changed()
 
     def _update_detection_frame(self, q_image) -> None:
         if not self.detection_view:
@@ -1202,11 +1272,52 @@ class HuntTab(QWidget):
         group = QGroupBox("탐지 요약")
         layout = QVBoxLayout(group)
         layout.setContentsMargins(8, 8, 8, 8)
-        self.summary_view = QTextEdit()
-        self.summary_view.setReadOnly(True)
-        self.summary_view.setMinimumHeight(120)
-        self.summary_view.setStyleSheet("font-family: Consolas, monospace;")
-        layout.addWidget(self.summary_view)
+        layout.setSpacing(8)
+
+        content_layout = QHBoxLayout()
+        content_layout.setSpacing(12)
+
+        self.summary_confidence_container = QWidget()
+        confidence_layout = QVBoxLayout(self.summary_confidence_container)
+        confidence_layout.setContentsMargins(0, 0, 0, 0)
+        confidence_layout.setSpacing(4)
+        confidence_header = QHBoxLayout()
+        confidence_label = QLabel("탐지 신뢰도")
+        self.show_confidence_summary_checkbox = QCheckBox()
+        self.show_confidence_summary_checkbox.setChecked(True)
+        self.show_confidence_summary_checkbox.toggled.connect(self._on_summary_checkbox_changed)
+        confidence_header.addWidget(confidence_label)
+        confidence_header.addWidget(self.show_confidence_summary_checkbox)
+        confidence_header.addStretch(1)
+        self.confidence_summary_view = QTextEdit()
+        self.confidence_summary_view.setReadOnly(True)
+        self.confidence_summary_view.setMinimumHeight(140)
+        self.confidence_summary_view.setStyleSheet("font-family: Consolas, monospace;")
+        confidence_layout.addLayout(confidence_header)
+        confidence_layout.addWidget(self.confidence_summary_view)
+        content_layout.addWidget(self.summary_confidence_container, 1)
+
+        self.summary_info_container = QWidget()
+        info_layout = QVBoxLayout(self.summary_info_container)
+        info_layout.setContentsMargins(0, 0, 0, 0)
+        info_layout.setSpacing(4)
+        info_header = QHBoxLayout()
+        info_label = QLabel("탐지 정보")
+        self.show_info_summary_checkbox = QCheckBox()
+        self.show_info_summary_checkbox.setChecked(True)
+        self.show_info_summary_checkbox.toggled.connect(self._on_summary_checkbox_changed)
+        info_header.addWidget(info_label)
+        info_header.addWidget(self.show_info_summary_checkbox)
+        info_header.addStretch(1)
+        self.info_summary_view = QTextEdit()
+        self.info_summary_view.setReadOnly(True)
+        self.info_summary_view.setMinimumHeight(140)
+        self.info_summary_view.setStyleSheet("font-family: Consolas, monospace;")
+        info_layout.addLayout(info_header)
+        info_layout.addWidget(self.info_summary_view)
+        content_layout.addWidget(self.summary_info_container, 1)
+
+        layout.addLayout(content_layout)
         return group
 
     def _create_attack_section(self) -> QGroupBox:
@@ -1442,6 +1553,25 @@ class HuntTab(QWidget):
         characters_data = payload.get('characters') or []
         monsters_data = payload.get('monsters') or []
         nickname_data = payload.get('nickname')
+        perf_data = payload.get('perf') or {}
+
+        if isinstance(perf_data, dict):
+            try:
+                self.latest_perf_stats['fps'] = float(perf_data.get('fps', self.latest_perf_stats['fps']))
+            except (TypeError, ValueError):
+                pass
+            try:
+                self.latest_perf_stats['total_ms'] = float(perf_data.get('total_ms', self.latest_perf_stats['total_ms']))
+            except (TypeError, ValueError):
+                pass
+            try:
+                self.latest_perf_stats['yolo_ms'] = float(perf_data.get('yolo_ms', self.latest_perf_stats['yolo_ms']))
+            except (TypeError, ValueError):
+                pass
+            try:
+                self.latest_perf_stats['nickname_ms'] = float(perf_data.get('nickname_ms', self.latest_perf_stats['nickname_ms']))
+            except (TypeError, ValueError):
+                pass
 
         def _to_box(data):
             try:
@@ -1637,20 +1767,17 @@ class HuntTab(QWidget):
         return AreaRect(x=character_box.center_x - radius, y=hunt_area.y, width=width, height=hunt_area.height)
 
     def _update_monster_count_label(self) -> None:
-        if hasattr(self, "monster_count_label"):
-            text = f"범위 내 몬스터: {self.latest_monster_count} | 주 스킬 범위: {self.latest_primary_monster_count}"
-            self.monster_count_label.setText(text)
+        self._update_detection_summary()
 
     def _update_facing_label(self) -> None:
-        if not hasattr(self, "facing_label"):
-            return
+        self._update_detection_summary()
+
+    def _format_facing_text(self) -> str:
         if self.last_facing == 'left':
-            text = "현재 방향: 좌측"
-        elif self.last_facing == 'right':
-            text = "현재 방향: 우측"
-        else:
-            text = "현재 방향: 미정"
-        self.facing_label.setText(text)
+            return "왼쪽"
+        if self.last_facing == 'right':
+            return "오른쪽"
+        return "미정"
 
     def _set_current_facing(self, side: Optional[str], *, save: bool = True) -> None:
         if side not in ('left', 'right'):
@@ -1782,13 +1909,22 @@ class HuntTab(QWidget):
             show_hunt = bool(display.get('show_hunt_area', self.show_hunt_area_checkbox.isChecked()))
             show_primary = bool(display.get('show_primary_area', self.show_primary_skill_checkbox.isChecked()))
             auto_target = bool(display.get('auto_target', self.auto_target_radio.isChecked()))
-            debug_enabled = bool(display.get('debug', self.debug_checkbox.isChecked()))
+            screen_output_enabled = bool(
+                display.get(
+                    'screen_output',
+                    display.get('debug', self.screen_output_checkbox.isChecked()),
+                )
+            )
+            summary_confidence = bool(display.get('summary_confidence', self.show_confidence_summary_checkbox.isChecked()))
+            summary_info = bool(display.get('summary_info', self.show_info_summary_checkbox.isChecked()))
 
             self.show_hunt_area_checkbox.setChecked(show_hunt)
             self.show_primary_skill_checkbox.setChecked(show_primary)
             self.auto_target_radio.setChecked(auto_target)
             self.manual_target_radio.setChecked(not auto_target)
-            self.debug_checkbox.setChecked(debug_enabled)
+            self.screen_output_checkbox.setChecked(screen_output_enabled)
+            self.show_confidence_summary_checkbox.setChecked(summary_confidence)
+            self.show_info_summary_checkbox.setChecked(summary_info)
 
         self.manual_capture_region = data.get('manual_capture_region', self.manual_capture_region)
         self.set_area_btn.setEnabled(self.manual_target_radio.isChecked())
@@ -1902,7 +2038,9 @@ class HuntTab(QWidget):
                 'show_hunt_area': self.show_hunt_area_checkbox.isChecked(),
                 'show_primary_area': self.show_primary_skill_checkbox.isChecked(),
                 'auto_target': self.auto_target_radio.isChecked(),
-                'debug': self.debug_checkbox.isChecked(),
+                'screen_output': self.screen_output_checkbox.isChecked(),
+                'summary_confidence': self.show_confidence_summary_checkbox.isChecked(),
+                'summary_info': self.show_info_summary_checkbox.isChecked(),
             },
             'misc': {
                 'direction_delay_min': self.direction_delay_min_spinbox.value(),
@@ -2034,12 +2172,7 @@ class HuntTab(QWidget):
             self._schedule_condition_poll()
 
     def _update_authority_ui(self) -> None:
-        if not hasattr(self, "authority_label"):
-            return
-        if self.current_authority == "hunt":
-            self.authority_label.setText("현재 권한: 사냥 탭")
-        else:
-            self.authority_label.setText("현재 권한: 맵 탭")
+        self._update_detection_summary()
         self._update_attack_buttons()
         self._update_buff_buttons()
 
