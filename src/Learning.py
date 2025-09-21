@@ -76,6 +76,8 @@ CLASS_COLORS = [
     QColor(128, 0, 0, 80), QColor(0, 128, 0, 80), QColor(0, 0, 128, 80),
     QColor(128, 128, 0, 80), QColor(0, 128, 128, 80), QColor(128, 0, 128, 80)
 ]
+# 최소 몬스터 라벨 크기(px)
+MIN_MONSTER_LABEL_SIZE = 30
 # 편집기에서 마우스 커서를 올린 다각형을 강조하기 위한 색상입니다.
 HIGHLIGHT_BRUSH_COLOR = QColor(255, 255, 0, 100) # 채우기 색상
 HIGHLIGHT_PEN_COLOR = QColor(255, 255, 255)   # 외곽선 색상 (흰색)
@@ -2757,18 +2759,40 @@ class LearningTab(QWidget):
             # 클래스가 할당된 다각형만 라벨로 변환
             labeled_polygons = [p for p in polygons_data if p.get('class_id') is not None]
 
+            filtered_small_polygons = 0
             if labeled_polygons:
                 q_img = pixmap.toImage()
                 w, h = q_img.width(), q_img.height()
                 for poly_data in labeled_polygons:
                     class_id, points = poly_data['class_id'], poly_data['points']
                     if w > 0 and h > 0:
+                        is_monster_class = False
+                        if 0 <= class_id < len(final_class_list):
+                            class_name = final_class_list[class_id]
+                            category = self.data_manager.get_class_category(class_name)
+                            is_monster_class = category == "몬스터"
+                        if is_monster_class and points:
+                            xs = [p.x() for p in points]
+                            ys = [p.y() for p in points]
+                            width_px = max(xs) - min(xs)
+                            height_px = max(ys) - min(ys)
+                            if (
+                                width_px < MIN_MONSTER_LABEL_SIZE
+                                or height_px < MIN_MONSTER_LABEL_SIZE
+                            ):
+                                filtered_small_polygons += 1
+                                continue
                         normalized_points = [f"{p.x()/w:.6f} {p.y()/h:.6f}" for p in points]
                         label_lines.append(f"{class_id} {' '.join(normalized_points)}")
                         involved_class_ids.add(class_id)
 
             involved_classes = [final_class_list[i] for i in involved_class_ids if i < len(final_class_list)]
             label_content = "\n".join(label_lines)
+
+            if filtered_small_polygons and hasattr(self, 'log_viewer'):
+                self.log_viewer.append(
+                    f"{MIN_MONSTER_LABEL_SIZE}px 미만 몬스터 라벨 {filtered_small_polygons}개를 제외했습니다."
+                )
 
             filename_to_update = os.path.basename(image_path) if image_path else None
 

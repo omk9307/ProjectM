@@ -27,6 +27,9 @@ from nickname_detection import NicknameDetector
 from direction_detection import DirectionDetector
 
 
+MIN_MONSTER_BOX_SIZE = 30  # 탐지된 몬스터로 인정할 최소 크기(px)
+
+
 __all__ = ["ScreenSnipper", "DetectionPopup", "DetectionThread"]
 
 
@@ -187,6 +190,7 @@ class DetectionThread(QThread):
         self.show_nickname_overlay = bool(show_nickname_overlay)
         self.show_direction_overlay = bool(show_direction_overlay)
         self.is_running = True
+        self.min_monster_box_size = MIN_MONSTER_BOX_SIZE
         
         # FPS 계산 변수
         self.fps = 0.0
@@ -277,11 +281,18 @@ class DetectionThread(QThread):
                     for i, box in enumerate(result.boxes):
                         cls_id = int(box.cls)
                         conf = float(box.conf.item())
+                        x1, y1, x2, y2 = box.xyxy[0].tolist()
+                        width = float(x2 - x1)
+                        height = float(y2 - y1)
                         if cls_id == self.char_class_index:
                             if conf >= self.conf_char:
                                 char_indices_with_conf.append((i, conf))
                         elif conf >= self.conf_monster:
-                            other_indices.append(i)
+                            if (
+                                width >= self.min_monster_box_size
+                                and height >= self.min_monster_box_size
+                            ):
+                                other_indices.append(i)
                     final_indices: List[int] = []
                     if char_indices_with_conf and nickname_info is None:
                         best_char_index = max(
@@ -311,11 +322,21 @@ class DetectionThread(QThread):
                     for box in result.boxes:
                         x1, y1, x2, y2 = [int(coord) for coord in box.xyxy[0].tolist()]
                         class_id = int(box.cls)
+                        width_px = float(x2 - x1)
+                        height_px = float(y2 - y1)
+                        if (
+                            class_id != self.char_class_index
+                            and (
+                                width_px < self.min_monster_box_size
+                                or height_px < self.min_monster_box_size
+                            )
+                        ):
+                            continue
                         item = {
                             "x": float(x1),
                             "y": float(y1),
-                            "width": float(x2 - x1),
-                            "height": float(y2 - y1),
+                            "width": width_px,
+                            "height": height_px,
                             "score": float(box.conf.item()),
                             "class_id": class_id,
                             "class_name": model.names[class_id],
