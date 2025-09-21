@@ -59,6 +59,7 @@ NICKNAME_EDGE = QPen(QColor(255, 255, 0, 220), 2, Qt.PenStyle.DotLine)
 DIRECTION_ROI_EDGE = QPen(QColor(170, 80, 255, 200), 1, Qt.PenStyle.DashLine)
 DIRECTION_MATCH_EDGE_LEFT = QPen(QColor(0, 200, 255, 220), 2, Qt.PenStyle.SolidLine)
 DIRECTION_MATCH_EDGE_RIGHT = QPen(QColor(255, 200, 0, 220), 2, Qt.PenStyle.SolidLine)
+MONSTER_LOSS_GRACE_SEC = 0.2  # 단기 미검출 시 방향 유지용 유예시간(초)
 
 try:
     COMPOSITION_MODE_DEST_OVER = QPainter.CompositionMode.CompositionMode_DestinationOver
@@ -380,6 +381,8 @@ class HuntTab(QWidget):
         self._next_command_ready_ts = 0.0
         self._last_condition_poll_ts = 0.0
         self._request_pending = False
+        self._cached_monster_boxes: List[DetectionBox] = []
+        self._cached_monster_boxes_ts = 0.0
 
         self.detection_thread: Optional[DetectionThread] = None
         self.detection_popup: Optional[DetectionPopup] = None
@@ -1282,21 +1285,19 @@ class HuntTab(QWidget):
             if direction_detail.get('matched') and direction_detail.get('side') in ('left', 'right'):
                 side_text = '왼쪽' if direction_detail.get('side') == 'left' else '오른쪽'
                 score_val = float(direction_detail.get('score', 0.0))
-                direction_line = f"방향 탐지: {direction_mode} - {side_text} ({score_val:.2f})"
-            elif self._direction_active:
-                side_text = '왼쪽' if self._direction_last_side == 'left' else '오른쪽' if self._direction_last_side == 'right' else '-'
-                direction_line = f"방향 탐지: {direction_mode} - 유지 ({side_text})"
+                direction_line = f"방향 탐지: {side_text} ({score_val:.2f}) - {direction_mode}"
+            elif self._direction_active and self._direction_last_side in ('left', 'right'):
+                side_text = '왼쪽' if self._direction_last_side == 'left' else '오른쪽'
+                direction_line = f"방향 탐지: 유지 ({side_text}) - {direction_mode}"
             else:
-                direction_line = f"방향 탐지: {direction_mode} - 비활성"
+                direction_line = f"방향 탐지: 비활성 - {direction_mode}"
 
             info_lines = [
-                "FPS:",
                 fps_line,
                 total_line,
                 f"이동권한: {authority_text}",
                 f"X축 범위 내 몬스터: {self.latest_monster_count}",
                 f"스킬 범위 몬스터: {self.latest_primary_monster_count}",
-                f"캐릭터 방향: {self._format_facing_text()}",
                 direction_line,
             ]
 
@@ -1934,9 +1935,33 @@ class HuntTab(QWidget):
         self.current_hunt_area = hunt_area
         self.current_primary_area = primary_area
 
-        monsters = self.latest_snapshot.monster_boxes
-        hunt_count = sum(1 for box in monsters if box.intersects(hunt_area))
-        primary_count = sum(1 for box in monsters if primary_area and box.intersects(primary_area))
+        now = time.time()
+        raw_monsters = self.latest_snapshot.monster_boxes or []
+        using_cached_monsters = False
+
+        if raw_monsters:
+            effective_monsters = raw_monsters
+            self._cached_monster_boxes = [DetectionBox(**vars(box)) for box in raw_monsters]
+            self._cached_monster_boxes_ts = now
+        else:
+            if (
+                self._cached_monster_boxes
+                and now - self._cached_monster_boxes_ts <= MONSTER_LOSS_GRACE_SEC
+            ):
+                effective_monsters = [DetectionBox(**vars(box)) for box in self._cached_monster_boxes]
+                using_cached_monsters = True
+            else:
+                effective_monsters = []
+                self._cached_monster_boxes = []
+                self._cached_monster_boxes_ts = 0.0
+
+        if using_cached_monsters:
+            self.latest_snapshot.monster_boxes = effective_monsters
+
+        hunt_count = sum(1 for box in effective_monsters if box.intersects(hunt_area))
+        primary_count = sum(
+            1 for box in effective_monsters if primary_area and box.intersects(primary_area)
+        )
 
         self.latest_monster_count = hunt_count
         self.latest_primary_monster_count = primary_count
@@ -1953,12 +1978,25 @@ class HuntTab(QWidget):
         self.current_primary_area = None
         self.latest_monster_count = 0
         self.latest_primary_monster_count = 0
+        self._cached_monster_boxes = []
+        self._cached_monster_boxes_ts = 0.0
         self._latest_nickname_box = None
         self._latest_direction_roi = None
         self._latest_direction_match = None
         self._update_monster_count_label()
         self._emit_area_overlays()
         self.monster_stats_updated.emit(0, 0)
+
+    def _get_recent_monster_boxes(self) -> List[DetectionBox]:
+        if self.latest_snapshot and self.latest_snapshot.monster_boxes:
+            return self.latest_snapshot.monster_boxes
+        now = time.time()
+        if (
+            self._cached_monster_boxes
+            and now - self._cached_monster_boxes_ts <= MONSTER_LOSS_GRACE_SEC
+        ):
+            return [DetectionBox(**vars(box)) for box in self._cached_monster_boxes]
+        return []
 
     def _apply_detected_direction(self, side: str, score: float) -> None:
         if side not in ('left', 'right'):
@@ -2676,7 +2714,7 @@ class HuntTab(QWidget):
             return False
         if not self.current_hunt_area:
             return False
-        monsters = self.latest_snapshot.monster_boxes
+        monsters = self._get_recent_monster_boxes()
         if not monsters:
             return False
 
@@ -2800,7 +2838,7 @@ class HuntTab(QWidget):
     def _select_target_monster(self, character_box: DetectionBox) -> Optional[DetectionBox]:
         if not self.latest_snapshot:
             return None
-        monsters = self.latest_snapshot.monster_boxes
+        monsters = self._get_recent_monster_boxes()
         if not monsters:
             return None
         candidates = monsters
