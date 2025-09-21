@@ -184,6 +184,7 @@ class AutoControlTab(QWidget):
     stop_recording_signal = pyqtSignal()
     log_generated = pyqtSignal(str, str)
     request_detection_toggle = pyqtSignal()
+    sequence_completed = pyqtSignal(str, object, bool)
 
     def __init__(self):
         super().__init__()
@@ -252,6 +253,21 @@ class AutoControlTab(QWidget):
             QPushButton { padding: 4px; }
             QPushButton:checked { background-color: #c62828; color: white; border: 1px solid #999; }
         """)
+
+    def _notify_sequence_completed(self, success):
+        command_name = self.current_command_name
+        if command_name:
+            try:
+                self.sequence_completed.emit(command_name, self.current_command_reason, success)
+            except Exception:
+                pass
+        self.current_command_name = ""
+        self.current_command_reason = None
+        self.current_sequence = []
+        self.current_sequence_index = 0
+        self.is_sequence_running = False
+        self.is_processing_step = False
+        self.is_test_mode = False
 
     def init_ui(self):
         main_layout = QHBoxLayout(self)
@@ -1257,12 +1273,13 @@ class AutoControlTab(QWidget):
                 self.sequence_timer.stop()
             except Exception:
                 pass
+            try:
+                self.sequence_watchdog.stop()
+            except Exception:
+                pass
             # 이미 눌린 키가 남아있을 수 있으므로 강제 해제
             self._release_all_keys(force=True)
-            # 내부 상태 초기화
-            self.is_sequence_running = False
-            self.is_processing_step = False
-            self.current_command_reason = None
+            self._notify_sequence_completed(False)
 
         # 만약 다른 시퀀스가 실행 중이면 기존 시퀀스 중단(이전 동작 취소)
         elif self.is_sequence_running:
@@ -1272,9 +1289,13 @@ class AutoControlTab(QWidget):
                 self.sequence_timer.stop()
             except Exception:
                 pass
+            try:
+                self.sequence_watchdog.stop()
+            except Exception:
+                pass
             # 안전하게 키들만 해제 (기본 동작: 강제 해제는 하지 않음)
             self._release_all_keys()
-            self.current_command_reason = None
+            self._notify_sequence_completed(False)
 
         # 이제 새 시퀀스 초기화
         self.status_label.setText(f"'{command_name}' 실행 중.")
@@ -1321,7 +1342,6 @@ class AutoControlTab(QWidget):
         try:
             # 완료 검사
             if self.current_sequence_index >= len(self.current_sequence):
-                self.is_sequence_running = False
                 self.sequence_watchdog.stop()
                 if self.current_command_reason:
                     log_msg = f"--- (완료) {self.current_command_name} (원인: {self.current_command_reason}) ---"
@@ -1331,7 +1351,7 @@ class AutoControlTab(QWidget):
                 # 테스트 모드 후 키 남아있으면 안전 해제
                 if self.is_test_mode and self.held_keys:
                     QTimer.singleShot(2000, lambda: self._release_all_keys(force=True))
-                self.current_command_reason = None
+                self._notify_sequence_completed(True)
                 return
 
             step = self.current_sequence[self.current_sequence_index]
@@ -1386,9 +1406,8 @@ class AutoControlTab(QWidget):
             print(f"[AutoControl] _process_next_step 예외: {e}")
             self.log_generated.emit(f"오류: _process_next_step 예외 발생 - {e}", "red")
             self._release_all_keys(force=True)
-            self.is_sequence_running = False
-            self.current_command_reason = None
             self.sequence_watchdog.stop()
+            self._notify_sequence_completed(False)
         finally:
             self.is_processing_step = False
 
@@ -1411,10 +1430,12 @@ class AutoControlTab(QWidget):
             self.sequence_timer.stop()
         except Exception:
             pass
+        try:
+            self.sequence_watchdog.stop()
+        except Exception:
+            pass
         self._release_all_keys(force=True)
-        self.is_sequence_running = False
-        self.is_processing_step = False
-        self.current_command_reason = None
+        self._notify_sequence_completed(False)
 
     def toggle_recording(self):
         if self.is_recording or self.is_waiting_for_start_key:
