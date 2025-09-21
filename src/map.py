@@ -4795,6 +4795,7 @@ class MapTab(QWidget):
             self.last_reached_wp_id = None
             self.current_path_index = -1
             self.is_forward = True
+            self.route_cycle_initialized = False
             self.start_waypoint_found = False
             
             # v10.2.0: 중간 목표 상태 변수
@@ -4891,6 +4892,9 @@ class MapTab(QWidget):
             self.alignment_expected_group = None
             self.verify_alignment_start_time = 0.0  # 정렬 확인 시작 시간
             self.last_align_command_time = 0.0      # 마지막 정렬 명령 전송 시간
+
+            # 공중 경로 계산 대기 메시지 중복 방지 플래그
+            self.airborne_path_warning_active = False
 
             # --- [v.1810] 좁은 발판 착지 판단 유예 플래그 ---
             self.just_landed_on_narrow_terrain = False
@@ -6355,6 +6359,13 @@ class MapTab(QWidget):
                 self.current_player_floor = None
                 # --- 초기화 끝 ---
 
+                # 자동 복구 상태 초기화
+                self.stuck_recovery_attempts = 0
+                self.last_movement_command = None
+                self.recovery_cooldown_until = 0.0
+                self.airborne_path_warning_active = False
+                self.route_cycle_initialized = False
+
                 # [핵심 수정] 탐지 시작 시간 기록 및 딜레이 플래그 활성화
                 self.detection_start_time = time.time()
                 self.initial_delay_active = True
@@ -7544,7 +7555,11 @@ class MapTab(QWidget):
         [MODIFIED] v14.3.9: 로그 출력을 디버그 체크박스로 제어.
         다음 여정을 계획하고 경로 순환 로직을 처리합니다.
         """
-        self.is_forward = not self.is_forward
+        if self.route_cycle_initialized:
+            self.is_forward = not self.is_forward
+        else:
+            self.is_forward = True
+            self.route_cycle_initialized = True
         path_key = "forward_path" if self.is_forward else "backward_path"
         next_journey = active_route.get(path_key, [])
         if not next_journey and not self.is_forward:
@@ -7572,9 +7587,13 @@ class MapTab(QWidget):
         """
         current_terrain = self._get_contact_terrain(final_player_pos)
         if not current_terrain:
-            if not self.current_segment_path:
+            if not self.current_segment_path and not self.airborne_path_warning_active:
                 self.update_general_log("경로 계산 대기: 공중에서는 경로를 계산할 수 없습니다. 착지 후 재시도합니다.", "gray")
+                self.airborne_path_warning_active = True
             return
+        else:
+            if self.airborne_path_warning_active:
+                self.airborne_path_warning_active = False
 
         start_group = current_terrain.get('dynamic_name')
         if not self.journey_plan or self.current_journey_index >= len(self.journey_plan):
