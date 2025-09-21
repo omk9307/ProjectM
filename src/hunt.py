@@ -716,12 +716,7 @@ class HuntTab(QWidget):
         control_container.setSizePolicy(QSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed))
         outer_layout.addWidget(control_container)
 
-        self.detection_view = QLabel("탐지 화면")
-        self.detection_view.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.detection_view.setStyleSheet("background-color: black; color: white;")
-        self.detection_view.setMinimumSize(360, 240)
-        self.detection_view.setSizePolicy(QSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding))
-        outer_layout.addWidget(self.detection_view, 1)
+        self.detection_view = None
 
         control_log_container = QVBoxLayout()
         control_log_label = QLabel("입력 로그")
@@ -890,7 +885,9 @@ class HuntTab(QWidget):
             self.detection_thread.finished.connect(self._on_detection_thread_finished)
 
             self.detection_thread.start()
-            self.detection_view.setText("탐지 준비 중...")
+            if self.detection_view:
+                self.detection_view.setText("탐지 준비 중...")
+                self.detection_view.setPixmap(QPixmap())
             self.detect_btn.setText("실시간 탐지 중단")
 
             if hasattr(self.data_manager, 'save_settings'):
@@ -907,8 +904,9 @@ class HuntTab(QWidget):
             self._release_pending = True
             self._stop_detection_thread()
             self.detect_btn.setText("실시간 탐지 시작")
-            self.detection_view.setText("탐지 중단됨")
-            self.detection_view.setPixmap(QPixmap())
+            if self.detection_view:
+                self.detection_view.setText("탐지 중단됨")
+                self.detection_view.setPixmap(QPixmap())
             self.clear_detection_snapshot()
             self._cancel_facing_reset_timer()
             if not thread_active:
@@ -994,7 +992,7 @@ class HuntTab(QWidget):
     def _on_detection_thread_finished(self) -> None:
         self.detect_btn.setChecked(False)
         self.detect_btn.setText("실시간 탐지 시작")
-        if not self.is_popup_active:
+        if not self.is_popup_active and self.detection_view:
             self.detection_view.setText("탐지 중단됨")
             self.detection_view.setPixmap(QPixmap())
         self.detection_thread = None
@@ -1011,7 +1009,7 @@ class HuntTab(QWidget):
         self._paint_overlays(image)
         if self.is_popup_active and self.detection_popup:
             self.detection_popup.update_frame(image)
-        if not self.is_popup_active:
+        elif self.detection_view:
             self._update_detection_frame(image)
 
     def _paint_overlays(self, image) -> None:
@@ -1135,6 +1133,9 @@ class HuntTab(QWidget):
         self.summary_view.setPlainText('\n'.join(lines))
 
     def _update_detection_frame(self, q_image) -> None:
+        if not self.detection_view:
+            return
+
         self.detection_view.setPixmap(
             QPixmap.fromImage(q_image).scaled(
                 self.detection_view.size(),
@@ -1159,9 +1160,9 @@ class HuntTab(QWidget):
             self.detection_popup.scale_changed.connect(self._on_popup_scale_changed)
 
         self.detection_popup.set_waiting_message()
-
-        self.detection_view.setText("탐지 화면이 팝업으로 표시 중입니다.")
-        self.detection_view.setPixmap(QPixmap())
+        if self.detection_view:
+            self.detection_view.setText("탐지 화면이 팝업으로 표시 중입니다.")
+            self.detection_view.setPixmap(QPixmap())
         self.detection_popup.show()
 
     def _on_popup_scale_changed(self, value: int) -> None:
@@ -1172,12 +1173,13 @@ class HuntTab(QWidget):
         self.is_popup_active = False
         self.popup_btn.setText("↗")
         self.popup_btn.setToolTip("탐지 화면을 팝업으로 열기")
-        if self.detect_btn.isChecked():
-            self.detection_view.setText("탐지 준비 중...")
-            self.detection_view.setPixmap(QPixmap())
-        else:
-            self.detection_view.setText("탐지 중단됨")
-            self.detection_view.setPixmap(QPixmap())
+        if self.detection_view:
+            if self.detect_btn.isChecked():
+                self.detection_view.setText("탐지 준비 중...")
+                self.detection_view.setPixmap(QPixmap())
+            else:
+                self.detection_view.setText("탐지 중단됨")
+                self.detection_view.setPixmap(QPixmap())
 
         self.detection_popup = None
 
