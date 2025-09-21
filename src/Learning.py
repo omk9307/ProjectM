@@ -1514,7 +1514,7 @@ class ExportThread(QThread):
         try:
             self.progress.emit(f"'{os.path.basename(self.model_path)}' 모델을 TensorRT로 변환 중...")
             model = YOLO(self.model_path)
-            model.export(format='engine', half=True, device=0)
+            model.export(format='engine', half=False, device=0)
             self.finished.emit(True, "모델 최적화 성공!")
         except Exception as e: self.finished.emit(False, f"모델 최적화 오류: {e}")
 
