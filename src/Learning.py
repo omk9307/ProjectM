@@ -915,6 +915,12 @@ class DataManager:
         self.nickname_dir = os.path.join(self.config_path, 'nickname')
         self.nickname_templates_dir = os.path.join(self.nickname_dir, 'templates')
         self.nickname_config_path = os.path.join(self.nickname_dir, 'config.json')
+        self.direction_dir = os.path.join(self.config_path, 'direction')
+        self.direction_templates_dir = os.path.join(self.direction_dir, 'templates')
+        self.direction_left_dir = os.path.join(self.direction_templates_dir, 'left')
+        self.direction_right_dir = os.path.join(self.direction_templates_dir, 'right')
+        self.direction_config_path = os.path.join(self.direction_dir, 'config.json')
+        self._overlay_listeners: list = []
         self.ensure_dirs_and_files()
         self.migrate_manifest_if_needed()
 
@@ -925,6 +931,10 @@ class DataManager:
         os.makedirs(self.config_path, exist_ok=True)
         os.makedirs(self.nickname_dir, exist_ok=True)
         os.makedirs(self.nickname_templates_dir, exist_ok=True)
+        os.makedirs(self.direction_dir, exist_ok=True)
+        os.makedirs(self.direction_templates_dir, exist_ok=True)
+        os.makedirs(self.direction_left_dir, exist_ok=True)
+        os.makedirs(self.direction_right_dir, exist_ok=True)
         # v1.3: manifest 생성/확인 시 네거티브 샘플 항목 추가
         if not os.path.exists(self.manifest_path):
             initial_manifest = {category: {} for category in CATEGORIES}
@@ -968,6 +978,23 @@ class DataManager:
                         changed = True
                 if changed:
                     self._write_nickname_config(nickname_config)
+        default_direction_config = self._default_direction_config()
+        if not os.path.exists(self.direction_config_path):
+            self._write_direction_config(default_direction_config)
+        else:
+            try:
+                with open(self.direction_config_path, 'r', encoding='utf-8') as f:
+                    direction_config = json.load(f)
+            except (json.JSONDecodeError, FileNotFoundError):
+                self._write_direction_config(default_direction_config)
+            else:
+                changed = False
+                for key, value in default_direction_config.items():
+                    if key not in direction_config:
+                        direction_config[key] = value if key not in {'templates_left', 'templates_right'} else list(value)
+                        changed = True
+                if changed:
+                    self._write_direction_config(direction_config)
 
     def _default_nickname_config(self):
         return {
@@ -975,12 +1002,39 @@ class DataManager:
             "match_threshold": 0.72,
             "char_offset_x": 0,
             "char_offset_y": 46,
+            "show_overlay": True,
             "templates": [],
         }
 
     def _write_nickname_config(self, config_data):
         with open(self.nickname_config_path, 'w', encoding='utf-8') as f:
             json.dump(config_data, f, indent=4, ensure_ascii=False)
+
+    def _default_direction_config(self):
+        return {
+            'match_threshold': 0.72,
+            'search_offset_y': 60.0,
+            'search_height': 20.0,
+            'search_half_width': 30.0,
+            'show_overlay': True,
+            'templates_left': [],
+            'templates_right': [],
+        }
+
+    def _write_direction_config(self, config_data):
+        with open(self.direction_config_path, 'w', encoding='utf-8') as f:
+            json.dump(config_data, f, indent=4, ensure_ascii=False)
+
+    def register_overlay_listener(self, callback):
+        if callable(callback) and callback not in self._overlay_listeners:
+            self._overlay_listeners.append(callback)
+
+    def _notify_overlay_listeners(self, payload: dict) -> None:
+        for callback in list(self._overlay_listeners):
+            try:
+                callback(payload)
+            except Exception:
+                continue
 
     def migrate_manifest_if_needed(self):
         """이전 버전의 manifest.json(플랫 구조)을 새 계층 구조로 자동 변환합니다."""
@@ -1268,6 +1322,10 @@ class DataManager:
                 continue
             config[key] = value
         self._write_nickname_config(config)
+        self._notify_overlay_listeners({
+            'target': 'nickname',
+            'show_overlay': bool(config.get('show_overlay', True)),
+        })
         return config
 
     def list_nickname_templates(self):
@@ -1351,10 +1409,152 @@ class DataManager:
             else:
                 remaining.append(entry)
 
-        if removed_count:
-            config['templates'] = remaining
-            self._write_nickname_config(config)
+        config['templates'] = remaining
+        self._write_nickname_config(config)
         return removed_count
+
+    # --- 방향 템플릿 관리 ---
+    def get_direction_config(self):
+        try:
+            with open(self.direction_config_path, 'r', encoding='utf-8') as f:
+                config = json.load(f)
+        except (json.JSONDecodeError, FileNotFoundError):
+            config = self._default_direction_config()
+            self._write_direction_config(config)
+            return config
+
+        default_cfg = self._default_direction_config()
+        changed = False
+        for key, value in default_cfg.items():
+            if key not in config:
+                config[key] = value if key not in {'templates_left', 'templates_right'} else list(value)
+                changed = True
+        for side_key in ('templates_left', 'templates_right'):
+            if not isinstance(config.get(side_key), list):
+                config[side_key] = []
+                changed = True
+        if changed:
+            self._write_direction_config(config)
+        return config
+
+    def update_direction_config(self, updates: dict):
+        if not isinstance(updates, dict):
+            return self.get_direction_config()
+        config = self.get_direction_config()
+        allowed = {'match_threshold', 'search_offset_y', 'search_height', 'search_half_width', 'show_overlay'}
+        changed = False
+        for key, value in updates.items():
+            if key in allowed:
+                config[key] = value
+                changed = True
+        if changed:
+            self._write_direction_config(config)
+        self._notify_overlay_listeners({
+            'target': 'direction',
+            'show_overlay': bool(config.get('show_overlay', True)),
+        })
+        return config
+
+    def list_direction_templates(self, side: str):
+        side = side.lower()
+        if side not in {'left', 'right'}:
+            return []
+        config = self.get_direction_config()
+        key = 'templates_left' if side == 'left' else 'templates_right'
+        entries = config.get(key, [])
+        results = []
+        base_dir = self.direction_left_dir if side == 'left' else self.direction_right_dir
+        changed = False
+        valid_entries = []
+        for entry in entries:
+            filename = entry.get('filename')
+            template_id = entry.get('id')
+            if not filename or not template_id:
+                changed = True
+                continue
+            path = os.path.join(base_dir, filename)
+            if not os.path.exists(path):
+                changed = True
+                continue
+            resolved = dict(entry)
+            resolved['path'] = path
+            resolved['side'] = side
+            results.append(resolved)
+            valid_entries.append(entry)
+        if changed:
+            config[key] = valid_entries
+            self._write_direction_config(config)
+        return results
+
+    def import_direction_template(self, side: str, file_path: str):
+        side = side.lower()
+        if side not in {'left', 'right'}:
+            raise ValueError('side must be "left" or "right"')
+        if not file_path:
+            raise ValueError('파일 경로가 필요합니다.')
+        image = cv2.imread(file_path, cv2.IMREAD_UNCHANGED)
+        if image is None:
+            raise IOError(f'이미지를 불러올 수 없습니다: {file_path}')
+        if image.ndim == 3 and image.shape[2] == 4:
+            image = cv2.cvtColor(image, cv2.COLOR_BGRA2BGR)
+        timestamp = time.strftime('%Y%m%d_%H%M%S')
+        template_id = f"dir_{int(time.time()*1000)%1_000_000:06d}_{uuid.uuid4().hex[:6]}"
+        filename = f"{template_id}.png"
+        save_dir = self.direction_left_dir if side == 'left' else self.direction_right_dir
+        save_path = os.path.join(save_dir, filename)
+        if not cv2.imwrite(save_path, image):
+            raise IOError('방향 템플릿을 저장하지 못했습니다.')
+
+        config = self.get_direction_config()
+        entry = {
+            'id': template_id,
+            'filename': filename,
+            'side': side,
+            'source': 'import',
+            'original_name': os.path.basename(file_path),
+            'created_at': time.time(),
+            'width': int(image.shape[1]),
+            'height': int(image.shape[0]),
+        }
+        key = 'templates_left' if side == 'left' else 'templates_right'
+        templates = config.get(key, [])
+        templates.append(entry)
+        config[key] = templates
+        self._write_direction_config(config)
+        entry['path'] = save_path
+        return entry
+
+    def delete_direction_templates(self, side: str, template_ids):
+        side = side.lower()
+        if side not in {'left', 'right'}:
+            return 0
+        if not template_ids:
+            return 0
+        if isinstance(template_ids, str):
+            template_ids = [template_ids]
+        template_ids = set(template_ids)
+        config = self.get_direction_config()
+        key = 'templates_left' if side == 'left' else 'templates_right'
+        templates = config.get(key, [])
+        remaining = []
+        removed = 0
+        for entry in templates:
+            template_id = entry.get('id')
+            if template_id in template_ids:
+                filename = entry.get('filename')
+                if filename:
+                    path = os.path.join(self.direction_left_dir if side == 'left' else self.direction_right_dir, filename)
+                    if os.path.exists(path):
+                        try:
+                            os.remove(path)
+                        except OSError:
+                            pass
+                removed += 1
+            else:
+                remaining.append(entry)
+        config[key] = remaining
+        self._write_direction_config(config)
+        return removed
 
     # v1.3: 방해 요소 추가 메서드 신설
     def add_distractor(self, cropped_image_data):
@@ -1535,6 +1735,8 @@ class LearningTab(QWidget):
         self._checked_class_names: set[str] = set(settings.get('hunt_checked_classes', []))
         self.nickname_config = self.data_manager.get_nickname_config()
         self._nickname_ui_updating = False
+        self.direction_config = self.data_manager.get_direction_config()
+        self._direction_ui_updating = False
         self.initUI()
         self.init_sam()
 
@@ -1704,6 +1906,9 @@ class LearningTab(QWidget):
         self.nickname_text_input = QLineEdit()
         self.nickname_text_input.setPlaceholderText("예: 버프몬")
         nickname_text_layout.addWidget(self.nickname_text_input, 1)
+        self.nickname_overlay_checkbox = QCheckBox("실시간 표기")
+        nickname_text_layout.addSpacing(8)
+        nickname_text_layout.addWidget(self.nickname_overlay_checkbox)
         nickname_layout.addLayout(nickname_text_layout)
 
         nickname_threshold_layout = QHBoxLayout()
@@ -1746,11 +1951,87 @@ class LearningTab(QWidget):
         nickname_group.setLayout(nickname_layout)
         right_layout.addWidget(nickname_group)
 
+        direction_group = QGroupBox("방향 탐지 설정")
+        direction_layout = QVBoxLayout()
+
+        direction_threshold_layout = QHBoxLayout()
+        direction_threshold_layout.addWidget(QLabel("템플릿 임계값:"))
+        self.direction_threshold_spin = QDoubleSpinBox()
+        self.direction_threshold_spin.setRange(0.1, 0.99)
+        self.direction_threshold_spin.setSingleStep(0.01)
+        direction_threshold_layout.addWidget(self.direction_threshold_spin)
+        direction_threshold_layout.addSpacing(8)
+
+        direction_threshold_layout.addWidget(QLabel("위쪽 오프셋(px):"))
+        self.direction_offset_spin = QSpinBox()
+        self.direction_offset_spin.setRange(0, 400)
+        self.direction_offset_spin.setSingleStep(1)
+        direction_threshold_layout.addWidget(self.direction_offset_spin)
+        direction_threshold_layout.addSpacing(8)
+
+        direction_threshold_layout.addWidget(QLabel("높이(px):"))
+        self.direction_height_spin = QSpinBox()
+        self.direction_height_spin.setRange(4, 200)
+        self.direction_height_spin.setSingleStep(1)
+        direction_threshold_layout.addWidget(self.direction_height_spin)
+        direction_threshold_layout.addSpacing(8)
+
+        direction_threshold_layout.addWidget(QLabel("좌우 폭(±px):"))
+        self.direction_half_width_spin = QSpinBox()
+        self.direction_half_width_spin.setRange(4, 400)
+        self.direction_half_width_spin.setSingleStep(1)
+        direction_threshold_layout.addWidget(self.direction_half_width_spin)
+        direction_threshold_layout.addSpacing(8)
+        self.direction_overlay_checkbox = QCheckBox("실시간 표기")
+        direction_threshold_layout.addWidget(self.direction_overlay_checkbox)
+        direction_layout.addLayout(direction_threshold_layout)
+
+        list_icon_size = QSize(96, 32)
+
+        direction_layout.addWidget(QLabel("좌측 템플릿"))
+        self.direction_left_list = QListWidget()
+        self.direction_left_list.setViewMode(QListWidget.ViewMode.IconMode)
+        self.direction_left_list.setIconSize(list_icon_size)
+        self.direction_left_list.setResizeMode(QListWidget.ResizeMode.Adjust)
+        self.direction_left_list.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
+        direction_layout.addWidget(self.direction_left_list)
+
+        left_buttons_layout = QHBoxLayout()
+        self.import_direction_left_btn = QPushButton("파일 추가")
+        self.import_direction_left_btn.clicked.connect(lambda: self.import_direction_templates('left'))
+        self.delete_direction_left_btn = QPushButton("선택 삭제")
+        self.delete_direction_left_btn.clicked.connect(lambda: self.delete_direction_templates('left'))
+        left_buttons_layout.addWidget(self.import_direction_left_btn)
+        left_buttons_layout.addWidget(self.delete_direction_left_btn)
+        direction_layout.addLayout(left_buttons_layout)
+
+        direction_layout.addWidget(QLabel("우측 템플릿"))
+        self.direction_right_list = QListWidget()
+        self.direction_right_list.setViewMode(QListWidget.ViewMode.IconMode)
+        self.direction_right_list.setIconSize(list_icon_size)
+        self.direction_right_list.setResizeMode(QListWidget.ResizeMode.Adjust)
+        self.direction_right_list.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
+        direction_layout.addWidget(self.direction_right_list)
+
+        right_buttons_layout = QHBoxLayout()
+        self.import_direction_right_btn = QPushButton("파일 추가")
+        self.import_direction_right_btn.clicked.connect(lambda: self.import_direction_templates('right'))
+        self.delete_direction_right_btn = QPushButton("선택 삭제")
+        self.delete_direction_right_btn.clicked.connect(lambda: self.delete_direction_templates('right'))
+        right_buttons_layout.addWidget(self.import_direction_right_btn)
+        right_buttons_layout.addWidget(self.delete_direction_right_btn)
+        direction_layout.addLayout(right_buttons_layout)
+
+        direction_group.setLayout(direction_layout)
+        right_layout.addWidget(direction_group)
+
         self.log_viewer = QTextEdit()
         self.log_viewer.setReadOnly(True)
+        log_metrics = self.log_viewer.fontMetrics()
+        self.log_viewer.setFixedHeight(max(log_metrics.lineSpacing() * 3, 48))
 
         right_layout.addWidget(QLabel('로그'))
-        right_layout.addWidget(self.log_viewer, 1)
+        right_layout.addWidget(self.log_viewer)
         right_layout.addStretch(1)
         
         main_layout.addLayout(right_layout, 2)
@@ -1774,10 +2055,17 @@ class LearningTab(QWidget):
 
 
         self._apply_nickname_config_to_ui()
+        self._apply_direction_config_to_ui()
         self.nickname_text_input.editingFinished.connect(self.on_nickname_text_changed)
         self.nickname_threshold_spin.valueChanged.connect(self.on_nickname_threshold_changed)
         self.nickname_offset_x_spin.valueChanged.connect(self.on_nickname_offset_changed)
         self.nickname_offset_y_spin.valueChanged.connect(self.on_nickname_offset_changed)
+        self.nickname_overlay_checkbox.toggled.connect(self.on_nickname_overlay_toggled)
+        self.direction_threshold_spin.valueChanged.connect(self.on_direction_threshold_changed)
+        self.direction_offset_spin.valueChanged.connect(self.on_direction_offset_changed)
+        self.direction_height_spin.valueChanged.connect(self.on_direction_range_changed)
+        self.direction_half_width_spin.valueChanged.connect(self.on_direction_range_changed)
+        self.direction_overlay_checkbox.toggled.connect(self.on_direction_overlay_toggled)
 
         self.populate_class_list()
         self.populate_model_list()
@@ -1836,6 +2124,7 @@ class LearningTab(QWidget):
         self.nickname_threshold_spin.setValue(max(self.nickname_threshold_spin.minimum(), min(self.nickname_threshold_spin.maximum(), threshold)))
         self.nickname_offset_x_spin.setValue(int(config.get('char_offset_x', 0)))
         self.nickname_offset_y_spin.setValue(int(config.get('char_offset_y', 0)))
+        self.nickname_overlay_checkbox.setChecked(bool(config.get('show_overlay', True)))
         self._nickname_ui_updating = False
 
     def populate_nickname_template_list(self):
@@ -1869,6 +2158,56 @@ class LearningTab(QWidget):
             item.setToolTip('\n'.join(tooltip_lines))
             self.nickname_template_list.addItem(item)
 
+    def _refresh_direction_config_cache(self):
+        self.direction_config = self.data_manager.get_direction_config()
+
+    def _apply_direction_config_to_ui(self):
+        self._direction_ui_updating = True
+        config = self.data_manager.get_direction_config()
+        self.direction_config = config
+        threshold = float(config.get('match_threshold', 0.72))
+        self.direction_threshold_spin.setValue(max(self.direction_threshold_spin.minimum(), min(self.direction_threshold_spin.maximum(), threshold)))
+        self.direction_offset_spin.setValue(int(round(config.get('search_offset_y', 60.0))))
+        self.direction_height_spin.setValue(int(round(config.get('search_height', 20.0))))
+        self.direction_half_width_spin.setValue(int(round(config.get('search_half_width', 30.0))))
+        self.direction_overlay_checkbox.setChecked(bool(config.get('show_overlay', True)))
+        self._direction_ui_updating = False
+        self.populate_direction_template_lists()
+
+    def populate_direction_template_lists(self):
+        self._populate_direction_template_list('left')
+        self._populate_direction_template_list('right')
+
+    def _populate_direction_template_list(self, side: str):
+        widget = self.direction_left_list if side == 'left' else self.direction_right_list
+        widget.clear()
+        templates = self.data_manager.list_direction_templates(side)
+        button = self.delete_direction_left_btn if side == 'left' else self.delete_direction_right_btn
+        if not templates:
+            empty = QListWidgetItem(QIcon(), "등록된 템플릿이 없습니다")
+            empty.setFlags(Qt.ItemFlag.NoItemFlags)
+            widget.addItem(empty)
+            button.setEnabled(False)
+            return
+        button.setEnabled(True)
+        for entry in templates:
+            pixmap = QPixmap(entry['path'])
+            if pixmap.isNull():
+                pixmap = QPixmap(widget.iconSize())
+                pixmap.fill(Qt.GlobalColor.darkGray)
+            icon = QIcon(pixmap)
+            label = entry.get('original_name') or entry.get('id', '템플릿')
+            item = QListWidgetItem(icon, label)
+            item.setData(Qt.ItemDataRole.UserRole, entry.get('id'))
+            tooltip_lines = [f"ID: {entry.get('id')}"]
+            size_text = f"크기: {entry.get('width', '?')}x{entry.get('height', '?')}"
+            tooltip_lines.append(size_text)
+            created = entry.get('created_at')
+            if created:
+                tooltip_lines.append(time.strftime('등록 시각: %Y-%m-%d %H:%M:%S', time.localtime(created)))
+            item.setToolTip('\n'.join(tooltip_lines))
+            widget.addItem(item)
+
     def on_nickname_text_changed(self):
         if self._nickname_ui_updating:
             return
@@ -1878,6 +2217,13 @@ class LearningTab(QWidget):
             self.nickname_text_input.setText(text)
         self.nickname_config = self.data_manager.update_nickname_config({'target_text': text})
         self.log_viewer.append(f"닉네임 기준 문자열을 '{text}'(으)로 설정했습니다.")
+
+    def on_nickname_overlay_toggled(self, checked: bool):
+        if self._nickname_ui_updating:
+            return
+        self.nickname_config = self.data_manager.update_nickname_config({'show_overlay': bool(checked)})
+        state_text = '표시' if checked else '비표시'
+        self.log_viewer.append(f"닉네임 실시간 표기를 {state_text}로 전환했습니다.")
 
     def on_nickname_threshold_changed(self, value: float):
         if self._nickname_ui_updating:
@@ -1892,6 +2238,38 @@ class LearningTab(QWidget):
             'char_offset_y': int(self.nickname_offset_y_spin.value()),
         }
         self.nickname_config = self.data_manager.update_nickname_config(updates)
+
+    def on_direction_threshold_changed(self, value: float):
+        if self._direction_ui_updating:
+            return
+        self.direction_config = self.data_manager.update_direction_config({'match_threshold': float(value)})
+        self.log_viewer.append(f"방향 템플릿 임계값을 {float(value):.2f}로 설정했습니다.")
+
+    def on_direction_offset_changed(self):
+        if self._direction_ui_updating:
+            return
+        offset_value = float(self.direction_offset_spin.value())
+        self.direction_config = self.data_manager.update_direction_config({'search_offset_y': offset_value})
+        self.log_viewer.append(f"방향 탐색 시작 오프셋을 {offset_value:.0f}px로 설정했습니다.")
+
+    def on_direction_range_changed(self):
+        if self._direction_ui_updating:
+            return
+        updates = {
+            'search_height': float(self.direction_height_spin.value()),
+            'search_half_width': float(self.direction_half_width_spin.value()),
+        }
+        self.direction_config = self.data_manager.update_direction_config(updates)
+        self.log_viewer.append(
+            f"방향 탐색 크기를 높이 {updates['search_height']:.0f}px / 좌우 ±{updates['search_half_width']:.0f}px로 설정했습니다."
+        )
+
+    def on_direction_overlay_toggled(self, checked: bool):
+        if self._direction_ui_updating:
+            return
+        self.direction_config = self.data_manager.update_direction_config({'show_overlay': bool(checked)})
+        state_text = '표시' if checked else '비표시'
+        self.log_viewer.append(f"방향 실시간 표기를 {state_text}로 전환했습니다.")
 
     def capture_nickname_template(self):
         try:
@@ -1937,6 +2315,29 @@ class LearningTab(QWidget):
             error_text = '\n'.join(f"- {os.path.basename(p)}: {msg}" for p, msg in errors)
             QMessageBox.warning(self, '일부 템플릿 추가 실패', error_text)
 
+    def import_direction_templates(self, side: str):
+        caption = '좌측 방향 템플릿 불러오기' if side == 'left' else '우측 방향 템플릿 불러오기'
+        file_paths, _ = QFileDialog.getOpenFileNames(self, caption, '', '이미지 파일 (*.png *.jpg *.jpeg *.bmp *.webp)')
+        if not file_paths:
+            return
+        added = 0
+        errors = []
+        for path in file_paths:
+            try:
+                entry = self.data_manager.import_direction_template(side, path)
+                added += 1
+                self.log_viewer.append(
+                    f"방향 템플릿 '{entry['id']}' 추가 (측: {side}, 파일: {os.path.basename(path)})"
+                )
+            except Exception as exc:
+                errors.append((path, str(exc)))
+        if added:
+            self._refresh_direction_config_cache()
+            self.populate_direction_template_lists()
+        if errors:
+            error_text = '\n'.join(f"- {os.path.basename(p)}: {msg}" for p, msg in errors)
+            QMessageBox.warning(self, '일부 방향 템플릿 추가 실패', error_text)
+
     def delete_selected_nickname_templates(self):
         selected_items = [item for item in self.nickname_template_list.selectedItems() if item.flags() != Qt.ItemFlag.NoItemFlags]
         if not selected_items:
@@ -1958,6 +2359,29 @@ class LearningTab(QWidget):
             self._refresh_nickname_config_cache()
             self.populate_nickname_template_list()
             self.log_viewer.append(f"닉네임 템플릿 {removed}개를 삭제했습니다.")
+
+    def delete_direction_templates(self, side: str):
+        widget = self.direction_left_list if side == 'left' else self.direction_right_list
+        selected_items = [item for item in widget.selectedItems() if item.flags() != Qt.ItemFlag.NoItemFlags]
+        if not selected_items:
+            QMessageBox.information(self, '삭제', '삭제할 방향 템플릿을 선택하세요.')
+            return
+        ids = [item.data(Qt.ItemDataRole.UserRole) for item in selected_items if item.data(Qt.ItemDataRole.UserRole)]
+        if not ids:
+            return
+        if QMessageBox.question(
+            self,
+            '삭제 확인',
+            f"선택한 방향 템플릿 {len(ids)}개를 삭제하시겠습니까?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        ) != QMessageBox.StandardButton.Yes:
+            return
+        removed = self.data_manager.delete_direction_templates(side, ids)
+        if removed:
+            self._refresh_direction_config_cache()
+            self.populate_direction_template_lists()
+            self.log_viewer.append(f"방향 템플릿 {removed}개를 삭제했습니다. (측: {side})")
 
     def populate_class_list(self):
         """manifest.json 데이터를 기반으로 QTreeWidget을 채웁니다."""

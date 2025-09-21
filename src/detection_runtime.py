@@ -24,6 +24,7 @@ from PyQt6.QtWidgets import (
 from ultralytics import YOLO
 
 from nickname_detection import NicknameDetector
+from direction_detection import DirectionDetector
 
 
 __all__ = ["ScreenSnipper", "DetectionPopup", "DetectionThread"]
@@ -165,6 +166,9 @@ class DetectionThread(QThread):
         char_class_index: int,
         is_debug_mode: bool = False,
         nickname_detector: Optional[NicknameDetector] = None,
+        direction_detector: Optional[DirectionDetector] = None,
+        show_nickname_overlay: bool = True,
+        show_direction_overlay: bool = True,
     ) -> None:
         super().__init__()
         self.model_path = model_path
@@ -179,6 +183,9 @@ class DetectionThread(QThread):
         )
         self.is_debug_mode = is_debug_mode
         self.nickname_detector = nickname_detector
+        self.direction_detector = direction_detector
+        self.show_nickname_overlay = bool(show_nickname_overlay)
+        self.show_direction_overlay = bool(show_direction_overlay)
         self.is_running = True
         
         # FPS 계산 변수
@@ -189,6 +196,7 @@ class DetectionThread(QThread):
         # [추가] 성능 분석을 위한 통계 변수
         self.perf_stats = {
             "nickname_ms": 0.0,
+            "direction_ms": 0.0,
             "yolo_ms": 0.0,
             "total_ms": 0.0,
         }
@@ -236,6 +244,21 @@ class DetectionThread(QThread):
                 nick_end = time.perf_counter()
                 self.perf_stats["nickname_ms"] = (nick_end - nick_start) * 1000
 
+                direction_start = time.perf_counter()
+                direction_info = None
+                if self.direction_detector is not None:
+                    try:
+                        if nickname_info is not None:
+                            direction_info = self.direction_detector.detect(frame, nickname_info)
+                        else:
+                            self.direction_detector.notify_missed()
+                    except Exception as exc:
+                        if self.is_debug_mode:
+                            print(f"[DetectionThread] 방향 탐지 오류: {exc}")
+                        direction_info = None
+                direction_end = time.perf_counter()
+                self.perf_stats["direction_ms"] = (direction_end - direction_start) * 1000
+
                 yolo_start = time.perf_counter()
                 results = model(
                     frame,
@@ -277,6 +300,7 @@ class DetectionThread(QThread):
                     "monsters": [],
                 }
                 payload["nickname"] = nickname_info
+                payload["direction"] = direction_info
 
                 annotated_frame = frame
                 if not annotated_frame.flags.writeable:
@@ -342,12 +366,29 @@ class DetectionThread(QThread):
                         log_messages.append(f"[{timestamp}] 탐색 완료. 객체 없음.")
                     self.detection_logged.emit(log_messages)
                 
-                if nickname_info and nickname_info.get('nickname_box'):
+                if self.show_nickname_overlay and nickname_info and nickname_info.get('nickname_box'):
                     nick_box = nickname_info['nickname_box']
                     x1, y1 = int(nick_box.get('x', 0)), int(nick_box.get('y', 0))
                     x2 = int(x1 + nick_box.get('width', 0))
                     y2 = int(y1 + nick_box.get('height', 0))
                     cv2.rectangle(annotated_frame, (x1, y1), (x2, y2), (0, 255, 255), 2)
+
+                if self.show_direction_overlay and direction_info and isinstance(direction_info, dict):
+                    roi_rect = direction_info.get('roi_rect')
+                    if roi_rect:
+                        dx1 = int(roi_rect.get('x', 0))
+                        dy1 = int(roi_rect.get('y', 0))
+                        dx2 = int(dx1 + roi_rect.get('width', 0))
+                        dy2 = int(dy1 + roi_rect.get('height', 0))
+                        cv2.rectangle(annotated_frame, (dx1, dy1), (dx2, dy2), (128, 64, 255), 1)
+                    if direction_info.get('matched') and direction_info.get('match_rect'):
+                        match_rect = direction_info['match_rect']
+                        mx1 = int(match_rect.get('x', 0))
+                        my1 = int(match_rect.get('y', 0))
+                        mx2 = int(mx1 + match_rect.get('width', 0))
+                        my2 = int(my1 + match_rect.get('height', 0))
+                        color = (0, 200, 255) if direction_info.get('side') == 'left' else (255, 200, 0)
+                        cv2.rectangle(annotated_frame, (mx1, my1), (mx2, my2), color, 2)
                 
                 loop_end_time = time.perf_counter()
                 self.perf_stats["total_ms"] = (loop_end_time - loop_start_time) * 1000
@@ -356,18 +397,21 @@ class DetectionThread(QThread):
                     "total_ms": float(self.perf_stats["total_ms"]),
                     "yolo_ms": float(self.perf_stats["yolo_ms"]),
                     "nickname_ms": float(self.perf_stats["nickname_ms"]),
+                    "direction_ms": float(self.perf_stats["direction_ms"]),
                 }
 
                 y_pos = 30
-                cv2.rectangle(annotated_frame, (5, 5), (230, 115), (0,0,0), -1)
+                cv2.rectangle(annotated_frame, (5, 5), (250, 140), (0,0,0), -1)
                 fps_text = f"FPS : {self.fps:.1f}"
                 total_text = f"TOTAL: {self.perf_stats['total_ms']:.1f} ms"
                 nick_text = f" NICK: {self.perf_stats['nickname_ms']:.1f} ms"
                 yolo_text = f" YOLO: {self.perf_stats['yolo_ms']:.1f} ms"
+                dir_text = f" DIR: {self.perf_stats['direction_ms']:.1f} ms"
                 cv2.putText(annotated_frame, fps_text, (10, y_pos), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2); y_pos += 25
                 cv2.putText(annotated_frame, total_text, (10, y_pos), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2); y_pos += 25
                 cv2.putText(annotated_frame, nick_text, (10, y_pos), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2); y_pos += 25
-                cv2.putText(annotated_frame, yolo_text, (10, y_pos), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
+                cv2.putText(annotated_frame, yolo_text, (10, y_pos), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2); y_pos += 25
+                cv2.putText(annotated_frame, dir_text, (10, y_pos), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
 
                 self.detections_ready.emit(payload)
 

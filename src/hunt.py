@@ -36,6 +36,7 @@ from PyQt6.QtWidgets import (
 from PyQt6.QtGui import QPixmap, QPainter, QPen, QColor, QBrush
 
 from detection_runtime import DetectionPopup, DetectionThread, ScreenSnipper
+from direction_detection import DirectionDetector
 from nickname_detection import NicknameDetector
 
 
@@ -55,6 +56,9 @@ PRIMARY_AREA_BRUSH = QBrush(PRIMARY_AREA_COLOR)
 FALLBACK_CHARACTER_EDGE = QPen(QColor(0, 255, 120, 220), 2, Qt.PenStyle.SolidLine)
 FALLBACK_CHARACTER_BRUSH = QBrush(QColor(0, 255, 120, 60))
 NICKNAME_EDGE = QPen(QColor(255, 255, 0, 220), 2, Qt.PenStyle.DotLine)
+DIRECTION_ROI_EDGE = QPen(QColor(170, 80, 255, 200), 1, Qt.PenStyle.DashLine)
+DIRECTION_MATCH_EDGE_LEFT = QPen(QColor(0, 200, 255, 220), 2, Qt.PenStyle.SolidLine)
+DIRECTION_MATCH_EDGE_RIGHT = QPen(QColor(255, 200, 0, 220), 2, Qt.PenStyle.SolidLine)
 
 try:
     COMPOSITION_MODE_DEST_OVER = QPainter.CompositionMode.CompositionMode_DestinationOver
@@ -323,6 +327,7 @@ class HuntTab(QWidget):
     CONDITION_POLL_MIN_INTERVAL_SEC = 0.12
     CONTROL_REQUEST_TIMEOUT_MS = 5000
     CHARACTER_PERSISTENCE_SEC = 5.0
+    DIRECTION_TIMEOUT_SEC = 1.5
 
     control_command_issued = pyqtSignal(str, object)
     control_authority_requested = pyqtSignal(dict)
@@ -350,7 +355,9 @@ class HuntTab(QWidget):
         self.overlay_preferences = {
             'hunt_area': True,
             'primary_area': True,
+            'direction_area': True,
         }
+        self._direction_area_user_pref = True
         self._last_character_boxes: List[DetectionBox] = []
         self._last_character_details: List[dict] = []
         self._last_character_seen_ts: float = 0.0
@@ -392,12 +399,14 @@ class HuntTab(QWidget):
             'characters': [],
             'monsters': [],
             'nickname': None,
+            'direction': None,
         }
         self.latest_perf_stats = {
             'fps': 0.0,
             'total_ms': 0.0,
             'yolo_ms': 0.0,
             'nickname_ms': 0.0,
+            'direction_ms': 0.0,
         }
         self._active_target_names: List[str] = []
 
@@ -408,6 +417,17 @@ class HuntTab(QWidget):
         self.teleport_command_right_v2 = "텔레포트(우)v2"
         self._movement_mode: Optional[str] = None
         self._last_movement_command_ts = 0.0
+        self._direction_config: dict = {}
+        self._direction_templates: dict[str, list] = {'left': [], 'right': []}
+        self._direction_active = False
+        self._direction_last_seen_ts = 0.0
+        self._direction_last_side: Optional[str] = None
+        self._latest_direction_roi: Optional[dict] = None
+        self._latest_direction_match: Optional[dict] = None
+        self._show_nickname_overlay_config = True
+        self._show_direction_overlay_config = True
+        self._direction_detector_available = False
+        self._last_direction_score: Optional[float] = None
 
         self._build_ui()
         self._update_facing_label()
@@ -429,6 +449,8 @@ class HuntTab(QWidget):
         self.facing_reset_timer.stop()
         if not self._is_detection_active():
             return
+        if getattr(self, '_direction_active', False):
+            return
         min_val = max(0.5, float(self.facing_reset_min_spinbox.value())) if hasattr(self, 'facing_reset_min_spinbox') else 1.0
         max_val = max(min_val, float(self.facing_reset_max_spinbox.value())) if hasattr(self, 'facing_reset_max_spinbox') else 4.0
         interval = random.uniform(min_val, max_val)
@@ -440,6 +462,8 @@ class HuntTab(QWidget):
 
     def _handle_facing_reset_timeout(self) -> None:
         if not self._is_detection_active():
+            return
+        if getattr(self, '_direction_active', False):
             return
         self._set_current_facing(None, save=False)
         self._schedule_facing_reset()
@@ -709,21 +733,26 @@ class HuntTab(QWidget):
         self.screen_output_checkbox.setChecked(False)
         self.screen_output_checkbox.toggled.connect(self._on_screen_output_toggled)
 
-        self.show_hunt_area_checkbox = QCheckBox("사냥 범위 표시")
+        self.show_hunt_area_checkbox = QCheckBox("사냥범위")
         self.show_hunt_area_checkbox.setChecked(True)
         self.show_hunt_area_checkbox.toggled.connect(self._on_overlay_toggle_changed)
 
-        self.show_primary_skill_checkbox = QCheckBox("주 스킬 범위 표시")
+        self.show_primary_skill_checkbox = QCheckBox("스킬범위")
         self.show_primary_skill_checkbox.setChecked(True)
         self.show_primary_skill_checkbox.toggled.connect(self._on_overlay_toggle_changed)
 
-        self.auto_request_checkbox = QCheckBox("조건 충족 시 자동 요청")
+        self.show_direction_checkbox = QCheckBox("방향범위")
+        self.show_direction_checkbox.setChecked(True)
+        self.show_direction_checkbox.toggled.connect(self._on_overlay_toggle_changed)
+
+        self.auto_request_checkbox = QCheckBox("자동사냥")
         self.auto_request_checkbox.toggled.connect(self._handle_setting_changed)
 
         for checkbox in (
             self.screen_output_checkbox,
             self.show_hunt_area_checkbox,
             self.show_primary_skill_checkbox,
+            self.show_direction_checkbox,
             self.auto_request_checkbox,
         ):
             checkbox.setSizePolicy(
@@ -746,6 +775,7 @@ class HuntTab(QWidget):
         button_row.addWidget(self.screen_output_checkbox)
         button_row.addWidget(self.show_hunt_area_checkbox)
         button_row.addWidget(self.show_primary_skill_checkbox)
+        button_row.addWidget(self.show_direction_checkbox)
         button_row.addWidget(self.auto_request_checkbox)
 
         button_row.addStretch(1)
@@ -902,19 +932,56 @@ class HuntTab(QWidget):
                 self.detect_btn.setChecked(False)
                 return
 
+            self._load_direction_configuration()
+            direction_detector_instance = self._build_thread_direction_detector()
+            if direction_detector_instance is None:
+                self.append_log("방향 템플릿이 없어 이미지 기반 방향 탐지를 비활성화합니다.", "info")
+
             self._reset_character_cache()
+            self._direction_active = False
+            self._direction_last_seen_ts = 0.0
+            self._direction_last_side = None
+            self._latest_direction_roi = None
+            self._latest_direction_match = None
+            self._direction_detector_available = direction_detector_instance is not None
             self.append_log("YOLO 캐릭터 탐지를 사용하지 않고 닉네임 기반 탐지에 의존합니다.", "info")
 
-            self.detection_thread = DetectionThread(
-                model_path=model_path,
-                capture_region=capture_region,
-                target_class_indices=target_indices,
-                conf_char=self.conf_char_spinbox.value(),
-                conf_monster=self.conf_monster_spinbox.value(),
-                char_class_index=-1,
-                is_debug_mode=False,
-                nickname_detector=nickname_detector_instance,
-            )
+            try:
+                self.detection_thread = DetectionThread(
+                    model_path=model_path,
+                    capture_region=capture_region,
+                    target_class_indices=target_indices,
+                    conf_char=self.conf_char_spinbox.value(),
+                    conf_monster=self.conf_monster_spinbox.value(),
+                    char_class_index=-1,
+                    is_debug_mode=False,
+                    nickname_detector=nickname_detector_instance,
+                    direction_detector=direction_detector_instance,
+                    show_nickname_overlay=self._is_nickname_overlay_active(),
+                    show_direction_overlay=self._is_direction_range_overlay_active(),
+                )
+            except TypeError:
+                # 구버전 런타임과의 호환성 확보
+                self.append_log("방향 탐지 통합을 지원하지 않는 런타임 감지 → 기본 모드로 전환합니다.", "warn")
+                self.detection_thread = DetectionThread(
+                    model_path=model_path,
+                    capture_region=capture_region,
+                    target_class_indices=target_indices,
+                    conf_char=self.conf_char_spinbox.value(),
+                    conf_monster=self.conf_monster_spinbox.value(),
+                    char_class_index=-1,
+                    is_debug_mode=False,
+                    nickname_detector=nickname_detector_instance,
+                    show_nickname_overlay=self._is_nickname_overlay_active(),
+                )
+                # 방향 감지를 비활성화하고 상태 초기화
+                direction_detector_instance = None
+                self._direction_active = False
+                self._direction_last_seen_ts = 0.0
+                self._direction_last_side = None
+                self._latest_direction_roi = None
+                self._latest_direction_match = None
+                self._direction_detector_available = False
 
             self.detection_thread.frame_ready.connect(self._handle_detection_frame)
 
@@ -923,6 +990,7 @@ class HuntTab(QWidget):
             self.detection_thread.finished.connect(self._on_detection_thread_finished)
 
             self.detection_thread.start()
+            self._update_detection_thread_overlay_flags()
             if self.detection_view:
                 self.detection_view.setText("탐지 준비 중...")
                 self.detection_view.setPixmap(QPixmap())
@@ -1081,7 +1149,7 @@ class HuntTab(QWidget):
                     painter.setBrush(PRIMARY_AREA_BRUSH)
                     painter.drawRect(rect)
             painter.setCompositionMode(COMPOSITION_MODE_SOURCE_OVER)
-            if self._latest_nickname_box:
+            if self._is_nickname_overlay_active() and self._latest_nickname_box:
                 nick_rect = self._dict_to_rect(self._latest_nickname_box, image.width(), image.height())
                 if not nick_rect.isNull():
                     painter.setPen(NICKNAME_EDGE)
@@ -1094,6 +1162,18 @@ class HuntTab(QWidget):
                     rect = self._box_to_rect(box, image.width(), image.height())
                     if not rect.isNull():
                         painter.drawRect(rect)
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            if self._is_direction_range_overlay_active() and self._latest_direction_roi:
+                rect = self._dict_to_rect(self._latest_direction_roi, image.width(), image.height())
+                if not rect.isNull():
+                    painter.setPen(DIRECTION_ROI_EDGE)
+                    painter.drawRect(rect)
+            if self._is_direction_match_overlay_active() and self._latest_direction_match:
+                rect = self._dict_to_rect(self._latest_direction_match, image.width(), image.height())
+                if not rect.isNull():
+                    pen = DIRECTION_MATCH_EDGE_LEFT if self._direction_last_side == 'left' else DIRECTION_MATCH_EDGE_RIGHT
+                    painter.setPen(pen)
+                    painter.drawRect(rect)
         finally:
             painter.end()
 
@@ -1183,10 +1263,11 @@ class HuntTab(QWidget):
             total_ms = float(perf.get('total_ms', 0.0))
             yolo_ms = float(perf.get('yolo_ms', 0.0))
             nickname_ms = float(perf.get('nickname_ms', 0.0))
+            direction_ms = float(perf.get('direction_ms', 0.0))
 
-            fps_text = f"FPS: {fps:.0f}"
-            perf_line = (
-                f"{fps_text} | Total: {total_ms:.1f} ms ( {yolo_ms:.1f} ms + {nickname_ms:.1f} ms)"
+            fps_line = f"FPS: {fps:.0f}"
+            total_line = (
+                f"Total: {total_ms:.1f} ms ( {yolo_ms:.1f} ms + {nickname_ms:.1f} ms + {direction_ms:.1f} ms)"
             )
 
             if self.current_authority == "hunt":
@@ -1196,12 +1277,27 @@ class HuntTab(QWidget):
             else:
                 authority_text = str(self.current_authority)
 
+            direction_detail = self.latest_detection_details.get('direction') or {}
+            direction_mode = "이미지 기반" if self._direction_detector_available else "랜덤 시간"
+            if direction_detail.get('matched') and direction_detail.get('side') in ('left', 'right'):
+                side_text = '왼쪽' if direction_detail.get('side') == 'left' else '오른쪽'
+                score_val = float(direction_detail.get('score', 0.0))
+                direction_line = f"방향 탐지: {direction_mode} - {side_text} ({score_val:.2f})"
+            elif self._direction_active:
+                side_text = '왼쪽' if self._direction_last_side == 'left' else '오른쪽' if self._direction_last_side == 'right' else '-'
+                direction_line = f"방향 탐지: {direction_mode} - 유지 ({side_text})"
+            else:
+                direction_line = f"방향 탐지: {direction_mode} - 비활성"
+
             info_lines = [
-                perf_line,
+                "FPS:",
+                fps_line,
+                total_line,
                 f"이동권한: {authority_text}",
                 f"X축 범위 내 몬스터: {self.latest_monster_count}",
                 f"스킬 범위 몬스터: {self.latest_primary_monster_count}",
                 f"캐릭터 방향: {self._format_facing_text()}",
+                direction_line,
             ]
 
             self.info_summary_view.setPlainText('\n'.join(info_lines))
@@ -1228,6 +1324,24 @@ class HuntTab(QWidget):
                 Qt.TransformationMode.SmoothTransformation,
             )
         )
+
+    def _is_nickname_overlay_active(self) -> bool:
+        return bool(self._show_nickname_overlay_config)
+
+    def _is_direction_range_overlay_active(self) -> bool:
+        if not self._show_direction_overlay_config:
+            return False
+        if not self.overlay_preferences.get('direction_area', True):
+            return False
+        checkbox = getattr(self, 'show_direction_checkbox', None)
+        if checkbox is None:
+            return True
+        if not checkbox.isEnabled():
+            return False
+        return checkbox.isChecked()
+
+    def _is_direction_match_overlay_active(self) -> bool:
+        return bool(self._show_direction_overlay_config)
 
     def _toggle_detection_popup(self) -> None:
         if self.is_popup_active:
@@ -1456,8 +1570,18 @@ class HuntTab(QWidget):
     def _on_overlay_toggle_changed(self, _checked: bool) -> None:
         self.overlay_preferences['hunt_area'] = self.show_hunt_area_checkbox.isChecked()
         self.overlay_preferences['primary_area'] = self.show_primary_skill_checkbox.isChecked()
+        direction_state = self.show_direction_checkbox.isChecked()
+        self.overlay_preferences['direction_area'] = direction_state
+        self._direction_area_user_pref = direction_state
         self._emit_area_overlays()
+        self._update_detection_thread_overlay_flags()
         self._save_settings()
+
+    def _update_detection_thread_overlay_flags(self) -> None:
+        if not self.detection_thread:
+            return
+        self.detection_thread.show_nickname_overlay = bool(self._is_nickname_overlay_active())
+        self.detection_thread.show_direction_overlay = bool(self._is_direction_range_overlay_active())
 
     def set_overlay_preferences(self, options: dict | None) -> None:
         if not isinstance(options, dict):
@@ -1476,7 +1600,20 @@ class HuntTab(QWidget):
                 self.show_primary_skill_checkbox.blockSignals(True)
                 self.show_primary_skill_checkbox.setChecked(new_state)
                 self.show_primary_skill_checkbox.blockSignals(False)
+        direction_value = None
+        if 'direction_area' in options:
+            direction_value = bool(options['direction_area'])
+        elif 'nickname_area' in options:  # backward compatibility
+            direction_value = bool(options['nickname_area'])
+        if direction_value is not None:
+            self.overlay_preferences['direction_area'] = direction_value
+            self._direction_area_user_pref = direction_value
+            if hasattr(self, 'show_direction_checkbox') and self.show_direction_checkbox.isChecked() != direction_value:
+                self.show_direction_checkbox.blockSignals(True)
+                self.show_direction_checkbox.setChecked(direction_value)
+                self.show_direction_checkbox.blockSignals(False)
         self._emit_area_overlays()
+        self._update_detection_thread_overlay_flags()
         self._save_settings()
 
     def _log_control_request(self, payload: dict, reason: str | None) -> None:
@@ -1618,6 +1755,11 @@ class HuntTab(QWidget):
                 self.latest_perf_stats['nickname_ms'] = float(perf_data.get('nickname_ms', self.latest_perf_stats['nickname_ms']))
             except (TypeError, ValueError):
                 pass
+            try:
+                self.latest_perf_stats['direction_ms'] = float(perf_data.get('direction_ms', self.latest_perf_stats['direction_ms']))
+            except (TypeError, ValueError):
+                pass
+        direction_data = payload.get('direction')
 
         def _to_box(data):
             try:
@@ -1700,10 +1842,12 @@ class HuntTab(QWidget):
             monster_boxes=monsters,
             timestamp=snapshot_ts,
         )
+        direction_record = direction_data if isinstance(direction_data, dict) else None
         self.latest_detection_details = {
             'characters': characters_data if characters_data else [],
             'monsters': monsters_data,
             'nickname': nickname_record,
+            'direction': direction_record,
         }
         if fallback_used and not characters_data and self._last_character_details:
             self.latest_detection_details['characters'] = [dict(item) for item in self._last_character_details]
@@ -1724,6 +1868,23 @@ class HuntTab(QWidget):
             self._last_nickname_match = nickname_record
         elif not fallback_used and nickname_record is None:
             self._last_nickname_match = None
+
+        if isinstance(direction_record, dict):
+            roi_rect = direction_record.get('roi_rect')
+            self._latest_direction_roi = dict(roi_rect) if isinstance(roi_rect, dict) else None
+            match_rect = direction_record.get('match_rect')
+            self._latest_direction_match = dict(match_rect) if isinstance(match_rect, dict) else None
+            if direction_record.get('matched') and direction_record.get('side') in ('left', 'right'):
+                self._apply_detected_direction(direction_record.get('side'), float(direction_record.get('score', 0.0)))
+            else:
+                # 유지하되 최신 탐지 갱신은 하지 않음
+                pass
+        else:
+            self._latest_direction_roi = None
+            self._latest_direction_match = None
+
+        self._evaluate_direction_timeout()
+
         self.update_detection_snapshot(snapshot)
         self._update_detection_summary()
         self._schedule_condition_poll()
@@ -1753,8 +1914,12 @@ class HuntTab(QWidget):
     def clear_detection_snapshot(self) -> None:
         self.latest_snapshot = None
         self._clear_detection_metrics()
-        self.latest_detection_details = {'characters': [], 'monsters': [], 'nickname': None}
+        self.latest_detection_details = {'characters': [], 'monsters': [], 'nickname': None, 'direction': None}
         self._reset_character_cache()
+        self._direction_active = False
+        self._direction_last_side = None
+        self._direction_last_seen_ts = 0.0
+        self._last_direction_score = None
         self._update_detection_summary()
 
     def _recalculate_hunt_metrics(self) -> None:
@@ -1789,9 +1954,31 @@ class HuntTab(QWidget):
         self.latest_monster_count = 0
         self.latest_primary_monster_count = 0
         self._latest_nickname_box = None
+        self._latest_direction_roi = None
+        self._latest_direction_match = None
         self._update_monster_count_label()
         self._emit_area_overlays()
         self.monster_stats_updated.emit(0, 0)
+
+    def _apply_detected_direction(self, side: str, score: float) -> None:
+        if side not in ('left', 'right'):
+            return
+        self._direction_active = True
+        self._direction_last_seen_ts = time.time()
+        self._direction_last_side = side
+        self._last_direction_score = float(score)
+        self._cancel_facing_reset_timer()
+        self._set_current_facing(side, save=False, from_direction=True)
+
+    def _evaluate_direction_timeout(self) -> None:
+        if not self._direction_active:
+            return
+        if time.time() - self._direction_last_seen_ts > self.DIRECTION_TIMEOUT_SEC:
+            self._direction_active = False
+            self._direction_last_side = None
+            self._last_direction_score = None
+            if self._is_detection_active():
+                self._schedule_facing_reset()
 
     def _select_reference_character_box(self, boxes: List[DetectionBox]) -> DetectionBox:
         return max(boxes, key=lambda box: box.score)
@@ -1820,20 +2007,26 @@ class HuntTab(QWidget):
 
     def _format_facing_text(self) -> str:
         if self.last_facing == 'left':
-            return "왼쪽"
+            base = "왼쪽"
         if self.last_facing == 'right':
-            return "오른쪽"
-        return "미정"
+            base = "오른쪽"
+        else:
+            return "미정"
+        if self._last_direction_score is not None:
+            return f"{base} ({self._last_direction_score:.2f})"
+        return base
 
-    def _set_current_facing(self, side: Optional[str], *, save: bool = True) -> None:
+    def _set_current_facing(self, side: Optional[str], *, save: bool = True, from_direction: bool = False) -> None:
         if side not in ('left', 'right'):
             self.last_facing = None
         else:
             self.last_facing = side
+        if not from_direction:
+            self._last_direction_score = None
         self._update_facing_label()
-        if side in ('left', 'right'):
+        if side in ('left', 'right') and not from_direction and not getattr(self, '_direction_active', False):
             self._schedule_facing_reset()
-        if save:
+        if save and not from_direction:
             self._save_settings()
 
     def _setup_timers(self) -> None:
@@ -1865,6 +2058,7 @@ class HuntTab(QWidget):
             self._nickname_config = self.data_manager.get_nickname_config()
             templates = self.data_manager.list_nickname_templates()
             self._nickname_templates = templates if isinstance(templates, list) else []
+            self._show_nickname_overlay_config = bool(self._nickname_config.get('show_overlay', True))
         except Exception as exc:  # pragma: no cover - 안전장치
             self._nickname_config = {}
             self._nickname_templates = []
@@ -1873,6 +2067,85 @@ class HuntTab(QWidget):
             self._latest_nickname_box = None
 
         self._apply_nickname_threshold_to_char_conf()
+        self._update_detection_thread_overlay_flags()
+
+    def _load_direction_configuration(self) -> None:
+        if not self.data_manager or not hasattr(self.data_manager, 'get_direction_config'):
+            self._direction_config = {}
+            self._direction_templates = {'left': [], 'right': []}
+            checkbox = getattr(self, 'show_direction_checkbox', None)
+            if checkbox is not None:
+                checkbox.blockSignals(True)
+                checkbox.setChecked(False)
+                checkbox.setEnabled(False)
+                checkbox.blockSignals(False)
+            self.overlay_preferences['direction_area'] = False
+            return
+        try:
+            self._direction_config = self.data_manager.get_direction_config()
+            left_templates = self.data_manager.list_direction_templates('left')
+            right_templates = self.data_manager.list_direction_templates('right')
+            self._direction_templates = {
+                'left': left_templates if isinstance(left_templates, list) else [],
+                'right': right_templates if isinstance(right_templates, list) else [],
+            }
+            self._show_direction_overlay_config = bool(self._direction_config.get('show_overlay', True))
+        except Exception as exc:
+            self._direction_config = {}
+            self._direction_templates = {'left': [], 'right': []}
+            self.append_log(f"방향 설정을 불러오지 못했습니다: {exc}", "warn")
+        checkbox = getattr(self, 'show_direction_checkbox', None)
+        if checkbox is not None:
+            checkbox.blockSignals(True)
+            if not self._show_direction_overlay_config:
+                self._direction_area_user_pref = self.overlay_preferences.get('direction_area', True)
+                self.overlay_preferences['direction_area'] = False
+                checkbox.setChecked(False)
+                checkbox.setEnabled(False)
+            else:
+                if not checkbox.isEnabled():
+                    checkbox.setEnabled(True)
+                restored_state = self._direction_area_user_pref if isinstance(self._direction_area_user_pref, bool) else True
+                self.overlay_preferences['direction_area'] = restored_state
+                checkbox.setChecked(restored_state)
+            checkbox.blockSignals(False)
+        self._update_detection_thread_overlay_flags()
+
+    def _handle_overlay_config_update(self, payload: dict) -> None:
+        if not isinstance(payload, dict):
+            return
+        target = payload.get('target')
+        show_overlay = bool(payload.get('show_overlay', True))
+        if target == 'nickname':
+            self._show_nickname_overlay_config = show_overlay
+            if not show_overlay:
+                self._latest_nickname_box = None
+        elif target == 'direction':
+            if not show_overlay:
+                self._direction_area_user_pref = self.overlay_preferences.get('direction_area', True)
+                self.overlay_preferences['direction_area'] = False
+            else:
+                restored_state = self._direction_area_user_pref if isinstance(self._direction_area_user_pref, bool) else True
+                self.overlay_preferences['direction_area'] = restored_state
+            self._show_direction_overlay_config = show_overlay
+            checkbox = getattr(self, 'show_direction_checkbox', None)
+            if checkbox is not None:
+                previous = checkbox.blockSignals(True)
+                if show_overlay:
+                    checkbox.setChecked(self.overlay_preferences.get('direction_area', True))
+                    checkbox.setEnabled(True)
+                else:
+                    checkbox.setChecked(False)
+                    checkbox.setEnabled(False)
+                checkbox.blockSignals(previous)
+            if not show_overlay:
+                self._latest_direction_roi = None
+                self._latest_direction_match = None
+        else:
+            return
+        self._update_detection_thread_overlay_flags()
+        self._update_detection_summary()
+        self._emit_area_overlays()
 
     def _build_thread_nickname_detector(self) -> Optional[NicknameDetector]:
         if not self._nickname_templates:
@@ -1891,8 +2164,32 @@ class HuntTab(QWidget):
             self.append_log(f"닉네임 탐지기를 초기화하지 못했습니다: {exc}", "warn")
             return None
 
+    def _build_thread_direction_detector(self) -> Optional[DirectionDetector]:
+        left_templates = self._direction_templates.get('left', [])
+        right_templates = self._direction_templates.get('right', [])
+        if not left_templates and not right_templates:
+            return None
+        config = self._direction_config or {}
+        try:
+            detector = DirectionDetector(
+                match_threshold=float(config.get('match_threshold', 0.72)),
+                search_offset_y=float(config.get('search_offset_y', 60.0)),
+                search_height=float(config.get('search_height', 20.0)),
+                search_half_width=float(config.get('search_half_width', 30.0)),
+            )
+            detector.load_templates(left_templates, right_templates)
+            return detector
+        except Exception as exc:
+            self.append_log(f"방향 탐지기를 초기화하지 못했습니다: {exc}", "warn")
+            return None
+
     def attach_data_manager(self, data_manager) -> None:
         self.data_manager = data_manager
+        if hasattr(self.data_manager, 'register_overlay_listener'):
+            try:
+                self.data_manager.register_overlay_listener(self._handle_overlay_config_update)
+            except Exception:
+                pass
         self.refresh_model_choices()
         if hasattr(self.data_manager, 'load_settings'):
             settings = self.data_manager.load_settings()
@@ -1904,6 +2201,7 @@ class HuntTab(QWidget):
         self.append_log("학습 데이터 연동 완료", "info")
         self._save_settings()
         self._load_nickname_configuration()
+        self._load_direction_configuration()
 
     def set_authority_bridge_active(self, request_connected: bool, release_connected: bool) -> None:
         self._authority_request_connected = bool(request_connected)
@@ -1954,6 +2252,12 @@ class HuntTab(QWidget):
         if display:
             show_hunt = bool(display.get('show_hunt_area', self.show_hunt_area_checkbox.isChecked()))
             show_primary = bool(display.get('show_primary_area', self.show_primary_skill_checkbox.isChecked()))
+            if 'show_direction_area' in display:
+                show_direction = bool(display.get('show_direction_area'))
+            elif 'show_nickname_area' in display:
+                show_direction = bool(display.get('show_nickname_area'))
+            else:
+                show_direction = self.show_direction_checkbox.isChecked()
             auto_target = bool(display.get('auto_target', self.auto_target_radio.isChecked()))
             screen_output_enabled = bool(
                 display.get(
@@ -1966,6 +2270,7 @@ class HuntTab(QWidget):
 
             self.show_hunt_area_checkbox.setChecked(show_hunt)
             self.show_primary_skill_checkbox.setChecked(show_primary)
+            self.show_direction_checkbox.setChecked(show_direction)
             self.auto_target_radio.setChecked(auto_target)
             self.manual_target_radio.setChecked(not auto_target)
             self.screen_output_checkbox.setChecked(screen_output_enabled)
@@ -1977,6 +2282,8 @@ class HuntTab(QWidget):
 
         self.overlay_preferences['hunt_area'] = self.show_hunt_area_checkbox.isChecked()
         self.overlay_preferences['primary_area'] = self.show_primary_skill_checkbox.isChecked()
+        self.overlay_preferences['direction_area'] = self.show_direction_checkbox.isChecked()
+        self._direction_area_user_pref = self.overlay_preferences['direction_area']
 
         misc = data.get('misc', {})
         if misc:
@@ -2100,6 +2407,7 @@ class HuntTab(QWidget):
             'display': {
                 'show_hunt_area': self.show_hunt_area_checkbox.isChecked(),
                 'show_primary_area': self.show_primary_skill_checkbox.isChecked(),
+                'show_direction_area': self.show_direction_checkbox.isChecked(),
                 'auto_target': self.auto_target_radio.isChecked(),
                 'screen_output': self.screen_output_checkbox.isChecked(),
                 'summary_confidence': self.show_confidence_summary_checkbox.isChecked(),
