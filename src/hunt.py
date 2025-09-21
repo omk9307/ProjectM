@@ -683,7 +683,7 @@ class HuntTab(QWidget):
         self.conf_char_spinbox.setSingleStep(0.05)
         self.conf_char_spinbox.setValue(0.5)
         conf_layout.addWidget(self.conf_char_spinbox)
-        self.conf_char_spinbox.valueChanged.connect(self._handle_setting_changed)
+        self.conf_char_spinbox.valueChanged.connect(self._on_conf_char_changed)
 
         conf_layout.addWidget(QLabel("몬스터 신뢰도:"))
         self.conf_monster_spinbox = QDoubleSpinBox()
@@ -913,6 +913,55 @@ class HuntTab(QWidget):
             self._cancel_facing_reset_timer()
             if not thread_active:
                 self._issue_all_keys_release("실시간 탐지 중단")
+
+    def _on_conf_char_changed(self, value: float) -> None:
+        self._sync_nickname_threshold_from_spinbox(float(value))
+        self._handle_setting_changed()
+
+    def _sync_nickname_threshold_from_spinbox(self, value: float) -> None:
+        spinbox = getattr(self, 'conf_char_spinbox', None)
+        if spinbox is not None:
+            value = max(spinbox.minimum(), min(spinbox.maximum(), float(value)))
+        try:
+            clamped_value = float(value)
+        except (TypeError, ValueError):
+            return
+
+        if self._nickname_config is None:
+            self._nickname_config = {}
+        self._nickname_config['match_threshold'] = clamped_value
+
+        if not self.data_manager or not hasattr(self.data_manager, 'update_nickname_config'):
+            return
+
+        try:
+            updated_config = self.data_manager.update_nickname_config({'match_threshold': clamped_value})
+        except Exception as exc:
+            self.append_log(f"닉네임 임계값을 업데이트하지 못했습니다: {exc}", "warn")
+            return
+
+        if isinstance(updated_config, dict):
+            self._nickname_config = updated_config
+
+    def _apply_nickname_threshold_to_char_conf(self) -> None:
+        spinbox = getattr(self, 'conf_char_spinbox', None)
+        if spinbox is None:
+            return
+        config = getattr(self, '_nickname_config', {}) or {}
+        threshold = config.get('match_threshold')
+        try:
+            threshold_value = float(threshold)
+        except (TypeError, ValueError):
+            return
+
+        clamped = max(spinbox.minimum(), min(spinbox.maximum(), threshold_value))
+        if abs(spinbox.value() - clamped) <= 1e-6:
+            return
+
+        previous_state = spinbox.blockSignals(True)
+        spinbox.setValue(clamped)
+        spinbox.blockSignals(previous_state)
+        self._save_settings()
 
     def _stop_detection_thread(self) -> None:
         if self.detection_thread:
@@ -1647,6 +1696,8 @@ class HuntTab(QWidget):
             self.append_log(f"닉네임 설정을 불러오지 못했습니다: {exc}", "warn")
         if not self._nickname_templates:
             self._latest_nickname_box = None
+
+        self._apply_nickname_threshold_to_char_conf()
 
     def _build_thread_nickname_detector(self) -> Optional[NicknameDetector]:
         if not self._nickname_templates:
