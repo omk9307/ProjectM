@@ -5,6 +5,7 @@ import time
 import json
 import os
 import random
+import copy
 from PyQt6.QtWidgets import (
     QApplication, QWidget, QVBoxLayout, QHBoxLayout, QLabel, QListWidget, QPushButton,
     QGroupBox, QFormLayout, QComboBox, QSpinBox, QMessageBox, QFrame, QCheckBox,
@@ -35,7 +36,6 @@ FULL_KEY_MAP = {
     Key.shift: 225, Key.shift_l: 225,
     Key.alt: 226, Key.alt_l: 226,
     Key.cmd: 227, Key.cmd_l: 227, # Windows Key
-    Key.ctrl_r: 228,
     Key.shift_r: 229,
     Key.alt_r: 230,
     Key.cmd_r: 231,
@@ -79,6 +79,7 @@ class AutoControlTab(QWidget):
         self.is_waiting_for_start_key = False
         self.keyboard_listener = None
         self.recorded_sequence = []
+        self._sequence_clipboard_cache = None
         self.last_event_time = 0
         self.auto_stop_timer = QTimer(self)
         self.auto_stop_timer.setSingleShot(True)
@@ -98,7 +99,7 @@ class AutoControlTab(QWidget):
 
         self.is_processing_step = False                 # 중복 _process_next_step 재진입 방지 플래그
         self.last_sent_timestamps = {}                  # 전송한 키의 타임스탬프 (에코 무시용)
-        self.ECHO_IGNORE_MS = 30                        # 기본 60ms, 필요하면 40~120 범위로 조절 권장
+        self.ECHO_IGNORE_MS = 30                        # 기본 30ms, 필요하면 40~120 범위로 조절 권장
         self.last_command_start_time = 0.0              # 마지막 시퀀스 시작 시각
         self.sequence_watchdog = QTimer(self)           # 시퀀스가 멈추는 경우 복구용 와치독
         self.sequence_watchdog.setSingleShot(True)
@@ -172,9 +173,12 @@ class AutoControlTab(QWidget):
         seq_title = QLabel("액션 시퀀스"); seq_title.setObjectName("TitleLabel")
         copy_seq_btn = QPushButton(QIcon.fromTheme("edit-copy"), " 복사")
         copy_seq_btn.clicked.connect(self.copy_sequence_to_clipboard)
+        paste_seq_btn = QPushButton(QIcon.fromTheme("edit-paste"), " 붙여넣기")
+        paste_seq_btn.clicked.connect(self.paste_sequence_from_clipboard)
         seq_title_layout.addWidget(seq_title)
         seq_title_layout.addStretch()
         seq_title_layout.addWidget(copy_seq_btn)
+        seq_title_layout.addWidget(paste_seq_btn)
         seq_group_layout.addLayout(seq_title_layout)
         
         self.action_sequence_list = QListWidget()
@@ -463,14 +467,19 @@ class AutoControlTab(QWidget):
                 continue # 그 외 문자열 키는 일단 제외
                 
             elif isinstance(k, Key):
-                # <<< [수정] alt 키만 예외 처리하고 나머지는 기존 방식 유지
-                if k.name.startswith('alt'):
-                    name = k.name # alt_l, alt_r 그대로 사용
+                raw_name = k.name
+                if raw_name.startswith('alt'):
+                    name = raw_name  # alt_l, alt_r 그대로 사용
+                elif raw_name == 'ctrl_l':
+                    name = raw_name
                 else:
-                    name = k.name.replace('_l', '').replace('_r', '') # ctrl, shift 등은 단일 이름으로
-                
-                key_str = f"Key.{name}"
-                
+                    name = raw_name.replace('_l', '').replace('_r', '')  # ctrl, shift 등은 단일 이름으로
+
+                if raw_name in ('ctrl', 'ctrl_l'):
+                    key_str = "Key.ctrl_l"
+                else:
+                    key_str = f"Key.{name}"
+
                 if name in ['up', 'down', 'left', 'right']:
                     keys_by_type["방향키"].append(key_str)
                 elif name.startswith('f') and name[1:].isdigit():
@@ -479,7 +488,7 @@ class AutoControlTab(QWidget):
                     keys_by_type["편집키"].append(key_str)
                 elif name in ['space', 'enter', 'esc', 'tab', 'backspace']:
                     keys_by_type["주요 특수키"].append(key_str)
-                elif name in ['ctrl', 'shift', 'cmd', 'alt_l']:
+                elif name in ['ctrl', 'ctrl_l', 'shift', 'cmd', 'alt_l']:
                     keys_by_type["수식키"].append(key_str)
         
         # 2. 각 그룹 내부 정렬
@@ -686,12 +695,42 @@ class AutoControlTab(QWidget):
             # PyQt의 클립보드 기능 사용
             clipboard = QApplication.clipboard()
             clipboard.setText(sequence_text)
+            self._sequence_clipboard_cache = copy.deepcopy(sequence)
             
             self.status_label.setText(f"'{command_text}' 시퀀스가 클립보드에 복사되었습니다.")
             print(f"--- 클립보드에 복사된 내용 ---\n{sequence_text}\n--------------------------")
 
         except Exception as e:
             QMessageBox.critical(self, "오류", f"클립보드 복사 중 오류가 발생했습니다:\n{e}")
+
+    def paste_sequence_from_clipboard(self):
+        command_item = self.command_list.currentItem()
+        if not command_item:
+            QMessageBox.warning(self, "알림", "붙여넣을 명령 프로필을 선택하세요.")
+            return
+
+        sequence_data = None
+        if isinstance(self._sequence_clipboard_cache, list):
+            sequence_data = copy.deepcopy(self._sequence_clipboard_cache)
+        else:
+            clipboard_text = QApplication.clipboard().text().strip()
+            if clipboard_text:
+                try:
+                    parsed = json.loads(clipboard_text)
+                    if isinstance(parsed, list):
+                        self._sequence_clipboard_cache = copy.deepcopy(parsed)
+                        sequence_data = copy.deepcopy(self._sequence_clipboard_cache)
+                except json.JSONDecodeError:
+                    sequence_data = None
+
+        if not isinstance(sequence_data, list):
+            QMessageBox.information(self, "알림", "복사한 시퀀스가 없습니다.")
+            return
+
+        command_text = command_item.text()
+        self.mappings[command_text] = copy.deepcopy(sequence_data)
+        self._populate_action_sequence_list(command_text)
+        self.status_label.setText(f"'{command_text}' 시퀀스가 붙여넣기 되었습니다.")
 
     # --- 시리얼 통신 및 명령 실행 ---
     def connect_to_pi(self):
@@ -707,8 +746,14 @@ class AutoControlTab(QWidget):
             print(f"[AutoControl] 시리얼 연결 실패: {e}")
 
     def _str_to_key_obj(self, key_str):
-        if key_str.startswith("Key."): return getattr(Key, key_str.split('.')[1], None)
-        else: return key_str 
+        if not key_str:
+            return None
+        if key_str.startswith("Key."):
+            key_name = key_str.split('.', 1)[1]
+            if key_name == 'ctrl':
+                key_name = 'ctrl_l'
+            return getattr(Key, key_name, None)
+        return key_str 
 
     def _send_command(self, command, key_object):
         if not self.ser or not self.ser.is_open:
@@ -1226,7 +1271,7 @@ class AutoControlTab(QWidget):
         translation_map = {
             'Key.right': '→', 'Key.left': '←', 'Key.down': '↓', 'Key.up': '↑',
             'Key.space': 'Space', 'Key.enter': 'Enter', 'Key.esc': 'Esc',
-            'Key.ctrl_l': 'Ctrl_L', 'Key.ctrl_r': 'Ctrl_R', 'Key.ctrl': 'Ctrl',
+            'Key.ctrl_l': 'Ctrl_L', 'Key.ctrl': 'Ctrl',
             'Key.alt_l': 'Alt_L', 'Key.alt_r': 'Alt_R', 'Key.alt': 'Alt',
             'Key.shift_l': 'Shift_L', 'Key.shift_r': 'Shift_R', 'Key.shift': 'Shift',
             'Key.cmd': 'Win', 'Key.cmd_l': 'Win_L', 'Key.cmd_r': 'Win_R',

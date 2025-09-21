@@ -142,6 +142,13 @@ class BuffSkill:
     post_delay_max: float = 0.46
 
 
+@dataclass
+class TeleportSettings:
+    enabled: bool = False
+    distance_px: float = 190.0
+    probability: int = 50
+
+
 class AttackSkillDialog(QDialog):
     """공격 스킬 정보를 입력/수정하기 위한 대화상자."""
 
@@ -393,6 +400,14 @@ class HuntTab(QWidget):
             'nickname_ms': 0.0,
         }
         self._active_target_names: List[str] = []
+
+        self.teleport_settings = TeleportSettings()
+        self.teleport_command_left = "텔레포트(좌)"
+        self.teleport_command_right = "텔레포트(우)"
+        self.teleport_command_left_v2 = "텔레포트(좌)v2"
+        self.teleport_command_right_v2 = "텔레포트(우)v2"
+        self._movement_mode: Optional[str] = None
+        self._last_movement_command_ts = 0.0
 
         self._build_ui()
         self._update_facing_label()
@@ -1260,10 +1275,13 @@ class HuntTab(QWidget):
 
         attack_section = self._create_attack_section()
         buff_section = self._create_buff_section()
+        teleport_section = self._create_teleport_section()
         attack_section.setSizePolicy(QSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred))
         buff_section.setSizePolicy(QSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred))
+        teleport_section.setSizePolicy(QSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed))
         layout.addWidget(attack_section)
         layout.addWidget(buff_section)
+        layout.addWidget(teleport_section)
 
         group.setLayout(layout)
         return group
@@ -1385,6 +1403,34 @@ class HuntTab(QWidget):
         layout.addLayout(button_layout)
 
         box.setLayout(layout)
+        return box
+
+    def _create_teleport_section(self) -> QGroupBox:
+        box = QGroupBox("텔레포트 이동")
+        form = QFormLayout()
+
+        self.teleport_enabled_checkbox = QCheckBox("사용")
+        self.teleport_enabled_checkbox.setChecked(self.teleport_settings.enabled)
+        self.teleport_enabled_checkbox.toggled.connect(self._handle_setting_changed)
+
+        self.teleport_distance_spinbox = QSpinBox()
+        self.teleport_distance_spinbox.setRange(50, 600)
+        self.teleport_distance_spinbox.setSingleStep(10)
+        self.teleport_distance_spinbox.setValue(int(self.teleport_settings.distance_px))
+        self.teleport_distance_spinbox.setSuffix(" px")
+        self.teleport_distance_spinbox.valueChanged.connect(self._handle_setting_changed)
+
+        self.teleport_probability_spinbox = QSpinBox()
+        self.teleport_probability_spinbox.setRange(0, 100)
+        self.teleport_probability_spinbox.setValue(int(self.teleport_settings.probability))
+        self.teleport_probability_spinbox.setSuffix(" %")
+        self.teleport_probability_spinbox.valueChanged.connect(self._handle_setting_changed)
+
+        form.addRow("사용", self.teleport_enabled_checkbox)
+        form.addRow("텔레포트 이동(px)", self.teleport_distance_spinbox)
+        form.addRow("사용 확률(%)", self.teleport_probability_spinbox)
+
+        box.setLayout(form)
         return box
 
     def _on_area_config_changed(self) -> None:
@@ -1951,6 +1997,19 @@ class HuntTab(QWidget):
             except (TypeError, ValueError):
                 pass
 
+        teleport = data.get('teleport', {})
+        if teleport:
+            self.teleport_settings.enabled = bool(teleport.get('enabled', self.teleport_settings.enabled))
+            self.teleport_settings.distance_px = float(teleport.get('distance_px', self.teleport_settings.distance_px))
+            self.teleport_settings.probability = int(teleport.get('probability', self.teleport_settings.probability))
+            self.teleport_command_left = teleport.get('command_left', self.teleport_command_left)
+            self.teleport_command_right = teleport.get('command_right', self.teleport_command_right)
+            self.teleport_command_left_v2 = teleport.get('command_left_v2', self.teleport_command_left_v2)
+            self.teleport_command_right_v2 = teleport.get('command_right_v2', self.teleport_command_right_v2)
+            self.teleport_enabled_checkbox.setChecked(self.teleport_settings.enabled)
+            self.teleport_distance_spinbox.setValue(int(self.teleport_settings.distance_px))
+            self.teleport_probability_spinbox.setValue(int(self.teleport_settings.probability))
+
         facing_state = data.get('last_facing')
         self._set_current_facing(facing_state if facing_state in ('left', 'right') else None, save=False)
         self.control_release_timeout = max(1.0, self.max_authority_hold_spinbox.value())
@@ -2017,6 +2076,10 @@ class HuntTab(QWidget):
         if getattr(self, '_suppress_settings_save', False):
             return
 
+        self.teleport_settings.enabled = bool(self.teleport_enabled_checkbox.isChecked())
+        self.teleport_settings.distance_px = float(self.teleport_distance_spinbox.value())
+        self.teleport_settings.probability = int(self.teleport_probability_spinbox.value())
+
         settings_data = {
             'ranges': {
                 'enemy_range': self.enemy_range_spinbox.value(),
@@ -2047,6 +2110,15 @@ class HuntTab(QWidget):
                 'direction_delay_max': self.direction_delay_max_spinbox.value(),
                 'facing_reset_min_sec': self.facing_reset_min_spinbox.value(),
                 'facing_reset_max_sec': self.facing_reset_max_spinbox.value(),
+            },
+            'teleport': {
+                'enabled': self.teleport_settings.enabled,
+                'distance_px': self.teleport_settings.distance_px,
+                'probability': self.teleport_settings.probability,
+                'command_left': self.teleport_command_left,
+                'command_right': self.teleport_command_right,
+                'command_left_v2': self.teleport_command_left_v2,
+                'command_right_v2': self.teleport_command_right_v2,
             },
             'attack_skills': [
                 {
@@ -2259,6 +2331,8 @@ class HuntTab(QWidget):
             self._ensure_idle_keys("공격 스킬 미등록")
             return
         if self.latest_primary_monster_count == 0:
+            if self._handle_monster_approach():
+                return
             self._ensure_idle_keys("주 스킬 범위 몬스터 없음")
             return
         if not self.latest_snapshot or not self.latest_snapshot.character_boxes:
@@ -2267,6 +2341,9 @@ class HuntTab(QWidget):
 
         if now - self.last_attack_ts < self.attack_interval_sec:
             return
+
+        if self._movement_mode:
+            self._movement_mode = None
 
         skill = self._select_attack_skill()
         if not skill:
@@ -2285,6 +2362,70 @@ class HuntTab(QWidget):
             return
 
         self._execute_attack_skill(skill)
+
+    def _handle_monster_approach(self) -> bool:
+        if not self.latest_snapshot or not self.latest_snapshot.character_boxes:
+            return False
+        if not self.current_hunt_area:
+            return False
+        monsters = self.latest_snapshot.monster_boxes
+        if not monsters:
+            return False
+
+        hunt_monsters = [box for box in monsters if box.intersects(self.current_hunt_area)]
+        if not hunt_monsters:
+            return False
+
+        character_box = self._select_reference_character_box(self.latest_snapshot.character_boxes)
+        target = min(hunt_monsters, key=lambda box: abs(box.center_x - character_box.center_x))
+        target_side = 'left' if target.center_x < character_box.center_x else 'right'
+        distance = abs(target.center_x - character_box.center_x)
+
+        teleport_enabled = bool(self.teleport_enabled_checkbox.isChecked())
+        teleport_distance = float(self.teleport_distance_spinbox.value())
+        teleport_probability = max(0, min(100, int(self.teleport_probability_spinbox.value())))
+
+        if teleport_enabled and distance > teleport_distance:
+            roll = random.randint(1, 100)
+            if roll <= teleport_probability:
+                if self._issue_teleport_command(target_side, distance):
+                    return True
+
+        return self._issue_walk_command(target_side, distance)
+
+    def _issue_walk_command(self, side: str, distance: float) -> bool:
+        if side not in ('left', 'right'):
+            return False
+        mode_key = f"walk_{side}"
+        if self._movement_mode == mode_key:
+            return True
+        command = "걷기(좌)" if side == 'left' else "걷기(우)"
+        reason = f"몬스터 접근 ({'좌' if side == 'left' else '우'}, {distance:.0f}px)"
+        self._emit_control_command(command, reason=reason)
+        self._movement_mode = mode_key
+        self.hunting_active = True
+        self._last_movement_command_ts = time.time()
+        return True
+
+    def _issue_teleport_command(self, side: str, distance: float) -> bool:
+        if side not in ('left', 'right'):
+            return False
+        if side == 'left':
+            candidates = [self.teleport_command_left, self.teleport_command_left_v2]
+        else:
+            candidates = [self.teleport_command_right, self.teleport_command_right_v2]
+        available = [cmd for cmd in candidates if isinstance(cmd, str) and cmd.strip()]
+        command = random.choice(available) if available else (self.teleport_command_left if side == 'left' else self.teleport_command_right)
+        reason = f"몬스터에게 이동 ({distance:.0f}px)"
+        self._emit_control_command(command, reason=reason)
+        self._movement_mode = None
+        self._set_current_facing(side, save=False)
+        self.hunting_active = True
+        self._last_movement_command_ts = time.time()
+        delay = random.uniform(0.12, 0.22)
+        self._set_command_cooldown(delay)
+        self._log_delay_message("텔레포트 이동", delay)
+        return True
 
     def _evaluate_buff_usage(self, now: float) -> bool:
         if self._get_command_delay_remaining() > 0:
@@ -2758,6 +2899,7 @@ class HuntTab(QWidget):
             self.append_log("모든 키 떼기 명령 전송", "debug")
         self._release_pending = False
         self.hunting_active = False
+        self._movement_mode = None
 
     def _ensure_idle_keys(self, reason: Optional[str] = None) -> None:
         self._clear_pending_skill()
