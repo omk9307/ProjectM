@@ -189,3 +189,33 @@ globals().update({name: getattr(_map_ui, name) for name in exported})
 for name in exported:
     if name not in __all__:
         __all__.append(name)
+
+try:
+    from . import map_widgets as _map_widgets
+except ImportError:
+    import map_widgets as _map_widgets  # type: ignore
+
+widget_exports = getattr(_map_widgets, "__all__", None)
+if not widget_exports:
+    widget_exports = [name for name in dir(_map_widgets) if not name.startswith('_')]
+
+globals().update({name: getattr(_map_widgets, name) for name in widget_exports})
+
+for name in widget_exports:
+    if name not in __all__:
+        __all__.append(name)
+
+try:
+    from . import map_editors as _map_editors
+except ImportError:
+    import map_editors as _map_editors  # type: ignore
+
+editor_exports = getattr(_map_editors, "__all__", None)
+if not editor_exports:
+    editor_exports = [name for name in dir(_map_editors) if not name.startswith('_')]
+
+globals().update({name: getattr(_map_editors, name) for name in editor_exports})
+
+for name in editor_exports:
+    if name not in __all__:
+        __all__.append(name)
