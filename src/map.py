@@ -344,7 +344,7 @@ JUMP_LINK_ARRIVAL_X_THRESHOLD = 4.0 # 점프 링크/낭떠러지 도착 x축 허
 LADDER_AVOIDANCE_WIDTH = 3.0 # 아래 점프 시 사다리 회피 X축 반경 (px)
 # ==================== v11.5.0 상태 머신 상수 ====================
 MAX_LOCK_DURATION = 5.0      # 행동 잠금(locked) 상태의 최대 지속 시간 (초)
-PREPARE_TIMEOUT = 5.0         # 행동 준비(prepare_to_*) 상태의 최대 지속 시간 (초)
+PREPARE_TIMEOUT = 15.0         # 행동 준비(prepare_to_*) 상태의 최대 지속 시간 (초)
 HYSTERESIS_EXIT_OFFSET = 4.0  # 도착 판정 히스테리시스 오프셋 (px)
 # =================================================================
 
@@ -7904,7 +7904,7 @@ class MapTab(QWidget):
             if time_since_last_action > self.STUCK_DETECTION_THRESHOLD_S and self.stuck_recovery_attempts < self.MAX_STUCK_RECOVERY_ATTEMPTS:
                 if self.last_movement_command:
                     self.stuck_recovery_attempts += 1
-                    log_msg = f"[자동 복구] 멈춤 감지 ({self.stuck_recovery_attempts}/{self.MAX_STUCK_RECOVERY_ATTEMPTS}). '붙기' 후 '{self.last_movement_command}' 재시도."
+                    log_msg = f"[자동 복구] 멈춤 감지 ({self.stuck_recovery_attempts}/{self.MAX_STUCK_RECOVERY_ATTEMPTS}). '사다리 멈춤복구' 후 '{self.last_movement_command}' 재시도."
                     self.update_general_log(log_msg, "orange")
                     
                     self.recovery_cooldown_until = time.time() + 1.5
@@ -7949,7 +7949,7 @@ class MapTab(QWidget):
                 if self.alignment_target_x is None:
                     self.update_general_log("정렬 대상이 유효하지 않아 정렬을 종료합니다.", "orange")
                     self._abort_alignment_and_recalculate()
-                elif abs(final_player_pos.x() - self.alignment_target_x) <= 2.0:
+                elif abs(final_player_pos.x() - self.alignment_target_x) <= 1.0:
                     self.update_general_log("정렬 범위 진입. 0.3초간 위치를 확인합니다.", "gray")
                     self.navigation_action = 'verify_alignment'
                     self.verify_alignment_start_time = time.time()
@@ -7958,7 +7958,7 @@ class MapTab(QWidget):
                     self.update_general_log("정렬 대상이 유효하지 않아 정렬을 종료합니다.", "orange")
                     self._abort_alignment_and_recalculate()
                 elif time.time() - self.verify_alignment_start_time > 0.3:
-                    if abs(final_player_pos.x() - self.alignment_target_x) <= 2.0:
+                    if abs(final_player_pos.x() - self.alignment_target_x) <= 1.0:
                         # 최종 성공
                         self.update_general_log("정렬 확인 완료. 위 방향으로 오르기를 시도합니다.", "green")
                         self.navigation_action = 'prepare_to_climb_upward'
@@ -8242,7 +8242,13 @@ class MapTab(QWidget):
                     # --- [신규] '정렬' 및 '위로 오르기' 명령 전송 로직 ---
                     if current_action_key == 'prepare_to_climb_upward' and action_changed:
                         command_to_send = "사다리타기(상)"
-                    
+
+                        self.navigation_action = 'climb_in_progress'
+                        self.navigation_state_locked = True
+                        self.lock_timeout_start = time.time()
+                        if self.debug_basic_pathfinding_checkbox and self.debug_basic_pathfinding_checkbox.isChecked():
+                            print("[INFO] 'prepare_to_climb_upward' -> 'climb_in_progress' 상태 즉시 전환")
+
                     elif current_action_key == 'align_for_climb' and is_on_ground:
                         # '툭 치기' 명령은 0.5초에 한 번씩만 보내도록 제한 (연타 방지)
                         if time.time() - self.last_align_command_time > 0.5:
