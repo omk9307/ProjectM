@@ -15,6 +15,7 @@ import math
 import shutil
 import copy
 import traceback
+import random
 from collections import defaultdict, deque
 import threading 
 import hashlib #  동일 컨텍스트 판별용
@@ -35,7 +36,7 @@ from PyQt6.QtWidgets import (
     QLineEdit, QRadioButton, QButtonGroup, QGroupBox, QComboBox,
 
     QGraphicsView, QGraphicsScene, QGraphicsPixmapItem, QCheckBox, QGraphicsRectItem,
-    QGraphicsLineItem, QGraphicsTextItem, QGraphicsEllipseItem, QTabWidget,
+    QGraphicsLineItem, QGraphicsTextItem, QGraphicsEllipseItem,
     QGraphicsSimpleTextItem, QFormLayout, QProgressDialog
 )
 from PyQt6.QtGui import QPixmap, QImage, QPainter, QPen, QColor, QBrush, QFont, QCursor, QIcon, QPolygonF, QFontMetrics, QFontMetricsF, QGuiApplication
@@ -300,6 +301,8 @@ MAPS_DIR = os.path.join(CONFIG_PATH, 'maps') # 모든 맵 프로필을 저장할
 GLOBAL_MAP_SETTINGS_FILE = os.path.join(CONFIG_PATH, 'global_map_settings.json')
 GLOBAL_ACTION_MODEL_DIR = os.path.join(CONFIG_PATH, 'global_action_model')
 
+ROUTE_SLOT_IDS = ["1", "2", "3", "4", "5"]
+
 # 내 캐릭터 (노란색 계열)
 PLAYER_ICON_LOWER = np.array([22, 120, 120])
 PLAYER_ICON_UPPER = np.array([35, 255, 255])
@@ -341,7 +344,7 @@ MAX_JUMP_DURATION = 3.0         # 점프 상태가 강제로 해제되기까지�
 WAYPOINT_ARRIVAL_X_THRESHOLD = 8.0 # 웨이포인트 도착 x축 허용 오차 (px)
 LADDER_ARRIVAL_X_THRESHOLD = 8.0   # 사다리 도착 x축 허용 오차 (px)
 JUMP_LINK_ARRIVAL_X_THRESHOLD = 4.0 # 점프 링크/낭떠러지 도착 x축 허용 오차 (px)
-LADDER_AVOIDANCE_WIDTH = 3.0 # 아래 점프 시 사다리 회피 X축 반경 (px)
+LADDER_AVOIDANCE_WIDTH = 2.0 # 아래 점프 시 사다리 회피 X축 반경 (px)
 # ==================== v11.5.0 상태 머신 상수 ====================
 MAX_LOCK_DURATION = 5.0      # 행동 잠금(locked) 상태의 최대 지속 시간 (초)
 PREPARE_TIMEOUT = 15.0         # 행동 준비(prepare_to_*) 상태의 최대 지속 시간 (초)
@@ -371,10 +374,11 @@ class NavigatorDisplay(QWidget):
         self.target_wp_id = None
         self.is_forward = True
         self.intermediate_target_type = 'walk'
+        self.direction_slot_label = "-"
 
     def update_data(self, floor, terrain_name, target_name, prev_name, next_name, 
                     direction, distance, full_path, last_reached_id, target_id, 
-                    is_forward, intermediate_type, player_state, nav_action):
+                    is_forward, direction_slot_label, intermediate_type, player_state, nav_action):
         """MapTab으로부터 최신 내비게이션 정보를 받아와 뷰를 갱신합니다."""
         self.current_floor = str(floor)
         self.current_terrain_name = terrain_name
@@ -390,6 +394,7 @@ class NavigatorDisplay(QWidget):
         self.target_wp_id = target_id
         self.is_forward = is_forward
         self.intermediate_target_type = intermediate_type
+        self.direction_slot_label = direction_slot_label or ("정방향" if is_forward else "역방향")
         self.update() # paintEvent 다시 호출
 
     def paintEvent(self, event):
@@ -422,9 +427,9 @@ class NavigatorDisplay(QWidget):
             font_direction_side = QFont("맑은 고딕", 9)
             painter.setFont(font_direction_side)
             painter.setPen(Qt.GlobalColor.yellow)
-            direction_text_side = f"{'정방향' if self.is_forward else '역방향'}"
+            direction_label = self.direction_slot_label or ("정방향" if self.is_forward else "역방향")
             dist_rect = QRect(left_rect.x(), 50, left_rect.width(), 25)
-            painter.drawText(dist_rect, Qt.AlignmentFlag.AlignCenter, direction_text_side)
+            painter.drawText(dist_rect, Qt.AlignmentFlag.AlignCenter, direction_label)
 
 
             # --- 2. 중앙 영역: 경로 및 진행 정보 ---
@@ -2645,14 +2650,29 @@ class FullMinimapEditorDialog(QDialog):
                             
                 # 4. 웨이포인트 순서 계산 및 그리기
                 wp_order_map = {}
-                route = self.route_profiles.get(self.active_route_profile, {})
-                for i, wp_id in enumerate(route.get("forward_path", [])):
-                    wp_order_map[wp_id] = f"{i+1}"
-                for i, wp_id in enumerate(route.get("backward_path", [])):
-                    if wp_id in wp_order_map:
-                        wp_order_map[wp_id] = f"{wp_order_map[wp_id]}/{i+1}"
-                    else:
-                        wp_order_map[wp_id] = f"{i+1}"
+                route = self.route_profiles.get(self.active_route_profile, {}) or {}
+
+                forward_slots = route.get("forward_slots", {})
+                for slot in ROUTE_SLOT_IDS:
+                    slot_data = forward_slots.get(slot, {}) or {}
+                    waypoints = slot_data.get("waypoints", []) or []
+                    for idx, wp_id in enumerate(waypoints):
+                        label = f"F{slot}-{idx + 1}"
+                        if wp_id in wp_order_map:
+                            wp_order_map[wp_id] = f"{wp_order_map[wp_id]}, {label}"
+                        else:
+                            wp_order_map[wp_id] = label
+
+                backward_slots = route.get("backward_slots", {})
+                for slot in ROUTE_SLOT_IDS:
+                    slot_data = backward_slots.get(slot, {}) or {}
+                    waypoints = slot_data.get("waypoints", []) or []
+                    for idx, wp_id in enumerate(waypoints):
+                        label = f"B{slot}-{idx + 1}"
+                        if wp_id in wp_order_map:
+                            wp_order_map[wp_id] = f"{wp_order_map[wp_id]}, {label}"
+                        else:
+                            wp_order_map[wp_id] = label
 
                 for wp_data in self.geometry_data.get("waypoints", []):
                     is_event = bool(wp_data.get('is_event'))
@@ -3390,12 +3410,8 @@ class FullMinimapEditorDialog(QDialog):
         ]
         
         # MapTab의 원본 route_profiles 데이터에서 직접 ID 제거 ---
-        if self.parent_map_tab and hasattr(self.parent_map_tab, 'route_profiles'):
-            for route in self.parent_map_tab.route_profiles.values():
-                if "forward_path" in route and isinstance(route["forward_path"], list):
-                    route["forward_path"] = [pid for pid in route["forward_path"] if pid != wp_id_to_delete]
-                if "backward_path" in route and isinstance(route["backward_path"], list):
-                    route["backward_path"] = [pid for pid in route["backward_path"] if pid != wp_id_to_delete]
+        if self.parent_map_tab and hasattr(self.parent_map_tab, '_remove_waypoint_from_all_routes'):
+            self.parent_map_tab._remove_waypoint_from_all_routes(wp_id_to_delete)
 
         self.view.viewport().update()
 
@@ -3719,29 +3735,51 @@ class RealtimeMinimapView(QLabel):
             painter.save()
             WAYPOINT_SIZE = 12.0 # 전역 좌표계 기준 크기
             
-            # 웨이포인트 순서 맵 생성 (현재 방향에 맞는 순서 맵만 생성)
+            # 웨이포인트 순서 맵 생성 (현재 실행 중인 여정 우선)
             wp_order_map = {}
-            if self.parent_tab.active_route_profile_name:
-                route = self.parent_tab.route_profiles.get(self.parent_tab.active_route_profile_name, {})
-                path_key = "forward_path" if self.is_forward else "backward_path"
-                path_ids = route.get(path_key, [])
-                
-                if not path_ids and not self.is_forward:
-                    path_ids = list(reversed(route.get("forward_path", [])))
+            path_ids = []
 
-                #  출발지/목적지 텍스트 처리 ---
-                if path_ids:
-                    # 먼저 모든 웨이포인트에 숫자 할당
-                    for i, wp_id in enumerate(path_ids):
-                        wp_order_map[wp_id] = f"{i+1}"
-                    
-                    # 시작점과 끝점 텍스트 덮어쓰기
-                    if len(path_ids) > 1:
-                        wp_order_map[path_ids[0]] = "출발지"
-                        wp_order_map[path_ids[-1]] = "목적지"
-                    elif len(path_ids) == 1:
-                        # 경로에 하나만 있을 경우 목적지로 표시
-                        wp_order_map[path_ids[0]] = "목적지"
+            if self.parent_tab.journey_plan:
+                path_ids = list(self.parent_tab.journey_plan)
+            elif self.parent_tab.active_route_profile_name:
+                route = self.parent_tab.route_profiles.get(self.parent_tab.active_route_profile_name, {}) or {}
+
+                if self.is_forward:
+                    slot_id = getattr(self.parent_tab, "current_forward_slot", "1") or "1"
+                    path_ids = self.parent_tab._get_route_slot_waypoints(route, "forward", slot_id)
+                    if not path_ids:
+                        enabled_slots = self.parent_tab._get_enabled_slot_ids(route, "forward")
+                        if enabled_slots:
+                            fallback_slot = enabled_slots[0]
+                            path_ids = self.parent_tab._get_route_slot_waypoints(route, "forward", fallback_slot)
+                else:
+                    slot_id = getattr(self.parent_tab, "current_backward_slot", "1") or "1"
+                    path_ids = self.parent_tab._get_route_slot_waypoints(route, "backward", slot_id)
+                    if not path_ids:
+                        enabled_slots = self.parent_tab._get_enabled_slot_ids(route, "backward")
+                        if enabled_slots:
+                            fallback_slot = enabled_slots[0]
+                            path_ids = self.parent_tab._get_route_slot_waypoints(route, "backward", fallback_slot)
+                        else:
+                            forward_slot = getattr(self.parent_tab, "last_selected_forward_slot", None) or getattr(self.parent_tab, "current_forward_slot", "1")
+                            forward_path = self.parent_tab._get_route_slot_waypoints(route, "forward", forward_slot)
+                            if forward_path:
+                                path_ids = list(reversed(forward_path))
+                            else:
+                                enabled_forward = self.parent_tab._get_enabled_slot_ids(route, "forward")
+                                if enabled_forward:
+                                    forward_path = self.parent_tab._get_route_slot_waypoints(route, "forward", enabled_forward[0])
+                                    path_ids = list(reversed(forward_path))
+
+            if path_ids:
+                for i, wp_id in enumerate(path_ids):
+                    wp_order_map[wp_id] = f"{i+1}"
+
+                if len(path_ids) > 1:
+                    wp_order_map[path_ids[0]] = "출발지"
+                    wp_order_map[path_ids[-1]] = "목적지"
+                elif len(path_ids) == 1:
+                    wp_order_map[path_ids[0]] = "목적지"
                     
             for wp_data in self.parent_tab.geometry_data.get("waypoints", []):
                 global_pos = QPointF(wp_data['pos'][0], wp_data['pos'][1])
@@ -4706,6 +4744,12 @@ class MapTab(QWidget):
             self.geometry_data = {} # terrain_lines, transition_objects, waypoints, jump_links 포함
             self.active_route_profile_name = None
             self.route_profiles = {}
+            self.current_forward_slot = "1"
+            self.current_backward_slot = "1"
+            self.last_selected_forward_slot = None
+            self.last_selected_backward_slot = None
+            self.last_forward_journey = []
+            self.current_direction_slot_label = "-"
             self.detection_thread = None
             self.capture_thread = None
             self.debug_dialog = None
@@ -4975,37 +5019,62 @@ class MapTab(QWidget):
         # 4. 웨이포인트 경로 관리 (v10.0.0 개편)
         self.wp_groupbox = QGroupBox("4. 웨이포인트 경로 관리")
         wp_main_layout = QVBoxLayout()
-        self.path_tabs = QTabWidget()
-        self.forward_path_widget = QWidget()
-        self.backward_path_widget = QWidget()
-        self.path_tabs.addTab(self.forward_path_widget, "정방향")
-        self.path_tabs.addTab(self.backward_path_widget, "역방향")
-        
-        # 정방향 탭 UI
-        fw_layout = QVBoxLayout(self.forward_path_widget)
+        path_layout = QHBoxLayout()
+
+        # 정방향 UI
+        forward_layout = QVBoxLayout()
+        forward_header = QHBoxLayout()
+        forward_header.addWidget(QLabel("정방향"))
+        self.forward_slot_combo = QComboBox()
+        self.forward_slot_combo.addItems(ROUTE_SLOT_IDS)
+        self.forward_slot_combo.currentIndexChanged.connect(self._on_forward_slot_changed)
+        self.forward_slot_enabled_checkbox = QCheckBox("사용")
+        self.forward_slot_enabled_checkbox.stateChanged.connect(lambda state: self._on_slot_enabled_changed('forward', state))
+        forward_header.addWidget(self.forward_slot_combo)
+        forward_header.addWidget(self.forward_slot_enabled_checkbox)
+        forward_header.addStretch()
+        forward_layout.addLayout(forward_header)
+
         self.forward_wp_list = QListWidget()
         self.forward_wp_list.setDragDropMode(QAbstractItemView.DragDropMode.InternalMove)
-        self.forward_wp_list.model().rowsMoved.connect(self.waypoint_order_changed)
+        self.forward_wp_list.model().rowsMoved.connect(lambda *args: self.waypoint_order_changed('forward'))
+        forward_layout.addWidget(self.forward_wp_list)
+
         fw_buttons = QHBoxLayout()
-        fw_add_btn = QPushButton("추가"); fw_add_btn.clicked.connect(self.add_waypoint_to_path)
-        fw_del_btn = QPushButton("삭제"); fw_del_btn.clicked.connect(self.delete_waypoint_from_path)
+        fw_add_btn = QPushButton("추가"); fw_add_btn.clicked.connect(lambda: self.add_waypoint_to_path('forward'))
+        fw_del_btn = QPushButton("삭제"); fw_del_btn.clicked.connect(lambda: self.delete_waypoint_from_path('forward'))
         fw_buttons.addWidget(fw_add_btn); fw_buttons.addWidget(fw_del_btn)
-        fw_layout.addWidget(self.forward_wp_list)
-        fw_layout.addLayout(fw_buttons)
-        
-        # 역방향 탭 UI
-        bw_layout = QVBoxLayout(self.backward_path_widget)
+        forward_layout.addLayout(fw_buttons)
+
+        # 역방향 UI
+        backward_layout = QVBoxLayout()
+        backward_header = QHBoxLayout()
+        backward_header.addWidget(QLabel("역방향"))
+        self.backward_slot_combo = QComboBox()
+        self.backward_slot_combo.addItems(ROUTE_SLOT_IDS)
+        self.backward_slot_combo.currentIndexChanged.connect(self._on_backward_slot_changed)
+        self.backward_slot_enabled_checkbox = QCheckBox("사용")
+        self.backward_slot_enabled_checkbox.stateChanged.connect(lambda state: self._on_slot_enabled_changed('backward', state))
+        backward_header.addWidget(self.backward_slot_combo)
+        backward_header.addWidget(self.backward_slot_enabled_checkbox)
+        backward_header.addStretch()
+        backward_layout.addLayout(backward_header)
+
         self.backward_wp_list = QListWidget()
         self.backward_wp_list.setDragDropMode(QAbstractItemView.DragDropMode.InternalMove)
-        self.backward_wp_list.model().rowsMoved.connect(self.waypoint_order_changed)
+        self.backward_wp_list.model().rowsMoved.connect(lambda *args: self.waypoint_order_changed('backward'))
+        backward_layout.addWidget(self.backward_wp_list)
+
         bw_buttons = QHBoxLayout()
-        bw_add_btn = QPushButton("추가"); bw_add_btn.clicked.connect(self.add_waypoint_to_path)
-        bw_del_btn = QPushButton("삭제"); bw_del_btn.clicked.connect(self.delete_waypoint_from_path)
+        bw_add_btn = QPushButton("추가"); bw_add_btn.clicked.connect(lambda: self.add_waypoint_to_path('backward'))
+        bw_del_btn = QPushButton("삭제"); bw_del_btn.clicked.connect(lambda: self.delete_waypoint_from_path('backward'))
         bw_buttons.addWidget(bw_add_btn); bw_buttons.addWidget(bw_del_btn)
-        bw_layout.addWidget(self.backward_wp_list)
-        bw_layout.addLayout(bw_buttons)
-        
-        wp_main_layout.addWidget(self.path_tabs)
+        backward_layout.addLayout(bw_buttons)
+
+        path_layout.addLayout(forward_layout, 1)
+        path_layout.addLayout(backward_layout, 1)
+
+        wp_main_layout.addLayout(path_layout)
         self.wp_groupbox.setLayout(wp_main_layout)
         left_layout.addWidget(self.wp_groupbox)
 
@@ -5138,6 +5207,196 @@ class MapTab(QWidget):
         main_layout.addLayout(logs_layout, 1)
         main_layout.addLayout(right_layout, 2)
         self.update_general_log("MapTab이 초기화되었습니다. 맵 프로필을 선택해주세요.", "black")
+
+    def _create_empty_route_slots(self):
+        return {slot: {"enabled": False, "waypoints": []} for slot in ROUTE_SLOT_IDS}
+
+    def _create_empty_route_profile(self):
+        return {
+            "forward_slots": self._create_empty_route_slots(),
+            "backward_slots": self._create_empty_route_slots(),
+        }
+
+    def _normalize_route_slot_dict(self, slot_dict):
+        modified = False
+        if not isinstance(slot_dict, dict):
+            slot_dict = {}
+            modified = True
+
+        for slot in ROUTE_SLOT_IDS:
+            slot_data = slot_dict.get(slot)
+            if not isinstance(slot_data, dict):
+                slot_dict[slot] = {"enabled": False, "waypoints": []}
+                modified = True
+                continue
+
+            if "enabled" not in slot_data or not isinstance(slot_data.get("enabled"), bool):
+                slot_data["enabled"] = bool(slot_data.get("enabled"))
+                modified = True
+
+            waypoints = slot_data.get("waypoints")
+            if not isinstance(waypoints, list):
+                slot_data["waypoints"] = []
+                modified = True
+            else:
+                cleaned = [wp for wp in waypoints if isinstance(wp, str)]
+                if len(cleaned) != len(waypoints):
+                    slot_data["waypoints"] = cleaned
+                    modified = True
+
+        extra_keys = [key for key in slot_dict.keys() if key not in ROUTE_SLOT_IDS]
+        if extra_keys:
+            for key in extra_keys:
+                slot_dict.pop(key, None)
+            modified = True
+
+        return slot_dict, modified
+
+    def _ensure_route_profile_structure(self, route_data, legacy_forward=None, legacy_backward=None):
+        if not isinstance(route_data, dict):
+            return self._create_empty_route_profile(), True
+
+        modified = False
+
+        if "forward_slots" not in route_data or not isinstance(route_data["forward_slots"], dict):
+            route_data["forward_slots"] = self._create_empty_route_slots()
+            modified = True
+        else:
+            route_data["forward_slots"], changed = self._normalize_route_slot_dict(route_data["forward_slots"])
+            modified = modified or changed
+
+        if "backward_slots" not in route_data or not isinstance(route_data["backward_slots"], dict):
+            route_data["backward_slots"] = self._create_empty_route_slots()
+            modified = True
+        else:
+            route_data["backward_slots"], changed = self._normalize_route_slot_dict(route_data["backward_slots"])
+            modified = modified or changed
+
+        if legacy_forward and isinstance(legacy_forward, list):
+            route_data["forward_slots"]["1"]["waypoints"] = [wp for wp in legacy_forward if isinstance(wp, str)]
+            route_data["forward_slots"]["1"]["enabled"] = bool(route_data["forward_slots"]["1"]["waypoints"])
+            modified = True
+
+        if legacy_backward and isinstance(legacy_backward, list):
+            route_data["backward_slots"]["1"]["waypoints"] = [wp for wp in legacy_backward if isinstance(wp, str)]
+            route_data["backward_slots"]["1"]["enabled"] = bool(route_data["backward_slots"]["1"]["waypoints"])
+            modified = True
+
+        return route_data, modified
+
+    def _collect_all_route_waypoint_ids(self, route_data):
+        waypoint_ids = []
+        for slot_dict in route_data.get("forward_slots", {}).values():
+            waypoint_ids.extend(slot_dict.get("waypoints", []))
+        for slot_dict in route_data.get("backward_slots", {}).values():
+            waypoint_ids.extend(slot_dict.get("waypoints", []))
+        # 고유 순서 유지
+        seen = set()
+        unique_ids = []
+        for wp_id in waypoint_ids:
+            if wp_id not in seen:
+                seen.add(wp_id)
+                unique_ids.append(wp_id)
+        return unique_ids
+
+    def _remove_waypoint_from_all_routes(self, waypoint_id):
+        removed = False
+        for route in self.route_profiles.values():
+            for slots_key in ("forward_slots", "backward_slots"):
+                slots = route.get(slots_key, {}) or {}
+                for slot_data in slots.values():
+                    waypoints = slot_data.get("waypoints", []) or []
+                    if waypoint_id in waypoints:
+                        slot_data["waypoints"] = [wp for wp in waypoints if wp != waypoint_id]
+                        removed = True
+        return removed
+
+    def _get_route_slot_waypoints(self, route_data, direction, slot_id):
+        slots_key = "forward_slots" if direction == "forward" else "backward_slots"
+        slots = route_data.get(slots_key, {}) or {}
+        slot_data = slots.get(slot_id, {}) or {}
+        waypoints = slot_data.get("waypoints", []) or []
+        return [wp for wp in waypoints if isinstance(wp, str)]
+
+    def _get_enabled_slot_ids(self, route_data, direction):
+        slots_key = "forward_slots" if direction == "forward" else "backward_slots"
+        slots = route_data.get(slots_key, {}) or {}
+        enabled_slots = []
+        for slot in ROUTE_SLOT_IDS:
+            slot_data = slots.get(slot, {}) or {}
+            if slot_data.get("enabled") and slot_data.get("waypoints"):
+                enabled_slots.append(slot)
+        return enabled_slots
+
+    def _rebuild_active_route_graph(self):
+        if not self.active_route_profile_name:
+            return
+        active_route = self.route_profiles.get(self.active_route_profile_name)
+        if not active_route:
+            return
+        waypoint_ids = self._collect_all_route_waypoint_ids(active_route)
+        self._build_navigation_graph(waypoint_ids)
+
+    def _on_forward_slot_changed(self, index):
+        slot = ROUTE_SLOT_IDS[index] if 0 <= index < len(ROUTE_SLOT_IDS) else ROUTE_SLOT_IDS[0]
+        if self.current_forward_slot == slot:
+            return
+        self.current_forward_slot = slot
+        self.populate_waypoint_list()
+
+    def _on_backward_slot_changed(self, index):
+        slot = ROUTE_SLOT_IDS[index] if 0 <= index < len(ROUTE_SLOT_IDS) else ROUTE_SLOT_IDS[0]
+        if self.current_backward_slot == slot:
+            return
+        self.current_backward_slot = slot
+        self.populate_waypoint_list()
+
+    def _on_slot_enabled_changed(self, direction, state):
+        if not self.active_route_profile_name:
+            return
+
+        route = self.route_profiles.get(self.active_route_profile_name)
+        if not route:
+            return
+
+        slot_id = self.current_forward_slot if direction == 'forward' else self.current_backward_slot
+        slots_key = "forward_slots" if direction == "forward" else "backward_slots"
+        route, changed = self._ensure_route_profile_structure(route)
+        self.route_profiles[self.active_route_profile_name] = route
+        slot_data = route.get(slots_key, {}).get(slot_id)
+        if slot_data is None:
+            return
+
+        try:
+            enabled = Qt.CheckState(state) == Qt.CheckState.Checked
+        except ValueError:
+            enabled = bool(state)
+        if slot_data.get("enabled") != enabled:
+            slot_data["enabled"] = enabled
+            self.save_profile_data()
+            self._rebuild_active_route_graph()
+
+    def _populate_direction_list(self, direction, route, waypoint_lookup):
+        list_widget = self.forward_wp_list if direction == 'forward' else self.backward_wp_list
+        slot_checkbox = self.forward_slot_enabled_checkbox if direction == 'forward' else self.backward_slot_enabled_checkbox
+        current_slot = self.current_forward_slot if direction == 'forward' else self.current_backward_slot
+        slots_key = "forward_slots" if direction == 'forward' else "backward_slots"
+        slot_data = route.get(slots_key, {}).get(current_slot, {"enabled": False, "waypoints": []})
+
+        slot_checkbox.blockSignals(True)
+        slot_checkbox.setChecked(bool(slot_data.get("enabled")))
+        slot_checkbox.blockSignals(False)
+
+        list_widget.clear()
+        for i, wp_id in enumerate(slot_data.get("waypoints", [])):
+            wp_data = waypoint_lookup.get(wp_id)
+            if not wp_data:
+                continue
+
+            item_text = f"{i + 1}. {wp_data.get('name', '이름 없음')} ({wp_data.get('floor', 'N/A')}층)"
+            item = QListWidgetItem(item_text)
+            item.setData(Qt.ItemDataRole.UserRole, wp_id)
+            list_widget.addItem(item)
 
     def _extract_features_from_sequence(self, sequence):
         """[MODIFIED] v14.0.3: 강화된 특징 추출 로직."""
@@ -5353,7 +5612,13 @@ class MapTab(QWidget):
         self.active_feature_info = []
         self.my_player_global_rects = []
         self.other_player_global_rects = []
-        
+        self.last_forward_journey = []
+        self.last_selected_forward_slot = None
+        self.last_selected_backward_slot = None
+        self.current_forward_slot = "1"
+        self.current_backward_slot = "1"
+        self.current_direction_slot_label = "-"
+
         # 로그 초기화
         self.general_log_viewer.clear()
         self.detection_log_viewer.clear()
@@ -5471,9 +5736,21 @@ class MapTab(QWidget):
             self._ensure_waypoint_event_fields()
             self._refresh_event_waypoint_states()
 
-            self.route_profiles = config.get('route_profiles', {})
+            raw_route_profiles = config.get('route_profiles', {}) or {}
+            normalized_profiles = {}
+            profiles_modified = False
+            for route_name, route_data in raw_route_profiles.items():
+                normalized_route, changed = self._ensure_route_profile_structure(copy.deepcopy(route_data))
+                normalized_profiles[route_name] = normalized_route
+                profiles_modified = profiles_modified or changed
+
+            self.route_profiles = normalized_profiles
             self.active_route_profile_name = config.get('active_route_profile')
             self.minimap_region = config.get('minimap_region')
+
+            if profiles_modified:
+                config['route_profiles'] = copy.deepcopy(normalized_profiles)
+                config_updated = True
 
             if config_updated or features_updated or geometry_updated:
                 self.save_profile_data()
@@ -5484,8 +5761,8 @@ class MapTab(QWidget):
             self._assign_dynamic_names()
             # --- v12.0.0 수정: 현재 경로 기준으로 그래프 생성 ---
             active_route = self.route_profiles.get(self.active_route_profile_name, {})
-            wp_ids = set(active_route.get("forward_path", []) + active_route.get("backward_path", []))
-            self._build_navigation_graph(list(wp_ids))
+            wp_ids = self._collect_all_route_waypoint_ids(active_route)
+            self._build_navigation_graph(wp_ids)
             self.update_ui_for_new_profile()
             self.update_general_log(f"'{profile_name}' 맵 프로필을 로드했습니다.", "blue")
             self._center_realtime_view_on_map()
@@ -5506,7 +5783,7 @@ class MapTab(QWidget):
             config_updated = True
         
         # v10.0.0 마이그레이션: 경로 프로필 구조 변경
-        for route_name, route_data in config.get('route_profiles', {}).items():
+        for route_name, route_data in list(config.get('route_profiles', {}).items()):
             if 'waypoints' in route_data and 'forward_path' not in route_data:
                 self.update_general_log(f"v10 마이그레이션: '{route_name}' 경로를 정방향/역방향 구조로 변환합니다.", "purple")
                 old_waypoints = route_data.pop('waypoints', [])
@@ -5542,6 +5819,15 @@ class MapTab(QWidget):
                 route_data['backward_path'] = []
                 config_updated = True
                 geometry_updated = True
+
+            legacy_forward = route_data.pop('forward_path', None)
+            legacy_backward = route_data.pop('backward_path', None)
+            normalized_route, changed = self._ensure_route_profile_structure(route_data, legacy_forward, legacy_backward)
+            config['route_profiles'][route_name] = normalized_route
+            if legacy_forward is not None or legacy_backward is not None:
+                config_updated = True
+            if changed:
+                config_updated = True
 
         # v10.0.0 마이그레이션: geometry 데이터 필드 추가
         if "waypoints" not in geometry: geometry["waypoints"] = []; geometry_updated = True
@@ -5643,8 +5929,8 @@ class MapTab(QWidget):
             self._update_map_data_and_views()
             # --- v12.0.0 수정: 현재 경로 기준으로 그래프 재생성 ---
             active_route = self.route_profiles.get(self.active_route_profile_name, {})
-            wp_ids = set(active_route.get("forward_path", []) + active_route.get("backward_path", []))
-            self._build_navigation_graph(list(wp_ids))
+            wp_ids = self._collect_all_route_waypoint_ids(active_route)
+            self._build_navigation_graph(wp_ids)
             
         except Exception as e:
             self.update_general_log(f"프로필 저장 오류: {e}", "red")
@@ -5790,7 +6076,7 @@ class MapTab(QWidget):
         self.route_profile_selector.clear()
 
         if not self.route_profiles:
-            self.route_profiles["기본 경로"] = {"forward_path": [], "backward_path": []}
+            self.route_profiles["기본 경로"] = self._create_empty_route_profile()
             self.active_route_profile_name = "기본 경로"
 
         routes = list(self.route_profiles.keys())
@@ -5805,6 +6091,19 @@ class MapTab(QWidget):
             self.active_route_profile_name = None
 
         self.route_profile_selector.blockSignals(False)
+
+        if hasattr(self, 'forward_slot_combo'):
+            target_index = ROUTE_SLOT_IDS.index(self.current_forward_slot) if self.current_forward_slot in ROUTE_SLOT_IDS else 0
+            self.forward_slot_combo.blockSignals(True)
+            self.forward_slot_combo.setCurrentIndex(target_index)
+            self.forward_slot_combo.blockSignals(False)
+
+        if hasattr(self, 'backward_slot_combo'):
+            target_index = ROUTE_SLOT_IDS.index(self.current_backward_slot) if self.current_backward_slot in ROUTE_SLOT_IDS else 0
+            self.backward_slot_combo.blockSignals(True)
+            self.backward_slot_combo.setCurrentIndex(target_index)
+            self.backward_slot_combo.blockSignals(False)
+
         self.populate_waypoint_list()
 
     def on_route_profile_selected(self, index):
@@ -5817,8 +6116,8 @@ class MapTab(QWidget):
             self.populate_waypoint_list()
             # --- v12.0.0 추가: 경로 프로필 변경 시 그래프 재생성 ---
             active_route = self.route_profiles.get(self.active_route_profile_name, {})
-            wp_ids = set(active_route.get("forward_path", []) + active_route.get("backward_path", []))
-            self._build_navigation_graph(list(wp_ids))
+            wp_ids = self._collect_all_route_waypoint_ids(active_route)
+            self._build_navigation_graph(wp_ids)
             # --- 추가 끝 ---
             self.save_profile_data()
 
@@ -5829,7 +6128,7 @@ class MapTab(QWidget):
                 QMessageBox.warning(self, "오류", "이미 존재하는 경로 프로필 이름입니다.")
                 return
 
-            self.route_profiles[route_name] = {"forward_path": [], "backward_path": []}
+            self.route_profiles[route_name] = self._create_empty_route_profile()
             self.active_route_profile_name = route_name
             self.populate_route_profile_selector()
             self.save_profile_data()
@@ -6258,20 +6557,33 @@ class MapTab(QWidget):
         max_num = max([int(name[1:]) for name in self.key_features.keys() if name.startswith("P") and name[1:].isdigit()] or [0])
         return f"P{max_num + 1}"
 
-    def add_waypoint_to_path(self):
+    def add_waypoint_to_path(self, direction='forward'):
         all_wps_in_geom = self.geometry_data.get("waypoints", [])
         if not all_wps_in_geom:
             QMessageBox.information(self, "알림", "편집기에서 먼저 웨이포인트를 생성해주세요.")
             return
 
-        # 현재 경로에 이미 추가된 ID들을 제외
-        current_route = self.route_profiles[self.active_route_profile_name]
-        current_tab_index = self.path_tabs.currentIndex()
-        path_key = "forward_path" if current_tab_index == 0 else "backward_path"
-        existing_ids = set(current_route.get(path_key, []))
-        
+        if not self.active_route_profile_name or self.active_route_profile_name not in self.route_profiles:
+            QMessageBox.warning(self, "오류", "경로 프로필이 선택되지 않았습니다.")
+            return
+
+        route = self.route_profiles[self.active_route_profile_name]
+        route, changed = self._ensure_route_profile_structure(route)
+        self.route_profiles[self.active_route_profile_name] = route
+        if changed:
+            self.save_profile_data()
+
+        slots_key = "forward_slots" if direction == 'forward' else "backward_slots"
+        current_slot = self.current_forward_slot if direction == 'forward' else self.current_backward_slot
+        slot_data = route.get(slots_key, {}).get(current_slot)
+        if slot_data is None:
+            QMessageBox.warning(self, "오류", "유효하지 않은 슬롯입니다.")
+            return
+
+        existing_ids = set(slot_data.get("waypoints", []))
+
         available_wps = {wp['name']: wp['id'] for wp in all_wps_in_geom if wp['id'] not in existing_ids}
-        
+
         if not available_wps:
             QMessageBox.information(self, "알림", "모든 웨이포인트가 이미 경로에 추가되었습니다.")
             return
@@ -6280,35 +6592,45 @@ class MapTab(QWidget):
 
         if ok and wp_name:
             wp_id = available_wps[wp_name]
-            current_route.get(path_key, []).append(wp_id)
+            slot_data.setdefault("waypoints", []).append(wp_id)
             self.populate_waypoint_list()
             self.save_profile_data()
+            self._rebuild_active_route_graph()
 
-    def delete_waypoint_from_path(self):
-        current_tab_index = self.path_tabs.currentIndex()
-        
-        if current_tab_index == 0:
-            list_widget = self.forward_wp_list
-            path_key = "forward_path"
-        else:
-            list_widget = self.backward_wp_list
-            path_key = "backward_path"
-            
+    def delete_waypoint_from_path(self, direction='forward'):
+        list_widget = self.forward_wp_list if direction == 'forward' else self.backward_wp_list
         selected_items = list_widget.selectedItems()
         if not selected_items:
             QMessageBox.warning(self, "오류", "삭제할 웨이포인트를 목록에서 선택하세요.")
             return
 
-        current_route = self.route_profiles[self.active_route_profile_name]
-        path_ids = current_route.get(path_key, [])
-        
+        if not self.active_route_profile_name or self.active_route_profile_name not in self.route_profiles:
+            QMessageBox.warning(self, "오류", "경로 프로필이 선택되지 않았습니다.")
+            return
+
+        route = self.route_profiles[self.active_route_profile_name]
+        route, changed = self._ensure_route_profile_structure(route)
+        self.route_profiles[self.active_route_profile_name] = route
+        if changed:
+            self.save_profile_data()
+
+        slots_key = "forward_slots" if direction == 'forward' else "backward_slots"
+        current_slot = self.current_forward_slot if direction == 'forward' else self.current_backward_slot
+        slot_data = route.get(slots_key, {}).get(current_slot)
+        if slot_data is None:
+            QMessageBox.warning(self, "오류", "유효하지 않은 슬롯입니다.")
+            return
+
+        path_ids = slot_data.get("waypoints", [])
+
         for item in selected_items:
             row = list_widget.row(item)
             if 0 <= row < len(path_ids):
                 del path_ids[row]
-        
+
         self.populate_waypoint_list()
         self.save_profile_data()
+        self._rebuild_active_route_graph()
 
     def set_minimap_area(self):
         self.update_general_log("화면에서 미니맵 영역을 드래그하여 선택하세요...", "black")
@@ -6360,7 +6682,7 @@ class MapTab(QWidget):
                 top_window.activateWindow()
 
     def populate_waypoint_list(self):
-        """v10.0.0: 새로운 경로 구조에 맞게 웨이포인트 목록을 채웁니다."""
+        """새 슬롯 구조 기준으로 웨이포인트 리스트를 갱신합니다."""
         self.forward_wp_list.clear()
         self.backward_wp_list.clear()
 
@@ -6369,29 +6691,35 @@ class MapTab(QWidget):
             return
 
         self.wp_groupbox.setTitle(f"4. 웨이포인트 경로 관리 (경로: {self.active_route_profile_name})")
-        
-        current_route = self.route_profiles[self.active_route_profile_name]
-        all_wps_in_geom = self.geometry_data.get("waypoints", [])
-        
-        # 정방향 경로 채우기
-        forward_path_ids = current_route.get("forward_path", [])
-        for i, wp_id in enumerate(forward_path_ids):
-            wp_data = next((wp for wp in all_wps_in_geom if wp['id'] == wp_id), None)
-            if wp_data:
-                item_text = f"{i + 1}. {wp_data.get('name', '이름 없음')} ({wp_data.get('floor', 'N/A')}층)"
-                item = QListWidgetItem(item_text)
-                item.setData(Qt.ItemDataRole.UserRole, wp_id)
-                self.forward_wp_list.addItem(item)
-        
-        # 역방향 경로 채우기
-        backward_path_ids = current_route.get("backward_path", [])
-        for i, wp_id in enumerate(backward_path_ids):
-            wp_data = next((wp for wp in all_wps_in_geom if wp['id'] == wp_id), None)
-            if wp_data:
-                item_text = f"{i + 1}. {wp_data.get('name', '이름 없음')} ({wp_data.get('floor', 'N/A')}층)"
-                item = QListWidgetItem(item_text)
-                item.setData(Qt.ItemDataRole.UserRole, wp_id)
-                self.backward_wp_list.addItem(item)
+
+        route = self.route_profiles.get(self.active_route_profile_name)
+        if route is None:
+            return
+
+        route, changed = self._ensure_route_profile_structure(route)
+        self.route_profiles[self.active_route_profile_name] = route
+        if changed:
+            self.save_profile_data()
+
+        if self.current_forward_slot not in ROUTE_SLOT_IDS:
+            self.current_forward_slot = ROUTE_SLOT_IDS[0]
+        if self.current_backward_slot not in ROUTE_SLOT_IDS:
+            self.current_backward_slot = ROUTE_SLOT_IDS[0]
+
+        if hasattr(self, 'forward_slot_combo'):
+            self.forward_slot_combo.blockSignals(True)
+            self.forward_slot_combo.setCurrentIndex(ROUTE_SLOT_IDS.index(self.current_forward_slot))
+            self.forward_slot_combo.blockSignals(False)
+
+        if hasattr(self, 'backward_slot_combo'):
+            self.backward_slot_combo.blockSignals(True)
+            self.backward_slot_combo.setCurrentIndex(ROUTE_SLOT_IDS.index(self.current_backward_slot))
+            self.backward_slot_combo.blockSignals(False)
+
+        waypoint_lookup = {wp['id']: wp for wp in self.geometry_data.get("waypoints", [])}
+
+        self._populate_direction_list('forward', route, waypoint_lookup)
+        self._populate_direction_list('backward', route, waypoint_lookup)
 
 
     def get_cleaned_minimap_image(self):
@@ -6409,27 +6737,30 @@ class MapTab(QWidget):
         max_num = max([int(name[1:]) for name in self.key_features.keys() if name.startswith("P") and name[1:].isdigit()] or [0])
         return f"P{max_num + 1}"
 
-    def waypoint_order_changed(self):
+    def waypoint_order_changed(self, direction):
         if not self.active_route_profile_name: return
+        route = self.route_profiles.get(self.active_route_profile_name)
+        if not route:
+            return
 
-        current_route = self.route_profiles[self.active_route_profile_name]
-        
-        # 정방향 리스트에서 새 순서 가져오기
-        new_forward_ids = [self.forward_wp_list.item(i).data(Qt.ItemDataRole.UserRole) for i in range(self.forward_wp_list.count())]
-        current_route["forward_path"] = new_forward_ids
-        
-        # 역방향 리스트에서 새 순서 가져오기
-        new_backward_ids = [self.backward_wp_list.item(i).data(Qt.ItemDataRole.UserRole) for i in range(self.backward_wp_list.count())]
-        current_route["backward_path"] = new_backward_ids
+        route, changed = self._ensure_route_profile_structure(route)
+        self.route_profiles[self.active_route_profile_name] = route
+        if changed:
+            self.save_profile_data()
 
-        # --- v12.0.0 추가: 경로 변경 시 그래프 재생성 ---
-        wp_ids = set(new_forward_ids + new_backward_ids)
-        self._build_navigation_graph(list(wp_ids))
-        # --- 추가 끝 ---
+        list_widget = self.forward_wp_list if direction == 'forward' else self.backward_wp_list
+        slots_key = "forward_slots" if direction == 'forward' else "backward_slots"
+        current_slot = self.current_forward_slot if direction == 'forward' else self.current_backward_slot
+        slot_data = route.get(slots_key, {}).get(current_slot)
+        if slot_data is None:
+            return
+
+        new_ids = [list_widget.item(i).data(Qt.ItemDataRole.UserRole) for i in range(list_widget.count())]
+        slot_data["waypoints"] = [wp_id for wp_id in new_ids if isinstance(wp_id, str)]
 
         self.save_profile_data()
+        self._rebuild_active_route_graph()
         self.update_general_log("웨이포인트 순서가 변경되었습니다.", "SaddleBrown")
-        # 순서 변경 후 목록을 다시 채워서 번호 업데이트
         self.populate_waypoint_list()
 
     def toggle_debug_view(self, checked):
@@ -6568,6 +6899,10 @@ class MapTab(QWidget):
                 self.last_reached_wp_id = None
                 self.target_waypoint_id = None
                 self.is_forward = True # 정방향으로 시작
+                self.last_forward_journey = []
+                self.last_selected_forward_slot = None
+                self.last_selected_backward_slot = None
+                self.current_direction_slot_label = "-"
                 self.smoothed_player_pos = None
                 self.last_player_pos = QPointF(0, 0)
                 self.player_state = 'on_terrain'
@@ -6637,6 +6972,10 @@ class MapTab(QWidget):
                 self.navigation_state_locked = False
                 self.last_reached_wp_id = None
                 self.target_waypoint_id = None
+                self.last_forward_journey = []
+                self.last_selected_forward_slot = None
+                self.last_selected_backward_slot = None
+                self.current_direction_slot_label = "-"
                 # --- 초기화 끝 ---
 
                 # [핵심 수정] 탐지 중지 시 딜레이 플래그 비활성화
@@ -7777,24 +8116,77 @@ class MapTab(QWidget):
         else:
             self.is_forward = True
             self.route_cycle_initialized = True
-        path_key = "forward_path" if self.is_forward else "backward_path"
-        next_journey = active_route.get(path_key, [])
-        if not next_journey and not self.is_forward:
-            next_journey = list(reversed(active_route.get("forward_path", [])))
+
+        forward_slots = active_route.get("forward_slots", {}) or {}
+        backward_slots = active_route.get("backward_slots", {}) or {}
+
+        next_journey = []
+        selected_slot = None
+        self.current_direction_slot_label = "정방향" if self.is_forward else "역방향"
+
+        if self.is_forward:
+            forward_options = self._get_enabled_slot_ids(active_route, "forward")
+            if forward_options:
+                selected_slot = random.choice(forward_options)
+                next_journey = list(forward_slots.get(selected_slot, {}).get("waypoints", []))
+                self.last_selected_forward_slot = selected_slot
+                self.last_forward_journey = list(next_journey)
+                self.current_direction_slot_label = f"정방향{selected_slot}"
+            else:
+                self.update_general_log("체크된 정방향 경로가 없어 탐지를 종료합니다.", "orange")
+                self.journey_plan = []
+                self.target_waypoint_id = None
+                self.start_waypoint_found = False
+                self.current_direction_slot_label = "-"
+                return
+        else:
+            backward_options = self._get_enabled_slot_ids(active_route, "backward")
+            if backward_options:
+                selected_slot = random.choice(backward_options)
+                next_journey = list(backward_slots.get(selected_slot, {}).get("waypoints", []))
+                self.last_selected_backward_slot = selected_slot
+                self.current_direction_slot_label = f"역방향{selected_slot}"
+            else:
+                if self.last_forward_journey:
+                    next_journey = list(reversed(self.last_forward_journey))
+                    if self.last_selected_forward_slot:
+                        self.current_direction_slot_label = f"역방향(정방향{self.last_selected_forward_slot} 역주행)"
+                    else:
+                        self.current_direction_slot_label = "역방향"
+                else:
+                    forward_options = self._get_enabled_slot_ids(active_route, "forward")
+                    if forward_options:
+                        fallback_slot = random.choice(forward_options)
+                        fallback_path = list(forward_slots.get(fallback_slot, {}).get("waypoints", []))
+                        if fallback_path:
+                            self.last_selected_forward_slot = fallback_slot
+                            self.last_forward_journey = list(fallback_path)
+                            next_journey = list(reversed(fallback_path))
+                            self.current_direction_slot_label = f"역방향(정방향{fallback_slot} 역주행)"
+
+                if not next_journey:
+                    self.update_general_log("역방향 슬롯이 비어 있고 역주행할 정방향 경로도 없어 순환을 종료합니다.", "orange")
+                    self.journey_plan = []
+                    self.target_waypoint_id = None
+                    self.start_waypoint_found = False
+                    self.current_direction_slot_label = "-"
+                    return
 
         if not next_journey:
             self.update_general_log("경로 완주. 순환할 경로가 없습니다.", "green")
             self.journey_plan = []
             self.target_waypoint_id = None
             self.start_waypoint_found = False
+            self.current_direction_slot_label = "-"
         else:
             self.journey_plan = next_journey
             self.current_journey_index = 0
-            self.start_waypoint_found = True 
-            direction_text = "정방향" if self.is_forward else "역방향"
-            self.update_general_log(f"새로운 여정을 시작합니다. ({direction_text})", "purple")
-            
-            # [PATCH] v14.3.9: print문을 조건문으로 감쌈
+            self.start_waypoint_found = True
+            direction_label = self.current_direction_slot_label
+            if not direction_label or direction_label == "-":
+                direction_label = "정방향" if self.is_forward else "역방향"
+            self.update_general_log(f"새로운 여정을 시작합니다. ({direction_label})", "purple")
+
             if self.debug_basic_pathfinding_checkbox and self.debug_basic_pathfinding_checkbox.isChecked():
                 print(f"[INFO] 새 여정 계획: {[self.nav_nodes.get(f'wp_{wp_id}', {}).get('name', '??') for wp_id in self.journey_plan]}")
 
@@ -8066,7 +8458,14 @@ class MapTab(QWidget):
         # [수정 끝]
         
         if final_player_pos is None or self.current_player_floor is None:
-            self.navigator_display.update_data("N/A", "", "없음", "", "", "-", 0, [], None, None, self.is_forward, 'walk', "대기 중", "오류: 위치/층 정보 없음")
+            self.navigator_display.update_data(
+                floor="N/A", terrain_name="", target_name="없음",
+                prev_name="", next_name="", direction="-", distance=0,
+                full_path=[], last_reached_id=None, target_id=None,
+                is_forward=self.is_forward, direction_slot_label=self.current_direction_slot_label,
+                intermediate_type='walk', player_state="대기 중",
+                nav_action="오류: 위치/층 정보 없음"
+            )
             return
 
         self._update_event_waypoint_proximity(final_player_pos)
@@ -8292,11 +8691,18 @@ class MapTab(QWidget):
 
     def _execute_recovery_resend(self):
         """마지막 이동 명령을 실제로 재전송하는 역할을 합니다."""
-        if self.last_movement_command:
+        command = self.last_movement_command
+
+        if self.guidance_text == "안전 지점으로 이동" and command in ["걷기(우)", "걷기(좌)", None]:
+            command = "아래점프"
+            self.last_movement_command = command
+            self.last_command_sent_time = time.time()
+
+        if command:
             if self.debug_auto_control_checkbox.isChecked():
-                print(f"[자동 제어 테스트] RECOVERY: {self.last_movement_command}")
+                print(f"[자동 제어 테스트] RECOVERY: {command}")
             elif self.auto_control_checkbox.isChecked():
-                self.control_command_issued.emit(self.last_movement_command, None)
+                self.control_command_issued.emit(command, None)
 
     def _update_navigator_and_view(self, final_player_pos, current_terrain_name):
         """
@@ -8546,16 +8952,19 @@ class MapTab(QWidget):
                             self.last_printed_direction = None
 
                     if (current_action_key == 'move_to_target' or self.guidance_text == "안전 지점으로 이동") and direction_changed and is_on_ground:
-                        if current_direction in ["→", "←"]:
-                            command_to_send = "걷기(우)" if current_direction == "→" else "걷기(좌)"
-                            self.last_printed_direction = current_direction
+                        if self.navigation_action in ['prepare_to_down_jump', 'prepare_to_fall']:
+                            pass  # 아래점프 준비 중에는 걷기 명령을 덮어쓰지 않음
+                        else:
+                            if current_direction in ["→", "←"]:
+                                command_to_send = "걷기(우)" if current_direction == "→" else "걷기(좌)"
+                                self.last_printed_direction = current_direction
 
                     # 명령 전송 (테스트 또는 실제)
                     if command_to_send:
                         # --- [v.1819] '의도된 움직임' 감지를 위해 명령 전송 시각 기록 ---
                         self.last_command_sent_time = time.time()
                         
-                        movement_related_keywords = ["걷기", "점프", "오르기", "사다리타기", "정렬"]
+                        movement_related_keywords = ["걷기", "점프", "오르기", "사다리타기", "정렬", "아래점프"]
                         if any(keyword in command_to_send for keyword in movement_related_keywords):
                             self.last_movement_command = command_to_send
                         
@@ -8579,6 +8988,7 @@ class MapTab(QWidget):
             prev_name=prev_name, next_name=next_name, direction=direction, distance=distance,
             full_path=self.journey_plan, last_reached_id=self.last_reached_wp_id,
             target_id=self.target_waypoint_id, is_forward=self.is_forward,
+            direction_slot_label=self.current_direction_slot_label,
             intermediate_type=self.intermediate_target_type, player_state=player_state_text,
             nav_action=nav_action_text
         )
@@ -9370,41 +9780,49 @@ class MapTab(QWidget):
         return closest_node_key, math.sqrt(min_dist_sq) if closest_node_key else float('inf')
     
     def _build_navigation_graph(self, waypoint_ids_in_route=None):
-            """
-            [DEBUG] v13.1.9: 노드 생성 시 그룹 할당 과정과, 노드 간 엣지(연결) 생성
-                     과정을 추적하기 위한 상세 디버그 로그 추가.
-            """
-            self.nav_nodes.clear()
-            self.nav_graph = defaultdict(dict)
-            print("\n" + "="*20 + " 내비게이션 그래프 생성 시작 (상세 디버그) " + "="*20)
+        """
+        [DEBUG] v13.1.9: 노드 생성 시 그룹 할당 과정과, 노드 간 엣지(연결) 생성
+                 과정을 추적하기 위한 상세 디버그 로그 추가.
+        """
+        self.nav_nodes.clear()
+        self.nav_graph = defaultdict(dict)
+        is_debug_enabled = self.debug_pathfinding_checkbox and self.debug_pathfinding_checkbox.isChecked()
 
-            if not self.geometry_data:
-                print("[GRAPH BUILD] CRITICAL: geometry_data가 없어 그래프 생성을 중단합니다.")
-                return
-            if waypoint_ids_in_route is None:
-                waypoint_ids_in_route = [wp['id'] for wp in self.geometry_data.get("waypoints", [])]
+        def debug_print(message):
+            if is_debug_enabled:
+                print(message)
 
-            terrain_lines = self.geometry_data.get("terrain_lines", [])
-            transition_objects = self.geometry_data.get("transition_objects", [])
+        debug_print("\n" + "="*20 + " 내비게이션 그래프 생성 시작 (상세 디버그) " + "="*20)
 
-            FLOOR_CHANGE_PENALTY = 0.0
-            CLIMB_UP_COST_MULTIPLIER = 1.5
-            CLIMB_DOWN_COST_MULTIPLIER = 500.0
-            JUMP_COST_MULTIPLIER = 1.3
-            FALL_COST_MULTIPLIER = 2.0
-            DOWN_JUMP_COST_MULTIPLIER = 1.2
+        if not self.geometry_data:
+            debug_print("[GRAPH BUILD] CRITICAL: geometry_data가 없어 그래프 생성을 중단합니다.")
+            return
 
-            print("[GRAPH BUILD] 1. 노드 생성 시작...")
-            # --- 1. 모든 잠재적 노드 생성 및 역할(walkable) 부여 ---
-            for wp in self.geometry_data.get("waypoints", []):
-                if wp['id'] in waypoint_ids_in_route:
-                    key = f"wp_{wp['id']}"
-                    pos = QPointF(*wp['pos'])
-                    contact_terrain = self._get_contact_terrain(pos)
-                    group = contact_terrain.get('dynamic_name') if contact_terrain else None
-                    if group is None: print(f"  - [WARNING] Waypoint '{wp.get('name')}'의 그룹 정보를 찾지 못했습니다.")
-                    self.nav_nodes[key] = {'type': 'waypoint', 'pos': pos, 'floor': wp.get('floor'), 'name': wp.get('name'), 'id': wp['id'], 'group': group, 'walkable': True}
-                    print(f"  - 생성(wp): '{wp.get('name')}' -> group: '{group}'")
+        if waypoint_ids_in_route is None:
+            waypoint_ids_in_route = [wp['id'] for wp in self.geometry_data.get("waypoints", [])]
+
+        terrain_lines = self.geometry_data.get("terrain_lines", [])
+        transition_objects = self.geometry_data.get("transition_objects", [])
+
+        FLOOR_CHANGE_PENALTY = 0.0
+        CLIMB_UP_COST_MULTIPLIER = 1.5
+        CLIMB_DOWN_COST_MULTIPLIER = 500.0
+        JUMP_COST_MULTIPLIER = 1.3
+        FALL_COST_MULTIPLIER = 2.0
+        DOWN_JUMP_COST_MULTIPLIER = 1.2
+
+        debug_print("[GRAPH BUILD] 1. 노드 생성 시작...")
+        # --- 1. 모든 잠재적 노드 생성 및 역할(walkable) 부여 ---
+        for wp in self.geometry_data.get("waypoints", []):
+            if wp['id'] in waypoint_ids_in_route:
+                key = f"wp_{wp['id']}"
+                pos = QPointF(*wp['pos'])
+                contact_terrain = self._get_contact_terrain(pos)
+                group = contact_terrain.get('dynamic_name') if contact_terrain else None
+                if group is None:
+                    debug_print(f"  - [WARNING] Waypoint '{wp.get('name')}'의 그룹 정보를 찾지 못했습니다.")
+                self.nav_nodes[key] = {'type': 'waypoint', 'pos': pos, 'floor': wp.get('floor'), 'name': wp.get('name'), 'id': wp['id'], 'group': group, 'walkable': True}
+                debug_print(f"  - 생성(wp): '{wp.get('name')}' -> group: '{group}'")
 
             for obj in transition_objects:
                 p1, p2 = QPointF(*obj['points'][0]), QPointF(*obj['points'][1])
@@ -9429,8 +9847,8 @@ class MapTab(QWidget):
                 
                 self.nav_nodes[entry_key] = {'type': 'ladder_entry', 'pos': entry_pos, 'obj_id': obj['id'], 'name': f"{base_name} (입구)", 'group': entry_group, 'walkable': True, 'floor': entry_floor}
                 self.nav_nodes[exit_key] = {'type': 'ladder_exit', 'pos': exit_pos, 'obj_id': obj['id'], 'name': f"{base_name} (출구)", 'group': exit_group, 'walkable': True, 'floor': exit_floor}
-                print(f"  - 생성(ladder): '{base_name} (입구)' -> group: '{entry_group}'")
-                print(f"  - 생성(ladder): '{base_name} (출구)' -> group: '{exit_group}'")
+                debug_print(f"  - 생성(ladder): '{base_name} (입구)' -> group: '{entry_group}'")
+                debug_print(f"  - 생성(ladder): '{base_name} (출구)' -> group: '{exit_group}'")
 
                 y_diff = abs(entry_pos.y() - exit_pos.y())
                 cost_up, cost_down = (y_diff * CLIMB_UP_COST_MULTIPLIER) + FLOOR_CHANGE_PENALTY, (y_diff * CLIMB_DOWN_COST_MULTIPLIER) + FLOOR_CHANGE_PENALTY
@@ -9523,23 +9941,24 @@ class MapTab(QWidget):
                     cost = (abs(y_above - landing_y) * DOWN_JUMP_COST_MULTIPLIER) + FLOOR_CHANGE_PENALTY
                     self.nav_graph[area_key][landing_key] = {'cost': cost, 'action': 'down_jump'}
             
-            print("\n[GRAPH BUILD] 2. 엣지(연결) 생성 시작...")
+            debug_print("\n[GRAPH BUILD] 2. 엣지(연결) 생성 시작...")
             # --- 2. 걷기(Walk) 간선 통합 생성 ---
             nodes_by_terrain_group = defaultdict(list)
             for key, node_data in self.nav_nodes.items():
                 if node_data.get('group'):
                     nodes_by_terrain_group[node_data['group']].append(key)
 
-            print(f"  - 총 {len(nodes_by_terrain_group)}개의 지형 그룹 발견.")
+            debug_print(f"  - 총 {len(nodes_by_terrain_group)}개의 지형 그룹 발견.")
             for group_name, node_keys in nodes_by_terrain_group.items():
-                print(f"  - 그룹 '{group_name}' 처리 중 ({len(node_keys)}개 노드)...")
+                debug_print(f"  - 그룹 '{group_name}' 처리 중 ({len(node_keys)}개 노드)...")
                 walkable_nodes_in_group = [k for k in node_keys if self.nav_nodes[k].get('walkable')]
                 action_nodes_in_group = [k for k in node_keys if not self.nav_nodes[k].get('walkable')]
-                print(f"    - Walkable: {len(walkable_nodes_in_group)}개, Action Triggers: {len(action_nodes_in_group)}개")
+                debug_print(f"    - Walkable: {len(walkable_nodes_in_group)}개, Action Triggers: {len(action_nodes_in_group)}개")
 
                 # 2a. walkable 노드들끼리 모두 연결
-                print("    - 2a. Walkable 노드 간 연결:")
-                if not walkable_nodes_in_group: print("      - 대상 없음")
+                debug_print("    - 2a. Walkable 노드 간 연결:")
+                if not walkable_nodes_in_group:
+                    debug_print("      - 대상 없음")
                 for i in range(len(walkable_nodes_in_group)):
                     for j in range(i + 1, len(walkable_nodes_in_group)):
                         key1, key2 = walkable_nodes_in_group[i], walkable_nodes_in_group[j]
@@ -9550,11 +9969,12 @@ class MapTab(QWidget):
                         self.nav_graph[key2][key1] = {'cost': cost, 'action': 'walk'}
                         name1 = self.nav_nodes[key1]['name']
                         name2 = self.nav_nodes[key2]['name']
-                        print(f"      - 연결: '{name1}' <-> '{name2}' (cost: {cost:.1f})")
+                        debug_print(f"      - 연결: '{name1}' <-> '{name2}' (cost: {cost:.1f})")
 
                 # 2b. 모든 walkable 노드에서 모든 action trigger 노드로 단방향 연결
-                print("    - 2b. Walkable -> Action Trigger 노드 간 연결:")
-                if not walkable_nodes_in_group or not action_nodes_in_group: print("      - 대상 없음")
+                debug_print("    - 2b. Walkable -> Action Trigger 노드 간 연결:")
+                if not walkable_nodes_in_group or not action_nodes_in_group:
+                    debug_print("      - 대상 없음")
                 for w_key in walkable_nodes_in_group:
                     for a_key in action_nodes_in_group:
                         pos1, pos2 = self.nav_nodes[w_key]['pos'], self.nav_nodes[a_key]['pos']
@@ -9563,9 +9983,9 @@ class MapTab(QWidget):
                         self.nav_graph[w_key][a_key] = {'cost': cost, 'action': 'walk'}
                         name1 = self.nav_nodes[w_key]['name']
                         name2 = self.nav_nodes[a_key]['name']
-                        print(f"      - 연결: '{name1}' -> '{name2}' (cost: {cost:.1f})")
+                        debug_print(f"      - 연결: '{name1}' -> '{name2}' (cost: {cost:.1f})")
 
-            print("\n" + "="*20 + f" 그래프 생성 완료 (노드: {len(self.nav_nodes)}개) " + "="*20)
+            debug_print("\n" + "="*20 + f" 그래프 생성 완료 (노드: {len(self.nav_nodes)}개) " + "="*20)
             self.update_general_log(f"내비게이션 그래프 생성 완료. (노드: {len(self.nav_nodes)}개)", "purple")
     
     def _find_path_astar(self, start_pos, start_group, goal_key):
