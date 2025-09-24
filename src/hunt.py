@@ -2795,12 +2795,29 @@ class HuntTab(QWidget):
             ready_ts = buff.next_ready_ts or 0.0
             if buff.last_triggered_ts == 0.0 or now >= ready_ts:
                 self._emit_control_command(buff.command)
-                self.append_log(f"버프 사용: {buff.name}", "debug")
                 buff.last_triggered_ts = now
                 jitter_ratio = max(0, min(buff.jitter_percent, 90)) / 100.0
                 jitter_window = buff.cooldown_seconds * jitter_ratio
-                next_delay = buff.cooldown_seconds - random.uniform(0, jitter_window)
-                buff.next_ready_ts = now + max(0.0, next_delay)
+
+                if jitter_window > 0:
+                    mean = jitter_window / 2.0
+                    std_dev = jitter_window / 6.0 if jitter_window > 0 else 0.0
+                    reduction = None
+                    for _ in range(5):
+                        candidate = random.gauss(mean, std_dev) if std_dev > 0 else mean
+                        if 0.0 <= candidate <= jitter_window:
+                            reduction = candidate
+                            break
+                    if reduction is None:
+                        candidate = random.gauss(mean, std_dev) if std_dev > 0 else mean
+                        reduction = min(max(candidate, 0.0), jitter_window)
+                else:
+                    reduction = 0.0
+
+                next_delay = buff.cooldown_seconds - reduction
+                wait_seconds = max(0.0, next_delay)
+                buff.next_ready_ts = now + wait_seconds
+                self.append_log(f"버프 사용: {buff.name} - {wait_seconds:.1f}초 후 사용예정", "info")
                 self.last_attack_ts = now
                 self.hunting_active = True
                 delay = random.uniform(buff.post_delay_min, buff.post_delay_max)
