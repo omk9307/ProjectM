@@ -1912,6 +1912,7 @@ class FullMinimapEditorDialog(QDialog):
             if 'event_profile' not in waypoint or waypoint['event_profile'] is None:
                 waypoint['event_profile'] = ""
 
+
     def _get_floor_from_closest_terrain(self, point, terrain_lines):
             """주어진 점에서 가장 가까운 지형선을 찾아 그 층 번호를 반환합니다."""
             min_dist_sq = float('inf')
@@ -4729,6 +4730,13 @@ class MapTab(QWidget):
             self.active_event_profile = ""
             self.active_event_reason = ""
             self.event_started_at = 0.0
+            # 이벤트 웨이포인트 재진입 추적용 상태
+            self.event_waypoint_states = {}
+            self.event_rearm_min_delay = 1.0
+            self.event_rearm_exit_delay = 0.6
+            self.event_retry_cooldown_seconds = 5.0
+            self.pending_event_request = None
+            self.pending_event_notified = False
             
             # [v11.3.7] 설정 변수 선언만 하고 값 할당은 load_profile_data로 위임
             self.cfg_idle_time_threshold = None
@@ -5460,6 +5468,7 @@ class MapTab(QWidget):
 
             config_updated, features_updated, geometry_updated = self.migrate_data_structures(config, self.key_features, self.geometry_data)
             self._ensure_waypoint_event_fields()
+            self._refresh_event_waypoint_states()
 
             self.route_profiles = config.get('route_profiles', {})
             self.active_route_profile_name = config.get('active_route_profile')
@@ -5900,6 +5909,7 @@ class MapTab(QWidget):
             if result:
                 self.geometry_data = self.editor_dialog.get_updated_geometry_data()
                 self._ensure_waypoint_event_fields()
+                self._refresh_event_waypoint_states()
                 self.render_options = self.editor_dialog.get_current_view_options()
                 self.save_profile_data()
                 self.update_general_log("지형 편집기 변경사항이 저장되었습니다.", "green")
@@ -5926,6 +5936,177 @@ class MapTab(QWidget):
             if 'event_profile' not in waypoint or waypoint['event_profile'] is None:
                 waypoint['event_profile'] = ""
 
+    def _refresh_event_waypoint_states(self):
+        """이벤트 웨이포인트 무장 상태를 초기화합니다."""
+        refreshed_states = {}
+        for waypoint in self.geometry_data.get("waypoints", []):
+            if waypoint.get('is_event') and waypoint.get('id'):
+                refreshed_states[waypoint['id']] = {
+                    "armed": True,
+                    "is_inside": False,
+                    "last_triggered": 0.0,
+                    "last_entered": 0.0,
+                    "last_exited": 0.0,
+                    "last_attempted": 0.0,
+                }
+        self.event_waypoint_states = refreshed_states
+
+    def _get_event_waypoint_state(self, waypoint_id):
+        if waypoint_id not in self.event_waypoint_states:
+            self.event_waypoint_states[waypoint_id] = {
+                "armed": True,
+                "is_inside": False,
+                "last_triggered": 0.0,
+                "last_entered": 0.0,
+                "last_exited": 0.0,
+                "last_attempted": 0.0,
+            }
+        return self.event_waypoint_states[waypoint_id]
+
+    def _can_start_event_now(self):
+        if self.event_in_progress:
+            return False
+        if self.navigation_state_locked:
+            return False
+        if self.navigation_action.endswith('_in_progress'):
+            return False
+        if self.navigation_action.startswith('prepare_to_'):
+            return False
+        return True
+
+    def _enqueue_pending_event(self, waypoint_data):
+        waypoint_id = waypoint_data.get('id') if waypoint_data else None
+        if not waypoint_id:
+            return
+
+        now = time.time()
+        if not self.pending_event_request or self.pending_event_request.get('waypoint_id') != waypoint_id:
+            self.pending_event_request = {
+                'waypoint_id': waypoint_id,
+                'requested_at': now,
+                'next_retry_at': now,
+            }
+            self.pending_event_notified = False
+        else:
+            self.pending_event_request['requested_at'] = now
+            self.pending_event_request['next_retry_at'] = now
+
+        if not self.pending_event_notified:
+            waypoint_name = waypoint_data.get('name', '')
+            profile_name = waypoint_data.get('event_profile', '')
+            self.update_general_log(
+                f"[이벤트] '{waypoint_name}' 명령 '{profile_name}' 실행을 현재 행동 완료 후 대기열에 추가합니다.",
+                "gray"
+            )
+            self.pending_event_notified = True
+
+    def _clear_pending_event(self, waypoint_id=None):
+        if self.pending_event_request is None:
+            return
+        if waypoint_id is None or self.pending_event_request.get('waypoint_id') == waypoint_id:
+            self.pending_event_request = None
+            self.pending_event_notified = False
+
+    def _try_execute_pending_event(self):
+        if not self.pending_event_request:
+            return
+
+        waypoint_id = self.pending_event_request.get('waypoint_id')
+        waypoint = self._find_waypoint_by_id(waypoint_id)
+        if waypoint is None:
+            self._clear_pending_event()
+            return
+
+        if time.time() < self.pending_event_request.get('next_retry_at', 0.0):
+            return
+
+        if not self._can_start_event_now():
+            return
+
+        if self._start_waypoint_event(waypoint):
+            self._clear_pending_event()
+        else:
+            self.pending_event_request['next_retry_at'] = time.time() + self.event_retry_cooldown_seconds
+
+    def _request_waypoint_event(self, waypoint_data):
+        if not waypoint_data:
+            return 'skipped'
+
+        if self._can_start_event_now():
+            return 'started' if self._start_waypoint_event(waypoint_data) else 'skipped'
+
+        self._enqueue_pending_event(waypoint_data)
+        return 'queued'
+
+    def _is_player_within_event_waypoint(self, waypoint, final_player_pos):
+        """플레이어가 이벤트 웨이포인트 반경에 들어왔는지 판정합니다."""
+        if final_player_pos is None:
+            return False
+
+        pos = waypoint.get('pos')
+        if not pos:
+            return False
+
+        waypoint_point = QPointF(pos[0], pos[1])
+        threshold_x = self.cfg_waypoint_arrival_x_threshold or WAYPOINT_ARRIVAL_X_THRESHOLD
+        threshold_y = self.cfg_jump_y_max_threshold or JUMP_Y_MAX_THRESHOLD
+
+        if waypoint.get('floor') is not None and self.current_player_floor is not None:
+            if abs(float(waypoint.get('floor', 0.0)) - float(self.current_player_floor)) > 0.1:
+                return False
+
+        if abs(final_player_pos.x() - waypoint_point.x()) > threshold_x:
+            return False
+
+        if abs(final_player_pos.y() - waypoint_point.y()) > max(threshold_y, threshold_x):
+            return False
+
+        distance = math.hypot(final_player_pos.x() - waypoint_point.x(), final_player_pos.y() - waypoint_point.y())
+        return distance <= max(threshold_x, threshold_y)
+
+    def _update_event_waypoint_proximity(self, final_player_pos):
+        """이벤트 웨이포인트 재진입 여부를 감시하고 필요 시 재실행을 트리거합니다."""
+        if not self.geometry_data or not self.geometry_data.get("waypoints"):
+            return
+
+        now = time.time()
+        for waypoint in self.geometry_data.get("waypoints", []):
+            if not waypoint.get('is_event'):
+                continue
+
+            waypoint_id = waypoint.get('id')
+            if not waypoint_id:
+                continue
+
+            state = self._get_event_waypoint_state(waypoint_id)
+            is_inside = self._is_player_within_event_waypoint(waypoint, final_player_pos)
+
+            if is_inside:
+                if not state['is_inside']:
+                    state['is_inside'] = True
+                    state['last_entered'] = now
+
+                if state['armed']:
+                    last_attempt = state.get('last_attempted', 0.0)
+                    if now - last_attempt >= self.event_retry_cooldown_seconds:
+                        state['last_attempted'] = now
+                        result = self._request_waypoint_event(waypoint)
+                        if result == 'started':
+                            state['armed'] = False
+                            state['last_triggered'] = now
+                continue
+
+            if state['is_inside']:
+                state['is_inside'] = False
+                state['last_exited'] = now
+                self._clear_pending_event(waypoint_id)
+
+            if not state['armed']:
+                triggered_at = state.get('last_triggered', 0.0)
+                exited_at = state.get('last_exited', 0.0)
+                if (now - triggered_at) >= self.event_rearm_min_delay and (now - exited_at) >= self.event_rearm_exit_delay:
+                    state['armed'] = True
+
     def _find_waypoint_by_id(self, waypoint_id):
         for waypoint in self.geometry_data.get("waypoints", []):
             if waypoint.get('id') == waypoint_id:
@@ -5935,6 +6116,15 @@ class MapTab(QWidget):
     def _start_waypoint_event(self, waypoint_data):
         if self.event_in_progress:
             return True
+
+        waypoint_id = waypoint_data.get('id') if waypoint_data else None
+        now = time.time()
+        state = None
+        if waypoint_id:
+            state = self._get_event_waypoint_state(waypoint_id)
+            if state and not state.get('armed', True):
+                return False
+            state['last_attempted'] = now
 
         auto_checkbox = getattr(self, "auto_control_checkbox", None)
         debug_checkbox = getattr(self, "debug_auto_control_checkbox", None)
@@ -5961,12 +6151,15 @@ class MapTab(QWidget):
         self.active_event_profile = profile_name
         self.active_event_reason = f"WAYPOINT_EVENT:{self.active_event_waypoint_id}"
         self.event_started_at = time.time()
-        self.navigation_action = 'event_wait'
         self.navigation_state_locked = False
         self.state_transition_counters.clear()
-        self.current_segment_path = []
-        self.expected_terrain_group = None
-        self.guidance_text = f"[이벤트] {waypoint_name}" if waypoint_name else "[이벤트]"
+
+        if waypoint_id:
+            state = self._get_event_waypoint_state(waypoint_id)
+            state['armed'] = False
+            state['is_inside'] = True
+            state['last_triggered'] = self.event_started_at
+            state['last_entered'] = self.event_started_at
 
         self.update_general_log(
             f"[이벤트] 웨이포인트 '{waypoint_name}'에서 명령 '{profile_name}' 실행을 시작합니다.",
@@ -5977,7 +6170,8 @@ class MapTab(QWidget):
         return True
 
     def _finish_waypoint_event(self, success):
-        waypoint = self._find_waypoint_by_id(self.active_event_waypoint_id)
+        waypoint_id = self.active_event_waypoint_id
+        waypoint = self._find_waypoint_by_id(waypoint_id)
         waypoint_name = waypoint.get('name', '') if waypoint else ''
         profile_name = self.active_event_profile
 
@@ -5992,6 +6186,12 @@ class MapTab(QWidget):
                 "red"
             )
 
+        if waypoint_id:
+            state = self.event_waypoint_states.get(waypoint_id)
+            if state:
+                state['is_inside'] = True
+                state['last_triggered'] = time.time()
+
         self.event_in_progress = False
         self.active_event_waypoint_id = None
         self.active_event_profile = ""
@@ -6002,6 +6202,7 @@ class MapTab(QWidget):
         self.recovery_cooldown_until = time.time() + 1.0
         self.current_segment_path = []
         self.current_segment_index = 0
+        self._try_execute_pending_event()
 
     @pyqtSlot(str, object, bool)
     def on_sequence_completed(self, command_name, reason, success):
@@ -6378,6 +6579,8 @@ class MapTab(QWidget):
                 self.recovery_cooldown_until = 0.0
                 self.airborne_path_warning_active = False
                 self.route_cycle_initialized = False
+
+                self._refresh_event_waypoint_states()
 
                 # [핵심 수정] 탐지 시작 시간 기록 및 딜레이 플래그 활성화
                 self.detection_start_time = time.time()
@@ -7843,6 +8046,7 @@ class MapTab(QWidget):
 
                 self.expected_terrain_group = None
                 self.update_general_log(log_message, "green")
+            self._try_execute_pending_event()
     
     def _update_player_state_and_navigation(self, final_player_pos):
         """
@@ -7864,11 +8068,7 @@ class MapTab(QWidget):
             self.navigator_display.update_data("N/A", "", "없음", "", "", "-", 0, [], None, None, self.is_forward, 'walk', "대기 중", "오류: 위치/층 정보 없음")
             return
 
-        if self.event_in_progress:
-            self.player_state = self._determine_player_physical_state(final_player_pos, contact_terrain)
-            self._update_navigator_and_view(final_player_pos, current_terrain_name)
-            self.last_player_pos = final_player_pos
-            return
+        self._update_event_waypoint_proximity(final_player_pos)
 
         # Phase 0: 타임아웃 (유지)
         if (self.navigation_state_locked and (time.time() - self.lock_timeout_start > MAX_LOCK_DURATION)) or \
@@ -7898,31 +8098,33 @@ class MapTab(QWidget):
         # 2. 움직여야 하는데 멈춰있고, 현재 복구 쿨다운 상태가 아닐 때만 멈춤 감지
         should_be_moving = self.navigation_action in ['move_to_target', 'prepare_to_climb', 'prepare_to_jump', 'prepare_to_down_jump', 'prepare_to_fall', 'align_for_climb'] and self.start_waypoint_found
         
-        if should_be_moving and not is_moving_state and time.time() > self.recovery_cooldown_until:
-            time_since_last_action = time.time() - self.last_action_time
-            
-            if time_since_last_action > self.STUCK_DETECTION_THRESHOLD_S and self.stuck_recovery_attempts < self.MAX_STUCK_RECOVERY_ATTEMPTS:
-                if self.last_movement_command:
-                    self.stuck_recovery_attempts += 1
-                    log_msg = f"[자동 복구] 멈춤 감지 ({self.stuck_recovery_attempts}/{self.MAX_STUCK_RECOVERY_ATTEMPTS}). '사다리 멈춤복구' 후 '{self.last_movement_command}' 재시도."
-                    self.update_general_log(log_msg, "orange")
-                    
-                    self.recovery_cooldown_until = time.time() + 1.5
-                    
-                    if self.debug_auto_control_checkbox.isChecked():
-                        print("[자동 제어 테스트] RECOVERY-PREP: 사다리 멈춤복구")
-                    elif self.auto_control_checkbox.isChecked():
-                        self.control_command_issued.emit("사다리 멈춤복구", None)
-                    
-                    QTimer.singleShot(1000, self._execute_recovery_resend)
-                    
-                    self.last_player_pos = final_player_pos
-                    return
-            
-            elif time_since_last_action > self.STUCK_DETECTION_THRESHOLD_S and self.stuck_recovery_attempts >= self.MAX_STUCK_RECOVERY_ATTEMPTS:
-                if time.time() - getattr(self, '_last_stuck_log_time', 0) > 5.0:
-                    self.update_general_log(f"[자동 복구] 실패: 최대 복구 시도({self.MAX_STUCK_RECOVERY_ATTEMPTS}회)를 초과했습니다. 수동 개입이 필요할 수 있습니다.", "red")
-                    setattr(self, '_last_stuck_log_time', time.time())
+        if not self.event_in_progress:
+            if should_be_moving and not is_moving_state and time.time() > self.recovery_cooldown_until:
+                time_since_last_action = time.time() - self.last_action_time
+                
+                if time_since_last_action > self.STUCK_DETECTION_THRESHOLD_S and self.stuck_recovery_attempts < self.MAX_STUCK_RECOVERY_ATTEMPTS:
+                    if self.last_movement_command:
+                        self.stuck_recovery_attempts += 1
+                        log_msg = f"[자동 복구] 멈춤 감지 ({self.stuck_recovery_attempts}/{self.MAX_STUCK_RECOVERY_ATTEMPTS}). '사다리 멈춤복구' 후 '{self.last_movement_command}' 재시도."
+                        self.update_general_log(log_msg, "orange")
+                        
+                        self.recovery_cooldown_until = time.time() + 1.5
+                        
+                        if self.debug_auto_control_checkbox.isChecked():
+                            print("[자동 제어 테스트] RECOVERY-PREP: 사다리 멈춤복구")
+                        elif self.auto_control_checkbox.isChecked():
+                            self.control_command_issued.emit("사다리 멈춤복구", None)
+                        
+                        QTimer.singleShot(1000, self._execute_recovery_resend)
+                        
+                        self.last_player_pos = final_player_pos
+                        return
+                
+                elif time_since_last_action > self.STUCK_DETECTION_THRESHOLD_S and self.stuck_recovery_attempts >= self.MAX_STUCK_RECOVERY_ATTEMPTS:
+                    if time.time() - getattr(self, '_last_stuck_log_time', 0) > 5.0:
+                        self.update_general_log(f"[자동 복구] 실패: 최대 복구 시도({self.MAX_STUCK_RECOVERY_ATTEMPTS}회)를 초과했습니다. 수동 개입이 필요할 수 있습니다.", "red")
+                        setattr(self, '_last_stuck_log_time', time.time())
+        
         # --- 로직 끝 ---
         
         # [이하 일반 내비게이션 로직]
@@ -8034,6 +8236,7 @@ class MapTab(QWidget):
             # 현재 상태를 다음 프레임과 비교하기 위해 저장
             self.last_debug_guidance_text = self.guidance_text
             
+        self._try_execute_pending_event()
         self.last_player_pos = final_player_pos
 
 
@@ -8055,134 +8258,139 @@ class MapTab(QWidget):
         nav_action_text = '대기 중'
         final_intermediate_type = 'walk'
         
-        if not self.event_in_progress:
-            # <<< [핵심 수정] 상태에 따른 안내선 목표(intermediate_target_pos) 및 텍스트(guidance_text) 결정 >>>
-            # 최우선 순위: "안전 지점으로 이동"과 같은 특수 안내는 그대로 유지
-            if self.guidance_text in ["안전 지점으로 이동", "점프 불가: 안전 지대 없음", "이동할 안전 지대 없음"]:
-                # 이 경우는 _handle_action_preparation에서 이미 intermediate_target_pos를 설정했으므로 그대로 사용
-                pass
-            # 1순위: 아래 점프 또는 낙하 관련 상태일 때
-            elif self.navigation_action in ['prepare_to_down_jump', 'prepare_to_fall', 'down_jump_in_progress', 'fall_in_progress']:
-                # 실시간으로 착지 지점을 계산하여 안내
-                max_y_diff = 70.0 if 'down_jump' in self.navigation_action else None
-                best_landing_terrain = self._find_best_landing_terrain_at_x(final_player_pos, max_y_diff=max_y_diff)
-                if best_landing_terrain:
-                    landing_terrain_group = best_landing_terrain.get('dynamic_name')
-                    p1, p2 = best_landing_terrain['points'][0], best_landing_terrain['points'][-1]
-                    landing_y = p1[1] + (p2[1] - p1[1]) * ((final_player_pos.x() - p1[0]) / (p2[0] - p1[0])) if (p2[0] - p1[0]) != 0 else p1[1]
+        nav_action_text = '대기 중'
+        direction = '-'
+        distance = 0
+        final_intermediate_type = 'walk'
 
-                    self.guidance_text = landing_terrain_group
-                    self.intermediate_target_pos = QPointF(final_player_pos.x(), landing_y)
+        # <<< [핵심 수정] 상태에 따른 안내선 목표(intermediate_target_pos) 및 텍스트(guidance_text) 결정 >>>
+        # 최우선 순위: "안전 지점으로 이동"과 같은 특수 안내는 그대로 유지
+        if self.guidance_text in ["안전 지점으로 이동", "점프 불가: 안전 지대 없음", "이동할 안전 지대 없음"]:
+            # 이 경우는 _handle_action_preparation에서 이미 intermediate_target_pos를 설정했으므로 그대로 사용
+            pass
+        # 1순위: 아래 점프 또는 낙하 관련 상태일 때
+        elif self.navigation_action in ['prepare_to_down_jump', 'prepare_to_fall', 'down_jump_in_progress', 'fall_in_progress']:
+            # 실시간으로 착지 지점을 계산하여 안내
+            max_y_diff = 70.0 if 'down_jump' in self.navigation_action else None
+            best_landing_terrain = self._find_best_landing_terrain_at_x(final_player_pos, max_y_diff=max_y_diff)
+            if best_landing_terrain:
+                landing_terrain_group = best_landing_terrain.get('dynamic_name')
+                p1, p2 = best_landing_terrain['points'][0], best_landing_terrain['points'][-1]
+                landing_y = p1[1] + (p2[1] - p1[1]) * ((final_player_pos.x() - p1[0]) / (p2[0] - p1[0])) if (p2[0] - p1[0]) != 0 else p1[1]
+
+                self.guidance_text = landing_terrain_group
+                self.intermediate_target_pos = QPointF(final_player_pos.x(), landing_y)
+            else:
+                self.guidance_text = "착지 지점 없음"
+                self.intermediate_target_pos = None
+        # <<< 핵심 수정 1 >>> prepare_to_climb 상태를 위한 분기 추가
+        elif self.navigation_action in ['prepare_to_climb', 'align_for_climb', 'verify_alignment', 'prepare_to_climb_upward']:
+            # 사다리 관련 상태에서는 항상 다음 목표(사다리 출구)를 안내
+            if self.current_segment_path and self.current_segment_index + 1 < len(self.current_segment_path):
+                target_node_key = self.current_segment_path[self.current_segment_index + 1]
+                target_node = self.nav_nodes.get(target_node_key, {})
+                self.guidance_text = target_node.get('name', '경로 없음')
+                self.intermediate_target_pos = target_node.get('pos')
+            else:
+                self.guidance_text = "경로 계산 중..."
+                self.intermediate_target_pos = None
+
+        # 2순위: 그 외 모든 상태 (일반 이동, 등반, 점프 등)
+        else:
+            # A* 경로상의 다음 노드를 목표로 설정
+            if self.current_segment_path and self.current_segment_index < len(self.current_segment_path):
+                # 액션 중일 때는 다음 노드가 목표
+                if self.navigation_action.endswith('_in_progress'):
+                    target_index = self.current_segment_index + 1
+                # 일반 이동이나 준비 상태일 때는 현재 노드가 목표
                 else:
-                    self.guidance_text = "착지 지점 없음"
-                    self.intermediate_target_pos = None
-            # <<< 핵심 수정 1 >>> prepare_to_climb 상태를 위한 분기 추가
-            elif self.navigation_action in ['prepare_to_climb', 'align_for_climb', 'verify_alignment', 'prepare_to_climb_upward']:
-                # 사다리 관련 상태에서는 항상 다음 목표(사다리 출구)를 안내
-                if self.current_segment_path and self.current_segment_index + 1 < len(self.current_segment_path):
-                    target_node_key = self.current_segment_path[self.current_segment_index + 1]
+                    target_index = self.current_segment_index
+
+                if target_index < len(self.current_segment_path):
+                    target_node_key = self.current_segment_path[target_index]
                     target_node = self.nav_nodes.get(target_node_key, {})
-                    self.guidance_text = target_node.get('name', '경로 없음')
-                    self.intermediate_target_pos = target_node.get('pos')
+
+                    # <<< 핵심 수정 >>> 착지 지점 건너뛰기 로직
+                    final_target_node = target_node
+                    final_target_index = target_index
+                    while final_target_node.get('type') in ['fall_landing', 'djump_landing']:
+                        final_target_index += 1
+                        if final_target_index < len(self.current_segment_path):
+                            final_target_key = self.current_segment_path[final_target_index]
+                            final_target_node = self.nav_nodes.get(final_target_key, {})
+                        else:
+                            # 경로 끝에 도달하면 마지막 착지 지점을 그대로 사용
+                            final_target_node = target_node
+                            break
+
+                    self.guidance_text = final_target_node.get('name', '경로 없음')
+                    self.intermediate_target_pos = final_target_node.get('pos')
                 else:
                     self.guidance_text = "경로 계산 중..."
                     self.intermediate_target_pos = None
-
-            # 2순위: 그 외 모든 상태 (일반 이동, 등반, 점프 등)
             else:
-                # A* 경로상의 다음 노드를 목표로 설정
-                if self.current_segment_path and self.current_segment_index < len(self.current_segment_path):
-                    # 액션 중일 때는 다음 노드가 목표
-                    if self.navigation_action.endswith('_in_progress'):
-                        target_index = self.current_segment_index + 1
-                    # 일반 이동이나 준비 상태일 때는 현재 노드가 목표
-                    else:
-                        target_index = self.current_segment_index
+                self.guidance_text = "경로 없음"
+                self.intermediate_target_pos = None
 
-                    if target_index < len(self.current_segment_path):
-                        target_node_key = self.current_segment_path[target_index]
-                        target_node = self.nav_nodes.get(target_node_key, {})
-
-                        # <<< 핵심 수정 >>> 착지 지점 건너뛰기 로직
-                        final_target_node = target_node
-                        final_target_index = target_index
-                        while final_target_node.get('type') in ['fall_landing', 'djump_landing']:
-                            final_target_index += 1
-                            if final_target_index < len(self.current_segment_path):
-                                final_target_key = self.current_segment_path[final_target_index]
-                                final_target_node = self.nav_nodes.get(final_target_key, {})
-                            else:
-                                # 경로 끝에 도달하면 마지막 착지 지점을 그대로 사용
-                                final_target_node = target_node
-                                break
-
-                        self.guidance_text = final_target_node.get('name', '경로 없음')
-                        self.intermediate_target_pos = final_target_node.get('pos')
-                    else:
-                        self.guidance_text = "경로 계산 중..."
-                        self.intermediate_target_pos = None
-                else:
-                    self.guidance_text = "경로 없음"
-                    self.intermediate_target_pos = None
-
-            # --- 이하 거리/방향 계산 및 UI 업데이트 로직 ---
-            if self.guidance_text == "안전 지점으로 이동":
-                if self.intermediate_target_pos:
-                    distance = abs(final_player_pos.x() - self.intermediate_target_pos.x())
-                    direction = "→" if final_player_pos.x() < self.intermediate_target_pos.x() else "←"
-                nav_action_text = self.guidance_text
-                final_intermediate_type = 'walk'
-            elif 'down_jump' in self.navigation_action or 'fall' in self.navigation_action:
-                if self.intermediate_target_pos:
-                    distance = abs(final_player_pos.y() - self.intermediate_target_pos.y())
-                else:
-                    distance = 0
-                direction = "↓" if 'down_jump' in self.navigation_action else "-"
-                nav_action_text = "아래로 점프하세요" if 'down_jump' in self.navigation_action else "낙하 중..."
-                final_intermediate_type = 'fall'
-            elif self.navigation_action == 'climb_in_progress':
-                direction = "↑"
-                if self.intermediate_target_pos:
-                    distance = abs(final_player_pos.y() - self.intermediate_target_pos.y())
-                else:
-                    distance = 0
-                nav_action_text = "오르는 중..."
-                final_intermediate_type = 'climb'
-            elif self.navigation_action == 'align_for_climb':
-                if self.alignment_target_x is not None:
-                    distance = abs(final_player_pos.x() - self.alignment_target_x)
-                    direction = "→" if final_player_pos.x() < self.alignment_target_x else "←"
-                else:
-                    distance = 0
-                    direction = "-"
-                nav_action_text = "사다리 앞 정렬 중..."
-                final_intermediate_type = 'walk'
-            elif self.navigation_action == 'verify_alignment':
-                distance = abs(final_player_pos.x() - self.alignment_target_x) if self.alignment_target_x is not None else 0
-                direction = "-"
-                nav_action_text = "정렬 확인 중..."
-                final_intermediate_type = 'walk'
-            else:
-                if self.intermediate_target_pos:
-                    distance = abs(final_player_pos.x() - self.intermediate_target_pos.x())
-                    direction = "→" if final_player_pos.x() < self.intermediate_target_pos.x() else "←"
-                action_text_map = {
-                    'move_to_target': "다음 목표로 이동",
-                    'prepare_to_climb': "점프+방향키로 오르세요",
-                    'prepare_to_climb_upward': "사다리타기(상) 실행",
-                    'prepare_to_jump': "점프하세요",
-                }
-                nav_action_text = action_text_map.get(self.navigation_action, '대기 중')
-                if self.navigation_action.startswith('prepare_to_') or self.navigation_action.endswith('_in_progress'):
-                    if 'climb' in self.navigation_action:
-                        final_intermediate_type = 'climb'
-                    elif 'jump' in self.navigation_action:
-                        final_intermediate_type = 'jump'
-        else:
-            nav_action_text = "이벤트 실행 중..."
-            direction = "-"
-            distance = 0
+        # --- 이하 거리/방향 계산 및 UI 업데이트 로직 ---
+        if self.guidance_text == "안전 지점으로 이동":
+            if self.intermediate_target_pos:
+                distance = abs(final_player_pos.x() - self.intermediate_target_pos.x())
+                direction = "→" if final_player_pos.x() < self.intermediate_target_pos.x() else "←"
+            nav_action_text = self.guidance_text
             final_intermediate_type = 'walk'
+        elif 'down_jump' in self.navigation_action or 'fall' in self.navigation_action:
+            if self.intermediate_target_pos:
+                distance = abs(final_player_pos.y() - self.intermediate_target_pos.y())
+            else:
+                distance = 0
+            direction = "↓" if 'down_jump' in self.navigation_action else "-"
+            nav_action_text = "아래로 점프하세요" if 'down_jump' in self.navigation_action else "낙하 중..."
+            final_intermediate_type = 'fall'
+        elif self.navigation_action == 'climb_in_progress':
+            direction = "↑"
+            if self.intermediate_target_pos:
+                distance = abs(final_player_pos.y() - self.intermediate_target_pos.y())
+            else:
+                distance = 0
+            nav_action_text = "오르는 중..."
+            final_intermediate_type = 'climb'
+        elif self.navigation_action == 'align_for_climb':
+            if self.alignment_target_x is not None:
+                distance = abs(final_player_pos.x() - self.alignment_target_x)
+                direction = "→" if final_player_pos.x() < self.alignment_target_x else "←"
+            else:
+                distance = 0
+                direction = "-"
+            nav_action_text = "사다리 앞 정렬 중..."
+            final_intermediate_type = 'walk'
+        elif self.navigation_action == 'verify_alignment':
+            distance = abs(final_player_pos.x() - self.alignment_target_x) if self.alignment_target_x is not None else 0
+            direction = "-"
+            nav_action_text = "정렬 확인 중..."
+            final_intermediate_type = 'walk'
+        else:
+            if self.intermediate_target_pos:
+                distance = abs(final_player_pos.x() - self.intermediate_target_pos.x())
+                direction = "→" if final_player_pos.x() < self.intermediate_target_pos.x() else "←"
+            action_text_map = {
+                'move_to_target': "다음 목표로 이동",
+                'prepare_to_climb': "점프+방향키로 오르세요",
+                'prepare_to_climb_upward': "사다리타기(상) 실행",
+                'prepare_to_jump': "점프하세요",
+            }
+            nav_action_text = action_text_map.get(self.navigation_action, '대기 중')
+            if self.navigation_action.startswith('prepare_to_') or self.navigation_action.endswith('_in_progress'):
+                if 'climb' in self.navigation_action:
+                    final_intermediate_type = 'climb'
+                elif 'jump' in self.navigation_action:
+                    final_intermediate_type = 'jump'
+
+        if self.event_in_progress:
+            if nav_action_text == '대기 중':
+                nav_action_text = "이벤트 실행 중..."
+            else:
+                nav_action_text = f"{nav_action_text} (이벤트 실행 중)"
         
         if self.start_waypoint_found and self.journey_plan:
             if self.current_journey_index > 0:
@@ -8404,20 +8612,20 @@ class MapTab(QWidget):
                 if next_index >= len(self.current_segment_path):
                     reached_wp_id = self.journey_plan[self.current_journey_index]
                     waypoint_data = self._find_waypoint_by_id(reached_wp_id)
-                    event_triggered = False
-                    if waypoint_data and waypoint_data.get('is_event'):
-                        event_triggered = self._start_waypoint_event(waypoint_data)
+                    pending_event_data = waypoint_data if waypoint_data and waypoint_data.get('is_event') else None
 
                     self.last_reached_wp_id = reached_wp_id
                     self.current_journey_index += 1
                     self.current_segment_path = []
                     self.expected_terrain_group = None
 
-                    if event_triggered:
-                        return
-
                     wp_name = self.nav_nodes.get(f"wp_{self.last_reached_wp_id}", {}).get('name')
                     self.update_general_log(f"'{wp_name}' 도착. 다음 구간으로 진행합니다.", "green")
+
+                    if pending_event_data:
+                        result = self._request_waypoint_event(pending_event_data)
+                        if result == 'started' or result == 'queued':
+                            return
                 else:
                     next_node_key = self.current_segment_path[next_index]
                     edge_data = self.nav_graph.get(current_node_key, {}).get(next_node_key, {})
