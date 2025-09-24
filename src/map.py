@@ -4737,7 +4737,7 @@ class MapTab(QWidget):
             self.event_retry_cooldown_seconds = 5.0
             self.pending_event_request = None
             self.pending_event_notified = False
-            
+
             # [v11.3.7] 설정 변수 선언만 하고 값 할당은 load_profile_data로 위임
             self.cfg_idle_time_threshold = None
             self.cfg_climbing_state_frame_threshold = None
@@ -4895,6 +4895,7 @@ class MapTab(QWidget):
             self.CLIMBING_RECOVERY_KEYWORDS = ["오르기", "사다리타기"] # 등반 복구 식별용
             self.recovery_cooldown_until = 0.0 # 복구 후 판단을 유예할 시간
             self.last_command_sent_time = 0.0 # 마지막으로 명령을 보낸 시간
+            self.NON_WALK_STUCK_THRESHOLD_S = 1.0            # 걷기/정지 이외 상태에서 멈춤으로 간주할 시간 (초)
             self.alignment_target_x = None # ---  사다리 앞 정렬(align) 상태 변수 ---
             self.alignment_expected_floor = None
             self.alignment_expected_group = None
@@ -8099,31 +8100,80 @@ class MapTab(QWidget):
         should_be_moving = self.navigation_action in ['move_to_target', 'prepare_to_climb', 'prepare_to_jump', 'prepare_to_down_jump', 'prepare_to_fall', 'align_for_climb'] and self.start_waypoint_found
         
         if not self.event_in_progress:
-            if should_be_moving and not is_moving_state and time.time() > self.recovery_cooldown_until:
-                time_since_last_action = time.time() - self.last_action_time
-                
+            now = time.time()
+            if should_be_moving and not is_moving_state and now > self.recovery_cooldown_until:
+                time_since_last_action = now - self.last_action_time
+
                 if time_since_last_action > self.STUCK_DETECTION_THRESHOLD_S and self.stuck_recovery_attempts < self.MAX_STUCK_RECOVERY_ATTEMPTS:
                     if self.last_movement_command:
                         self.stuck_recovery_attempts += 1
-                        log_msg = f"[자동 복구] 멈춤 감지 ({self.stuck_recovery_attempts}/{self.MAX_STUCK_RECOVERY_ATTEMPTS}). '사다리 멈춤복구' 후 '{self.last_movement_command}' 재시도."
+                        log_msg = (
+                            f"[자동 복구] 멈춤 감지 ({self.stuck_recovery_attempts}/{self.MAX_STUCK_RECOVERY_ATTEMPTS}). "
+                            f"'사다리 멈춤복구' 후 '{self.last_movement_command}' 재시도."
+                        )
                         self.update_general_log(log_msg, "orange")
-                        
-                        self.recovery_cooldown_until = time.time() + 1.5
-                        
+
+                        self.recovery_cooldown_until = now + 1.5
+
                         if self.debug_auto_control_checkbox.isChecked():
                             print("[자동 제어 테스트] RECOVERY-PREP: 사다리 멈춤복구")
                         elif self.auto_control_checkbox.isChecked():
                             self.control_command_issued.emit("사다리 멈춤복구", None)
-                        
+
                         QTimer.singleShot(1000, self._execute_recovery_resend)
-                        
+
                         self.last_player_pos = final_player_pos
                         return
-                
+
                 elif time_since_last_action > self.STUCK_DETECTION_THRESHOLD_S and self.stuck_recovery_attempts >= self.MAX_STUCK_RECOVERY_ATTEMPTS:
-                    if time.time() - getattr(self, '_last_stuck_log_time', 0) > 5.0:
-                        self.update_general_log(f"[자동 복구] 실패: 최대 복구 시도({self.MAX_STUCK_RECOVERY_ATTEMPTS}회)를 초과했습니다. 수동 개입이 필요할 수 있습니다.", "red")
-                        setattr(self, '_last_stuck_log_time', time.time())
+                    if now - getattr(self, '_last_stuck_log_time', 0) > 5.0:
+                        self.update_general_log(
+                            f"[자동 복구] 실패: 최대 복구 시도({self.MAX_STUCK_RECOVERY_ATTEMPTS}회)를 초과했습니다. 수동 개입이 필요할 수 있습니다.",
+                            "red"
+                        )
+                        setattr(self, '_last_stuck_log_time', now)
+
+            elif (
+                self.player_state not in ['idle', 'on_terrain']
+                and self.last_movement_time
+                and now > self.recovery_cooldown_until
+            ):
+                time_since_last_movement = now - self.last_movement_time
+
+                if (
+                    time_since_last_movement > self.NON_WALK_STUCK_THRESHOLD_S
+                    and self.stuck_recovery_attempts < self.MAX_STUCK_RECOVERY_ATTEMPTS
+                ):
+                    if self.last_movement_command:
+                        self.stuck_recovery_attempts += 1
+                        log_msg = (
+                            f"[자동 복구] 비걷기 상태 멈춤 감지 ({self.stuck_recovery_attempts}/{self.MAX_STUCK_RECOVERY_ATTEMPTS}). "
+                            f"'사다리 멈춤복구' 후 '{self.last_movement_command}' 재시도."
+                        )
+                        self.update_general_log(log_msg, "orange")
+
+                        self.recovery_cooldown_until = now + 1.5
+
+                        if self.debug_auto_control_checkbox.isChecked():
+                            print("[자동 제어 테스트] RECOVERY-PREP: 사다리 멈춤복구")
+                        elif self.auto_control_checkbox.isChecked():
+                            self.control_command_issued.emit("사다리 멈춤복구", None)
+
+                        QTimer.singleShot(1000, self._execute_recovery_resend)
+
+                        self.last_player_pos = final_player_pos
+                        return
+
+                elif (
+                    time_since_last_movement > self.NON_WALK_STUCK_THRESHOLD_S
+                    and self.stuck_recovery_attempts >= self.MAX_STUCK_RECOVERY_ATTEMPTS
+                ):
+                    if now - getattr(self, '_last_stuck_log_time', 0) > 5.0:
+                        self.update_general_log(
+                            f"[자동 복구] 실패: 최대 복구 시도({self.MAX_STUCK_RECOVERY_ATTEMPTS}회)를 초과했습니다. 수동 개입이 필요할 수 있습니다.",
+                            "red"
+                        )
+                        setattr(self, '_last_stuck_log_time', now)
         
         # --- 로직 끝 ---
         
