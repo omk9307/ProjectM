@@ -1757,6 +1757,8 @@ class WaypointEditDialog(QDialog):
         self.name_edit = QLineEdit(waypoint_data.get('name', ''))
         self.event_checkbox = QCheckBox("이벤트 웨이포인트")
         self.event_checkbox.setChecked(bool(waypoint_data.get('is_event')))
+        self.event_always_checkbox = QCheckBox("항상 실행")
+        self.event_always_checkbox.setChecked(bool(waypoint_data.get('event_always')))
 
         self.profile_combo = QComboBox()
         self.profile_combo.addItem("프로필 선택", "")
@@ -1768,12 +1770,15 @@ class WaypointEditDialog(QDialog):
         if idx >= 0:
             self.profile_combo.setCurrentIndex(idx)
 
-        self.profile_combo.setEnabled(self.event_checkbox.isChecked() and bool(self._event_profiles))
+        event_enabled = self.event_checkbox.isChecked()
+        self.profile_combo.setEnabled(event_enabled and bool(self._event_profiles))
+        self.event_always_checkbox.setEnabled(event_enabled)
 
         form_layout = QFormLayout()
         form_layout.addRow("이름", self.name_edit)
         form_layout.addRow("이벤트", self.event_checkbox)
         form_layout.addRow("명령 프로필", self.profile_combo)
+        form_layout.addRow("", self.event_always_checkbox)
 
         self.hint_label = QLabel("이벤트 명령 프로필은 '자동 제어' 탭에서 '이벤트' 카테고리로 등록되어야 합니다.")
         self.hint_label.setWordWrap(True)
@@ -1796,8 +1801,10 @@ class WaypointEditDialog(QDialog):
 
     def _on_event_toggled(self, checked):
         self.profile_combo.setEnabled(checked and bool(self._event_profiles))
+        self.event_always_checkbox.setEnabled(checked)
         if not checked:
             self.profile_combo.setCurrentIndex(0)
+            self.event_always_checkbox.setChecked(False)
 
     def _handle_accept(self):
         name = self.name_edit.text().strip()
@@ -1819,7 +1826,8 @@ class WaypointEditDialog(QDialog):
         profile = self.profile_combo.currentData() if is_event else ""
         if profile is None:
             profile = ""
-        return name, is_event, profile
+        always_run = self.event_always_checkbox.isChecked() if is_event else False
+        return name, is_event, profile, always_run
 
 
 class FullMinimapEditorDialog(QDialog):
@@ -1916,6 +1924,8 @@ class FullMinimapEditorDialog(QDialog):
                 waypoint['is_event'] = False
             if 'event_profile' not in waypoint or waypoint['event_profile'] is None:
                 waypoint['event_profile'] = ""
+            if 'event_always' not in waypoint:
+                waypoint['event_always'] = False
 
 
     def _get_floor_from_closest_terrain(self, point, terrain_lines):
@@ -2764,7 +2774,7 @@ class FullMinimapEditorDialog(QDialog):
                 if waypoint_data:
                     dialog = WaypointEditDialog(waypoint_data, _load_event_profiles(), self)
                     if dialog.exec() == QDialog.DialogCode.Accepted:
-                        new_name, is_event, event_profile = dialog.get_values()
+                        new_name, is_event, event_profile, event_always = dialog.get_values()
                         old_name = waypoint_data.get("name", "")
                         if new_name != old_name and any(wp.get('name') == new_name for wp in self.geometry_data.get("waypoints", [])):
                             QMessageBox.warning(self, "오류", "이미 존재하는 웨이포인트 이름입니다.")
@@ -2772,6 +2782,7 @@ class FullMinimapEditorDialog(QDialog):
                             waypoint_data["name"] = new_name
                             waypoint_data["is_event"] = is_event
                             waypoint_data["event_profile"] = event_profile if is_event else ""
+                            waypoint_data["event_always"] = event_always if is_event else False
                             self.populate_scene() # UI 즉시 갱신
                     return # 이름 변경 로직 후 드래그 패닝 방지
                 
@@ -6370,12 +6381,17 @@ class MapTab(QWidget):
             return
 
         now = time.time()
+        current_plan_ids = set(self.journey_plan or [])
         for waypoint in self.geometry_data.get("waypoints", []):
             if not waypoint.get('is_event'):
                 continue
 
             waypoint_id = waypoint.get('id')
             if not waypoint_id:
+                continue
+
+            always_run = bool(waypoint.get('event_always'))
+            if not always_run and waypoint_id not in current_plan_ids:
                 continue
 
             state = self._get_event_waypoint_state(waypoint_id)
