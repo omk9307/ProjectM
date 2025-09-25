@@ -26,6 +26,7 @@ import pygetwindow as gw
 import time
 import uuid
 import requests
+from collections import OrderedDict
 
 from PyQt6.QtWidgets import (
     QApplication, QWidget, QVBoxLayout, QHBoxLayout,
@@ -1739,6 +1740,8 @@ class LearningTab(QWidget):
         self._nickname_ui_updating = False
         self.direction_config = self.data_manager.get_direction_config()
         self._direction_ui_updating = False
+        self._thumbnail_cache = OrderedDict()
+        self._thumbnail_cache_limit = 256
         self.initUI()
         self.init_sam()
 
@@ -2523,9 +2526,60 @@ class LearningTab(QWidget):
             image_paths = valid_paths
 
         for path in image_paths:
-            item = QListWidgetItem(QIcon(path), os.path.basename(path))
+            icon = self._get_thumbnail_icon(path)
+            item = QListWidgetItem(icon, os.path.basename(path))
             item.setData(Qt.ItemDataRole.UserRole, path)
             self.image_list_widget.addItem(item)
+
+    def _get_thumbnail_icon(self, image_path):
+        """이미지 경로에 대한 썸네일 QIcon을 캐시에서 반환하거나 새로 생성합니다."""
+        icon_size = self.image_list_widget.iconSize()
+        size_tuple = (icon_size.width(), icon_size.height())
+
+        if size_tuple[0] <= 0 or size_tuple[1] <= 0:
+            size_tuple = (128, 128)
+            icon_size = QSize(*size_tuple)
+
+        cache_entry = self._thumbnail_cache.get(image_path)
+        file_mtime = None
+        try:
+            file_mtime = os.path.getmtime(image_path)
+        except OSError:
+            file_mtime = None
+
+        if cache_entry and file_mtime is None:
+            self._thumbnail_cache.pop(image_path, None)
+            cache_entry = None
+
+        if cache_entry and file_mtime is not None:
+            cached_mtime, cached_size, cached_icon = cache_entry
+            if cached_mtime == file_mtime and cached_size == size_tuple:
+                self._thumbnail_cache.move_to_end(image_path)
+                return cached_icon
+            self._thumbnail_cache.pop(image_path, None)
+
+        placeholder = None
+        pixmap = QPixmap()
+        if file_mtime is not None and pixmap.load(image_path):
+            pixmap = pixmap.scaled(icon_size, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation)
+        else:
+            placeholder = QPixmap(icon_size)
+            placeholder.fill(Qt.GlobalColor.darkGray)
+            pixmap = placeholder
+
+        icon = QIcon(pixmap)
+
+        if file_mtime is not None:
+            self._thumbnail_cache[image_path] = (file_mtime, size_tuple, icon)
+            self._thumbnail_cache.move_to_end(image_path)
+            while len(self._thumbnail_cache) > self._thumbnail_cache_limit:
+                self._thumbnail_cache.popitem(last=False)
+
+        return icon
+
+    def _invalidate_thumbnail_cache(self, image_path):
+        """지정한 이미지 경로에 대한 캐시를 제거합니다."""
+        self._thumbnail_cache.pop(image_path, None)
 
     def add_class(self):
         selected_item = self.class_tree_widget.currentItem()
@@ -2587,6 +2641,7 @@ class LearningTab(QWidget):
         if reply == QMessageBox.StandardButton.Yes:
             success, message = self.data_manager.delete_class(class_name)
             if success:
+                self._thumbnail_cache.clear()
                 self.populate_class_list()
                 self.image_list_widget.clear()
                 self.log_viewer.append(message)
@@ -2606,6 +2661,7 @@ class LearningTab(QWidget):
             success, message = self.data_manager.rebuild_manifest_from_labels()
 
             if success:
+                self._thumbnail_cache.clear()
                 self.update_status_message(message)
                 self.log_viewer.append(message)
                 self.populate_class_list()
@@ -2676,7 +2732,10 @@ class LearningTab(QWidget):
         if not selected_items: return
         if QMessageBox.question(self, '삭제', f"이미지 {len(selected_items)}개를 삭제하시겠습니까?") == QMessageBox.StandardButton.Yes:
             for item in selected_items:
-                self.data_manager.delete_image(item.data(Qt.ItemDataRole.UserRole))
+                image_path = item.data(Qt.ItemDataRole.UserRole)
+                if image_path:
+                    self._invalidate_thumbnail_cache(image_path)
+                    self.data_manager.delete_image(image_path)
             self.populate_image_list()
 
     def capture_screen(self):
