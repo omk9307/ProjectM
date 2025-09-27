@@ -5,7 +5,7 @@ import os
 import random
 from dataclasses import dataclass
 import time
-from typing import List, Optional
+from typing import List, Optional, Callable
 
 import pygetwindow as gw
 
@@ -130,6 +130,8 @@ class AttackSkill:
     is_primary: bool = False
     min_monsters: int = 1
     probability: int = 100
+    pre_delay_min: float = 0.0
+    pre_delay_max: float = 0.0
     post_delay_min: float = 0.43
     post_delay_max: float = 0.46
     completion_delay_min: float = 0.0
@@ -145,6 +147,8 @@ class BuffSkill:
     jitter_percent: int = 15
     last_triggered_ts: float = 0.0
     next_ready_ts: float = 0.0
+    pre_delay_min: float = 0.0
+    pre_delay_max: float = 0.0
     post_delay_min: float = 0.43
     post_delay_max: float = 0.46
     completion_delay_min: float = 0.0
@@ -185,6 +189,20 @@ class AttackSkillDialog(QDialog):
         self.probability_spinbox.setValue(100)
         self.probability_spinbox.setSuffix(" %")
 
+        self.pre_delay_min_spinbox = QDoubleSpinBox()
+        self.pre_delay_min_spinbox.setRange(0.0, 5.0)
+        self.pre_delay_min_spinbox.setSingleStep(0.05)
+        self.pre_delay_min_spinbox.setDecimals(3)
+        self.pre_delay_min_spinbox.setValue(0.0)
+        self.pre_delay_min_spinbox.setSuffix(" s")
+
+        self.pre_delay_max_spinbox = QDoubleSpinBox()
+        self.pre_delay_max_spinbox.setRange(0.0, 5.0)
+        self.pre_delay_max_spinbox.setSingleStep(0.05)
+        self.pre_delay_max_spinbox.setDecimals(3)
+        self.pre_delay_max_spinbox.setValue(0.0)
+        self.pre_delay_max_spinbox.setSuffix(" s")
+
         self.delay_min_spinbox = QDoubleSpinBox()
         self.delay_min_spinbox.setRange(0.0, 5.0)
         self.delay_min_spinbox.setSingleStep(0.05)
@@ -220,6 +238,8 @@ class AttackSkillDialog(QDialog):
             self.primary_checkbox.setChecked(skill.is_primary)
             self.min_monsters_spinbox.setValue(skill.min_monsters)
             self.probability_spinbox.setValue(skill.probability)
+            self.pre_delay_min_spinbox.setValue(getattr(skill, 'pre_delay_min', 0.0))
+            self.pre_delay_max_spinbox.setValue(getattr(skill, 'pre_delay_max', 0.0))
             self.delay_min_spinbox.setValue(skill.post_delay_min)
             self.delay_max_spinbox.setValue(skill.post_delay_max)
             self.completion_min_spinbox.setValue(getattr(skill, 'completion_delay_min', 0.0))
@@ -232,6 +252,8 @@ class AttackSkillDialog(QDialog):
         form.addRow("주 스킬", self.primary_checkbox)
         form.addRow("사용 최소 몬스터 수", self.min_monsters_spinbox)
         form.addRow("사용 확률", self.probability_spinbox)
+        form.addRow("스킬 발동 전 대기 최소", self.pre_delay_min_spinbox)
+        form.addRow("스킬 발동 전 대기 최대", self.pre_delay_max_spinbox)
         form.addRow("스킬 발동 후 대기 최소", self.delay_min_spinbox)
         form.addRow("스킬 발동 후 대기 최대", self.delay_max_spinbox)
         form.addRow("스킬 완료 후 대기 최소", self.completion_min_spinbox)
@@ -258,6 +280,8 @@ class AttackSkillDialog(QDialog):
             is_primary=self.primary_checkbox.isChecked(),
             min_monsters=self.min_monsters_spinbox.value(),
             probability=self.probability_spinbox.value(),
+            pre_delay_min=min(self.pre_delay_min_spinbox.value(), self.pre_delay_max_spinbox.value()),
+            pre_delay_max=max(self.pre_delay_min_spinbox.value(), self.pre_delay_max_spinbox.value()),
             post_delay_min=min(self.delay_min_spinbox.value(), self.delay_max_spinbox.value()),
             post_delay_max=max(self.delay_min_spinbox.value(), self.delay_max_spinbox.value()),
             completion_delay_min=min(self.completion_min_spinbox.value(), self.completion_max_spinbox.value()),
@@ -286,6 +310,20 @@ class BuffSkillDialog(QDialog):
         self.jitter_spinbox.setRange(0, 50)
         self.jitter_spinbox.setValue(15)
         self.jitter_spinbox.setSuffix(" %")
+
+        self.pre_delay_min_spinbox = QDoubleSpinBox()
+        self.pre_delay_min_spinbox.setRange(0.0, 10.0)
+        self.pre_delay_min_spinbox.setSingleStep(0.05)
+        self.pre_delay_min_spinbox.setDecimals(3)
+        self.pre_delay_min_spinbox.setValue(0.0)
+        self.pre_delay_min_spinbox.setSuffix(" s")
+
+        self.pre_delay_max_spinbox = QDoubleSpinBox()
+        self.pre_delay_max_spinbox.setRange(0.0, 10.0)
+        self.pre_delay_max_spinbox.setSingleStep(0.05)
+        self.pre_delay_max_spinbox.setDecimals(3)
+        self.pre_delay_max_spinbox.setValue(0.0)
+        self.pre_delay_max_spinbox.setSuffix(" s")
 
         self.delay_min_spinbox = QDoubleSpinBox()
         self.delay_min_spinbox.setRange(0.0, 10.0)
@@ -321,6 +359,8 @@ class BuffSkillDialog(QDialog):
             self.enabled_checkbox.setChecked(skill.enabled)
             self.cooldown_spinbox.setValue(skill.cooldown_seconds)
             self.jitter_spinbox.setValue(skill.jitter_percent)
+            self.pre_delay_min_spinbox.setValue(getattr(skill, 'pre_delay_min', 0.0))
+            self.pre_delay_max_spinbox.setValue(getattr(skill, 'pre_delay_max', 0.0))
             self.delay_min_spinbox.setValue(skill.post_delay_min)
             self.delay_max_spinbox.setValue(skill.post_delay_max)
             self.completion_min_spinbox.setValue(getattr(skill, 'completion_delay_min', 0.0))
@@ -332,6 +372,8 @@ class BuffSkillDialog(QDialog):
         form.addRow("사용", self.enabled_checkbox)
         form.addRow("쿨타임", self.cooldown_spinbox)
         form.addRow("오차 허용", self.jitter_spinbox)
+        form.addRow("스킬 발동 전 대기 최소", self.pre_delay_min_spinbox)
+        form.addRow("스킬 발동 전 대기 최대", self.pre_delay_max_spinbox)
         form.addRow("스킬 발동 후 대기 최소", self.delay_min_spinbox)
         form.addRow("스킬 발동 후 대기 최대", self.delay_max_spinbox)
         form.addRow("스킬 완료 후 대기 최소", self.completion_min_spinbox)
@@ -357,6 +399,8 @@ class BuffSkillDialog(QDialog):
             cooldown_seconds=self.cooldown_spinbox.value(),
             enabled=self.enabled_checkbox.isChecked(),
             jitter_percent=self.jitter_spinbox.value(),
+            pre_delay_min=min(self.pre_delay_min_spinbox.value(), self.pre_delay_max_spinbox.value()),
+            pre_delay_max=max(self.pre_delay_min_spinbox.value(), self.pre_delay_max_spinbox.value()),
             post_delay_min=min(self.delay_min_spinbox.value(), self.delay_max_spinbox.value()),
             post_delay_max=max(self.delay_min_spinbox.value(), self.delay_max_spinbox.value()),
             completion_delay_min=min(self.completion_min_spinbox.value(), self.completion_max_spinbox.value()),
@@ -476,6 +520,7 @@ class HuntTab(QWidget):
         self._direction_detector_available = False
         self._last_direction_score: Optional[float] = None
         self._pending_completion_delays: list[dict] = []
+        self._pre_delay_timers: dict[str, QTimer] = {}
 
         self._build_ui()
         self._update_facing_label()
@@ -530,6 +575,54 @@ class HuntTab(QWidget):
             return
         message = f"{context} 후 대기 {self._format_delay_ms(delay_sec)}"
         self._append_control_log(message)
+
+    def _normalize_delay_range(self, min_value: float, max_value: float) -> tuple[float, float]:
+        try:
+            min_val = float(min_value)
+            max_val = float(max_value)
+        except (TypeError, ValueError):
+            return 0.0, 0.0
+        if min_val > max_val:
+            min_val, max_val = max_val, min_val
+        min_val = max(0.0, min_val)
+        max_val = max(0.0, max_val)
+        return min_val, max_val
+
+    def _sample_delay(self, min_value: float, max_value: float) -> float:
+        min_val, max_val = self._normalize_delay_range(min_value, max_value)
+        if max_val <= 0.0:
+            return 0.0
+        if min_val == max_val:
+            return min_val
+        return random.uniform(min_val, max_val)
+
+    def _start_pre_delay(self, command: str, delay_sec: float, context: str, callback: Callable[[], None]) -> bool:
+        delay_sec = max(0.0, float(delay_sec))
+        if delay_sec <= 0.0:
+            return False
+        if not command:
+            return False
+        if command in self._pre_delay_timers:
+            return True
+
+        timer = QTimer(self)
+        timer.setSingleShot(True)
+        timer.setInterval(max(1, int(delay_sec * 1000)))
+
+        def on_timeout() -> None:
+            try:
+                self._pre_delay_timers.pop(command, None)
+            finally:
+                self._next_command_ready_ts = time.time()
+                callback()
+
+        timer.timeout.connect(on_timeout)
+        self._pre_delay_timers[command] = timer
+        timer.start()
+        self._set_command_cooldown(delay_sec)
+        self.hunting_active = True
+        self._append_control_log(f"{context} 대기 {self._format_delay_ms(delay_sec)}")
+        return True
 
     def _queue_completion_delay(self, command: str, min_delay: float, max_delay: float, context: str) -> None:
         if not command:
@@ -2472,6 +2565,8 @@ class HuntTab(QWidget):
                         is_primary=bool(item.get('is_primary', False)),
                         min_monsters=int(item.get('min_monsters', 1)),
                         probability=int(item.get('probability', 100)),
+                        pre_delay_min=float(item.get('pre_delay_min', 0.0)),
+                        pre_delay_max=float(item.get('pre_delay_max', 0.0)),
                         post_delay_min=float(item.get('post_delay_min', 0.43)),
                         post_delay_max=float(item.get('post_delay_max', 0.46)),
                         completion_delay_min=float(item.get('completion_delay_min', 0.0)),
@@ -2496,6 +2591,8 @@ class HuntTab(QWidget):
                         cooldown_seconds=int(item.get('cooldown_seconds', 60)),
                         enabled=bool(item.get('enabled', True)),
                         jitter_percent=int(item.get('jitter_percent', 15)),
+                        pre_delay_min=float(item.get('pre_delay_min', 0.0)),
+                        pre_delay_max=float(item.get('pre_delay_max', 0.0)),
                         post_delay_min=float(item.get('post_delay_min', 0.43)),
                         post_delay_max=float(item.get('post_delay_max', 0.46)),
                         completion_delay_min=float(item.get('completion_delay_min', 0.0)),
@@ -2575,6 +2672,8 @@ class HuntTab(QWidget):
                     'is_primary': skill.is_primary,
                     'min_monsters': skill.min_monsters,
                     'probability': skill.probability,
+                    'pre_delay_min': getattr(skill, 'pre_delay_min', 0.0),
+                    'pre_delay_max': getattr(skill, 'pre_delay_max', 0.0),
                     'post_delay_min': skill.post_delay_min,
                     'post_delay_max': skill.post_delay_max,
                     'completion_delay_min': getattr(skill, 'completion_delay_min', 0.0),
@@ -2589,6 +2688,8 @@ class HuntTab(QWidget):
                     'enabled': skill.enabled,
                     'cooldown_seconds': skill.cooldown_seconds,
                     'jitter_percent': skill.jitter_percent,
+                    'pre_delay_min': getattr(skill, 'pre_delay_min', 0.0),
+                    'pre_delay_max': getattr(skill, 'pre_delay_max', 0.0),
                     'post_delay_min': skill.post_delay_min,
                     'post_delay_max': skill.post_delay_max,
                     'completion_delay_min': getattr(skill, 'completion_delay_min', 0.0),
@@ -2886,56 +2987,110 @@ class HuntTab(QWidget):
             if not buff.enabled or buff.cooldown_seconds <= 0:
                 continue
 
+            if buff.command in self._pre_delay_timers:
+                return True
+
             ready_ts = buff.next_ready_ts or 0.0
             if buff.last_triggered_ts == 0.0 or now >= ready_ts:
-                self._emit_control_command(buff.command)
-                self._queue_completion_delay(buff.command, buff.completion_delay_min, buff.completion_delay_max, f"버프 '{buff.name}'")
-                buff.last_triggered_ts = now
-                jitter_ratio = max(0, min(buff.jitter_percent, 90)) / 100.0
-                jitter_window = buff.cooldown_seconds * jitter_ratio
-
-                if jitter_window > 0:
-                    mean = jitter_window / 2.0
-                    std_dev = jitter_window / 6.0 if jitter_window > 0 else 0.0
-                    reduction = None
-                    for _ in range(5):
-                        candidate = random.gauss(mean, std_dev) if std_dev > 0 else mean
-                        if 0.0 <= candidate <= jitter_window:
-                            reduction = candidate
-                            break
-                    if reduction is None:
-                        candidate = random.gauss(mean, std_dev) if std_dev > 0 else mean
-                        reduction = min(max(candidate, 0.0), jitter_window)
-                else:
-                    reduction = 0.0
-
-                next_delay = buff.cooldown_seconds - reduction
-                wait_seconds = max(0.0, next_delay)
-                buff.next_ready_ts = now + wait_seconds
-                self.append_log(f"버프 사용: {buff.name} - {wait_seconds:.1f}초 후 사용예정", "info")
-                self.last_attack_ts = now
-                self.hunting_active = True
-                delay = random.uniform(buff.post_delay_min, buff.post_delay_max)
-                self._set_command_cooldown(delay)
-                self._log_delay_message(f"버프 '{buff.name}'", delay)
-                return True
+                if self._trigger_buff_skill(buff):
+                    return True
 
         return False
 
-    def _execute_attack_skill(self, skill: AttackSkill) -> None:
+    def _execute_attack_skill(self, skill: AttackSkill, *, skip_pre_delay: bool = False) -> None:
         if not skill.enabled:
             return
+        if not self.auto_hunt_enabled or self.current_authority != "hunt":
+            return
+
         remaining = self._get_command_delay_remaining()
         if remaining > 0:
             self._schedule_skill_execution(skill, remaining)
             return
+
+        if not skip_pre_delay:
+            pre_delay = self._sample_delay(getattr(skill, 'pre_delay_min', 0.0), getattr(skill, 'pre_delay_max', 0.0))
+            if pre_delay > 0.0:
+                if self._start_pre_delay(
+                    skill.command,
+                    pre_delay,
+                    f"스킬 '{skill.name}' 발동 전",
+                    lambda s=skill: self._execute_attack_skill(s, skip_pre_delay=True),
+                ):
+                    return
+
+        self._next_command_ready_ts = max(self._next_command_ready_ts, time.time())
         self._emit_control_command(skill.command)
         self._queue_completion_delay(skill.command, skill.completion_delay_min, skill.completion_delay_max, f"스킬 '{skill.name}'")
         self.last_attack_ts = time.time()
         self.hunting_active = True
-        delay = random.uniform(skill.post_delay_min, skill.post_delay_max)
-        self._set_command_cooldown(delay)
-        self._log_delay_message(f"스킬 '{skill.name}'", delay)
+        post_delay = self._sample_delay(skill.post_delay_min, skill.post_delay_max)
+        if post_delay > 0.0:
+            self._set_command_cooldown(post_delay)
+            self._log_delay_message(f"스킬 '{skill.name}'", post_delay)
+
+    def _trigger_buff_skill(self, buff: BuffSkill, *, is_test: bool = False) -> bool:
+        if not buff.enabled:
+            return False
+        command = buff.command
+        if not command:
+            return False
+        if command in self._pre_delay_timers:
+            return True
+
+        context_label = f"테스트 버프 '{buff.name}'" if is_test else f"버프 '{buff.name}'"
+
+        def emit() -> None:
+            exec_time = time.time()
+            self._next_command_ready_ts = max(self._next_command_ready_ts, exec_time)
+            self._emit_control_command(command)
+            self._queue_completion_delay(command, buff.completion_delay_min, buff.completion_delay_max, context_label)
+
+            jitter_ratio = max(0, min(buff.jitter_percent, 90)) / 100.0
+            jitter_window = buff.cooldown_seconds * jitter_ratio
+
+            if is_test:
+                if jitter_window > 0:
+                    next_delay = buff.cooldown_seconds - random.uniform(0, jitter_window)
+                else:
+                    next_delay = buff.cooldown_seconds
+                buff.next_ready_ts = exec_time + max(0.0, next_delay)
+            else:
+                if jitter_window > 0:
+                    mean = jitter_window / 2.0
+                    std_dev = jitter_window / 6.0
+                    reduction = None
+                    for _ in range(5):
+                        candidate = random.gauss(mean, std_dev)
+                        if 0.0 <= candidate <= jitter_window:
+                            reduction = candidate
+                            break
+                    if reduction is None:
+                        candidate = random.gauss(mean, std_dev)
+                        reduction = min(max(candidate, 0.0), jitter_window)
+                else:
+                    reduction = 0.0
+                next_delay = buff.cooldown_seconds - reduction
+                wait_seconds = max(0.0, next_delay)
+                buff.next_ready_ts = exec_time + wait_seconds
+                self.append_log(f"버프 사용: {buff.name} - {wait_seconds:.1f}초 후 사용예정", "info")
+                self.last_attack_ts = exec_time
+                self.hunting_active = True
+
+            buff.last_triggered_ts = exec_time
+
+            post_delay = self._sample_delay(buff.post_delay_min, buff.post_delay_max)
+            if post_delay > 0.0:
+                self._set_command_cooldown(post_delay)
+                self._log_delay_message(context_label, post_delay)
+
+        pre_delay = self._sample_delay(getattr(buff, 'pre_delay_min', 0.0), getattr(buff, 'pre_delay_max', 0.0))
+        if pre_delay > 0.0:
+            if self._start_pre_delay(command, pre_delay, f"{context_label} 발동 전", emit):
+                return True
+
+        emit()
+        return True
 
     def _select_attack_skill(self) -> Optional[AttackSkill]:
         enabled_skills = [s for s in self.attack_skills if s.enabled]
@@ -3117,10 +3272,10 @@ class HuntTab(QWidget):
             if updated.is_primary:
                 for existing in self.attack_skills:
                     existing.is_primary = False
-            self.attack_skills[index] = updated
-            self._ensure_primary_skill()
-            self._refresh_attack_tree()
-            self._save_settings()
+        self.attack_skills[index] = updated
+        self._ensure_primary_skill()
+        self._refresh_attack_tree()
+        self._save_settings()
 
     def remove_attack_skill(self) -> None:
         index = self._get_selected_attack_index()
@@ -3147,12 +3302,34 @@ class HuntTab(QWidget):
         if index is None:
             return
         skill = self.attack_skills[index]
-        self._emit_control_command(skill.command)
-        self._queue_completion_delay(skill.command, skill.completion_delay_min, skill.completion_delay_max, f"테스트 스킬 '{skill.name}'")
         self.append_log(f"테스트 실행 (공격): {skill.name}", "info")
-        delay = random.uniform(skill.post_delay_min, skill.post_delay_max)
-        self._set_command_cooldown(delay)
-        self._log_delay_message(f"테스트 스킬 '{skill.name}'", delay)
+        self._trigger_manual_attack_skill(skill)
+
+    def _trigger_manual_attack_skill(self, skill: AttackSkill) -> None:
+        command = skill.command
+        if not command:
+            return
+        if command in self._pre_delay_timers:
+            return
+
+        context_label = f"테스트 스킬 '{skill.name}'"
+
+        def emit() -> None:
+            exec_time = time.time()
+            self._next_command_ready_ts = max(self._next_command_ready_ts, exec_time)
+            self._emit_control_command(command)
+            self._queue_completion_delay(command, skill.completion_delay_min, skill.completion_delay_max, context_label)
+            post_delay = self._sample_delay(skill.post_delay_min, skill.post_delay_max)
+            if post_delay > 0.0:
+                self._set_command_cooldown(post_delay)
+                self._log_delay_message(context_label, post_delay)
+
+        pre_delay = self._sample_delay(getattr(skill, 'pre_delay_min', 0.0), getattr(skill, 'pre_delay_max', 0.0))
+        if pre_delay > 0.0:
+            if self._start_pre_delay(command, pre_delay, f"{context_label} 발동 전", emit):
+                return
+
+        emit()
 
     def add_buff_skill(self) -> None:
         dialog = BuffSkillDialog(self)
@@ -3190,18 +3367,8 @@ class HuntTab(QWidget):
         if index is None:
             return
         skill = self.buff_skills[index]
-        self._emit_control_command(skill.command)
-        self._queue_completion_delay(skill.command, skill.completion_delay_min, skill.completion_delay_max, f"테스트 버프 '{skill.name}'")
         self.append_log(f"테스트 실행 (버프): {skill.name}", "info")
-        now = time.time()
-        skill.last_triggered_ts = now
-        jitter_ratio = max(0, min(skill.jitter_percent, 90)) / 100.0
-        jitter_window = skill.cooldown_seconds * jitter_ratio
-        next_delay = skill.cooldown_seconds - random.uniform(0, jitter_window)
-        skill.next_ready_ts = now + max(0.0, next_delay)
-        delay = random.uniform(skill.post_delay_min, skill.post_delay_max)
-        self._set_command_cooldown(delay)
-        self._log_delay_message(f"테스트 버프 '{skill.name}'", delay)
+        self._trigger_buff_skill(skill, is_test=True)
 
     def _refresh_attack_tree(self) -> None:
         if not hasattr(self, "attack_tree"):
@@ -3352,6 +3519,13 @@ class HuntTab(QWidget):
         if self._request_timeout_timer:
             self._request_timeout_timer.stop()
         self._request_pending = False
+        for timer in list(self._pre_delay_timers.values()):
+            try:
+                timer.stop()
+            except Exception:
+                pass
+            timer.deleteLater()
+        self._pre_delay_timers.clear()
         self._pending_completion_delays.clear()
         self._stop_detection_thread()
         if hasattr(self, 'detect_btn'):
