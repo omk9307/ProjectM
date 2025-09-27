@@ -1950,6 +1950,7 @@ class LearningTab(QWidget):
         self.nickname_template_list.setIconSize(QSize(160, 64))
         self.nickname_template_list.setResizeMode(QListWidget.ResizeMode.Adjust)
         self.nickname_template_list.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
+        self.nickname_template_list.setFixedHeight(100)
         nickname_layout.addWidget(self.nickname_template_list, 1)
 
         nickname_buttons_layout = QHBoxLayout()
