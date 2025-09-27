@@ -26,6 +26,7 @@ import pygetwindow as gw
 import ctypes
 from ctypes import wintypes
 from pathlib import Path
+from typing import Dict, Optional
 
 from PyQt6.QtWidgets import (
     QApplication, QWidget, QLabel, QVBoxLayout, QHBoxLayout, QPushButton, QTextEdit,
@@ -294,6 +295,17 @@ class MapTab(QWidget):
             self.pending_event_request = None
             self.pending_event_notified = False
 
+            # 금지벽 제어 상태
+            self.forbidden_wall_states = {}
+            self.forbidden_wall_in_progress = False
+            self.active_forbidden_wall_id = None
+            self.active_forbidden_wall_reason = ""
+            self.active_forbidden_wall_profile = ""
+            self.forbidden_wall_started_at = 0.0
+            self.active_forbidden_wall_trigger = ""
+            self.forbidden_wall_touch_threshold = 2.0
+            self.pending_forbidden_command = None
+
             # [v11.3.7] 설정 변수 선언만 하고 값 할당은 load_profile_data로 위임
             self.cfg_idle_time_threshold = None
             self.cfg_climbing_state_frame_threshold = None
@@ -439,7 +451,8 @@ class MapTab(QWidget):
             
             self.render_options = {
                 'background': True, 'features': True, 'waypoints': True,
-                'terrain': True, 'objects': True, 'jump_links': True
+                'terrain': True, 'objects': True, 'jump_links': True,
+                'forbidden_walls': True,
             }
             
             # ---  멈춤 감지 및 자동 복구 시스템 변수 ---
@@ -621,7 +634,6 @@ class MapTab(QWidget):
         self.initial_delay_spinbox.setValue(2000)
         self.initial_delay_spinbox.setSuffix(" ms")
         settings_h_layout_1.addWidget(self.initial_delay_spinbox)
-        
         settings_h_layout_2 = QHBoxLayout()
         settings_h_layout_2.addStretch(1)
         settings_h_layout_2.addWidget(QLabel("단축키:"))
@@ -728,6 +740,19 @@ class MapTab(QWidget):
             "forward_slots": self._create_empty_route_slots(),
             "backward_slots": self._create_empty_route_slots(),
         }
+
+    def _emit_control_command(self, command: str, reason: object = None, *, allow_forbidden: bool = False) -> bool:
+        """자동 제어 쪽으로 명령을 전달합니다."""
+        if not command:
+            return False
+
+        if self.forbidden_wall_in_progress and not allow_forbidden and reason != self.active_forbidden_wall_reason:
+            self.update_general_log("[금지벽] 명령 실행 중이어서 다른 명령은 보류됩니다.", "gray")
+            self.pending_forbidden_command = (command, reason)
+            return False
+
+        self.control_command_issued.emit(command, reason)
+        return True
 
     def _normalize_route_slot_dict(self, slot_dict):
         modified = False
@@ -1212,7 +1237,8 @@ class MapTab(QWidget):
             saved_options = config.get('render_options', {})
             self.render_options = {
                 'background': True, 'features': True, 'waypoints': True,
-                'terrain': True, 'objects': True, 'jump_links': True
+                'terrain': True, 'objects': True, 'jump_links': True,
+                'forbidden_walls': True,
             }
             self.render_options.update(saved_options)
 
@@ -1240,13 +1266,20 @@ class MapTab(QWidget):
                 with open(geometry_file, 'r', encoding='utf-8') as f:
                     self.geometry_data = json.load(f)
             else:
-                self.geometry_data = {"terrain_lines": [], "transition_objects": [], "waypoints": [], "jump_links": []}
+                self.geometry_data = {
+                    "terrain_lines": [],
+                    "transition_objects": [],
+                    "waypoints": [],
+                    "jump_links": [],
+                    "forbidden_walls": [],
+                }
 
             self._ensure_waypoint_event_fields()
 
             config_updated, features_updated, geometry_updated = self.migrate_data_structures(config, self.key_features, self.geometry_data)
             self._ensure_waypoint_event_fields()
             self._refresh_event_waypoint_states()
+            self._refresh_forbidden_wall_states()
 
             raw_route_profiles = config.get('route_profiles', {}) or {}
             normalized_profiles = {}
@@ -1344,6 +1377,43 @@ class MapTab(QWidget):
         # v10.0.0 마이그레이션: geometry 데이터 필드 추가
         if "waypoints" not in geometry: geometry["waypoints"] = []; geometry_updated = True
         if "jump_links" not in geometry: geometry["jump_links"] = []; geometry_updated = True
+        if "forbidden_walls" not in geometry: geometry["forbidden_walls"] = []; geometry_updated = True
+
+        for wall in geometry.get("forbidden_walls", []):
+            if not wall.get("id"):
+                wall["id"] = f"fw-{uuid.uuid4()}"
+                geometry_updated = True
+            if "line_id" not in wall:
+                wall["line_id"] = ""
+                geometry_updated = True
+            if "pos" not in wall or not isinstance(wall.get("pos"), (list, tuple)) or len(wall.get("pos", [])) < 2:
+                wall["pos"] = [0.0, 0.0]
+                geometry_updated = True
+            if "enabled" not in wall:
+                wall["enabled"] = False
+                geometry_updated = True
+            if "range_left" not in wall:
+                wall["range_left"] = 0.0
+                geometry_updated = True
+            if "range_right" not in wall:
+                wall["range_right"] = 0.0
+                geometry_updated = True
+            if "dwell_seconds" not in wall:
+                wall["dwell_seconds"] = 3.0
+                geometry_updated = True
+            if "cooldown_seconds" not in wall:
+                wall["cooldown_seconds"] = 5.0
+                geometry_updated = True
+            if "instant_on_contact" not in wall:
+                wall["instant_on_contact"] = False
+                geometry_updated = True
+            if not isinstance(wall.get("skill_profiles"), list):
+                wall["skill_profiles"] = list(wall.get("skill_profiles") or [])
+                geometry_updated = True
+            if "floor" not in wall or wall.get("floor") is None:
+                parent_line = next((line for line in geometry.get("terrain_lines", []) if line.get("id") == wall.get("line_id")), None)
+                wall["floor"] = parent_line.get("floor") if parent_line else None
+                geometry_updated = True
         for line in geometry.get("terrain_lines", []):
             if "floor" not in line: line["floor"] = 1.0; geometry_updated = True
         
@@ -1429,8 +1499,21 @@ class MapTab(QWidget):
             })
             
             key_features_data = self._prepare_data_for_json(self.key_features)
+
+            if "forbidden_walls" not in self.geometry_data:
+                self.geometry_data["forbidden_walls"] = []
+            else:
+                for wall in self.geometry_data.get("forbidden_walls", []):
+                    wall.setdefault("cooldown_seconds", 5.0)
+                    wall.setdefault("dwell_seconds", 3.0)
+                    wall.setdefault("range_left", 0.0)
+                    wall.setdefault("range_right", 0.0)
+                    wall.setdefault("enabled", False)
+                    wall.setdefault("instant_on_contact", False)
+                    wall.setdefault("skill_profiles", [])
+
             geometry_data = self._prepare_data_for_json(self.geometry_data)
-            
+
 
             with open(config_file, 'w', encoding='utf-8') as f: json.dump(config_data, f, indent=4, ensure_ascii=False)
             with open(features_file, 'w', encoding='utf-8') as f: json.dump(key_features_data, f, indent=4, ensure_ascii=False)
@@ -1581,6 +1664,12 @@ class MapTab(QWidget):
             widget.setEnabled(False)
 
         self.minimap_view_label.setText("맵 프로필을 선택하거나 생성해주세요.")
+        if hasattr(self, 'minimap_view_label'):
+            self.minimap_view_label.update_static_cache(
+                geometry_data=self.geometry_data,
+                key_features=self.key_features,
+                global_positions=getattr(self, 'global_positions', {}),
+            )
         self.save_global_settings()
 
     def populate_route_profile_selector(self):
@@ -1722,6 +1811,7 @@ class MapTab(QWidget):
                 self.geometry_data = self.editor_dialog.get_updated_geometry_data()
                 self._ensure_waypoint_event_fields()
                 self._refresh_event_waypoint_states()
+                self._refresh_forbidden_wall_states()
                 self.render_options = self.editor_dialog.get_current_view_options()
                 self.save_profile_data()
                 self.update_general_log("지형 편집기 변경사항이 저장되었습니다.", "green")
@@ -1983,7 +2073,14 @@ class MapTab(QWidget):
             "DodgerBlue"
         )
 
-        self.control_command_issued.emit(profile_name, self.active_event_reason)
+        if not self._emit_control_command(profile_name, self.active_event_reason):
+            self.update_general_log("[이벤트] 금지벽 명령 실행 중이라 이벤트 명령을 보류합니다.", "orange")
+            self.event_in_progress = False
+            self.active_event_waypoint_id = None
+            self.active_event_profile = ""
+            self.active_event_reason = ""
+            self.event_started_at = 0.0
+            return False
         return True
 
     def _finish_waypoint_event(self, success):
@@ -2021,15 +2118,206 @@ class MapTab(QWidget):
         self.current_segment_index = 0
         self._try_execute_pending_event()
 
+    def _refresh_forbidden_wall_states(self) -> None:
+        refreshed: Dict[str, dict] = {}
+        for wall in self.geometry_data.get("forbidden_walls", []):
+            wall_id = wall.get('id')
+            if not wall_id:
+                continue
+            existing = self.forbidden_wall_states.get(wall_id, {})
+            refreshed[wall_id] = {
+                'entered_at': existing.get('entered_at'),
+                'last_triggered': existing.get('last_triggered', 0.0),
+                'contact_ready': existing.get('contact_ready', True),
+            }
+        self.forbidden_wall_states = refreshed
+
+        if self.active_forbidden_wall_id and self.active_forbidden_wall_id not in refreshed:
+            self.forbidden_wall_in_progress = False
+            self.active_forbidden_wall_id = None
+            self.active_forbidden_wall_reason = ""
+            self.active_forbidden_wall_profile = ""
+            self.active_forbidden_wall_trigger = ""
+            self.forbidden_wall_started_at = 0.0
+
+    def _get_forbidden_wall_state(self, wall_id: str) -> dict:
+        if wall_id not in self.forbidden_wall_states:
+            self.forbidden_wall_states[wall_id] = {
+                'entered_at': None,
+                'last_triggered': 0.0,
+                'contact_ready': True,
+            }
+        return self.forbidden_wall_states[wall_id]
+
+    def _get_forbidden_wall_by_id(self, wall_id: str | None) -> Optional[dict]:
+        if not wall_id:
+            return None
+        for wall in self.geometry_data.get("forbidden_walls", []):
+            if wall.get('id') == wall_id:
+                return wall
+        return None
+
+    def _trigger_forbidden_wall(self, wall: dict, trigger_type: str) -> bool:
+        auto_checkbox = getattr(self, "auto_control_checkbox", None)
+        debug_checkbox = getattr(self, "debug_auto_control_checkbox", None)
+        is_auto_enabled = bool(auto_checkbox and auto_checkbox.isChecked())
+        is_debug_enabled = bool(debug_checkbox and debug_checkbox.isChecked())
+        if not (is_auto_enabled or is_debug_enabled):
+            return False
+
+        skills = wall.get('skill_profiles') or []
+        if not skills:
+            return False
+
+        wall_id = wall.get('id') or f"fw-{uuid.uuid4()}"
+        wall['id'] = wall_id
+        state = self._get_forbidden_wall_state(wall_id)
+
+        cooldown = max(0.0, float(wall.get('cooldown_seconds', 5.0)))
+        if cooldown > 0.0 and state.get('last_triggered'):
+            elapsed = time.time() - float(state['last_triggered'])
+            if elapsed < cooldown:
+                return False
+
+        command = random.choice(skills)
+        wall_pos = wall.get('pos') or [0.0, 0.0]
+        trigger_label = "접촉" if trigger_type == "contact" else "대기"
+
+        reason = f"FORBIDDEN_WALL:{wall_id}"
+        message = (
+            f"[금지벽] ({wall_pos[0]:.1f}, {wall_pos[1]:.1f})에서 명령 '{command}' 실행 시작"
+            f" (트리거: {trigger_label})."
+        )
+        self.update_general_log(message, "crimson")
+
+        state['entered_at'] = None
+        state['last_triggered'] = time.time()
+        state['contact_ready'] = False
+
+        self.forbidden_wall_in_progress = True
+        self.active_forbidden_wall_id = wall_id
+        self.active_forbidden_wall_reason = reason
+        self.active_forbidden_wall_profile = command
+        self.active_forbidden_wall_trigger = trigger_type
+        self.forbidden_wall_started_at = time.time()
+
+        if not self._emit_control_command(command, reason, allow_forbidden=True):
+            self.forbidden_wall_in_progress = False
+            self.active_forbidden_wall_id = None
+            self.active_forbidden_wall_reason = ""
+            self.active_forbidden_wall_profile = ""
+            self.active_forbidden_wall_trigger = ""
+            state['contact_ready'] = False
+            return False
+        return True
+
+    def _finish_forbidden_wall_sequence(self, success: bool) -> None:
+        wall = self._get_forbidden_wall_by_id(self.active_forbidden_wall_id)
+        wall_pos = wall.get('pos') if wall else [0.0, 0.0]
+        trigger_label = "접촉" if self.active_forbidden_wall_trigger == "contact" else "대기"
+        status_text = "완료" if success else "실패"
+        color = "green" if success else "red"
+        self.update_general_log(
+            f"[금지벽] ({wall_pos[0]:.1f}, {wall_pos[1]:.1f}) 명령 '{self.active_forbidden_wall_profile}' {status_text}"
+            f" (트리거: {trigger_label}).",
+            color,
+        )
+
+        state = self.forbidden_wall_states.get(self.active_forbidden_wall_id)
+        if state:
+            state['entered_at'] = None
+            state['last_triggered'] = time.time()
+            state['contact_ready'] = False
+
+        self.forbidden_wall_in_progress = False
+        self.active_forbidden_wall_id = None
+        self.active_forbidden_wall_reason = ""
+        self.active_forbidden_wall_profile = ""
+        self.active_forbidden_wall_trigger = ""
+        self.forbidden_wall_started_at = 0.0
+        
+        pending = getattr(self, 'pending_forbidden_command', None)
+        self.pending_forbidden_command = None
+        if pending and not self.event_in_progress:
+            command, pending_reason = pending
+            if self._emit_control_command(command, pending_reason):
+                self.update_general_log(
+                    "금지벽 종료 후 보류된 명령을 재전송했습니다.",
+                    "gray",
+                )
+
+    def _update_forbidden_wall_logic(self, final_player_pos: QPointF, contact_terrain: Optional[dict]) -> None:
+        walls = self.geometry_data.get("forbidden_walls", [])
+        if not walls or final_player_pos is None:
+            return
+
+        current_line_id = contact_terrain.get('id') if contact_terrain else None
+        now = time.time()
+
+        touch_threshold = getattr(self, 'forbidden_wall_touch_threshold', 2.0)
+
+        for wall in walls:
+            wall_id = wall.get('id')
+            if not wall_id:
+                continue
+
+            state = self._get_forbidden_wall_state(wall_id)
+
+            if not wall.get('enabled') or not wall.get('skill_profiles'):
+                state['entered_at'] = None
+                state['contact_ready'] = True
+                continue
+
+            if wall.get('line_id') != current_line_id:
+                state['entered_at'] = None
+                state['contact_ready'] = True
+                continue
+
+            wall_pos = wall.get('pos') or [0.0, 0.0]
+            wall_x = float(wall_pos[0])
+            dx = final_player_pos.x() - wall_x
+
+            range_left = max(0.0, float(wall.get('range_left', 0.0)))
+            range_right = max(0.0, float(wall.get('range_right', 0.0)))
+            dwell_seconds = max(0.0, float(wall.get('dwell_seconds', 0.0)))
+
+            within_range = (-range_left <= dx <= range_right)
+            within_touch = abs(dx) <= touch_threshold
+
+            if within_range:
+                if state.get('entered_at') is None:
+                    state['entered_at'] = now
+            else:
+                state['entered_at'] = None
+
+            if within_touch:
+                instant_enabled = bool(wall.get('instant_on_contact'))
+                if instant_enabled and state.get('contact_ready', True) and not self.forbidden_wall_in_progress and not self.event_in_progress:
+                    if self._trigger_forbidden_wall(wall, trigger_type="contact"):
+                        state['contact_ready'] = False
+                        continue
+            else:
+                state['contact_ready'] = True
+
+            if (
+                dwell_seconds > 0.0
+                and within_range
+                and state.get('entered_at') is not None
+                and not self.forbidden_wall_in_progress
+                and not self.event_in_progress
+                and (now - state['entered_at']) >= dwell_seconds
+            ):
+                if self._trigger_forbidden_wall(wall, trigger_type="dwell"):
+                    state['entered_at'] = None
+
     @pyqtSlot(str, object, bool)
     def on_sequence_completed(self, command_name, reason, success):
-        if not self.event_in_progress:
-            return
-
-        if not isinstance(reason, str) or reason != self.active_event_reason:
-            return
-
-        self._finish_waypoint_event(bool(success))
+        if isinstance(reason, str):
+            if self.event_in_progress and reason == self.active_event_reason:
+                self._finish_waypoint_event(bool(success))
+                return
+            if self.forbidden_wall_in_progress and reason == self.active_forbidden_wall_reason:
+                self._finish_forbidden_wall_sequence(bool(success))
 
     def process_new_waypoint_data(self, wp_data, final_features_on_canvas, newly_drawn_features, deleted_feature_ids, context_frame_bgr):
         # 이 함수는 v10.0.0에서 더 이상 사용되지 않음. 웨이포인트는 편집기에서 직접 생성됨.
@@ -2469,7 +2757,7 @@ class MapTab(QWidget):
                 if self.debug_auto_control_checkbox.isChecked():
                     print("[자동 제어 테스트] 모든 키 떼기")
                 elif self.auto_control_checkbox.isChecked():
-                    self.control_command_issued.emit("모든 키 떼기", None)
+                    self._emit_control_command("모든 키 떼기", None)
 
                 self.update_general_log("탐지를 중단합니다.", "black")
                 self.detect_anchor_btn.setText("탐지 시작")
@@ -3213,6 +3501,12 @@ class MapTab(QWidget):
         if not self.global_positions:
             self.full_map_pixmap = None
             self.full_map_bounding_rect = QRectF()
+            if hasattr(self, 'minimap_view_label'):
+                self.minimap_view_label.update_static_cache(
+                    geometry_data=self.geometry_data,
+                    key_features=self.key_features,
+                    global_positions=self.global_positions,
+                )
             return
 
         all_items_rects = []
@@ -3304,6 +3598,14 @@ class MapTab(QWidget):
         
         painter.end()
         self.update_general_log(f"배경 지도 이미지 생성 완료. (크기: {self.full_map_pixmap.width()}x{self.full_map_pixmap.height()})", "green")
+
+        # 정적 렌더링 캐시 갱신
+        if hasattr(self, 'minimap_view_label'):
+            self.minimap_view_label.update_static_cache(
+                geometry_data=self.geometry_data,
+                key_features=self.key_features,
+                global_positions=self.global_positions,
+            )
       
     def _calculate_content_bounding_rect(self):
         """현재 맵의 모든 시각적 요소(지형, 오브젝트 등)를 포함하는 전체 경계를 계산합니다."""
@@ -3983,9 +4285,13 @@ class MapTab(QWidget):
                 intermediate_type='walk', player_state="대기 중",
                 nav_action="오류: 위치/층 정보 없음"
             )
+            for state in self.forbidden_wall_states.values():
+                state['entered_at'] = None
+                state['contact_ready'] = True
             return
 
         self._update_event_waypoint_proximity(final_player_pos)
+        self._update_forbidden_wall_logic(final_player_pos, contact_terrain)
 
         # Phase 0: 타임아웃 (유지)
         if (self.navigation_state_locked and (time.time() - self.lock_timeout_start > MAX_LOCK_DURATION)) or \
@@ -4003,10 +4309,13 @@ class MapTab(QWidget):
         
         # 1. 캐릭터가 움직였을 때, '의도된' 움직임인지 확인 후 처리
         if is_moving_state:
-            self.last_action_time = time.time()
+            if self.last_movement_time:
+                self.last_action_time = self.last_movement_time
+            else:
+                self.last_action_time = time.time()
             # [핵심 수정] 명령을 보낸 지 0.5초 이내에 발생한 움직임만 '의도된' 것으로 간주
             is_intentional_move = (time.time() - self.last_command_sent_time < 0.5)
-            
+
             if self.stuck_recovery_attempts > 0 and is_intentional_move:
                 self.update_general_log("[자동 복구] 의도된 움직임 감지. 복구 상태를 초기화합니다.", "green")
                 self.stuck_recovery_attempts = 0
@@ -4017,31 +4326,50 @@ class MapTab(QWidget):
         
         if not self.event_in_progress:
             now = time.time()
-            if should_be_moving and not is_moving_state and now > self.recovery_cooldown_until:
-                time_since_last_action = now - self.last_action_time
+            last_movement_reference = self.last_movement_time or self.last_action_time
+            if last_movement_reference:
+                time_since_last_movement = now - last_movement_reference
+            else:
+                time_since_last_movement = float('inf')
 
-                if time_since_last_action > self.STUCK_DETECTION_THRESHOLD_S and self.stuck_recovery_attempts < self.MAX_STUCK_RECOVERY_ATTEMPTS:
-                    if self.last_movement_command:
-                        self.stuck_recovery_attempts += 1
-                        log_msg = (
-                            f"[자동 복구] 멈춤 감지 ({self.stuck_recovery_attempts}/{self.MAX_STUCK_RECOVERY_ATTEMPTS}). "
-                            f"'사다리 멈춤복구' 후 '{self.last_movement_command}' 재시도."
-                        )
-                        self.update_general_log(log_msg, "orange")
+            can_attempt_recovery = (
+                self.last_movement_command is not None
+                and self.last_command_sent_time > 0.0
+                and (now - self.last_command_sent_time) >= self.STUCK_DETECTION_THRESHOLD_S
+            )
 
-                        self.recovery_cooldown_until = now + 1.5
+            if (
+                should_be_moving
+                and can_attempt_recovery
+                and now > self.recovery_cooldown_until
+            ):
+                if (
+                    time_since_last_movement > self.STUCK_DETECTION_THRESHOLD_S
+                    and self.stuck_recovery_attempts < self.MAX_STUCK_RECOVERY_ATTEMPTS
+                ):
+                    self.stuck_recovery_attempts += 1
+                    log_msg = (
+                        f"[자동 복구] 멈춤 감지 ({self.stuck_recovery_attempts}/{self.MAX_STUCK_RECOVERY_ATTEMPTS}). "
+                        f"'사다리 멈춤복구' 후 '{self.last_movement_command}' 재시도."
+                    )
+                    self.update_general_log(log_msg, "orange")
 
-                        if self.debug_auto_control_checkbox.isChecked():
-                            print("[자동 제어 테스트] RECOVERY-PREP: 사다리 멈춤복구")
-                        elif self.auto_control_checkbox.isChecked():
-                            self.control_command_issued.emit("사다리 멈춤복구", None)
+                    self.recovery_cooldown_until = now + 1.5
 
-                        QTimer.singleShot(1000, self._execute_recovery_resend)
+                    if self.debug_auto_control_checkbox.isChecked():
+                        print("[자동 제어 테스트] RECOVERY-PREP: 사다리 멈춤복구")
+                    elif self.auto_control_checkbox.isChecked():
+                        self._emit_control_command("사다리 멈춤복구", None)
 
-                        self.last_player_pos = final_player_pos
-                        return
+                    QTimer.singleShot(1000, self._execute_recovery_resend)
 
-                elif time_since_last_action > self.STUCK_DETECTION_THRESHOLD_S and self.stuck_recovery_attempts >= self.MAX_STUCK_RECOVERY_ATTEMPTS:
+                    self.last_player_pos = final_player_pos
+                    return
+
+                elif (
+                    time_since_last_movement > self.STUCK_DETECTION_THRESHOLD_S
+                    and self.stuck_recovery_attempts >= self.MAX_STUCK_RECOVERY_ATTEMPTS
+                ):
                     if now - getattr(self, '_last_stuck_log_time', 0) > 5.0:
                         self.update_general_log(
                             f"[자동 복구] 실패: 최대 복구 시도({self.MAX_STUCK_RECOVERY_ATTEMPTS}회)를 초과했습니다. 수동 개입이 필요할 수 있습니다.",
@@ -4052,36 +4380,36 @@ class MapTab(QWidget):
             elif (
                 self.player_state not in ['idle', 'on_terrain']
                 and self.last_movement_time
+                and can_attempt_recovery
                 and now > self.recovery_cooldown_until
             ):
-                time_since_last_movement = now - self.last_movement_time
+                non_walk_time_since_move = now - self.last_movement_time
 
                 if (
-                    time_since_last_movement > self.NON_WALK_STUCK_THRESHOLD_S
+                    non_walk_time_since_move > self.NON_WALK_STUCK_THRESHOLD_S
                     and self.stuck_recovery_attempts < self.MAX_STUCK_RECOVERY_ATTEMPTS
                 ):
-                    if self.last_movement_command:
-                        self.stuck_recovery_attempts += 1
-                        log_msg = (
-                            f"[자동 복구] 비걷기 상태 멈춤 감지 ({self.stuck_recovery_attempts}/{self.MAX_STUCK_RECOVERY_ATTEMPTS}). "
-                            f"'사다리 멈춤복구' 후 '{self.last_movement_command}' 재시도."
-                        )
-                        self.update_general_log(log_msg, "orange")
+                    self.stuck_recovery_attempts += 1
+                    log_msg = (
+                        f"[자동 복구] 비걷기 상태 멈춤 감지 ({self.stuck_recovery_attempts}/{self.MAX_STUCK_RECOVERY_ATTEMPTS}). "
+                        f"'사다리 멈춤복구' 후 '{self.last_movement_command}' 재시도."
+                    )
+                    self.update_general_log(log_msg, "orange")
 
-                        self.recovery_cooldown_until = now + 1.5
+                    self.recovery_cooldown_until = now + 1.5
 
-                        if self.debug_auto_control_checkbox.isChecked():
-                            print("[자동 제어 테스트] RECOVERY-PREP: 사다리 멈춤복구")
-                        elif self.auto_control_checkbox.isChecked():
-                            self.control_command_issued.emit("사다리 멈춤복구", None)
+                    if self.debug_auto_control_checkbox.isChecked():
+                        print("[자동 제어 테스트] RECOVERY-PREP: 사다리 멈춤복구")
+                    elif self.auto_control_checkbox.isChecked():
+                        self._emit_control_command("사다리 멈춤복구", None)
 
-                        QTimer.singleShot(1000, self._execute_recovery_resend)
+                    QTimer.singleShot(1000, self._execute_recovery_resend)
 
-                        self.last_player_pos = final_player_pos
-                        return
+                    self.last_player_pos = final_player_pos
+                    return
 
                 elif (
-                    time_since_last_movement > self.NON_WALK_STUCK_THRESHOLD_S
+                    non_walk_time_since_move > self.NON_WALK_STUCK_THRESHOLD_S
                     and self.stuck_recovery_attempts >= self.MAX_STUCK_RECOVERY_ATTEMPTS
                 ):
                     if now - getattr(self, '_last_stuck_log_time', 0) > 5.0:
@@ -4219,7 +4547,7 @@ class MapTab(QWidget):
             if self.debug_auto_control_checkbox.isChecked():
                 print(f"[자동 제어 테스트] RECOVERY: {command}")
             elif self.auto_control_checkbox.isChecked():
-                self.control_command_issued.emit(command, None)
+                self._emit_control_command(command, None)
 
     def _update_navigator_and_view(self, final_player_pos, current_terrain_name):
         """
@@ -4401,7 +4729,7 @@ class MapTab(QWidget):
                     if self.debug_auto_control_checkbox.isChecked():
                         print("[자동 제어 테스트] 모든 키 떼기")
                     elif self.auto_control_checkbox.isChecked():
-                        self.control_command_issued.emit("모든 키 떼기", None)
+                        self._emit_control_command("모든 키 떼기", None)
                     self.initial_delay_active = False
             else:
                 # --- [v.1811] BUGFIX: UnboundLocalError 해결 ---
@@ -4488,7 +4816,7 @@ class MapTab(QWidget):
                         if self.debug_auto_control_checkbox.isChecked():
                             print(f"[자동 제어 테스트] {command_to_send}")
                         elif self.auto_control_checkbox.isChecked():
-                            self.control_command_issued.emit(command_to_send, None)
+                            self._emit_control_command(command_to_send, None)
 
                     # 상태 업데이트
                     if action_changed:
@@ -5042,6 +5370,7 @@ class MapTab(QWidget):
             self.global_positions = self._calculate_global_positions()
             self._generate_full_map_pixmap()
             self._assign_dynamic_names() #동적 이름 부여 메서드 호출 추가
+            self._refresh_forbidden_wall_states()
             self.update_general_log("맵 데이터를 최신 정보로 갱신했습니다.", "purple")
 
     def _calculate_global_positions(self):
