@@ -103,6 +103,8 @@ try:
         SRC_ROOT,
         STUCK_DETECTION_WAIT_DEFAULT,
         WAYPOINT_ARRIVAL_X_THRESHOLD,
+        WAYPOINT_ARRIVAL_X_THRESHOLD_MIN_DEFAULT,
+        WAYPOINT_ARRIVAL_X_THRESHOLD_MAX_DEFAULT,
         WORKSPACE_ROOT,
         Y_MOVEMENT_DEADZONE,
         CLIMBING_STATE_FRAME_THRESHOLD,
@@ -152,6 +154,8 @@ except ImportError:
         SRC_ROOT,
         STUCK_DETECTION_WAIT_DEFAULT,
         WAYPOINT_ARRIVAL_X_THRESHOLD,
+        WAYPOINT_ARRIVAL_X_THRESHOLD_MIN_DEFAULT,
+        WAYPOINT_ARRIVAL_X_THRESHOLD_MAX_DEFAULT,
         WORKSPACE_ROOT,
         Y_MOVEMENT_DEADZONE,
         CLIMBING_STATE_FRAME_THRESHOLD,
@@ -162,6 +166,11 @@ except ImportError:
         ON_TERRAIN_Y_THRESHOLD,
         load_event_profiles,
     )
+
+if 'WAYPOINT_ARRIVAL_X_THRESHOLD_MIN_DEFAULT' not in globals():
+    WAYPOINT_ARRIVAL_X_THRESHOLD_MIN_DEFAULT = WAYPOINT_ARRIVAL_X_THRESHOLD
+if 'WAYPOINT_ARRIVAL_X_THRESHOLD_MAX_DEFAULT' not in globals():
+    WAYPOINT_ARRIVAL_X_THRESHOLD_MAX_DEFAULT = WAYPOINT_ARRIVAL_X_THRESHOLD
 
 try:
     from .map_logic import (
@@ -254,6 +263,8 @@ class MapTab(QWidget):
     # [MODIFIED] v14.3.0: 점프 프로파일링 관련 시그널로 변경 및 추가
     jump_profile_measured_signal = pyqtSignal(float, float) # duration, y_offset
     jump_profile_progress_signal = pyqtSignal(int)
+
+    EVENT_WAYPOINT_THRESHOLD = 8.0
     
     def __init__(self):
             super().__init__()
@@ -328,6 +339,8 @@ class MapTab(QWidget):
             self.cfg_max_jump_duration = None
             self.cfg_y_movement_deadzone = None
             self.cfg_waypoint_arrival_x_threshold = None
+            self.cfg_waypoint_arrival_x_threshold_min = None
+            self.cfg_waypoint_arrival_x_threshold_max = None
             self.cfg_ladder_arrival_x_threshold = None
             self.cfg_jump_link_arrival_x_threshold = None
             self.cfg_on_ladder_enter_frame_threshold = None
@@ -486,6 +499,9 @@ class MapTab(QWidget):
             self.airborne_recovery_cooldown_until = 0.0
             self._last_airborne_recovery_log_time = 0.0
             self._reset_airborne_recovery_state()
+
+            self._active_waypoint_threshold_key = None
+            self._active_waypoint_threshold_value = None
 
             # --- [v.1810] 좁은 발판 착지 판단 유예 플래그 ---
             self.just_landed_on_narrow_terrain = False
@@ -1200,6 +1216,8 @@ class MapTab(QWidget):
             self.cfg_max_jump_duration = MAX_JUMP_DURATION
             self.cfg_y_movement_deadzone = Y_MOVEMENT_DEADZONE
             self.cfg_waypoint_arrival_x_threshold = WAYPOINT_ARRIVAL_X_THRESHOLD
+            self.cfg_waypoint_arrival_x_threshold_min = WAYPOINT_ARRIVAL_X_THRESHOLD_MIN_DEFAULT
+            self.cfg_waypoint_arrival_x_threshold_max = WAYPOINT_ARRIVAL_X_THRESHOLD_MAX_DEFAULT
             self.cfg_ladder_arrival_x_threshold = LADDER_ARRIVAL_X_THRESHOLD
             self.cfg_jump_link_arrival_x_threshold = JUMP_LINK_ARRIVAL_X_THRESHOLD
             self.cfg_on_ladder_enter_frame_threshold = 3
@@ -1238,6 +1256,14 @@ class MapTab(QWidget):
                 self.cfg_max_jump_duration = state_config.get("max_jump_duration", self.cfg_max_jump_duration)
                 self.cfg_y_movement_deadzone = state_config.get("y_movement_deadzone", self.cfg_y_movement_deadzone)
                 self.cfg_waypoint_arrival_x_threshold = state_config.get("waypoint_arrival_x_threshold", self.cfg_waypoint_arrival_x_threshold)
+                self.cfg_waypoint_arrival_x_threshold_min = state_config.get(
+                    "waypoint_arrival_x_threshold_min",
+                    self.cfg_waypoint_arrival_x_threshold_min
+                )
+                self.cfg_waypoint_arrival_x_threshold_max = state_config.get(
+                    "waypoint_arrival_x_threshold_max",
+                    self.cfg_waypoint_arrival_x_threshold_max
+                )
                 self.cfg_ladder_arrival_x_threshold = state_config.get("ladder_arrival_x_threshold", self.cfg_ladder_arrival_x_threshold)
                 self.cfg_jump_link_arrival_x_threshold = state_config.get("jump_link_arrival_x_threshold", self.cfg_jump_link_arrival_x_threshold)
                 self.cfg_on_ladder_enter_frame_threshold = state_config.get("on_ladder_enter_frame_threshold", self.cfg_on_ladder_enter_frame_threshold)
@@ -1251,7 +1277,20 @@ class MapTab(QWidget):
                 self.cfg_airborne_recovery_wait = state_config.get("airborne_recovery_wait", self.cfg_airborne_recovery_wait)
                 self.cfg_ladder_recovery_resend_delay = state_config.get("ladder_recovery_resend_delay", self.cfg_ladder_recovery_resend_delay)
 
+                if self.cfg_waypoint_arrival_x_threshold_min > self.cfg_waypoint_arrival_x_threshold_max:
+                    self.cfg_waypoint_arrival_x_threshold_min, self.cfg_waypoint_arrival_x_threshold_max = (
+                        self.cfg_waypoint_arrival_x_threshold_max,
+                        self.cfg_waypoint_arrival_x_threshold_min,
+                    )
+
+                self.cfg_waypoint_arrival_x_threshold = (
+                    self.cfg_waypoint_arrival_x_threshold_min + self.cfg_waypoint_arrival_x_threshold_max
+                ) / 2.0
+
                 self.update_general_log("저장된 상태 판정 설정을 로드했습니다.", "gray")
+
+                self._active_waypoint_threshold_key = None
+                self._active_waypoint_threshold_value = None
 
             saved_options = config.get('render_options', {})
             self.render_options = {
@@ -1497,6 +1536,8 @@ class MapTab(QWidget):
                 "max_jump_duration": self.cfg_max_jump_duration,
                 "y_movement_deadzone": self.cfg_y_movement_deadzone,
                 "waypoint_arrival_x_threshold": self.cfg_waypoint_arrival_x_threshold,
+                "waypoint_arrival_x_threshold_min": self.cfg_waypoint_arrival_x_threshold_min,
+                "waypoint_arrival_x_threshold_max": self.cfg_waypoint_arrival_x_threshold_max,
                 "ladder_arrival_x_threshold": self.cfg_ladder_arrival_x_threshold,
                 "jump_link_arrival_x_threshold": self.cfg_jump_link_arrival_x_threshold,
                 "on_ladder_enter_frame_threshold": self.cfg_on_ladder_enter_frame_threshold,
@@ -1972,7 +2013,7 @@ class MapTab(QWidget):
             return False
 
         waypoint_point = QPointF(pos[0], pos[1])
-        threshold_x = self.cfg_waypoint_arrival_x_threshold or WAYPOINT_ARRIVAL_X_THRESHOLD
+        threshold_x = self.EVENT_WAYPOINT_THRESHOLD
         threshold_y = self.cfg_jump_y_max_threshold or JUMP_Y_MAX_THRESHOLD
 
         if waypoint.get('floor') is not None and self.current_player_floor is not None:
@@ -2832,6 +2873,8 @@ class MapTab(QWidget):
             "max_jump_duration": self.cfg_max_jump_duration,
             "y_movement_deadzone": self.cfg_y_movement_deadzone,
             "waypoint_arrival_x_threshold": self.cfg_waypoint_arrival_x_threshold,
+            "waypoint_arrival_x_threshold_min": self.cfg_waypoint_arrival_x_threshold_min,
+            "waypoint_arrival_x_threshold_max": self.cfg_waypoint_arrival_x_threshold_max,
             "ladder_arrival_x_threshold": self.cfg_ladder_arrival_x_threshold,
             "jump_link_arrival_x_threshold": self.cfg_jump_link_arrival_x_threshold,
             "on_ladder_enter_frame_threshold": self.cfg_on_ladder_enter_frame_threshold,
@@ -2854,6 +2897,19 @@ class MapTab(QWidget):
                 attr_name = f"cfg_{key}"
                 if hasattr(self, attr_name):
                     setattr(self, attr_name, value)
+
+            if self.cfg_waypoint_arrival_x_threshold_min > self.cfg_waypoint_arrival_x_threshold_max:
+                self.cfg_waypoint_arrival_x_threshold_min, self.cfg_waypoint_arrival_x_threshold_max = (
+                    self.cfg_waypoint_arrival_x_threshold_max,
+                    self.cfg_waypoint_arrival_x_threshold_min,
+                )
+
+            self.cfg_waypoint_arrival_x_threshold = (
+                self.cfg_waypoint_arrival_x_threshold_min + self.cfg_waypoint_arrival_x_threshold_max
+            ) / 2.0
+
+            self._active_waypoint_threshold_key = None
+            self._active_waypoint_threshold_value = None
 
             self.update_general_log("상태 판정 설정이 업데이트되었습니다.", "blue")
             self.save_profile_data()              
@@ -3041,6 +3097,8 @@ class MapTab(QWidget):
             "max_jump_duration": self.cfg_max_jump_duration,
             "y_movement_deadzone": self.cfg_y_movement_deadzone,
             "waypoint_arrival_x_threshold": self.cfg_waypoint_arrival_x_threshold,
+            "waypoint_arrival_x_threshold_min": self.cfg_waypoint_arrival_x_threshold_min,
+            "waypoint_arrival_x_threshold_max": self.cfg_waypoint_arrival_x_threshold_max,
             "ladder_arrival_x_threshold": self.cfg_ladder_arrival_x_threshold,
             "jump_link_arrival_x_threshold": self.cfg_jump_link_arrival_x_threshold,
             # ==================== v11.5.0 설정값 전달 추가 시작 ====================
@@ -3072,6 +3130,14 @@ class MapTab(QWidget):
             self.cfg_max_jump_duration = updated_config.get("max_jump_duration", self.cfg_max_jump_duration)
             self.cfg_y_movement_deadzone = updated_config.get("y_movement_deadzone", self.cfg_y_movement_deadzone)
             self.cfg_waypoint_arrival_x_threshold = updated_config.get("waypoint_arrival_x_threshold", self.cfg_waypoint_arrival_x_threshold)
+            self.cfg_waypoint_arrival_x_threshold_min = updated_config.get(
+                "waypoint_arrival_x_threshold_min",
+                self.cfg_waypoint_arrival_x_threshold_min,
+            )
+            self.cfg_waypoint_arrival_x_threshold_max = updated_config.get(
+                "waypoint_arrival_x_threshold_max",
+                self.cfg_waypoint_arrival_x_threshold_max,
+            )
             self.cfg_ladder_arrival_x_threshold = updated_config.get("ladder_arrival_x_threshold", self.cfg_ladder_arrival_x_threshold)
             self.cfg_jump_link_arrival_x_threshold = updated_config.get("jump_link_arrival_x_threshold", self.cfg_jump_link_arrival_x_threshold)
             # ==================== v11.5.0 설정값 업데이트 추가 시작 ====================
@@ -3079,6 +3145,19 @@ class MapTab(QWidget):
             self.cfg_action_success_frame_threshold = updated_config.get("action_success_frame_threshold", self.cfg_action_success_frame_threshold)
             # ==================== v11.5.0 설정값 업데이트 추가 끝 ======================
             self.cfg_ladder_recovery_resend_delay = updated_config.get("ladder_recovery_resend_delay", self.cfg_ladder_recovery_resend_delay)
+
+            if self.cfg_waypoint_arrival_x_threshold_min > self.cfg_waypoint_arrival_x_threshold_max:
+                self.cfg_waypoint_arrival_x_threshold_min, self.cfg_waypoint_arrival_x_threshold_max = (
+                    self.cfg_waypoint_arrival_x_threshold_max,
+                    self.cfg_waypoint_arrival_x_threshold_min,
+                )
+
+            self.cfg_waypoint_arrival_x_threshold = (
+                self.cfg_waypoint_arrival_x_threshold_min + self.cfg_waypoint_arrival_x_threshold_max
+            ) / 2.0
+
+            self._active_waypoint_threshold_key = None
+            self._active_waypoint_threshold_value = None
 
             self.update_general_log("상태 판정 설정이 업데이트되었습니다.", "blue")
             self.save_profile_data() # 변경사항을 즉시 파일에 저장
@@ -4096,12 +4175,46 @@ class MapTab(QWidget):
             self.update_general_log(f"{log_msg}<br>{log_msg_detail}", 'red')
             self.journey_plan = []
 
-    def _get_arrival_threshold(self, node_type):
+    def _resolve_waypoint_arrival_threshold(self, node_key, node_data):
+        """일반 웨이포인트의 도착 임계값을 최소~최대 범위 내에서 결정합니다."""
+        if not node_data:
+            return self.cfg_waypoint_arrival_x_threshold
+
+        if node_data.get('is_event'):
+            return self.EVENT_WAYPOINT_THRESHOLD
+
+        if (
+            node_key == self._active_waypoint_threshold_key
+            and self._active_waypoint_threshold_value is not None
+        ):
+            return self._active_waypoint_threshold_value
+
+        min_val = max(
+            min(self.cfg_waypoint_arrival_x_threshold_min, self.cfg_waypoint_arrival_x_threshold_max),
+            0.0,
+        )
+        max_val = max(
+            max(self.cfg_waypoint_arrival_x_threshold_min, self.cfg_waypoint_arrival_x_threshold_max),
+            min_val,
+        )
+
+        if abs(max_val - min_val) < 1e-6:
+            chosen = max_val
+        else:
+            chosen = random.uniform(min_val, max_val)
+
+        self._active_waypoint_threshold_key = node_key
+        self._active_waypoint_threshold_value = chosen
+        return chosen
+
+    def _get_arrival_threshold(self, node_type, node_key=None, node_data=None):
         """노드 타입에 맞는 도착 판정 임계값을 반환합니다."""
         if node_type == 'ladder_entry':
             return self.cfg_ladder_arrival_x_threshold
-        elif node_type in ['jump_vertex', 'fall_start', 'djump_area']:
+        if node_type in ['jump_vertex', 'fall_start', 'djump_area']:
             return self.cfg_jump_link_arrival_x_threshold
+        if node_type == 'waypoint':
+            return self._resolve_waypoint_arrival_threshold(node_key, node_data)
         return self.cfg_waypoint_arrival_x_threshold
 
     def _transition_to_action_state(self, new_action_state, prev_node_key):
@@ -4153,7 +4266,7 @@ class MapTab(QWidget):
         recalc_cooldown = 1.0
         if time.time() - self.last_path_recalculation_time > recalc_cooldown:
             off_course_reason = None
-            arrival_threshold = self._get_arrival_threshold(action_node.get('type'))
+            arrival_threshold = self._get_arrival_threshold(action_node.get('type'), action_node_key, action_node)
             exit_threshold = arrival_threshold + HYSTERESIS_EXIT_OFFSET
 
             if self.navigation_action == 'prepare_to_down_jump':
@@ -5016,6 +5129,9 @@ class MapTab(QWidget):
         self.alignment_expected_group = None
         self.verify_alignment_start_time = 0.0
 
+        self._active_waypoint_threshold_key = None
+        self._active_waypoint_threshold_value = None
+
     def _abort_alignment_and_recalculate(self):
         """정렬 상태를 중단하고 경로 재탐색을 트리거합니다."""
         self._clear_alignment_state()
@@ -5044,7 +5160,7 @@ class MapTab(QWidget):
 
             if not self.intermediate_target_pos: return
 
-            arrival_threshold = self._get_arrival_threshold(current_node.get('type'))
+            arrival_threshold = self._get_arrival_threshold(current_node.get('type'), current_node_key, current_node)
             target_floor = current_node.get('floor')
             floor_matches = target_floor is None or abs(self.current_player_floor - target_floor) < 0.1
             
@@ -5064,7 +5180,11 @@ class MapTab(QWidget):
                     print(f"[INFO] 중간 목표 '{self.guidance_text}' 도착.")
 
                 node_type = current_node.get('type')
-                
+
+                if node_type == 'waypoint' and not current_node.get('is_event'):
+                    self._active_waypoint_threshold_key = None
+                    self._active_waypoint_threshold_value = None
+
                 if node_type in ['fall_start', 'djump_area']:
                     if node_type == 'fall_start':
                         self._transition_to_action_state('prepare_to_fall', current_node_key)
@@ -5826,7 +5946,16 @@ class MapTab(QWidget):
                 group = contact_terrain.get('dynamic_name') if contact_terrain else None
                 if group is None:
                     debug_print(f"  - [WARNING] Waypoint '{wp.get('name')}'의 그룹 정보를 찾지 못했습니다.")
-                self.nav_nodes[key] = {'type': 'waypoint', 'pos': pos, 'floor': wp.get('floor'), 'name': wp.get('name'), 'id': wp['id'], 'group': group, 'walkable': True}
+                self.nav_nodes[key] = {
+                    'type': 'waypoint',
+                    'pos': pos,
+                    'floor': wp.get('floor'),
+                    'name': wp.get('name'),
+                    'id': wp['id'],
+                    'group': group,
+                    'walkable': True,
+                    'is_event': bool(wp.get('is_event')),
+                }
                 debug_print(f"  - 생성(wp): '{wp.get('name')}' -> group: '{group}'")
 
             for obj in transition_objects:
@@ -6302,12 +6431,19 @@ class MapTab(QWidget):
                 self.update_general_log(f"단축키가 '{new_hotkey.upper()}' (으)로 설정되었습니다.", "blue")
                 self._save_and_reregister_hotkey(new_hotkey)
 
+    def _sync_hotkey_filter_id(self):
+        if hasattr(self, 'win_event_filter') and self.win_event_filter:
+            hotkey_id = getattr(self.hotkey_manager, 'hotkey_id', None)
+            if hasattr(self.win_event_filter, 'hotkey_id'):
+                self.win_event_filter.hotkey_id = hotkey_id
+
     def _save_and_reregister_hotkey(self, new_hotkey_str):
         self.current_hotkey = new_hotkey_str
         self.save_global_settings()
         self.hotkey_display_label.setText(self.current_hotkey.upper())
         if self.hotkey_manager:
             self.hotkey_manager.register_hotkey(self.current_hotkey)
+            self._sync_hotkey_filter_id()
 
     def perform_initial_setup(self):
         os.makedirs(MAPS_DIR, exist_ok=True)
@@ -6321,6 +6457,7 @@ class MapTab(QWidget):
         self.hotkey_display_label.setText(self.current_hotkey.upper())
         if self.hotkey_manager:
             self.hotkey_manager.register_hotkey(self.current_hotkey)
+            self._sync_hotkey_filter_id()
 
         if last_profile and last_profile in [self.profile_selector.itemText(i) for i in range(self.profile_selector.count())]:
             profile_to_load = last_profile

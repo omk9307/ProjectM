@@ -99,6 +99,8 @@ try:
         MOVE_DEADZONE,
         ROUTE_SLOT_IDS,
         WAYPOINT_ARRIVAL_X_THRESHOLD,
+        WAYPOINT_ARRIVAL_X_THRESHOLD_MIN_DEFAULT,
+        WAYPOINT_ARRIVAL_X_THRESHOLD_MAX_DEFAULT,
         Y_MOVEMENT_DEADZONE,
         CLIMBING_STATE_FRAME_THRESHOLD,
         CLIMB_X_MOVEMENT_THRESHOLD,
@@ -130,6 +132,8 @@ except ImportError:
         MOVE_DEADZONE,
         ROUTE_SLOT_IDS,
         WAYPOINT_ARRIVAL_X_THRESHOLD,
+        WAYPOINT_ARRIVAL_X_THRESHOLD_MIN_DEFAULT,
+        WAYPOINT_ARRIVAL_X_THRESHOLD_MAX_DEFAULT,
         Y_MOVEMENT_DEADZONE,
         CLIMBING_STATE_FRAME_THRESHOLD,
         CLIMB_X_MOVEMENT_THRESHOLD,
@@ -3667,7 +3671,8 @@ class StateConfigDialog(QDialog):
         add_spinbox("jump_initial_velocity_threshold", "점프 초기 속도 임계값(px/f):", 1.0, 10.0, 0.1)
         add_spinbox("climb_max_velocity", "등반 최대 속도(px/f):", 1.0, 10.0, 0.1)
         form_layout.addRow(QLabel("---"))
-        add_spinbox("waypoint_arrival_x_threshold", "웨이포인트 도착 X오차(px):", 0.0, 20.0, 0.1)
+        add_spinbox("waypoint_arrival_x_threshold_min", "웨이포인트 도착 X오차 최소값(px):", 0.0, 20.0, 0.1)
+        add_spinbox("waypoint_arrival_x_threshold_max", "웨이포인트 도착 X오차 최대값(px):", 0.0, 20.0, 0.1)
         add_spinbox("ladder_arrival_x_threshold", "사다리 도착 X오차(px):", 0.0, 20.0, 0.1)
         add_spinbox("jump_link_arrival_x_threshold", "점프/낭떠러지 도착 X오차(px):", 0.0, 20.0, 0.1)
         form_layout.addRow(QLabel("---"))
@@ -3762,6 +3767,8 @@ class StateConfigDialog(QDialog):
             "jump_initial_velocity_threshold": 4.0,
             "climb_max_velocity": 3.0,
             "waypoint_arrival_x_threshold": WAYPOINT_ARRIVAL_X_THRESHOLD,
+            "waypoint_arrival_x_threshold_min": WAYPOINT_ARRIVAL_X_THRESHOLD_MIN_DEFAULT,
+            "waypoint_arrival_x_threshold_max": WAYPOINT_ARRIVAL_X_THRESHOLD_MAX_DEFAULT,
             "ladder_arrival_x_threshold": LADDER_ARRIVAL_X_THRESHOLD,
             "jump_link_arrival_x_threshold": JUMP_LINK_ARRIVAL_X_THRESHOLD,
             "arrival_frame_threshold": 2,
@@ -3776,14 +3783,15 @@ class StateConfigDialog(QDialog):
 
 #  WinEventFilter: PyQt의 네이티브 이벤트 필터를 사용하여 WM_HOTKEY 메시지를 감지
 class WinEventFilter(QAbstractNativeEventFilter):
-    def __init__(self, callback):
+    def __init__(self, callback, hotkey_id=None):
         super().__init__()
         self.callback = callback
+        self.hotkey_id = hotkey_id
 
     def nativeEventFilter(self, event_type, message):
         if event_type == "windows_generic_MSG":
             msg = ctypes.wintypes.MSG.from_address(int(message))
-            if msg.message == win32con.WM_HOTKEY:
+            if msg.message == win32con.WM_HOTKEY and (self.hotkey_id is None or msg.wParam == self.hotkey_id):
                 self.callback()
         return False, 0
 
