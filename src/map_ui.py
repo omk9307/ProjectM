@@ -4643,6 +4643,9 @@ class MapTab(QWidget):
             return
 
         self.stuck_recovery_attempts += 1
+        if not self.last_movement_command:
+            self.last_movement_command = "아래점프"
+
         log_msg = (
             f"[자동 복구] 공중 경로 대기 상태 감지 ({self.stuck_recovery_attempts}/{self.MAX_STUCK_RECOVERY_ATTEMPTS}). "
             f"'사다리 멈춤복구' 후 '{self.last_movement_command}' 재시도."
