@@ -1552,6 +1552,10 @@ class HuntTab(QWidget):
                 lines.append(
                     f"캐릭터: 신뢰도 {float(best_char.get('score', 0.0)):.2f}"
                 )
+                if self._last_direction_score is not None:
+                    lines.append(
+                        f"캐릭터 방향: 신뢰도 {self._last_direction_score:.2f}"
+                    )
             else:
                 lines.append("캐릭터 없음")
 
