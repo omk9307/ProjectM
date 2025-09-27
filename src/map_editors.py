@@ -112,6 +112,7 @@ try:
         JUMP_Y_MIN_THRESHOLD,
         ON_TERRAIN_Y_THRESHOLD,
         load_event_profiles,
+        load_skill_profiles,
     )
 except ImportError:
     from map import (  # type: ignore
@@ -139,6 +140,7 @@ except ImportError:
         JUMP_Y_MIN_THRESHOLD,
         ON_TERRAIN_Y_THRESHOLD,
         load_event_profiles,
+        load_skill_profiles,
     )
 
 try:
@@ -154,7 +156,7 @@ except ImportError:
 __all__ = [
     'ZoomableView', 'CroppingLabel', 'FeatureCropDialog', 'KeyFeatureManagerDialog',
     'AdvancedWaypointCanvas', 'AdvancedWaypointEditorDialog', 'CustomGraphicsView',
-    'DebugViewDialog', 'RoundedRectItem', 'WaypointEditDialog', 'FullMinimapEditorDialog',
+    'DebugViewDialog', 'RoundedRectItem', 'WaypointEditDialog', 'ForbiddenWallDialog', 'FullMinimapEditorDialog',
     'ActionLearningDialog', 'StateConfigDialog', 'WinEventFilter', 'HotkeyManager',
     'HotkeySettingDialog'
 ]
@@ -1187,10 +1189,14 @@ class CustomGraphicsView(QGraphicsView):
             return
         
         #  웨이포인트 위에서 좌클릭 시 드래그 방지 ---
-        if event.button() == Qt.MouseButton.LeftButton:
+        if event.button() in (Qt.MouseButton.LeftButton, Qt.MouseButton.RightButton):
             item = self.itemAt(event.pos())
-            # '기본' 모드일 때만 이름 변경 로직이 작동해야 함
             current_mode = self.parent_dialog.current_mode if self.parent_dialog else "select"
+            if current_mode == "select" and item and item.data(0) in ["forbidden_wall", "forbidden_wall_indicator", "forbidden_wall_range"]:
+                self.mousePressed.emit(self.mapToScene(event.pos()), event.button())
+                event.accept()
+                return
+
             if current_mode == "select" and item and item.data(0) in ["waypoint_v10", "waypoint_lod_text"]:
                 # 웨이포인트가 클릭되었으므로, 이름 변경을 위해 시그널만 방출하고
                 # QGraphicsView의 기본 드래그 로직이 시작되지 않도록 이벤트를 여기서 종료한다.
@@ -1432,6 +1438,126 @@ class WaypointEditDialog(QDialog):
         return name, is_event, profile, always_run
 
 
+class ForbiddenWallDialog(QDialog):
+    def __init__(self, wall_data: dict, skill_profiles: List[str], parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("금지벽 설정")
+        self.setModal(True)
+        self._skill_profiles = skill_profiles or []
+
+        # 기본값 구성
+        enabled = bool(wall_data.get('enabled', False))
+        range_left = float(wall_data.get('range_left', 0.0))
+        range_right = float(wall_data.get('range_right', 0.0))
+        dwell_sec = max(0.0, float(wall_data.get('dwell_seconds', 3.0)))
+        cooldown_sec = max(0.0, float(wall_data.get('cooldown_seconds', 5.0)))
+        instant_on_contact = bool(wall_data.get('instant_on_contact', False))
+        selected_profiles = set(wall_data.get('skill_profiles', []))
+
+        self.enabled_checkbox = QCheckBox("금지 설정 사용")
+        self.enabled_checkbox.setChecked(enabled)
+
+        self.range_left_spin = QDoubleSpinBox()
+        self.range_left_spin.setRange(0.0, 2000.0)
+        self.range_left_spin.setDecimals(1)
+        self.range_left_spin.setSingleStep(1.0)
+        self.range_left_spin.setValue(range_left)
+        self.range_left_spin.setSuffix(" px")
+
+        self.range_right_spin = QDoubleSpinBox()
+        self.range_right_spin.setRange(0.0, 2000.0)
+        self.range_right_spin.setDecimals(1)
+        self.range_right_spin.setSingleStep(1.0)
+        self.range_right_spin.setValue(range_right)
+        self.range_right_spin.setSuffix(" px")
+
+        self.dwell_spin = QDoubleSpinBox()
+        self.dwell_spin.setRange(0.0, 120.0)
+        self.dwell_spin.setDecimals(1)
+        self.dwell_spin.setSingleStep(0.5)
+        self.dwell_spin.setValue(dwell_sec)
+        self.dwell_spin.setSuffix(" s")
+
+        self.cooldown_spin = QDoubleSpinBox()
+        self.cooldown_spin.setRange(0.0, 600.0)
+        self.cooldown_spin.setDecimals(1)
+        self.cooldown_spin.setSingleStep(0.5)
+        self.cooldown_spin.setValue(cooldown_sec)
+        self.cooldown_spin.setSuffix(" s")
+
+        self.instant_checkbox = QCheckBox("금지벽 접촉 시 즉시 실행")
+        self.instant_checkbox.setChecked(instant_on_contact)
+
+        config_form = QFormLayout()
+        config_form.addRow("좌측 범위", self.range_left_spin)
+        config_form.addRow("우측 범위", self.range_right_spin)
+        config_form.addRow("대기 시간", self.dwell_spin)
+        config_form.addRow("쿨타임", self.cooldown_spin)
+        config_form.addRow("", self.instant_checkbox)
+
+        self.config_widget = QWidget()
+        self.config_widget.setLayout(config_form)
+
+        self.skill_checks: List[QCheckBox] = []
+        skills_layout = QVBoxLayout()
+        skills_layout.setSpacing(4)
+
+        if self._skill_profiles:
+            for profile_name in self._skill_profiles:
+                checkbox = QCheckBox(profile_name)
+                checkbox.setChecked(profile_name in selected_profiles)
+                self.skill_checks.append(checkbox)
+                skills_layout.addWidget(checkbox)
+        else:
+            hint = QLabel("스킬 탭에 등록된 명령 프로필이 없습니다.")
+            hint.setStyleSheet("color: #888;")
+            skills_layout.addWidget(hint)
+
+        skills_container = QWidget()
+        skills_container.setLayout(skills_layout)
+        self.skills_container = skills_container
+
+        button_box = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        button_box.accepted.connect(self._handle_accept)
+        button_box.rejected.connect(self.reject)
+
+        main_layout = QVBoxLayout(self)
+        main_layout.addWidget(self.enabled_checkbox)
+        main_layout.addWidget(self.config_widget)
+        self.skills_label = QLabel("실행할 명령 프로필")
+        main_layout.addWidget(self.skills_label)
+        main_layout.addWidget(skills_container)
+        main_layout.addStretch(1)
+        main_layout.addWidget(button_box)
+
+        self.enabled_checkbox.toggled.connect(self._update_enabled_state)
+        self._update_enabled_state(enabled)
+
+    def _update_enabled_state(self, checked: bool) -> None:
+        self.config_widget.setEnabled(checked)
+        self.skills_container.setEnabled(checked)
+        if hasattr(self, 'skills_label'):
+            self.skills_label.setEnabled(checked)
+
+    def _handle_accept(self) -> None:
+        if self.enabled_checkbox.isChecked():
+            selected = [chk.text() for chk in self.skill_checks if chk.isChecked()]
+            if not selected:
+                QMessageBox.warning(self, "오류", "금지벽이 동작할 명령 프로필을 하나 이상 선택해주세요.")
+                return
+        self.accept()
+
+    def get_values(self) -> dict:
+        return {
+            "enabled": self.enabled_checkbox.isChecked(),
+            "range_left": float(self.range_left_spin.value()),
+            "range_right": float(self.range_right_spin.value()),
+            "dwell_seconds": float(self.dwell_spin.value()),
+            "cooldown_seconds": float(self.cooldown_spin.value()),
+            "instant_on_contact": self.instant_checkbox.isChecked(),
+            "skill_profiles": [chk.text() for chk in self.skill_checks if chk.isChecked()],
+        }
+
 class FullMinimapEditorDialog(QDialog):
     """
     맵 프로필의 모든 지형/웨이포인트 정보를 종합하여 전체 맵을 시각화하고,
@@ -1447,6 +1573,8 @@ class FullMinimapEditorDialog(QDialog):
         self.route_profiles = route_profiles
         self.all_waypoints_in_profile = geometry_data.get("waypoints", []) # v10.0.0: 프로필의 모든 웨이포인트
         self.geometry_data = copy.deepcopy(geometry_data)
+        if "forbidden_walls" not in self.geometry_data:
+            self.geometry_data["forbidden_walls"] = []
         self._ensure_waypoint_event_fields()
         self.render_options = render_options
         self.global_positions = global_positions
@@ -1697,17 +1825,20 @@ class FullMinimapEditorDialog(QDialog):
         self.object_mode_radio = QRadioButton("층 이동 오브젝트 추가 (O)")
         self.waypoint_mode_radio = QRadioButton("웨이포인트 추가 (W)")
         self.jump_mode_radio = QRadioButton("지형 점프 연결 (J)")
+        self.forbidden_wall_mode_radio = QRadioButton("금지벽 추가 (F)")
         self.select_mode_radio.setChecked(True)
         self.select_mode_radio.toggled.connect(lambda: self.set_mode("select"))
         self.terrain_mode_radio.toggled.connect(lambda: self.set_mode("terrain"))
         self.object_mode_radio.toggled.connect(lambda: self.set_mode("object"))
         self.waypoint_mode_radio.toggled.connect(lambda: self.set_mode("waypoint"))
         self.jump_mode_radio.toggled.connect(lambda: self.set_mode("jump"))
+        self.forbidden_wall_mode_radio.toggled.connect(lambda: self.set_mode("forbidden_wall"))
         mode_layout.addWidget(self.select_mode_radio)
         mode_layout.addWidget(self.terrain_mode_radio)
         mode_layout.addWidget(self.object_mode_radio)
         mode_layout.addWidget(self.waypoint_mode_radio)
         mode_layout.addWidget(self.jump_mode_radio)
+        mode_layout.addWidget(self.forbidden_wall_mode_radio)
         mode_box.setLayout(mode_layout)
 
         # 지형 입력 옵션
@@ -1749,7 +1880,10 @@ class FullMinimapEditorDialog(QDialog):
         self.chk_show_jump_links = QCheckBox("지형 점프 연결")
         self.chk_show_jump_links.setChecked(self.render_options.get('jump_links', True))
         self.chk_show_jump_links.stateChanged.connect(self._update_visibility)
-        
+        self.chk_show_forbidden_walls = QCheckBox("금지벽")
+        self.chk_show_forbidden_walls.setChecked(self.render_options.get('forbidden_walls', True))
+        self.chk_show_forbidden_walls.stateChanged.connect(self._update_visibility)
+
         zoom_layout = QHBoxLayout()
         zoom_in_btn = QPushButton("확대")
         zoom_out_btn = QPushButton("축소")
@@ -1774,6 +1908,7 @@ class FullMinimapEditorDialog(QDialog):
         view_opts_layout.addWidget(self.chk_show_terrain)
         view_opts_layout.addWidget(self.chk_show_objects)
         view_opts_layout.addWidget(self.chk_show_jump_links)
+        view_opts_layout.addWidget(self.chk_show_forbidden_walls)
         view_opts_layout.addLayout(zoom_layout)
         view_opts_box.setLayout(view_opts_layout)
 
@@ -1814,7 +1949,8 @@ class FullMinimapEditorDialog(QDialog):
             'waypoints': self.chk_show_waypoints.isChecked(),
             'terrain': self.chk_show_terrain.isChecked(),
             'objects': self.chk_show_objects.isChecked(),
-            'jump_links': self.chk_show_jump_links.isChecked()
+            'jump_links': self.chk_show_jump_links.isChecked(),
+            'forbidden_walls': self.chk_show_forbidden_walls.isChecked()
         }
         
     def set_mode(self, mode):
@@ -2286,6 +2422,9 @@ class FullMinimapEditorDialog(QDialog):
                         else:
                             wp_order_map[wp_id] = label
 
+                for wall_data in self.geometry_data.get("forbidden_walls", []):
+                    self._add_forbidden_wall_graphics(wall_data)
+
                 for wp_data in self.geometry_data.get("waypoints", []):
                     is_event = bool(wp_data.get('is_event'))
                     self._add_waypoint_rect(QPointF(wp_data['pos'][0], wp_data['pos'][1]), wp_data['id'], wp_data['name'], wp_data['name'], is_event=is_event)
@@ -2305,6 +2444,7 @@ class FullMinimapEditorDialog(QDialog):
         show_terrain = self.chk_show_terrain.isChecked()
         show_objects = self.chk_show_objects.isChecked()
         show_jump_links = self.chk_show_jump_links.isChecked()
+        show_forbidden_walls = self.chk_show_forbidden_walls.isChecked()
 
         for item in self.scene.items():
             item_type = item.data(0)
@@ -2326,6 +2466,8 @@ class FullMinimapEditorDialog(QDialog):
                 item.setVisible(show_jump_links)
             elif item_type in ["jump_link_name", "jump_link_name_bg"]: # 수정: _bg 타입 추가
                 item.setVisible(show_jump_links)
+            elif item_type in ["forbidden_wall", "forbidden_wall_indicator", "forbidden_wall_range"]:
+                item.setVisible(show_forbidden_walls)
 
     def _update_lod_visibility(self):
         """
@@ -2364,15 +2506,24 @@ class FullMinimapEditorDialog(QDialog):
                 
     def on_scene_mouse_press(self, scene_pos, button):
         #  '기본' 모드에서 웨이포인트 클릭 시 이름 변경 기능 추가 ---
-        if self.current_mode == "select" and button == Qt.MouseButton.LeftButton:
+        if self.current_mode == "select" and button in (Qt.MouseButton.LeftButton, Qt.MouseButton.RightButton):
             # 클릭 위치의 아이템 가져오기 (View 좌표로 변환 필요)
             view_pos = self.view.mapFromScene(scene_pos)
             item_at_pos = self.view.itemAt(view_pos)
             
-            if item_at_pos and item_at_pos.data(0) in ["waypoint_v10", "waypoint_lod_text"]:
+            if item_at_pos and item_at_pos.data(0) in ["forbidden_wall", "forbidden_wall_indicator", "forbidden_wall_range"]:
+                wall_id = item_at_pos.data(1)
+                if wall_id:
+                    if button == Qt.MouseButton.LeftButton:
+                        self._edit_forbidden_wall(wall_id)
+                    else:
+                        self._delete_forbidden_wall_by_id(wall_id)
+                return
+
+            if button == Qt.MouseButton.LeftButton and item_at_pos and item_at_pos.data(0) in ["waypoint_v10", "waypoint_lod_text"]:
                 wp_id = item_at_pos.data(1)
                 waypoint_data = next((wp for wp in self.geometry_data.get("waypoints", []) if wp.get("id") == wp_id), None)
- 
+
                 if waypoint_data:
                     dialog = WaypointEditDialog(waypoint_data, load_event_profiles(), self)
                     if dialog.exec() == QDialog.DialogCode.Accepted:
@@ -2418,7 +2569,15 @@ class FullMinimapEditorDialog(QDialog):
                 if self.is_drawing_line:
                     self._finish_drawing_line()
                 else:
-                    self._delete_terrain_at(scene_pos)
+                    items_at_pos = self.view.items(self.view.mapFromScene(scene_pos))
+                    for item in items_at_pos:
+                        if item.data(0) in ["forbidden_wall", "forbidden_wall_indicator", "forbidden_wall_range"]:
+                            wall_id = item.data(1)
+                            if wall_id:
+                                self._delete_forbidden_wall_by_id(wall_id)
+                            break
+                    else:
+                        self._delete_terrain_at(scene_pos)
                     
         elif self.current_mode == "object":
             if button == Qt.MouseButton.LeftButton:
@@ -2490,6 +2649,43 @@ class FullMinimapEditorDialog(QDialog):
                             self._delete_object_by_id(item.data(1))
                             break
         
+        elif self.current_mode == "forbidden_wall":
+            if button == Qt.MouseButton.LeftButton:
+                terrain_info = self._get_closest_point_on_terrain(scene_pos)
+                if not terrain_info:
+                    QMessageBox.information(self, "금지벽 추가", "금지벽은 지형선 위에서만 추가할 수 있습니다.")
+                    return
+
+                snap_pos, parent_line_id = terrain_info
+                wall_id = f"fw-{uuid.uuid4()}"
+                parent_line = next((line for line in self.geometry_data.get("terrain_lines", []) if line.get("id") == parent_line_id), None)
+                wall_floor = parent_line.get("floor") if parent_line else None
+
+                new_wall = {
+                    "id": wall_id,
+                    "line_id": parent_line_id,
+                    "pos": [snap_pos.x(), snap_pos.y()],
+                    "floor": wall_floor,
+                    "enabled": False,
+                    "range_left": 0.0,
+                    "range_right": 0.0,
+                    "dwell_seconds": 3.0,
+                    "cooldown_seconds": 5.0,
+                    "instant_on_contact": False,
+                    "skill_profiles": [],
+                }
+
+                self.geometry_data.setdefault("forbidden_walls", []).append(new_wall)
+                self.populate_scene()
+                self._edit_forbidden_wall(wall_id)
+
+            elif button == Qt.MouseButton.RightButton:
+                items_at_pos = self.view.items(self.view.mapFromScene(scene_pos))
+                for item in items_at_pos:
+                    if item.data(0) in ["forbidden_wall", "forbidden_wall_indicator", "forbidden_wall_range"]:
+                        self._delete_forbidden_wall_by_id(item.data(1))
+                        break
+
         elif self.current_mode == "waypoint":
             if button == Qt.MouseButton.LeftButton:
                 terrain_info = self._get_closest_point_on_terrain(scene_pos)
@@ -2737,6 +2933,95 @@ class FullMinimapEditorDialog(QDialog):
             
             return rect_item
 
+    def _format_forbidden_wall_tooltip(self, wall_data: dict) -> str:
+        status = "사용" if wall_data.get('enabled') else "비활성"
+        range_left = float(wall_data.get('range_left', 0.0))
+        range_right = float(wall_data.get('range_right', 0.0))
+        dwell = float(wall_data.get('dwell_seconds', 0.0))
+        cooldown = float(wall_data.get('cooldown_seconds', 5.0))
+        instant = "예" if wall_data.get('instant_on_contact') else "아니오"
+        skills = wall_data.get('skill_profiles') or []
+        skill_text = ", ".join(skills) if skills else "-"
+        return (
+            f"상태: {status}\n"
+            f"좌측 범위: {range_left:.1f}px\n"
+            f"우측 범위: {range_right:.1f}px\n"
+            f"대기 시간: {dwell:.1f}s\n"
+            f"쿨타임: {cooldown:.1f}s\n"
+            f"접촉 즉시 실행: {instant}\n"
+            f"명령 프로필: {skill_text}"
+        )
+
+    def _add_forbidden_wall_graphics(self, wall_data: dict) -> None:
+        wall_id = wall_data.get('id')
+        pos = wall_data.get('pos') or [0.0, 0.0]
+        if len(pos) < 2:
+            return
+
+        x, y = float(pos[0]), float(pos[1])
+        enabled = bool(wall_data.get('enabled'))
+        color = QColor(220, 50, 50) if enabled else QColor(150, 90, 90)
+        outline = QColor(120, 30, 30) if enabled else QColor(80, 60, 60)
+
+        dot_radius = 2.0
+        dot_pen = QPen(outline, 0.8)
+        dot_brush = QBrush(color)
+        dot_item = self.scene.addEllipse(x - dot_radius, y - dot_radius, dot_radius * 2, dot_radius * 2, dot_pen, dot_brush)
+        dot_item.setZValue(400)
+        dot_item.setData(0, "forbidden_wall")
+        dot_item.setData(1, wall_id)
+        dot_item.setToolTip(self._format_forbidden_wall_tooltip(wall_data))
+
+        range_left = max(0.0, float(wall_data.get('range_left', 0.0)))
+        range_right = max(0.0, float(wall_data.get('range_right', 0.0)))
+        range_pen = QPen(QColor(60, 150, 255, 180), 1.5)
+        range_pen.setCapStyle(Qt.PenCapStyle.FlatCap)
+
+        tooltip = self._format_forbidden_wall_tooltip(wall_data)
+
+        if range_left > 0.0:
+            left_line = self.scene.addLine(x - range_left, y, x, y, range_pen)
+            left_line.setZValue(395)
+            left_line.setData(0, "forbidden_wall_range")
+            left_line.setData(1, wall_id)
+            left_line.setToolTip(tooltip)
+
+        if range_right > 0.0:
+            right_line = self.scene.addLine(x, y, x + range_right, y, range_pen)
+            right_line.setZValue(395)
+            right_line.setData(0, "forbidden_wall_range")
+            right_line.setData(1, wall_id)
+            right_line.setToolTip(tooltip)
+
+    def _edit_forbidden_wall(self, wall_id: str) -> None:
+        if not wall_id:
+            return
+        walls = self.geometry_data.get("forbidden_walls", [])
+        wall = next((w for w in walls if w.get('id') == wall_id), None)
+        if not wall:
+            return
+
+        # 라인 층 정보 최신화
+        parent_line = next((line for line in self.geometry_data.get("terrain_lines", []) if line.get("id") == wall.get('line_id')), None)
+        if parent_line and parent_line.get('floor') is not None:
+            wall['floor'] = parent_line.get('floor')
+
+        dialog = ForbiddenWallDialog(wall, load_skill_profiles(), self)
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            wall.update(dialog.get_values())
+            self.populate_scene()
+
+    def _delete_forbidden_wall_by_id(self, wall_id: str) -> None:
+        if not wall_id:
+            return
+        original_len = len(self.geometry_data.get("forbidden_walls", []))
+        self.geometry_data["forbidden_walls"] = [
+            wall for wall in self.geometry_data.get("forbidden_walls", [])
+            if wall.get('id') != wall_id
+        ]
+        if len(self.geometry_data.get("forbidden_walls", [])) != original_len:
+            self.populate_scene()
+
     def _add_jump_link_line(self, p1, p2, link_id):
         """씬에 지형 점프 연결선을 추가합니다."""
         pen = QPen(QColor(0, 255, 0, 200), 2, Qt.PenStyle.DashLine)
@@ -2891,6 +3176,13 @@ class FullMinimapEditorDialog(QDialog):
                 line for line in self.geometry_data.get("terrain_lines", [])
                 if line.get("id") not in ids_in_group
             ]
+
+            # 2d. 금지벽 삭제
+            if "forbidden_walls" in self.geometry_data:
+                self.geometry_data["forbidden_walls"] = [
+                    wall for wall in self.geometry_data.get("forbidden_walls", [])
+                    if wall.get("line_id") not in ids_in_group
+                ]
 
             # --- 단계 3: UI 전체 갱신 ---
             self.populate_scene()

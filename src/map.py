@@ -97,7 +97,7 @@ def _resolve_key_mappings_path_for_map() -> Path:
     return fallback_path.resolve()
 
 
-def load_event_profiles() -> List[str]:
+def _load_profiles_by_category(target_category: str) -> List[str]:
     target_path = _resolve_key_mappings_path_for_map()
     if not target_path.is_file():
         return []
@@ -122,9 +122,21 @@ def load_event_profiles() -> List[str]:
     else:
         profiles = {key: value for key, value in raw_data.items() if not key.startswith("_")}
 
-    event_profiles = [name for name in profiles.keys() if isinstance(name, str) and categories.get(name) == "이벤트"]
-    event_profiles.sort()
-    return event_profiles
+    filtered = [
+        name
+        for name in profiles.keys()
+        if isinstance(name, str) and categories.get(name) == target_category
+    ]
+    filtered.sort()
+    return filtered
+
+
+def load_event_profiles() -> List[str]:
+    return _load_profiles_by_category("이벤트")
+
+
+def load_skill_profiles() -> List[str]:
+    return _load_profiles_by_category("스킬")
 
 
 _BASE_EXPORTS = [
@@ -171,6 +183,7 @@ _BASE_EXPORTS = [
     "PREPARE_TIMEOUT",
     "HYSTERESIS_EXIT_OFFSET",
     "load_event_profiles",
+    "load_skill_profiles",
 ]
 
 __all__ = list(_BASE_EXPORTS)

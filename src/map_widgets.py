@@ -410,6 +410,11 @@ class RealtimeMinimapView(QLabel):
         # 패닝(드래그) 상태 변수
         self.is_panning = False
         self.last_pan_pos = QPoint()
+
+        # 금지벽 등 정적 정보 캐싱용
+        self._cached_geometry = {}
+        self._cached_key_features = {}
+        self._cached_global_positions = {}
     
     def wheelEvent(self, event):
         """마우스 휠 스크롤로 줌 레벨을 조절합니다."""
@@ -441,6 +446,23 @@ class RealtimeMinimapView(QLabel):
             self.is_panning = False
             self.setCursor(Qt.CursorShape.ArrowCursor)
         super().mouseReleaseEvent(event)
+
+    def update_static_cache(self, *, geometry_data=None, key_features=None, global_positions=None) -> None:
+        """MapTab에서 지형/지형 요소 데이터를 갱신할 때 호출되는 보조 함수."""
+        if geometry_data is not None:
+            self._cached_geometry = geometry_data
+        if key_features is not None:
+            self._cached_key_features = key_features
+        if global_positions is not None:
+            self._cached_global_positions = global_positions
+
+        # 프로필이 초기화될 때 기존 렌더링 잔상을 지우기 위한 기본 리셋
+        if not geometry_data:
+            self.active_features = []
+            self.my_player_rects = []
+            self.other_player_rects = []
+            self.final_player_pos_global = None
+        self.update()
 
     def update_view_data(self, camera_center, active_features, my_players, other_players, target_wp_id, reached_wp_id, final_player_pos, is_forward, intermediate_pos, intermediate_type, nav_action, intermediate_node_type):
         """MapTab으로부터 렌더링에 필요한 최신 데이터를 받습니다."""
@@ -768,6 +790,40 @@ class RealtimeMinimapView(QLabel):
 
             painter.restore()
 
+        if render_opts.get('forbidden_walls', True):
+            painter.save()
+            for wall_data in self.parent_tab.geometry_data.get("forbidden_walls", []):
+                pos = wall_data.get('pos')
+                if not pos or len(pos) < 2:
+                    continue
+
+                global_point = QPointF(float(pos[0]), float(pos[1]))
+                local_point = global_to_local(global_point)
+
+                color = QColor(220, 50, 50) if wall_data.get('enabled') else QColor(150, 90, 90)
+                outline = color.darker(150)
+
+                range_left = max(0.0, float(wall_data.get('range_left', 0.0)))
+                range_right = max(0.0, float(wall_data.get('range_right', 0.0)))
+                range_pen = QPen(QColor(70, 160, 255, 230), max(1.5, self.zoom_level), Qt.PenStyle.SolidLine)
+                range_pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+                painter.setPen(range_pen)
+
+                if range_left > 0.0:
+                    left_global = QPointF(global_point.x() - range_left, global_point.y())
+                    painter.drawLine(global_to_local(left_global), local_point)
+
+                if range_right > 0.0:
+                    right_global = QPointF(global_point.x() + range_right, global_point.y())
+                    painter.drawLine(local_point, global_to_local(right_global))
+
+                dot_radius = max(2.5, 2.5 * self.zoom_level * 0.6)
+                dot_rect = QRectF(local_point.x() - dot_radius, local_point.y() - dot_radius, dot_radius * 2, dot_radius * 2)
+                painter.setPen(QPen(outline, max(1.0, 0.9 * self.zoom_level)))
+                painter.setBrush(QBrush(color))
+                painter.drawEllipse(dot_rect)
+            painter.restore()
+
         # ==================== v11.6.2 시각적 보정 로직 추가 시작 ====================
         if self.intermediate_target_pos and self.final_player_pos_global:
             painter.save()
@@ -879,4 +935,3 @@ class RealtimeMinimapView(QLabel):
         painter.setPen(text_color)
         painter.drawText(rect, flags, text)
         painter.restore()
-
