@@ -2010,6 +2010,7 @@ class LearningTab(QWidget):
         self.direction_left_list.setIconSize(list_icon_size)
         self.direction_left_list.setResizeMode(QListWidget.ResizeMode.Adjust)
         self.direction_left_list.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
+        self.direction_left_list.setFixedHeight(40)
         direction_layout.addWidget(self.direction_left_list)
 
         left_buttons_layout = QHBoxLayout()
@@ -2027,6 +2028,7 @@ class LearningTab(QWidget):
         self.direction_right_list.setIconSize(list_icon_size)
         self.direction_right_list.setResizeMode(QListWidget.ResizeMode.Adjust)
         self.direction_right_list.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
+        self.direction_right_list.setFixedHeight(40)
         direction_layout.addWidget(self.direction_right_list)
 
         right_buttons_layout = QHBoxLayout()
