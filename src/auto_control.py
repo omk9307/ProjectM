@@ -13,7 +13,7 @@ from PyQt6.QtWidgets import (
     QGroupBox, QFormLayout, QComboBox, QSpinBox, QMessageBox, QFrame, QCheckBox,
     QListWidgetItem, QInputDialog, QAbstractItemView, QTabWidget, QFileDialog
 )
-from PyQt6.QtCore import pyqtSlot, Qt, QTimer, pyqtSignal, QMimeData
+from PyQt6.QtCore import pyqtSlot, Qt, QTimer, pyqtSignal, QMimeData, QSize
 from PyQt6.QtGui import QIcon, QColor
 from pynput.keyboard import Key, Listener
 from datetime import datetime
@@ -185,6 +185,7 @@ class AutoControlTab(QWidget):
     log_generated = pyqtSignal(str, str)
     request_detection_toggle = pyqtSignal()
     sequence_completed = pyqtSignal(str, object, bool)
+    command_profile_renamed = pyqtSignal(str, str)
 
     def __init__(self):
         super().__init__()
@@ -192,6 +193,7 @@ class AutoControlTab(QWidget):
         self.held_keys = set()
         self.mappings = {}
         self.profile_categories = {}
+        self.category_overrides = set()
         self.key_list_str = self._generate_key_list()
         self.active_category = CATEGORY_NAMES[0]
         self.category_lists = {}
@@ -308,14 +310,20 @@ class AutoControlTab(QWidget):
         cmd_group_layout.addWidget(self.command_tab_widget)
 
         cmd_buttons_layout = QHBoxLayout()
-        add_cmd_btn = QPushButton(QIcon.fromTheme("list-add"), " 추가"); add_cmd_btn.clicked.connect(self.add_command_profile)
-        remove_cmd_btn = QPushButton(QIcon.fromTheme("list-remove"), " 삭제"); remove_cmd_btn.clicked.connect(self.remove_command_profile)
-        randomize_btn = QPushButton(QIcon.fromTheme("view-refresh"), " 지연 랜덤화")
-        randomize_btn.clicked.connect(self.randomize_delays)
+        add_cmd_btn = QPushButton(QIcon.fromTheme("list-add"), "추가"); add_cmd_btn.clicked.connect(self.add_command_profile)
+        remove_cmd_btn = QPushButton(QIcon.fromTheme("list-remove"), "삭제"); remove_cmd_btn.clicked.connect(self.remove_command_profile)
+        rename_cmd_btn = QPushButton(QIcon.fromTheme("edit-rename"), "이름변경"); rename_cmd_btn.clicked.connect(self.rename_command_profile)
+        randomize_btn = QPushButton(QIcon.fromTheme("view-refresh"), "랜덤"); randomize_btn.clicked.connect(self.randomize_delays)
+
+        for btn in (add_cmd_btn, remove_cmd_btn, rename_cmd_btn, randomize_btn):
+            btn.setIconSize(QSize(14, 14))
+            btn.setFixedWidth(88)
 
         cmd_buttons_layout.addWidget(add_cmd_btn)
         cmd_buttons_layout.addWidget(remove_cmd_btn)
+        cmd_buttons_layout.addWidget(rename_cmd_btn)
         cmd_buttons_layout.addWidget(randomize_btn)
+        cmd_buttons_layout.addStretch(1)
         cmd_group_layout.addLayout(cmd_buttons_layout)
         top_h_layout.addLayout(cmd_group_layout, 2)
 
@@ -446,9 +454,11 @@ class AutoControlTab(QWidget):
         title.setObjectName("TitleLabel")
         
         self.log_checkbox = QCheckBox("입력 감지")
-        self.log_checkbox.setChecked(False)
-        # [수정] 체크박스 상태가 변경될 때 리스너 상태를 업데이트하도록 연결
+        self.log_checkbox.setChecked(True)
         self.log_checkbox.toggled.connect(self._update_global_listener_state)
+
+        self.log_persist_checkbox = QCheckBox("저장 모드")
+        self.log_persist_checkbox.setChecked(False)
         
         self.console_log_checkbox = QCheckBox("상세 콘솔 로그")
         self.console_log_checkbox.setChecked(False)
@@ -458,6 +468,7 @@ class AutoControlTab(QWidget):
         header_layout.addWidget(title)
         header_layout.addStretch()
         header_layout.addWidget(self.log_checkbox)
+        header_layout.addWidget(self.log_persist_checkbox)
         header_layout.addWidget(self.console_log_checkbox)
         header_layout.addWidget(clear_log_btn)
         
@@ -511,6 +522,7 @@ class AutoControlTab(QWidget):
                 self.status_label.setText(f"'{self.key_mappings_path.name}' 매핑을 불러왔습니다.")
         else:
             self.mappings = self.create_default_mappings()
+            self.category_overrides.clear()
             self._ensure_profile_categories()
             self.populate_command_list()
             if hasattr(self, 'status_label'):
@@ -533,28 +545,46 @@ class AutoControlTab(QWidget):
         else:
             QMessageBox.warning(self, "불러오기 실패", "선택한 파일에서 매핑을 불러올 수 없습니다. JSON 구조를 확인해주세요.")
 
-    def _ensure_profile_categories(self, categories=None):
+    def _ensure_profile_categories(self, categories=None, overrides=None):
         if not isinstance(categories, dict):
             categories = {}
+
+        if overrides is None:
+            overrides = getattr(self, 'category_overrides', set())
+        if not isinstance(overrides, (set, list, tuple)):
+            overrides = set()
+        else:
+            overrides = set(overrides)
 
         valid_categories = set(CATEGORY_NAMES)
         if not isinstance(self.mappings, dict):
             self.mappings = {}
 
+        updated_overrides = set()
         self.profile_categories = {}
         for name in self.mappings.keys():
             category = categories.get(name)
             if category not in valid_categories:
                 category = CATEGORY_NAMES[0]
             self.profile_categories[name] = category
+            if name in overrides:
+                updated_overrides.add(name)
+
+        self.category_overrides = updated_overrides
 
     def save_mappings(self):
         try:
+            self._ensure_profile_categories(self.profile_categories, self.category_overrides)
+
             categories_to_save = {
                 name: self.profile_categories.get(name, CATEGORY_NAMES[0])
                 for name in self.mappings.keys()
             }
+            meta_to_save = {
+                'category_overrides': sorted(self.category_overrides),
+            }
             data_to_save = {
+                '_meta': meta_to_save,
                 '_categories': categories_to_save,
                 'profiles': self.mappings,
             }
@@ -586,6 +616,9 @@ class AutoControlTab(QWidget):
 
         meta = raw_data.get('_meta') if isinstance(raw_data.get('_meta'), dict) else {}
         categories = raw_data.get('_categories') or meta.get('categories') or {}
+        overrides_from_meta = meta.get('category_overrides') if isinstance(meta.get('category_overrides'), list) else None
+        if overrides_from_meta is None and isinstance(categories, dict):
+            overrides_from_meta = list(categories.keys())
 
         if isinstance(raw_data.get('profiles'), dict):
             new_mappings = raw_data.get('profiles', {})
@@ -601,13 +634,17 @@ class AutoControlTab(QWidget):
 
         self.mappings = new_mappings
         self.key_mappings_path = target_path.resolve()
-        self._ensure_profile_categories(categories)
+        self._ensure_profile_categories(categories, overrides_from_meta)
         self._apply_category_heuristics()
         self.populate_command_list()
         return True
 
     def _apply_category_heuristics(self):
+        overrides = getattr(self, 'category_overrides', set())
         for name in self.mappings.keys():
+            if name in overrides:
+                continue
+
             current_category = self.profile_categories.get(name)
             if current_category in CATEGORY_NAMES and current_category != CATEGORY_NAMES[0]:
                 continue
@@ -692,6 +729,7 @@ class AutoControlTab(QWidget):
                                      QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel)
         if reply == QMessageBox.StandardButton.Yes:
             self.mappings = self.create_default_mappings()
+            self.category_overrides.clear()
             self._ensure_profile_categories()
             self.populate_command_list()
             current_list = self._current_command_list()
@@ -702,7 +740,7 @@ class AutoControlTab(QWidget):
         if not self.category_lists:
             return
 
-        self._ensure_profile_categories(self.profile_categories)
+        self._ensure_profile_categories(self.profile_categories, self.category_overrides)
         current_selection = self._current_command_name()
 
         for list_widget in self.category_lists.values():
@@ -717,6 +755,7 @@ class AutoControlTab(QWidget):
             if list_widget is None:
                 list_widget = self.category_lists.get(CATEGORY_NAMES[0])
                 self.profile_categories[name] = CATEGORY_NAMES[0]
+                self.category_overrides.discard(name)
             if list_widget is None:
                 continue
             list_widget.addItem(name)
@@ -820,9 +859,13 @@ class AutoControlTab(QWidget):
             if previous_category != target_category:
                 self.profile_categories[name] = target_category
                 changed = True
+            if target_category in CATEGORY_NAMES and name not in self.category_overrides:
+                self.category_overrides.add(name)
+                changed = True
 
         if changed:
             self.populate_command_list()
+            self.save_mappings()
 
         focused_name = None
         for name in unique_names:
@@ -1022,6 +1065,7 @@ class AutoControlTab(QWidget):
                 return
             self.mappings[text] = []
             self.profile_categories[text] = self.active_category
+            self.category_overrides.add(text)
             self.populate_command_list()
             self._select_command_in_lists(text)
 
@@ -1033,7 +1077,51 @@ class AutoControlTab(QWidget):
         if reply == QMessageBox.StandardButton.Yes:
             self.mappings.pop(command_text, None)
             self.profile_categories.pop(command_text, None)
+            self.category_overrides.discard(command_text)
             self.populate_command_list()
+
+    def rename_command_profile(self):
+        current_item = self._current_command_item()
+        if not current_item:
+            QMessageBox.warning(self, "알림", "이름을 변경할 명령 프로필을 선택하세요.")
+            return
+
+        old_name = current_item.text()
+        new_name, ok = QInputDialog.getText(self, "명령 프로필 이름 변경", f"'{old_name}'의 새 이름:", text=old_name)
+        if not ok:
+            return
+
+        new_name = (new_name or "").strip()
+        if not new_name or new_name == old_name:
+            return
+
+        if new_name in self.mappings:
+            QMessageBox.warning(self, "오류", "이미 존재하는 명령어입니다.")
+            return
+
+        sequence = self.mappings.pop(old_name, [])
+        self.mappings[new_name] = sequence
+
+        category = self.profile_categories.pop(old_name, self.active_category)
+        self.profile_categories[new_name] = category
+        had_override = old_name in self.category_overrides
+        self.category_overrides.discard(old_name)
+        if had_override:
+            self.category_overrides.add(new_name)
+
+        self._rename_active_references(old_name, new_name)
+        self.populate_command_list()
+        self._select_command_in_lists(new_name)
+        self._populate_action_sequence_list(new_name)
+
+        self.save_mappings()
+        if getattr(self, 'status_label', None):
+            self.status_label.setText(f"명령 프로필 이름을 '{old_name}'에서 '{new_name}'(으)로 변경했습니다.")
+        self.command_profile_renamed.emit(old_name, new_name)
+
+    def _rename_active_references(self, old_name: str, new_name: str) -> None:
+        if self.current_command_name == old_name:
+            self.current_command_name = new_name
 
     def add_action_step(self):
         command_item = self._current_command_item()
@@ -1656,7 +1744,7 @@ class AutoControlTab(QWidget):
         item.setForeground(QColor(color_str))
         self.key_log_list.addItem(item)
         
-        if self.key_log_list.count() > 200:
+        if not self.log_persist_checkbox.isChecked() and self.key_log_list.count() > 200:
             self.key_log_list.takeItem(0)
             
         self.key_log_list.scrollToBottom()
@@ -1672,7 +1760,7 @@ class AutoControlTab(QWidget):
         self.key_log_list.addItem(item)
         
         # 로그가 200줄을 넘어가면 가장 오래된 로그를 삭제하여 메모리 관리
-        if self.key_log_list.count() > 200:
+        if not self.log_persist_checkbox.isChecked() and self.key_log_list.count() > 200:
             self.key_log_list.takeItem(0)
             
         # 항상 최신 로그가 보이도록 스크롤
@@ -1689,7 +1777,7 @@ class AutoControlTab(QWidget):
         item.setForeground(Qt.GlobalColor.cyan)
         self.key_log_list.addItem(item)
         
-        if self.key_log_list.count() > 200:
+        if not self.log_persist_checkbox.isChecked() and self.key_log_list.count() > 200:
             self.key_log_list.takeItem(0)
             
         self.key_log_list.scrollToBottom()
