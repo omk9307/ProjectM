@@ -470,6 +470,7 @@ class MapTab(QWidget):
             self.last_command_sent_time = 0.0 # 마지막으로 명령을 보낸 시간
             self.NON_WALK_STUCK_THRESHOLD_S = 1.0            # 걷기/정지 이외 상태에서 멈춤으로 간주할 시간 (초)
             self.cfg_airborne_recovery_wait = AIRBORNE_RECOVERY_WAIT_DEFAULT  # 공중 자동복구 대기시간 (초)
+            self.ladder_float_recovery_cooldown_until = 0.0  # 탐지 직후 밧줄 매달림 복구 쿨다운
             self.alignment_target_x = None # ---  사다리 앞 정렬(align) 상태 변수 ---
             self.alignment_expected_floor = None
             self.alignment_expected_group = None
@@ -2734,6 +2735,7 @@ class MapTab(QWidget):
                 self.last_movement_command = None
                 self.recovery_cooldown_until = 0.0
                 self.airborne_path_warning_active = False
+                self.ladder_float_recovery_cooldown_until = 0.0
                 self.route_cycle_initialized = False
 
                 self._refresh_event_waypoint_states()
@@ -4298,6 +4300,8 @@ class MapTab(QWidget):
         # [수정 끝]
         
         if final_player_pos is None or self.current_player_floor is None:
+            if final_player_pos is not None and contact_terrain is None:
+                self._attempt_ladder_float_recovery(final_player_pos)
             self.navigator_display.update_data(
                 floor="N/A", terrain_name="", target_name="없음",
                 prev_name="", next_name="", direction="-", distance=0,
@@ -4655,6 +4659,44 @@ class MapTab(QWidget):
         self.airborne_warning_started_at = now
         self.airborne_recovery_cooldown_until = now + 1.5
         return
+
+    def _attempt_ladder_float_recovery(self, final_player_pos):
+        """탐지 직후 밧줄 매달림 상태에서 사다리 복구를 시도합니다."""
+        if final_player_pos is None:
+            return False
+
+        if not (self.auto_control_checkbox.isChecked() or self.debug_auto_control_checkbox.isChecked()):
+            return False
+
+        now = time.time()
+        if now < self.ladder_float_recovery_cooldown_until:
+            return False
+
+        transition_objects = self.geometry_data.get("transition_objects", [])
+        if not transition_objects:
+            return False
+
+        is_near_ladder, _, dist = self._check_near_ladder(
+            final_player_pos,
+            transition_objects,
+            1.0,
+            return_dist=True,
+            current_floor=None,
+        )
+
+        if not (is_near_ladder and dist >= 0.0 and dist <= 1.0):
+            return False
+
+        self.update_general_log("[자동 복구] 사다리 근접 상태 감지. 사다리 멈춤복구를 실행합니다.", "orange")
+
+        if self.debug_auto_control_checkbox.isChecked():
+            print("[자동 제어 테스트] FLOAT-RECOVERY: 사다리 멈춤복구")
+        elif self.auto_control_checkbox.isChecked():
+            self._emit_control_command("사다리 멈춤복구", None)
+
+        self.last_command_sent_time = now
+        self.ladder_float_recovery_cooldown_until = now + 1.5
+        return True
 
     def _update_navigator_and_view(self, final_player_pos, current_terrain_name):
         """
