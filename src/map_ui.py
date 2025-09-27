@@ -72,6 +72,7 @@ try:
         HYSTERESIS_EXIT_OFFSET,
         IDLE_TIME_THRESHOLD,
         AIRBORNE_RECOVERY_WAIT_DEFAULT,
+        LADDER_RECOVERY_RESEND_DELAY_DEFAULT,
         JUMPING_STATE_FRAME_THRESHOLD,
         JUMP_LINK_ARRIVAL_X_THRESHOLD,
         JUMP_Y_MAX_THRESHOLD,
@@ -120,6 +121,7 @@ except ImportError:
         HYSTERESIS_EXIT_OFFSET,
         IDLE_TIME_THRESHOLD,
         AIRBORNE_RECOVERY_WAIT_DEFAULT,
+        LADDER_RECOVERY_RESEND_DELAY_DEFAULT,
         JUMPING_STATE_FRAME_THRESHOLD,
         JUMP_LINK_ARRIVAL_X_THRESHOLD,
         JUMP_Y_MAX_THRESHOLD,
@@ -470,6 +472,7 @@ class MapTab(QWidget):
             self.last_command_sent_time = 0.0 # 마지막으로 명령을 보낸 시간
             self.NON_WALK_STUCK_THRESHOLD_S = 1.0            # 걷기/정지 이외 상태에서 멈춤으로 간주할 시간 (초)
             self.cfg_airborne_recovery_wait = AIRBORNE_RECOVERY_WAIT_DEFAULT  # 공중 자동복구 대기시간 (초)
+            self.cfg_ladder_recovery_resend_delay = LADDER_RECOVERY_RESEND_DELAY_DEFAULT  # 사다리 복구 재전송 대기시간 (초)
             self.ladder_float_recovery_cooldown_until = 0.0  # 탐지 직후 밧줄 매달림 복구 쿨다운
             self.alignment_target_x = None # ---  사다리 앞 정렬(align) 상태 변수 ---
             self.alignment_expected_floor = None
@@ -1208,6 +1211,7 @@ class MapTab(QWidget):
             # ==================== v11.5.0 기본값 초기화 추가 끝 ======================
             self.cfg_stuck_detection_wait = STUCK_DETECTION_WAIT_DEFAULT
             self.cfg_airborne_recovery_wait = AIRBORNE_RECOVERY_WAIT_DEFAULT
+            self.cfg_ladder_recovery_resend_delay = LADDER_RECOVERY_RESEND_DELAY_DEFAULT
             
             config = {}
             if os.path.exists(config_file):
@@ -1245,6 +1249,7 @@ class MapTab(QWidget):
                 # ==================== v11.5.0 설정 로드 추가 끝 ======================
                 self.cfg_stuck_detection_wait = state_config.get("stuck_detection_wait", self.cfg_stuck_detection_wait)
                 self.cfg_airborne_recovery_wait = state_config.get("airborne_recovery_wait", self.cfg_airborne_recovery_wait)
+                self.cfg_ladder_recovery_resend_delay = state_config.get("ladder_recovery_resend_delay", self.cfg_ladder_recovery_resend_delay)
 
                 self.update_general_log("저장된 상태 판정 설정을 로드했습니다.", "gray")
 
@@ -1503,6 +1508,7 @@ class MapTab(QWidget):
                 # ==================== v11.5.0 설정 저장 추가 끝 ======================
                 "stuck_detection_wait": self.cfg_stuck_detection_wait,
                 "airborne_recovery_wait": self.cfg_airborne_recovery_wait,
+                "ladder_recovery_resend_delay": self.cfg_ladder_recovery_resend_delay,
             }
 
             config_data = self._prepare_data_for_json({
@@ -2835,6 +2841,7 @@ class MapTab(QWidget):
             "action_success_frame_threshold": self.cfg_action_success_frame_threshold,
             "stuck_detection_wait": self.cfg_stuck_detection_wait,
             "airborne_recovery_wait": self.cfg_airborne_recovery_wait,
+            "ladder_recovery_resend_delay": self.cfg_ladder_recovery_resend_delay,
         }
         
         # [MODIFIED] v14.3.3: parent_tab 대신 표준 parent 인자 사용
@@ -3042,6 +3049,7 @@ class MapTab(QWidget):
             # ==================== v11.5.0 설정값 전달 추가 끝 ======================
             "stuck_detection_wait": self.cfg_stuck_detection_wait,
             "airborne_recovery_wait": self.cfg_airborne_recovery_wait,
+            "ladder_recovery_resend_delay": self.cfg_ladder_recovery_resend_delay,
         }
         
         dialog = StateConfigDialog(current_config, self)
@@ -3070,6 +3078,7 @@ class MapTab(QWidget):
             self.cfg_arrival_frame_threshold = updated_config.get("arrival_frame_threshold", self.cfg_arrival_frame_threshold)
             self.cfg_action_success_frame_threshold = updated_config.get("action_success_frame_threshold", self.cfg_action_success_frame_threshold)
             # ==================== v11.5.0 설정값 업데이트 추가 끝 ======================
+            self.cfg_ladder_recovery_resend_delay = updated_config.get("ladder_recovery_resend_delay", self.cfg_ladder_recovery_resend_delay)
 
             self.update_general_log("상태 판정 설정이 업데이트되었습니다.", "blue")
             self.save_profile_data() # 변경사항을 즉시 파일에 저장
@@ -4566,7 +4575,8 @@ class MapTab(QWidget):
         elif self.auto_control_checkbox.isChecked():
             self._emit_control_command("사다리 멈춤복구", None)
 
-        QTimer.singleShot(1000, self._execute_recovery_resend)
+        resend_delay_ms = max(int(round(self.cfg_ladder_recovery_resend_delay * 1000)), 0)
+        QTimer.singleShot(resend_delay_ms, self._execute_recovery_resend)
 
         self.last_player_pos = final_player_pos
 
