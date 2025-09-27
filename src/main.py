@@ -143,6 +143,7 @@ class MainWindow(QMainWindow):
 
             hunt_tab.control_command_issued.connect(auto_control_tab.receive_control_command)
             auto_control_tab.log_generated.connect(hunt_tab.append_log)
+            auto_control_tab.sequence_completed.connect(hunt_tab.on_sequence_completed)
 
             if hasattr(hunt_tab, 'append_log'):
                 hunt_tab.append_log("자동 제어 탭과 연동이 설정되었습니다.")
