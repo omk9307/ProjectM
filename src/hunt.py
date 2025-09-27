@@ -3,14 +3,17 @@
 import json
 import os
 import random
-from dataclasses import dataclass
 import time
+import ctypes
+from ctypes import wintypes
+from dataclasses import dataclass
 from typing import List, Optional, Callable
 
 import pygetwindow as gw
 
-from PyQt6.QtCore import Qt, QTimer, pyqtSignal, QRect
+from PyQt6.QtCore import Qt, QTimer, pyqtSignal, QRect, QThread, QAbstractNativeEventFilter
 from PyQt6.QtWidgets import (
+    QApplication,
     QCheckBox,
     QComboBox,
     QDialog,
@@ -38,6 +41,70 @@ from PyQt6.QtGui import QPixmap, QPainter, QPen, QColor, QBrush
 from detection_runtime import DetectionPopup, DetectionThread, ScreenSnipper
 from direction_detection import DirectionDetector
 from nickname_detection import NicknameDetector
+
+if os.name == 'nt':
+    MOD_ALT = 0x0001
+    MOD_CONTROL = 0x0002
+    MOD_SHIFT = 0x0004
+    WM_HOTKEY = 0x0312
+    VK_F_KEYS = {f"f{i}": 0x6F + i for i in range(1, 13)}
+
+    class _HuntHotkeyEventFilter(QAbstractNativeEventFilter):
+        def __init__(self, hotkey_id: int, callback: Callable[[], None]):
+            super().__init__()
+            self.hotkey_id = hotkey_id
+            self.callback = callback
+
+        def nativeEventFilter(self, event_type, message):
+            if event_type == "windows_generic_MSG":
+                msg = wintypes.MSG.from_address(int(message))
+                if msg.message == WM_HOTKEY and msg.wParam == self.hotkey_id:
+                    self.callback()
+            return False, 0
+
+    class _HuntHotkeyManager:
+        _NEXT_ID = 100
+
+        def __init__(self):
+            self.user32 = ctypes.windll.user32
+            self.hotkey_id: Optional[int] = None
+            self.current_hotkey_str: Optional[str] = None
+
+        def register_hotkey(self, hotkey_str: str) -> int:
+            self.unregister_hotkey()
+            hotkey_str = (hotkey_str or '').lower()
+            if not hotkey_str or hotkey_str == 'none':
+                raise ValueError("hotkey string is empty")
+
+            parts = hotkey_str.split('+')
+            mods, vk = 0, None
+            for part in parts:
+                if part in ("alt", "ctrl", "shift"):
+                    mods |= {"alt": MOD_ALT, "ctrl": MOD_CONTROL, "shift": MOD_SHIFT}[part]
+                elif part in VK_F_KEYS:
+                    vk = VK_F_KEYS[part]
+
+            if vk is None:
+                raise ValueError("unsupported hotkey")
+
+            hotkey_id = _HuntHotkeyManager._NEXT_ID
+            _HuntHotkeyManager._NEXT_ID += 1
+
+            if not self.user32.RegisterHotKey(None, hotkey_id, mods, vk):
+                raise RuntimeError("RegisterHotKey failed")
+
+            self.hotkey_id = hotkey_id
+            self.current_hotkey_str = hotkey_str
+            return hotkey_id
+
+        def unregister_hotkey(self) -> None:
+            if self.hotkey_id is not None:
+                self.user32.UnregisterHotKey(None, self.hotkey_id)
+                self.hotkey_id = None
+                self.current_hotkey_str = None
+else:
+    _HuntHotkeyManager = None
+    _HuntHotkeyEventFilter = None
 
 
 CHARACTER_CLASS_NAME = "캐릭터"
@@ -521,17 +588,50 @@ class HuntTab(QWidget):
         self._last_direction_score: Optional[float] = None
         self._pending_completion_delays: list[dict] = []
         self._pre_delay_timers: dict[str, QTimer] = {}
+        self.hotkey_manager = None
+        self.hotkey_event_filter = None
+        self.detection_hotkey = 'f10'
 
         self._build_ui()
         self._update_facing_label()
         self._load_settings()
         self._setup_timers()
         self._setup_facing_reset_timer()
+        self._setup_detection_hotkey()
 
     def _setup_facing_reset_timer(self) -> None:
         self.facing_reset_timer = QTimer(self)
         self.facing_reset_timer.setSingleShot(True)
         self.facing_reset_timer.timeout.connect(self._handle_facing_reset_timeout)
+
+    def _setup_detection_hotkey(self) -> None:
+        if _HuntHotkeyManager is None or _HuntHotkeyEventFilter is None:
+            return
+        app = QApplication.instance()
+        if app is None:
+            return
+        try:
+            self.hotkey_manager = _HuntHotkeyManager()
+            hotkey_id = self.hotkey_manager.register_hotkey(self.detection_hotkey)
+            self.hotkey_event_filter = _HuntHotkeyEventFilter(hotkey_id, self.detect_btn.click)
+            app.installNativeEventFilter(self.hotkey_event_filter)
+            if hasattr(self.detect_btn, 'setToolTip'):
+                self.detect_btn.setToolTip(f"단축키: {self.detection_hotkey.upper()}")
+            self.append_log(f"사냥탭 탐지 단축키가 '{self.detection_hotkey.upper()}'로 설정되었습니다.", "info")
+        except Exception as exc:
+            if self.hotkey_manager:
+                try:
+                    self.hotkey_manager.unregister_hotkey()
+                except Exception:
+                    pass
+                self.hotkey_manager = None
+            if self.hotkey_event_filter and app:
+                try:
+                    app.removeNativeEventFilter(self.hotkey_event_filter)
+                except Exception:
+                    pass
+                self.hotkey_event_filter = None
+            self.append_log(f"단축키 등록 중 오류가 발생했습니다: {exc}", "warn")
 
     def _is_detection_active(self) -> bool:
         return bool(self.detect_btn.isChecked())
@@ -944,6 +1044,7 @@ class HuntTab(QWidget):
         button_row = QHBoxLayout()
         self.detect_btn = QPushButton("실시간 탐지 시작")
         self.detect_btn.setCheckable(True)
+        self.detect_btn.setToolTip("단축키: F10")
         self.detect_btn.clicked.connect(self._toggle_detection)
         button_row.addWidget(self.detect_btn)
 
@@ -1045,6 +1146,29 @@ class HuntTab(QWidget):
             self.append_log(f"수동 탐지 영역 설정 완료: {self.manual_capture_region}")
             self._save_settings()
 
+    def _activate_maple_window(self) -> Optional[object]:
+        try:
+            maple_windows = gw.getWindowsWithTitle('Maple') or gw.getWindowsWithTitle('메이플')
+        except Exception as exc:
+            self.append_log(f"게임 창 검색 실패: {exc}", "warn")
+            return None
+
+        if not maple_windows:
+            return None
+
+        target_window = maple_windows[0]
+        try:
+            if target_window.isMinimized:
+                target_window.restore()
+                QThread.msleep(200)
+            target_window.activate()
+            QThread.msleep(120)
+        except Exception as exc:
+            self.append_log(f"게임 창 활성화 중 오류 발생: {exc}", "warn")
+            return None
+
+        return target_window
+
     def _toggle_detection(self, checked: bool) -> None:
         if checked:
             if not self.data_manager:
@@ -1079,20 +1203,18 @@ class HuntTab(QWidget):
                 self.detect_btn.setChecked(False)
                 return
 
+            maple_window = self._activate_maple_window()
+            if not maple_window:
+                QMessageBox.warning(self, '오류', '메이플스토리 창을 찾을 수 없습니다.')
+                self.detect_btn.setChecked(False)
+                return
+
             if self.auto_target_radio.isChecked():
-                target_windows = gw.getWindowsWithTitle('Maple') or gw.getWindowsWithTitle('메이플')
-                if not target_windows:
-                    QMessageBox.warning(self, '오류', '메이플스토리 창을 찾을 수 없습니다.')
-                    self.detect_btn.setChecked(False)
-                    return
-                win = target_windows[0]
-                if win.isMinimized:
-                    win.restore()
                 capture_region = {
-                    'top': win.top,
-                    'left': win.left,
-                    'width': win.width,
-                    'height': win.height,
+                    'top': maple_window.top,
+                    'left': maple_window.left,
+                    'width': maple_window.width,
+                    'height': maple_window.height,
                 }
             else:
                 if not self.manual_capture_region:
@@ -3528,6 +3650,19 @@ class HuntTab(QWidget):
         self._pre_delay_timers.clear()
         self._pending_completion_delays.clear()
         self._stop_detection_thread()
+        app = QApplication.instance()
+        if app and getattr(self, 'hotkey_event_filter', None):
+            try:
+                app.removeNativeEventFilter(self.hotkey_event_filter)
+            except Exception:
+                pass
+            self.hotkey_event_filter = None
+        if getattr(self, 'hotkey_manager', None):
+            try:
+                self.hotkey_manager.unregister_hotkey()
+            except Exception:
+                pass
+            self.hotkey_manager = None
         if hasattr(self, 'detect_btn'):
             self.detect_btn.setChecked(False)
             self.detect_btn.setText("실시간 탐지 시작")
