@@ -153,6 +153,52 @@ except ImportError:
         load_skill_profiles,
     )
 
+if 'WAYPOINT_ARRIVAL_X_THRESHOLD_MIN_DEFAULT' not in globals():
+    WAYPOINT_ARRIVAL_X_THRESHOLD_MIN_DEFAULT = WAYPOINT_ARRIVAL_X_THRESHOLD
+if 'WAYPOINT_ARRIVAL_X_THRESHOLD_MAX_DEFAULT' not in globals():
+    WAYPOINT_ARRIVAL_X_THRESHOLD_MAX_DEFAULT = WAYPOINT_ARRIVAL_X_THRESHOLD
+if 'WALK_TELEPORT_PROBABILITY_DEFAULT' not in globals():
+    WALK_TELEPORT_PROBABILITY_DEFAULT = 3.0
+if 'WALK_TELEPORT_INTERVAL_DEFAULT' not in globals():
+    WALK_TELEPORT_INTERVAL_DEFAULT = 0.5
+if 'WALK_TELEPORT_BONUS_DELAY_DEFAULT' not in globals():
+    WALK_TELEPORT_BONUS_DELAY_DEFAULT = 1.0
+if 'WALK_TELEPORT_BONUS_STEP_DEFAULT' not in globals():
+    WALK_TELEPORT_BONUS_STEP_DEFAULT = 10.0
+if 'WALK_TELEPORT_BONUS_MAX_DEFAULT' not in globals():
+    WALK_TELEPORT_BONUS_MAX_DEFAULT = 50.0
+
+try:
+    from . import map as _map_module  # type: ignore
+except ImportError:
+    import map as _map_module  # type: ignore
+
+WALK_TELEPORT_PROBABILITY_DEFAULT = getattr(
+    _map_module,
+    "WALK_TELEPORT_PROBABILITY_DEFAULT",
+    WALK_TELEPORT_PROBABILITY_DEFAULT,
+)
+WALK_TELEPORT_INTERVAL_DEFAULT = getattr(
+    _map_module,
+    "WALK_TELEPORT_INTERVAL_DEFAULT",
+    WALK_TELEPORT_INTERVAL_DEFAULT,
+)
+WALK_TELEPORT_BONUS_DELAY_DEFAULT = getattr(
+    _map_module,
+    "WALK_TELEPORT_BONUS_DELAY_DEFAULT",
+    WALK_TELEPORT_BONUS_DELAY_DEFAULT,
+)
+WALK_TELEPORT_BONUS_STEP_DEFAULT = getattr(
+    _map_module,
+    "WALK_TELEPORT_BONUS_STEP_DEFAULT",
+    WALK_TELEPORT_BONUS_STEP_DEFAULT,
+)
+WALK_TELEPORT_BONUS_MAX_DEFAULT = getattr(
+    _map_module,
+    "WALK_TELEPORT_BONUS_MAX_DEFAULT",
+    WALK_TELEPORT_BONUS_MAX_DEFAULT,
+)
+
 try:
     from .map_widgets import MultiScreenSnipper
 except ImportError:
@@ -3598,6 +3644,11 @@ class StateConfigDialog(QDialog):
         self.setMinimumWidth(450)
         
         self.config = current_config.copy()
+        if isinstance(self.config.get("walk_teleport_probability"), (int, float)) and self.config["walk_teleport_probability"] <= 1.0:
+            self.config["walk_teleport_probability"] *= 100.0
+        self.config.setdefault("walk_teleport_bonus_delay", WALK_TELEPORT_BONUS_DELAY_DEFAULT)
+        self.config.setdefault("walk_teleport_bonus_step", WALK_TELEPORT_BONUS_STEP_DEFAULT)
+        self.config.setdefault("walk_teleport_bonus_max", WALK_TELEPORT_BONUS_MAX_DEFAULT)
         
         main_layout = QVBoxLayout(self)
         self.spinboxes = {}
@@ -3678,6 +3729,12 @@ class StateConfigDialog(QDialog):
         form_layout.addRow(QLabel("---"))
         add_spinbox("arrival_frame_threshold", "도착 판정 프레임:", 1, 10, 1, is_double=False)
         add_spinbox("action_success_frame_threshold", "행동 성공 판정 프레임:", 1, 10, 1, is_double=False)
+        form_layout.addRow(QLabel("---"))
+        add_spinbox("walk_teleport_probability", "걷기 텔레포트 확률(%):", 0.0, 100.0, 1.0, decimals=1)
+        add_spinbox("walk_teleport_interval", "걷기 텔레포트 판정 주기(초):", 0.1, 10.0, 0.1)
+        add_spinbox("walk_teleport_bonus_delay", "걷기 텔레포트 보너스 간격(초):", 0.1, 10.0, 0.1)
+        add_spinbox("walk_teleport_bonus_step", "걷기 텔레포트 보너스 증가율(%):", 0.0, 100.0, 1.0, decimals=1)
+        add_spinbox("walk_teleport_bonus_max", "걷기 텔레포트 보너스 최대(%):", 0.0, 100.0, 1.0, decimals=1)
         
         # 3. 하단 버튼
         button_box = QDialogButtonBox()
@@ -3763,9 +3820,9 @@ class StateConfigDialog(QDialog):
             "climb_x_movement_threshold": CLIMB_X_MOVEMENT_THRESHOLD,
             "fall_on_ladder_x_movement_threshold": FALL_ON_LADDER_X_MOVEMENT_THRESHOLD,
             "ladder_x_grab_threshold": LADDER_X_GRAB_THRESHOLD,
-            "on_ladder_enter_frame_threshold": 3,
-            "jump_initial_velocity_threshold": 4.0,
-            "climb_max_velocity": 3.0,
+            "on_ladder_enter_frame_threshold": 1,
+            "jump_initial_velocity_threshold": 1.0,
+            "climb_max_velocity": 1.0,
             "waypoint_arrival_x_threshold": WAYPOINT_ARRIVAL_X_THRESHOLD,
             "waypoint_arrival_x_threshold_min": WAYPOINT_ARRIVAL_X_THRESHOLD_MIN_DEFAULT,
             "waypoint_arrival_x_threshold_max": WAYPOINT_ARRIVAL_X_THRESHOLD_MAX_DEFAULT,
@@ -3776,6 +3833,11 @@ class StateConfigDialog(QDialog):
             "stuck_detection_wait": STUCK_DETECTION_WAIT_DEFAULT,
             "airborne_recovery_wait": AIRBORNE_RECOVERY_WAIT_DEFAULT,
             "ladder_recovery_resend_delay": LADDER_RECOVERY_RESEND_DELAY_DEFAULT,
+            "walk_teleport_probability": WALK_TELEPORT_PROBABILITY_DEFAULT,
+            "walk_teleport_interval": WALK_TELEPORT_INTERVAL_DEFAULT,
+            "walk_teleport_bonus_delay": WALK_TELEPORT_BONUS_DELAY_DEFAULT,
+            "walk_teleport_bonus_step": WALK_TELEPORT_BONUS_STEP_DEFAULT,
+            "walk_teleport_bonus_max": WALK_TELEPORT_BONUS_MAX_DEFAULT,
         }
         for key, spinbox in self.spinboxes.items():
             if key in defaults:

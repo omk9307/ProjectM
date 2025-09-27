@@ -36,7 +36,7 @@ from PyQt6.QtWidgets import (
 
     QGraphicsView, QGraphicsScene, QGraphicsPixmapItem, QCheckBox, QGraphicsRectItem,
     QGraphicsLineItem, QGraphicsTextItem, QGraphicsEllipseItem,
-    QGraphicsSimpleTextItem, QFormLayout, QProgressDialog
+    QGraphicsSimpleTextItem, QFormLayout, QProgressDialog, QSizePolicy
 )
 from PyQt6.QtGui import QPixmap, QImage, QPainter, QPen, QColor, QBrush, QFont, QCursor, QIcon, QPolygonF, QFontMetrics, QFontMetricsF, QGuiApplication
 from PyQt6.QtCore import Qt, QThread, pyqtSignal, pyqtSlot, QRect, QPoint, QRectF, QPointF, QSize, QSizeF, QTimer
@@ -171,6 +171,47 @@ if 'WAYPOINT_ARRIVAL_X_THRESHOLD_MIN_DEFAULT' not in globals():
     WAYPOINT_ARRIVAL_X_THRESHOLD_MIN_DEFAULT = WAYPOINT_ARRIVAL_X_THRESHOLD
 if 'WAYPOINT_ARRIVAL_X_THRESHOLD_MAX_DEFAULT' not in globals():
     WAYPOINT_ARRIVAL_X_THRESHOLD_MAX_DEFAULT = WAYPOINT_ARRIVAL_X_THRESHOLD
+if 'WALK_TELEPORT_PROBABILITY_DEFAULT' not in globals():
+    WALK_TELEPORT_PROBABILITY_DEFAULT = 3.0
+if 'WALK_TELEPORT_INTERVAL_DEFAULT' not in globals():
+    WALK_TELEPORT_INTERVAL_DEFAULT = 0.5
+if 'WALK_TELEPORT_BONUS_DELAY_DEFAULT' not in globals():
+    WALK_TELEPORT_BONUS_DELAY_DEFAULT = 1.0
+if 'WALK_TELEPORT_BONUS_STEP_DEFAULT' not in globals():
+    WALK_TELEPORT_BONUS_STEP_DEFAULT = 10.0
+if 'WALK_TELEPORT_BONUS_MAX_DEFAULT' not in globals():
+    WALK_TELEPORT_BONUS_MAX_DEFAULT = 50.0
+
+try:
+    from . import map as _map_module  # type: ignore
+except ImportError:
+    import map as _map_module  # type: ignore
+
+WALK_TELEPORT_PROBABILITY_DEFAULT = getattr(
+    _map_module,
+    "WALK_TELEPORT_PROBABILITY_DEFAULT",
+    WALK_TELEPORT_PROBABILITY_DEFAULT,
+)
+WALK_TELEPORT_INTERVAL_DEFAULT = getattr(
+    _map_module,
+    "WALK_TELEPORT_INTERVAL_DEFAULT",
+    WALK_TELEPORT_INTERVAL_DEFAULT,
+)
+WALK_TELEPORT_BONUS_DELAY_DEFAULT = getattr(
+    _map_module,
+    "WALK_TELEPORT_BONUS_DELAY_DEFAULT",
+    WALK_TELEPORT_BONUS_DELAY_DEFAULT,
+)
+WALK_TELEPORT_BONUS_STEP_DEFAULT = getattr(
+    _map_module,
+    "WALK_TELEPORT_BONUS_STEP_DEFAULT",
+    WALK_TELEPORT_BONUS_STEP_DEFAULT,
+)
+WALK_TELEPORT_BONUS_MAX_DEFAULT = getattr(
+    _map_module,
+    "WALK_TELEPORT_BONUS_MAX_DEFAULT",
+    WALK_TELEPORT_BONUS_MAX_DEFAULT,
+)
 
 try:
     from .map_logic import (
@@ -346,6 +387,11 @@ class MapTab(QWidget):
             self.cfg_on_ladder_enter_frame_threshold = None
             self.cfg_jump_initial_velocity_threshold = None
             self.cfg_climb_max_velocity = None
+            self.cfg_walk_teleport_probability = None
+            self.cfg_walk_teleport_interval = None
+            self.cfg_walk_teleport_bonus_delay = None
+            self.cfg_walk_teleport_bonus_step = None
+            self.cfg_walk_teleport_bonus_max = None
 
             # ==================== v11.5.0 설정 변수 추가 시작 ====================
             self.cfg_arrival_frame_threshold = None
@@ -487,6 +533,12 @@ class MapTab(QWidget):
             self.cfg_airborne_recovery_wait = AIRBORNE_RECOVERY_WAIT_DEFAULT  # 공중 자동복구 대기시간 (초)
             self.cfg_ladder_recovery_resend_delay = LADDER_RECOVERY_RESEND_DELAY_DEFAULT  # 사다리 복구 재전송 대기시간 (초)
             self.ladder_float_recovery_cooldown_until = 0.0  # 탐지 직후 밧줄 매달림 복구 쿨다운
+            self.cfg_walk_teleport_probability = WALK_TELEPORT_PROBABILITY_DEFAULT
+            self.cfg_walk_teleport_interval = WALK_TELEPORT_INTERVAL_DEFAULT
+            self._last_walk_teleport_check_time = 0.0
+            self._walk_teleport_active = False
+            self._walk_teleport_walk_started_at = 0.0
+            self._walk_teleport_bonus_percent = 0.0
             self.alignment_target_x = None # ---  사다리 앞 정렬(align) 상태 변수 ---
             self.alignment_expected_floor = None
             self.alignment_expected_group = None
@@ -513,7 +565,8 @@ class MapTab(QWidget):
             # 2. UI가 생성된 후에 단축키 관리자를 초기화합니다.
             self.hotkey_manager = HotkeyManager()
             # self.detect_anchor_btn이 이제 존재하므로 안전하게 참조할 수 있습니다.
-            self.win_event_filter = WinEventFilter(self.detect_anchor_btn.click)
+            hotkey_id = getattr(self.hotkey_manager, 'hotkey_id', None)
+            self.win_event_filter = WinEventFilter(self.detect_anchor_btn.click, hotkey_id=hotkey_id)
             QApplication.instance().installNativeEventFilter(self.win_event_filter)
             self.current_hotkey = "None"
 
@@ -730,16 +783,33 @@ class MapTab(QWidget):
         
         # 로그 뷰어
         logs_layout = QVBoxLayout()
-        logs_layout.addWidget(QLabel("일반 로그"))
+        logs_layout.setContentsMargins(0, 0, 0, 0)
+        logs_layout.setSpacing(6)
+
+        general_log_label = QLabel("일반 로그")
+        general_log_label.setContentsMargins(0, 0, 0, 0)
+        logs_layout.addWidget(general_log_label)
+
         self.general_log_viewer = QTextEdit()
         self.general_log_viewer.setReadOnly(True)
-        self.general_log_viewer.setFixedHeight(300)
-        logs_layout.addWidget(self.general_log_viewer)
-        
-        logs_layout.addWidget(QLabel("탐지 상태 로그"))
+        self.general_log_viewer.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        self.general_log_viewer.setMinimumHeight(200)
+        self.general_log_viewer.document().setDocumentMargin(6)
+        logs_layout.addWidget(self.general_log_viewer, 1)
+
+        detection_log_label = QLabel("탐지 상태 로그")
+        detection_log_label.setContentsMargins(0, 0, 0, 0)
+        logs_layout.addWidget(detection_log_label)
+
         self.detection_log_viewer = QTextEdit()
         self.detection_log_viewer.setReadOnly(True)
+        self.detection_log_viewer.setFixedHeight(70)
+        self.detection_log_viewer.document().setDocumentMargin(6)
         logs_layout.addWidget(self.detection_log_viewer)
+
+        self._walk_teleport_probability_text = "텔레포트 확률: 0.0%"
+        self._last_detection_log_body = ""
+        self._render_detection_log(None)
 
         # 우측 레이아웃 (네비게이터 + 실시간 뷰)
         view_header_layout = QHBoxLayout()
@@ -1098,6 +1168,13 @@ class MapTab(QWidget):
         self.populate_profile_selector()
         profile_to_load = None
         last_profile = self.load_global_settings()
+        self.hotkey_display_label.setText(self.current_hotkey.upper())
+        if self.hotkey_manager:
+            try:
+                self.hotkey_manager.register_hotkey(self.current_hotkey)
+                self._sync_hotkey_filter_id()
+            except Exception as exc:
+                self.update_general_log(f"전역 단축키 등록 실패: {exc}", "red")
         if last_profile and last_profile in [self.profile_selector.itemText(i) for i in range(self.profile_selector.count())]:
             profile_to_load = last_profile
         elif self.profile_selector.count() > 0:
@@ -1109,6 +1186,61 @@ class MapTab(QWidget):
             self.load_profile_data(profile_to_load)
         else:
             self.update_ui_for_no_profile()
+
+    @pyqtSlot(str, str)
+    def on_command_profile_renamed(self, old_name: str, new_name: str) -> None:
+        if not old_name or not new_name or old_name == new_name:
+            return
+
+        changed = False
+
+        def _replace_event_profile(container: Optional[list]):
+            nonlocal changed
+            if not isinstance(container, list):
+                return
+            for entry in container:
+                if isinstance(entry, dict) and entry.get('event_profile') == old_name:
+                    entry['event_profile'] = new_name
+                    changed = True
+
+        for route_data in self.route_profiles.values():
+            _replace_event_profile(route_data.get('waypoints', []))
+
+        _replace_event_profile(self.geometry_data.get('waypoints', []))
+
+        for wall in self.geometry_data.get('forbidden_walls', []):
+            profiles = wall.get('skill_profiles')
+            if isinstance(profiles, list):
+                updated = [new_name if profile == old_name else profile for profile in profiles]
+                if updated != profiles:
+                    wall['skill_profiles'] = updated
+                    changed = True
+
+        if getattr(self, 'active_event_profile', '') == old_name:
+            self.active_event_profile = new_name
+            changed = True
+
+        pending_forbidden = getattr(self, 'pending_forbidden_command', None)
+        if pending_forbidden and pending_forbidden[0] == old_name:
+            self.pending_forbidden_command = (new_name, pending_forbidden[1])
+            changed = True
+
+        if getattr(self, 'active_forbidden_wall_profile', '') == old_name:
+            self.active_forbidden_wall_profile = new_name
+            changed = True
+
+        if not changed:
+            return
+
+        self._ensure_waypoint_event_fields()
+        self._refresh_event_waypoint_states()
+        self._refresh_forbidden_wall_states()
+        self.populate_waypoint_list()
+        self.save_profile_data()
+        self.update_general_log(
+            f"명령 프로필 '{old_name}' → '{new_name}' 변경을 맵 데이터에 반영했습니다.",
+            "blue",
+        )
 
     def populate_profile_selector(self):
         self.profile_selector.clear()
@@ -1220,9 +1352,9 @@ class MapTab(QWidget):
             self.cfg_waypoint_arrival_x_threshold_max = WAYPOINT_ARRIVAL_X_THRESHOLD_MAX_DEFAULT
             self.cfg_ladder_arrival_x_threshold = LADDER_ARRIVAL_X_THRESHOLD
             self.cfg_jump_link_arrival_x_threshold = JUMP_LINK_ARRIVAL_X_THRESHOLD
-            self.cfg_on_ladder_enter_frame_threshold = 3
-            self.cfg_jump_initial_velocity_threshold = 4.0
-            self.cfg_climb_max_velocity = 3.0
+            self.cfg_on_ladder_enter_frame_threshold = 1
+            self.cfg_jump_initial_velocity_threshold = 1.0
+            self.cfg_climb_max_velocity = 1.0
             # ==================== v11.5.0 기본값 초기화 추가 시작 ====================
             self.cfg_arrival_frame_threshold = 2
             self.cfg_action_success_frame_threshold = 2
@@ -1231,6 +1363,13 @@ class MapTab(QWidget):
             self.cfg_airborne_recovery_wait = AIRBORNE_RECOVERY_WAIT_DEFAULT
             self.cfg_ladder_recovery_resend_delay = LADDER_RECOVERY_RESEND_DELAY_DEFAULT
             
+            self.cfg_walk_teleport_probability = WALK_TELEPORT_PROBABILITY_DEFAULT
+            self.cfg_walk_teleport_interval = WALK_TELEPORT_INTERVAL_DEFAULT
+            self.cfg_walk_teleport_bonus_delay = WALK_TELEPORT_BONUS_DELAY_DEFAULT
+            self.cfg_walk_teleport_bonus_step = WALK_TELEPORT_BONUS_STEP_DEFAULT
+            self.cfg_walk_teleport_bonus_max = WALK_TELEPORT_BONUS_MAX_DEFAULT
+            self._reset_walk_teleport_state()
+
             config = {}
             if os.path.exists(config_file):
                 with open(config_file, 'r', encoding='utf-8') as f:
@@ -1276,6 +1415,49 @@ class MapTab(QWidget):
                 self.cfg_stuck_detection_wait = state_config.get("stuck_detection_wait", self.cfg_stuck_detection_wait)
                 self.cfg_airborne_recovery_wait = state_config.get("airborne_recovery_wait", self.cfg_airborne_recovery_wait)
                 self.cfg_ladder_recovery_resend_delay = state_config.get("ladder_recovery_resend_delay", self.cfg_ladder_recovery_resend_delay)
+                probability_percent = state_config.get(
+                    "walk_teleport_probability",
+                    self.cfg_walk_teleport_probability,
+                )
+                if probability_percent is not None and probability_percent <= 1.0:
+                    probability_percent *= 100.0
+                self.cfg_walk_teleport_probability = max(
+                    min(
+                        probability_percent if probability_percent is not None else self.cfg_walk_teleport_probability,
+                        100.0,
+                    ),
+                    0.0,
+                )
+
+                interval_value = state_config.get(
+                    "walk_teleport_interval",
+                    self.cfg_walk_teleport_interval,
+                )
+                self.cfg_walk_teleport_interval = max(
+                    interval_value if interval_value is not None else self.cfg_walk_teleport_interval,
+                    0.1,
+                )
+
+                self.cfg_walk_teleport_bonus_delay = state_config.get(
+                    "walk_teleport_bonus_delay",
+                    self.cfg_walk_teleport_bonus_delay,
+                )
+                self.cfg_walk_teleport_bonus_step = state_config.get(
+                    "walk_teleport_bonus_step",
+                    self.cfg_walk_teleport_bonus_step,
+                )
+                self.cfg_walk_teleport_bonus_max = state_config.get(
+                    "walk_teleport_bonus_max",
+                    self.cfg_walk_teleport_bonus_max,
+                )
+
+                self.cfg_walk_teleport_bonus_delay = max(self.cfg_walk_teleport_bonus_delay or 0.0, 0.1)
+                self.cfg_walk_teleport_bonus_step = max(self.cfg_walk_teleport_bonus_step or 0.0, 0.0)
+                self.cfg_walk_teleport_bonus_max = max(self.cfg_walk_teleport_bonus_max or 0.0, 0.0)
+                if self.cfg_walk_teleport_bonus_max < self.cfg_walk_teleport_bonus_step:
+                    self.cfg_walk_teleport_bonus_max = self.cfg_walk_teleport_bonus_step
+
+                self._reset_walk_teleport_state()
 
                 if self.cfg_waypoint_arrival_x_threshold_min > self.cfg_waypoint_arrival_x_threshold_max:
                     self.cfg_waypoint_arrival_x_threshold_min, self.cfg_waypoint_arrival_x_threshold_max = (
@@ -1550,6 +1732,11 @@ class MapTab(QWidget):
                 "stuck_detection_wait": self.cfg_stuck_detection_wait,
                 "airborne_recovery_wait": self.cfg_airborne_recovery_wait,
                 "ladder_recovery_resend_delay": self.cfg_ladder_recovery_resend_delay,
+                "walk_teleport_probability": self.cfg_walk_teleport_probability,
+                "walk_teleport_interval": self.cfg_walk_teleport_interval,
+                "walk_teleport_bonus_delay": self.cfg_walk_teleport_bonus_delay,
+                "walk_teleport_bonus_step": self.cfg_walk_teleport_bonus_step,
+                "walk_teleport_bonus_max": self.cfg_walk_teleport_bonus_max,
             }
 
             config_data = self._prepare_data_for_json({
@@ -2804,6 +2991,7 @@ class MapTab(QWidget):
                 self.detection_thread.status_updated.connect(self.update_detection_log_message)
                 self.detection_thread.start()
 
+                self._reset_walk_teleport_state()
                 self.detect_anchor_btn.setText("탐지 중단")
             else:
                 # [핵심 수정] 스레드 중단 전에 플래그를 False로 먼저 설정
@@ -2830,6 +3018,7 @@ class MapTab(QWidget):
 
                 self.detection_thread = None
                 self.capture_thread = None
+                self._last_walk_teleport_check_time = 0.0
 
                 # --- [v12.3.1] 탐지 중지 시에도 상태 초기화 ---
                 self.journey_plan = []
@@ -2885,6 +3074,11 @@ class MapTab(QWidget):
             "stuck_detection_wait": self.cfg_stuck_detection_wait,
             "airborne_recovery_wait": self.cfg_airborne_recovery_wait,
             "ladder_recovery_resend_delay": self.cfg_ladder_recovery_resend_delay,
+            "walk_teleport_probability": self.cfg_walk_teleport_probability,
+            "walk_teleport_interval": self.cfg_walk_teleport_interval,
+            "walk_teleport_bonus_delay": self.cfg_walk_teleport_bonus_delay,
+            "walk_teleport_bonus_step": self.cfg_walk_teleport_bonus_step,
+            "walk_teleport_bonus_max": self.cfg_walk_teleport_bonus_max,
         }
         
         # [MODIFIED] v14.3.3: parent_tab 대신 표준 parent 인자 사용
@@ -2908,11 +3102,20 @@ class MapTab(QWidget):
                 self.cfg_waypoint_arrival_x_threshold_min + self.cfg_waypoint_arrival_x_threshold_max
             ) / 2.0
 
+            self.cfg_walk_teleport_probability = max(min(self.cfg_walk_teleport_probability, 100.0), 0.0)
+            self.cfg_walk_teleport_interval = max(self.cfg_walk_teleport_interval, 0.1)
+            self.cfg_walk_teleport_bonus_delay = max(self.cfg_walk_teleport_bonus_delay, 0.1)
+            self.cfg_walk_teleport_bonus_step = max(self.cfg_walk_teleport_bonus_step, 0.0)
+            self.cfg_walk_teleport_bonus_max = max(self.cfg_walk_teleport_bonus_max, 0.0)
+            if self.cfg_walk_teleport_bonus_max < self.cfg_walk_teleport_bonus_step:
+                self.cfg_walk_teleport_bonus_max = self.cfg_walk_teleport_bonus_step
+            self._reset_walk_teleport_state()
+
             self._active_waypoint_threshold_key = None
             self._active_waypoint_threshold_value = None
 
             self.update_general_log("상태 판정 설정이 업데이트되었습니다.", "blue")
-            self.save_profile_data()              
+            self.save_profile_data()
 
 # v14.0.0: 동작 학습 관련 메서드들
     def get_active_profile_path(self):
@@ -3079,89 +3282,6 @@ class MapTab(QWidget):
         else:
             print("삭제할 파일이 없습니다.")            
    
-    def _open_state_config_dialog(self):
-        # 현재 설정값들을 딕셔너리로 만듦
-        current_config = {
-            "idle_time_threshold": self.cfg_idle_time_threshold,
-            "climbing_state_frame_threshold": self.cfg_climbing_state_frame_threshold,
-            "falling_state_frame_threshold": self.cfg_falling_state_frame_threshold,
-            "jumping_state_frame_threshold": self.cfg_jumping_state_frame_threshold,
-            "on_terrain_y_threshold": self.cfg_on_terrain_y_threshold,
-            "jump_y_min_threshold": self.cfg_jump_y_min_threshold,
-            "jump_y_max_threshold": self.cfg_jump_y_max_threshold,
-            "fall_y_min_threshold": self.cfg_fall_y_min_threshold,
-            "climb_x_movement_threshold": self.cfg_climb_x_movement_threshold,
-            "fall_on_ladder_x_movement_threshold": self.cfg_fall_on_ladder_x_movement_threshold,
-            "ladder_x_grab_threshold": self.cfg_ladder_x_grab_threshold,
-            "move_deadzone": self.cfg_move_deadzone,
-            "max_jump_duration": self.cfg_max_jump_duration,
-            "y_movement_deadzone": self.cfg_y_movement_deadzone,
-            "waypoint_arrival_x_threshold": self.cfg_waypoint_arrival_x_threshold,
-            "waypoint_arrival_x_threshold_min": self.cfg_waypoint_arrival_x_threshold_min,
-            "waypoint_arrival_x_threshold_max": self.cfg_waypoint_arrival_x_threshold_max,
-            "ladder_arrival_x_threshold": self.cfg_ladder_arrival_x_threshold,
-            "jump_link_arrival_x_threshold": self.cfg_jump_link_arrival_x_threshold,
-            # ==================== v11.5.0 설정값 전달 추가 시작 ====================
-            "arrival_frame_threshold": self.cfg_arrival_frame_threshold,
-            "action_success_frame_threshold": self.cfg_action_success_frame_threshold,
-            # ==================== v11.5.0 설정값 전달 추가 끝 ======================
-            "stuck_detection_wait": self.cfg_stuck_detection_wait,
-            "airborne_recovery_wait": self.cfg_airborne_recovery_wait,
-            "ladder_recovery_resend_delay": self.cfg_ladder_recovery_resend_delay,
-        }
-        
-        dialog = StateConfigDialog(current_config, self)
-        if dialog.exec(): # 사용자가 '저장'을 눌렀을 경우
-            updated_config = dialog.get_updated_config()
-            
-            # 멤버 변수 업데이트
-            self.cfg_idle_time_threshold = updated_config.get("idle_time_threshold", self.cfg_idle_time_threshold)
-            self.cfg_climbing_state_frame_threshold = updated_config.get("climbing_state_frame_threshold", self.cfg_climbing_state_frame_threshold)
-            self.cfg_falling_state_frame_threshold = updated_config.get("falling_state_frame_threshold", self.cfg_falling_state_frame_threshold)
-            self.cfg_jumping_state_frame_threshold = updated_config.get("jumping_state_frame_threshold", self.cfg_jumping_state_frame_threshold)
-            self.cfg_on_terrain_y_threshold = updated_config.get("on_terrain_y_threshold", self.cfg_on_terrain_y_threshold)
-            self.cfg_jump_y_min_threshold = updated_config.get("jump_y_min_threshold", self.cfg_jump_y_min_threshold)
-            self.cfg_jump_y_max_threshold = updated_config.get("jump_y_max_threshold", self.cfg_jump_y_max_threshold)
-            self.cfg_fall_y_min_threshold = updated_config.get("fall_y_min_threshold", self.cfg_fall_y_min_threshold)
-            self.cfg_climb_x_movement_threshold = updated_config.get("climb_x_movement_threshold", self.cfg_climb_x_movement_threshold)
-            self.cfg_fall_on_ladder_x_movement_threshold = updated_config.get("fall_on_ladder_x_movement_threshold", self.cfg_fall_on_ladder_x_movement_threshold)
-            self.cfg_ladder_x_grab_threshold = updated_config.get("ladder_x_grab_threshold", self.cfg_ladder_x_grab_threshold)
-            self.cfg_move_deadzone = updated_config.get("move_deadzone", self.cfg_move_deadzone)
-            self.cfg_max_jump_duration = updated_config.get("max_jump_duration", self.cfg_max_jump_duration)
-            self.cfg_y_movement_deadzone = updated_config.get("y_movement_deadzone", self.cfg_y_movement_deadzone)
-            self.cfg_waypoint_arrival_x_threshold = updated_config.get("waypoint_arrival_x_threshold", self.cfg_waypoint_arrival_x_threshold)
-            self.cfg_waypoint_arrival_x_threshold_min = updated_config.get(
-                "waypoint_arrival_x_threshold_min",
-                self.cfg_waypoint_arrival_x_threshold_min,
-            )
-            self.cfg_waypoint_arrival_x_threshold_max = updated_config.get(
-                "waypoint_arrival_x_threshold_max",
-                self.cfg_waypoint_arrival_x_threshold_max,
-            )
-            self.cfg_ladder_arrival_x_threshold = updated_config.get("ladder_arrival_x_threshold", self.cfg_ladder_arrival_x_threshold)
-            self.cfg_jump_link_arrival_x_threshold = updated_config.get("jump_link_arrival_x_threshold", self.cfg_jump_link_arrival_x_threshold)
-            # ==================== v11.5.0 설정값 업데이트 추가 시작 ====================
-            self.cfg_arrival_frame_threshold = updated_config.get("arrival_frame_threshold", self.cfg_arrival_frame_threshold)
-            self.cfg_action_success_frame_threshold = updated_config.get("action_success_frame_threshold", self.cfg_action_success_frame_threshold)
-            # ==================== v11.5.0 설정값 업데이트 추가 끝 ======================
-            self.cfg_ladder_recovery_resend_delay = updated_config.get("ladder_recovery_resend_delay", self.cfg_ladder_recovery_resend_delay)
-
-            if self.cfg_waypoint_arrival_x_threshold_min > self.cfg_waypoint_arrival_x_threshold_max:
-                self.cfg_waypoint_arrival_x_threshold_min, self.cfg_waypoint_arrival_x_threshold_max = (
-                    self.cfg_waypoint_arrival_x_threshold_max,
-                    self.cfg_waypoint_arrival_x_threshold_min,
-                )
-
-            self.cfg_waypoint_arrival_x_threshold = (
-                self.cfg_waypoint_arrival_x_threshold_min + self.cfg_waypoint_arrival_x_threshold_max
-            ) / 2.0
-
-            self._active_waypoint_threshold_key = None
-            self._active_waypoint_threshold_value = None
-
-            self.update_general_log("상태 판정 설정이 업데이트되었습니다.", "blue")
-            self.save_profile_data() # 변경사항을 즉시 파일에 저장
-
     def start_jump_profiling(self):
         """점프 특성 프로파일링 모드를 시작합니다."""
         self.is_profiling_jump = True
@@ -4207,6 +4327,70 @@ class MapTab(QWidget):
         self._active_waypoint_threshold_value = chosen
         return chosen
 
+    def _maybe_trigger_walk_teleport(self, direction: str, distance_to_target: float | None) -> None:
+        """걷기 중 일정 거리 이상일 때 텔레포트 명령을 확률적으로 실행합니다."""
+        if not (self.auto_control_checkbox.isChecked() or self.debug_auto_control_checkbox.isChecked()):
+            self._update_walk_teleport_probability_display(0.0)
+            self._reset_walk_teleport_state()
+            return
+
+        if direction not in ("→", "←") or distance_to_target is None:
+            self._update_walk_teleport_probability_display(0.0)
+            self._reset_walk_teleport_state()
+            return
+
+        if distance_to_target < 20.0:
+            self._update_walk_teleport_probability_display(0.0)
+            return
+
+        now = time.time()
+
+        bonus_delay = max(self.cfg_walk_teleport_bonus_delay, 0.1)
+        bonus_step = max(self.cfg_walk_teleport_bonus_step, 0.0)
+        bonus_max = max(self.cfg_walk_teleport_bonus_max, 0.0)
+
+        if not self._walk_teleport_active:
+            self._start_walk_teleport_tracking(now)
+            elapsed = 0.0
+        else:
+            elapsed = max(0.0, now - self._walk_teleport_walk_started_at)
+
+        if bonus_step > 0.0:
+            bonus_steps = math.floor(elapsed / bonus_delay)
+            self._walk_teleport_bonus_percent = min(bonus_max, bonus_steps * bonus_step)
+        else:
+            self._walk_teleport_bonus_percent = 0.0 if not self._walk_teleport_active else min(bonus_max, self._walk_teleport_bonus_percent)
+
+        base_percent = max(min(self.cfg_walk_teleport_probability, 100.0), 0.0)
+        effective_percent = min(100.0, base_percent + self._walk_teleport_bonus_percent)
+        probability = effective_percent / 100.0
+
+        self._update_walk_teleport_probability_display(effective_percent)
+
+        if probability <= 0.0:
+            return
+
+        interval = max(self.cfg_walk_teleport_interval, 0.1)
+        if (now - self._last_walk_teleport_check_time) < interval:
+            return
+
+        self._last_walk_teleport_check_time = now
+
+        if random.random() >= probability:
+            return
+
+        teleport_command = "걷기 중 텔레포트"
+
+        executed = False
+        if self.debug_auto_control_checkbox.isChecked():
+            print(f"[자동 제어 테스트] WALK-TELEPORT: {teleport_command}")
+        elif self.auto_control_checkbox.isChecked():
+            self._emit_control_command(teleport_command, None)
+            executed = True
+
+        if executed:
+            self.last_command_sent_time = now
+
     def _get_arrival_threshold(self, node_type, node_key=None, node_data=None):
         """노드 타입에 맞는 도착 판정 임계값을 반환합니다."""
         if node_type == 'ladder_entry':
@@ -4672,6 +4856,8 @@ class MapTab(QWidget):
             self.last_command_sent_time = time.time()
 
         if command:
+            if command in ("걷기(우)", "걷기(좌)"):
+                self._start_walk_teleport_tracking()
             if self.debug_auto_control_checkbox.isChecked():
                 print(f"[자동 제어 테스트] RECOVERY: {command}")
             elif self.auto_control_checkbox.isChecked():
@@ -4692,6 +4878,23 @@ class MapTab(QWidget):
         QTimer.singleShot(resend_delay_ms, self._execute_recovery_resend)
 
         self.last_player_pos = final_player_pos
+
+    def _reset_walk_teleport_state(self):
+        """걷기 텔레포트 확률 누적 상태를 초기화합니다."""
+        self._walk_teleport_active = False
+        self._walk_teleport_walk_started_at = 0.0
+        self._walk_teleport_bonus_percent = 0.0
+        self._last_walk_teleport_check_time = 0.0
+        if hasattr(self, '_update_walk_teleport_probability_display'):
+            self._update_walk_teleport_probability_display(0.0)
+
+    def _start_walk_teleport_tracking(self, start_time: float | None = None):
+        """걷기 텔레포트 확률 누적을 시작합니다."""
+        now = start_time if start_time is not None else time.time()
+        self._walk_teleport_active = True
+        self._walk_teleport_walk_started_at = now
+        self._walk_teleport_bonus_percent = 0.0
+        self._last_walk_teleport_check_time = now
 
     def _reset_airborne_recovery_state(self):
         """공중 경고 관련 타이머를 초기화합니다."""
@@ -4965,6 +5168,11 @@ class MapTab(QWidget):
             else:
                 nav_action_text = f"{nav_action_text} (이벤트 실행 중)"
         
+        if final_intermediate_type != 'walk' or self.event_in_progress:
+            self._reset_walk_teleport_state()
+        else:
+            self._maybe_trigger_walk_teleport(direction, distance)
+
         if self.start_waypoint_found and self.journey_plan:
             if self.current_journey_index > 0:
                 prev_wp_id = self.journey_plan[self.current_journey_index - 1]
@@ -5075,14 +5283,16 @@ class MapTab(QWidget):
                             if current_direction in ["→", "←"]:
                                 command_to_send = "걷기(우)" if current_direction == "→" else "걷기(좌)"
                                 self.last_printed_direction = current_direction
+                                self._start_walk_teleport_tracking()
 
                     # 명령 전송 (테스트 또는 실제)
                     if command_to_send:
                         # --- [v.1819] '의도된 움직임' 감지를 위해 명령 전송 시각 기록 ---
                         self.last_command_sent_time = time.time()
                         
-                        movement_related_keywords = ["걷기", "점프", "오르기", "사다리타기", "정렬", "아래점프"]
-                        if any(keyword in command_to_send for keyword in movement_related_keywords):
+                        movement_related_keywords = ["걷기", "점프", "오르기", "사다리타기", "정렬", "아래점프", "텔레포트"]
+                        if ("텔레포트" not in command_to_send
+                                and any(keyword in command_to_send for keyword in movement_related_keywords)):
                             self.last_movement_command = command_to_send
                         
                         if self.debug_auto_control_checkbox.isChecked():
@@ -5148,6 +5358,8 @@ class MapTab(QWidget):
             v12.8.6: [수정] '낭떠러지' 또는 '아래 점프' 지점 도착 시, 다음 경로를 확인하기 전에 먼저 해당 노드의 타입을 확인하고 즉시 행동 준비 상태로 전환하도록 수정하여 경로 실행 오류를 해결합니다.
             'move_to_target' 상태일 때의 도착 판정, 상태 전환, 이탈 판정을 처리합니다.
             """
+            distance = 0.0
+            direction = "-"
             if not (self.current_segment_path and self.current_segment_index < len(self.current_segment_path)):
                 self.expected_terrain_group = None
                 return
@@ -5171,6 +5383,8 @@ class MapTab(QWidget):
                     arrived = True
             else:
                 distance_to_target = abs(final_player_pos.x() - self.intermediate_target_pos.x())
+                if not self.event_in_progress:
+                    direction = "→" if final_player_pos.x() < self.intermediate_target_pos.x() else "←"
                 if distance_to_target < arrival_threshold and floor_matches:
                     arrived = True
 
@@ -5589,6 +5803,20 @@ class MapTab(QWidget):
         self.general_log_viewer.append(f'<font color="{color}">{message}</font>')
         self.general_log_viewer.verticalScrollBar().setValue(self.general_log_viewer.verticalScrollBar().maximum())
         
+    def _render_detection_log(self, body_html: str | None) -> None:
+        self._last_detection_log_body = body_html or ""
+        probability_html = f"<span>{self._walk_teleport_probability_text}</span>"
+        if self._last_detection_log_body:
+            combined = f"{probability_html}<br>{self._last_detection_log_body}"
+        else:
+            combined = probability_html
+        self.detection_log_viewer.setHtml(combined)
+
+    def _update_walk_teleport_probability_display(self, percent: float) -> None:
+        self._walk_teleport_probability_text = f"텔레포트 확률: {max(percent, 0.0):.1f}%"
+        if hasattr(self, '_last_detection_log_body'):
+            self._render_detection_log(self._last_detection_log_body)
+
     def update_detection_log_from_features(self, inliers, outliers):
         """정상치와 이상치 피처 목록을 받아 탐지 상태 로그를 업데이트합니다."""
         #  5프레임마다 한 번씩만 업데이트하도록 조절
@@ -5602,7 +5830,7 @@ class MapTab(QWidget):
         all_found = inliers + outliers
         if not all_found:
             log_html += '<font color="red">탐지된 지형 없음</font>'
-            self.detection_log_viewer.setHtml(log_html)
+            self._render_detection_log(log_html)
             return
 
         inlier_texts = []
@@ -5622,14 +5850,16 @@ class MapTab(QWidget):
             log_html += ", "
         log_html += ", ".join(outlier_texts)
         
-        self.detection_log_viewer.setHtml(log_html)
+        self._render_detection_log(log_html)
 
     def update_detection_log_message(self, message, color):
         """단순 텍스트 메시지를 탐지 상태 로그에 표시합니다."""
-        self.detection_log_viewer.setHtml(f'<font color="{color}">{message}</font>')
+        body = f'<font color="{color}">{message}</font>'
+        self._render_detection_log(body)
         
     def update_detection_log(self, message, color):
-        self.detection_log_viewer.setText(f'<font color="{color}">{message}</font>')
+        body = f'<font color="{color}">{message}</font>'
+        self._render_detection_log(body)
     
     def _build_line_floor_map(self): # [v11.4.5] 지형선 ID와 층 정보를 매핑하는 캐시를 생성하는 헬퍼 메서드
         """self.geometry_data를 기반으로 line_id_to_floor_map을 생성/갱신합니다."""
@@ -6456,8 +6686,11 @@ class MapTab(QWidget):
         last_profile = self.load_global_settings()
         self.hotkey_display_label.setText(self.current_hotkey.upper())
         if self.hotkey_manager:
-            self.hotkey_manager.register_hotkey(self.current_hotkey)
-            self._sync_hotkey_filter_id()
+            try:
+                self.hotkey_manager.register_hotkey(self.current_hotkey)
+                self._sync_hotkey_filter_id()
+            except Exception as exc:
+                self.update_general_log(f"전역 단축키 등록 실패: {exc}", "red")
 
         if last_profile and last_profile in [self.profile_selector.itemText(i) for i in range(self.profile_selector.count())]:
             profile_to_load = last_profile

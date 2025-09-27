@@ -4,6 +4,7 @@ import json
 import os
 import random
 import time
+import math
 import ctypes
 from ctypes import wintypes
 from dataclasses import dataclass
@@ -15,7 +16,6 @@ from PyQt6.QtCore import Qt, QTimer, pyqtSignal, QRect, QThread, QAbstractNative
 from PyQt6.QtWidgets import (
     QApplication,
     QCheckBox,
-    QComboBox,
     QDialog,
     QDialogButtonBox,
     QFormLayout,
@@ -227,6 +227,12 @@ class TeleportSettings:
     enabled: bool = False
     distance_px: float = 190.0
     probability: int = 50
+    walk_enabled: bool = False
+    walk_probability: float = 3.0
+    walk_interval: float = 0.5
+    walk_bonus_interval: float = 0.5
+    walk_bonus_step: float = 20.0
+    walk_bonus_max: float = 70.0
 
 
 class AttackSkillDialog(QDialog):
@@ -573,6 +579,13 @@ class HuntTab(QWidget):
         self.teleport_command_right = "텔레포트(우)"
         self.teleport_command_left_v2 = "텔레포트(좌)v2"
         self.teleport_command_right_v2 = "텔레포트(우)v2"
+        self.walk_teleport_command = "걷기 중 텔레포트"
+        self._walk_teleport_active = False
+        self._walk_teleport_walk_started_at = 0.0
+        self._last_walk_teleport_check_ts = 0.0
+        self._walk_teleport_bonus_percent = 0.0
+        self._walk_teleport_direction: Optional[str] = None
+        self._walk_teleport_display_percent = 0.0
         self._movement_mode: Optional[str] = None
         self._last_movement_command_ts = 0.0
         self._direction_config: dict = {}
@@ -779,34 +792,28 @@ class HuntTab(QWidget):
         misc_group = self._create_misc_group()
 
         left_column.addWidget(detection_group)
-
-        range_misc_row = QHBoxLayout()
-        range_misc_row.setSpacing(10)
-        range_misc_row.addWidget(range_group, 1)
-        range_misc_row.addWidget(misc_group, 1)
-        left_column.addLayout(range_misc_row)
-
-        condition_row = QHBoxLayout()
-        condition_row.setSpacing(10)
-        condition_row.addWidget(condition_group, 1)
-        condition_row.addStretch(1)
-        left_column.addLayout(condition_row)
         left_column.addStretch(1)
 
         right_column = QVBoxLayout()
         right_column.setSpacing(10)
 
-        model_group = self._create_model_group()
         skill_group = self._create_skill_group()
-
-        right_column.addWidget(model_group)
         right_column.addWidget(skill_group, 1)
+
+        config_row = QHBoxLayout()
+        config_row.setSpacing(10)
+        for group in (range_group, misc_group, condition_group):
+            group.setSizePolicy(QSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed))
+            group.setMaximumWidth(260)
+            group.setMinimumWidth(200)
+            config_row.addWidget(group, 1)
+        right_column.addLayout(config_row)
         right_column.addStretch(1)
 
-        main_layout.addLayout(left_column, 5)
-        main_layout.addLayout(right_column, 5)
-        main_layout.setStretch(0, 5)
-        main_layout.setStretch(1, 5)
+        main_layout.addLayout(left_column, 1)
+        main_layout.addLayout(right_column, 1)
+        main_layout.setStretch(0, 1)
+        main_layout.setStretch(1, 1)
 
         self.setLayout(main_layout)
         self._refresh_attack_tree()
@@ -947,18 +954,6 @@ class HuntTab(QWidget):
         group.setSizePolicy(QSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed))
         return group
 
-    def _create_model_group(self) -> QGroupBox:
-        group = QGroupBox("사용 모델")
-        model_layout = QHBoxLayout()
-        self.model_selector = QComboBox()
-        self.model_selector.setPlaceholderText("학습 탭과 연동 필요")
-        self.refresh_model_btn = QPushButton("새로고침")
-        self.refresh_model_btn.clicked.connect(self.refresh_model_choices)
-        model_layout.addWidget(self.model_selector, 1)
-        model_layout.addWidget(self.refresh_model_btn)
-        group.setLayout(model_layout)
-        return group
-
     def _create_detection_group(self) -> QGroupBox:
         group = QGroupBox("탐지 실행")
         group.setSizePolicy(
@@ -1073,7 +1068,7 @@ class HuntTab(QWidget):
         control_log_label = QLabel("입력 로그")
         self.control_log_view = QTextEdit()
         self.control_log_view.setReadOnly(True)
-        self.control_log_view.setMinimumHeight(100)
+        self.control_log_view.setMinimumHeight(160)
         self.control_log_view.setStyleSheet("font-family: Consolas, monospace;")
         control_log_container.addWidget(control_log_label)
         control_log_container.addWidget(self.control_log_view)
@@ -1083,7 +1078,7 @@ class HuntTab(QWidget):
         keyboard_log_label = QLabel("키보드 입력 로그")
         self.keyboard_log_view = QTextEdit()
         self.keyboard_log_view.setReadOnly(True)
-        self.keyboard_log_view.setMinimumHeight(100)
+        self.keyboard_log_view.setMinimumHeight(160)
         self.keyboard_log_view.setStyleSheet("font-family: Consolas, monospace;")
         keyboard_log_container.addWidget(keyboard_log_label)
         keyboard_log_container.addWidget(self.keyboard_log_view)
@@ -1093,7 +1088,7 @@ class HuntTab(QWidget):
         log_label = QLabel("로그")
         self.log_view = QTextEdit()
         self.log_view.setReadOnly(True)
-        self.log_view.setMinimumHeight(120)
+        self.log_view.setMinimumHeight(200)
         self.log_view.setStyleSheet("font-family: Consolas, monospace;")
         log_container.addWidget(log_label)
         log_container.addWidget(self.log_view)
@@ -1169,6 +1164,24 @@ class HuntTab(QWidget):
 
         return target_window
 
+    def _get_active_model_name(self) -> Optional[str]:
+        model_name: Optional[str] = None
+        if self.data_manager and hasattr(self.data_manager, 'load_settings'):
+            try:
+                settings = self.data_manager.load_settings()
+            except Exception:
+                settings = {}
+            if isinstance(settings, dict):
+                model_name = settings.get('last_used_model') or settings.get('model')
+        if not model_name and isinstance(self.last_used_model, str):
+            model_name = self.last_used_model
+        if isinstance(model_name, str):
+            model_name = model_name.strip()
+            if model_name:
+                self.last_used_model = model_name
+                return model_name
+        return None
+
     def _toggle_detection(self, checked: bool) -> None:
         if checked:
             if not self.data_manager:
@@ -1176,9 +1189,9 @@ class HuntTab(QWidget):
                 self.detect_btn.setChecked(False)
                 return
 
-            selected_model = self.model_selector.currentText().strip()
-            if not selected_model or not self.model_selector.isEnabled():
-                QMessageBox.warning(self, "오류", "사용할 모델을 선택하세요.")
+            selected_model = self._get_active_model_name()
+            if not selected_model:
+                QMessageBox.warning(self, "오류", "학습 탭에서 사용할 모델을 먼저 지정하세요.")
                 self.detect_btn.setChecked(False)
                 return
 
@@ -1301,8 +1314,6 @@ class HuntTab(QWidget):
                 self.detection_view.setPixmap(QPixmap())
             self.detect_btn.setText("실시간 탐지 중단")
 
-            if hasattr(self.data_manager, 'save_settings'):
-                self.data_manager.save_settings({'last_used_model': selected_model})
             self.last_used_model = selected_model
             self.append_log(f"탐지 시작: 모델={selected_model}, 범위={capture_region}")
             if self._active_target_names:
@@ -1594,6 +1605,9 @@ class HuntTab(QWidget):
             else:
                 direction_line = f"방향 탐지: 비활성 - {direction_mode}"
 
+            teleport_percent = self._get_walk_teleport_display_percent()
+            teleport_line = f"텔레포트 확률: {teleport_percent:.1f}%"
+
             info_lines = [
                 fps_line,
                 total_line,
@@ -1601,6 +1615,7 @@ class HuntTab(QWidget):
                 f"X축 범위 내 몬스터: {self.latest_monster_count}",
                 f"스킬 범위 몬스터: {self.latest_primary_monster_count}",
                 direction_line,
+                teleport_line,
             ]
 
             self.info_summary_view.setPlainText('\n'.join(info_lines))
@@ -1823,32 +1838,187 @@ class HuntTab(QWidget):
         return box
 
     def _create_teleport_section(self) -> QGroupBox:
-        box = QGroupBox("텔레포트 이동")
-        form = QFormLayout()
+        box = QGroupBox("텔레포트 설정")
 
-        self.teleport_enabled_checkbox = QCheckBox("사용")
+        self.teleport_enabled_checkbox = QCheckBox()
         self.teleport_enabled_checkbox.setChecked(self.teleport_settings.enabled)
-        self.teleport_enabled_checkbox.toggled.connect(self._handle_setting_changed)
+        self.teleport_enabled_checkbox.setToolTip("텔레포트 기본 동작 사용 여부")
+        self.teleport_enabled_checkbox.toggled.connect(self._on_base_teleport_toggled)
 
         self.teleport_distance_spinbox = QSpinBox()
         self.teleport_distance_spinbox.setRange(50, 600)
         self.teleport_distance_spinbox.setSingleStep(10)
         self.teleport_distance_spinbox.setValue(int(self.teleport_settings.distance_px))
         self.teleport_distance_spinbox.setSuffix(" px")
+        self.teleport_distance_spinbox.setMaximumWidth(90)
         self.teleport_distance_spinbox.valueChanged.connect(self._handle_setting_changed)
 
         self.teleport_probability_spinbox = QSpinBox()
         self.teleport_probability_spinbox.setRange(0, 100)
         self.teleport_probability_spinbox.setValue(int(self.teleport_settings.probability))
         self.teleport_probability_spinbox.setSuffix(" %")
+        self.teleport_probability_spinbox.setMaximumWidth(90)
         self.teleport_probability_spinbox.valueChanged.connect(self._handle_setting_changed)
 
-        form.addRow("사용", self.teleport_enabled_checkbox)
-        form.addRow("텔레포트 이동(px)", self.teleport_distance_spinbox)
-        form.addRow("사용 확률(%)", self.teleport_probability_spinbox)
+        self.walk_teleport_checkbox = QCheckBox()
+        self.walk_teleport_checkbox.setChecked(self.teleport_settings.walk_enabled)
+        self.walk_teleport_checkbox.setToolTip("걷기 중 텔레포트 사용 여부")
+        self.walk_teleport_checkbox.toggled.connect(self._on_walk_teleport_toggled)
 
-        box.setLayout(form)
+        self.walk_teleport_probability_spinbox = QDoubleSpinBox()
+        self.walk_teleport_probability_spinbox.setRange(0.0, 100.0)
+        self.walk_teleport_probability_spinbox.setDecimals(1)
+        self.walk_teleport_probability_spinbox.setSingleStep(0.5)
+        self.walk_teleport_probability_spinbox.setValue(float(self.teleport_settings.walk_probability))
+        self.walk_teleport_probability_spinbox.setSuffix(" %")
+        self.walk_teleport_probability_spinbox.setMaximumWidth(90)
+        self.walk_teleport_probability_spinbox.valueChanged.connect(self._handle_setting_changed)
+
+        self.walk_teleport_interval_spinbox = QDoubleSpinBox()
+        self.walk_teleport_interval_spinbox.setRange(0.1, 10.0)
+        self.walk_teleport_interval_spinbox.setDecimals(2)
+        self.walk_teleport_interval_spinbox.setSingleStep(0.1)
+        self.walk_teleport_interval_spinbox.setValue(float(self.teleport_settings.walk_interval))
+        self.walk_teleport_interval_spinbox.setSuffix(" s")
+        self.walk_teleport_interval_spinbox.setMaximumWidth(90)
+        self.walk_teleport_interval_spinbox.valueChanged.connect(self._handle_setting_changed)
+
+        self.walk_teleport_bonus_interval_spinbox = QDoubleSpinBox()
+        self.walk_teleport_bonus_interval_spinbox.setRange(0.1, 10.0)
+        self.walk_teleport_bonus_interval_spinbox.setDecimals(2)
+        self.walk_teleport_bonus_interval_spinbox.setSingleStep(0.1)
+        self.walk_teleport_bonus_interval_spinbox.setValue(float(self.teleport_settings.walk_bonus_interval))
+        self.walk_teleport_bonus_interval_spinbox.setSuffix(" s")
+        self.walk_teleport_bonus_interval_spinbox.setMaximumWidth(90)
+        self.walk_teleport_bonus_interval_spinbox.valueChanged.connect(self._handle_setting_changed)
+
+        self.walk_teleport_bonus_step_spinbox = QDoubleSpinBox()
+        self.walk_teleport_bonus_step_spinbox.setRange(0.0, 100.0)
+        self.walk_teleport_bonus_step_spinbox.setDecimals(1)
+        self.walk_teleport_bonus_step_spinbox.setSingleStep(1.0)
+        self.walk_teleport_bonus_step_spinbox.setValue(float(self.teleport_settings.walk_bonus_step))
+        self.walk_teleport_bonus_step_spinbox.setSuffix(" %")
+        self.walk_teleport_bonus_step_spinbox.setMaximumWidth(90)
+        self.walk_teleport_bonus_step_spinbox.valueChanged.connect(self._handle_setting_changed)
+
+        self.walk_teleport_bonus_max_spinbox = QDoubleSpinBox()
+        self.walk_teleport_bonus_max_spinbox.setRange(0.0, 100.0)
+        self.walk_teleport_bonus_max_spinbox.setDecimals(1)
+        self.walk_teleport_bonus_max_spinbox.setSingleStep(1.0)
+        self.walk_teleport_bonus_max_spinbox.setValue(float(self.teleport_settings.walk_bonus_max))
+        self.walk_teleport_bonus_max_spinbox.setSuffix(" %")
+        self.walk_teleport_bonus_max_spinbox.setMaximumWidth(90)
+        self.walk_teleport_bonus_max_spinbox.valueChanged.connect(self._handle_setting_changed)
+
+        # 좌측: 기본 텔레포트 설정
+        left_column = QVBoxLayout()
+        left_column.setSpacing(6)
+        base_header = QHBoxLayout()
+        base_header.setSpacing(6)
+        base_label = QLabel("텔레포트 기본설정")
+        base_header.addWidget(base_label)
+        base_header.addStretch(1)
+        base_header.addWidget(self.teleport_enabled_checkbox)
+        left_column.addLayout(base_header)
+
+        base_row = QHBoxLayout()
+        base_row.setSpacing(6)
+        base_row.addWidget(QLabel("이동(px)"))
+        base_row.addWidget(self.teleport_distance_spinbox)
+        base_row.addSpacing(8)
+        base_row.addWidget(QLabel("확률(%)"))
+        base_row.addWidget(self.teleport_probability_spinbox)
+        base_row.addStretch(1)
+        left_column.addLayout(base_row)
+        left_column.addStretch(1)
+
+        # 우측: 걷기 중 텔레포트 설정
+        right_column = QVBoxLayout()
+        right_column.setSpacing(6)
+        walk_header = QHBoxLayout()
+        walk_header.setSpacing(6)
+        walk_header.addWidget(QLabel("텔레포트(걷기 중)"))
+        walk_header.addStretch(1)
+        walk_header.addWidget(self.walk_teleport_checkbox)
+        right_column.addLayout(walk_header)
+
+        walk_top_row = QHBoxLayout()
+        walk_top_row.setSpacing(6)
+        walk_top_row.addWidget(QLabel("확률(%)"))
+        walk_top_row.addWidget(self.walk_teleport_probability_spinbox)
+        walk_top_row.addSpacing(6)
+        walk_top_row.addWidget(QLabel("판정주기(s)"))
+        walk_top_row.addWidget(self.walk_teleport_interval_spinbox)
+        walk_top_row.addStretch(1)
+        right_column.addLayout(walk_top_row)
+
+        walk_bottom_row = QHBoxLayout()
+        walk_bottom_row.setSpacing(6)
+        walk_bottom_row.addWidget(QLabel("보너스 간격(s)"))
+        walk_bottom_row.addWidget(self.walk_teleport_bonus_interval_spinbox)
+        walk_bottom_row.addSpacing(6)
+        walk_bottom_row.addWidget(QLabel("보너스 증가율(%)"))
+        walk_bottom_row.addWidget(self.walk_teleport_bonus_step_spinbox)
+        walk_bottom_row.addSpacing(6)
+        walk_bottom_row.addWidget(QLabel("보너스 최대(%)"))
+        walk_bottom_row.addWidget(self.walk_teleport_bonus_max_spinbox)
+        walk_bottom_row.addStretch(1)
+        right_column.addLayout(walk_bottom_row)
+        right_column.addStretch(1)
+
+        columns_layout = QHBoxLayout()
+        columns_layout.setContentsMargins(0, 0, 0, 0)
+        columns_layout.setSpacing(16)
+        columns_layout.addLayout(left_column, 1)
+        columns_layout.addLayout(right_column, 1)
+
+        outer_layout = QVBoxLayout()
+        outer_layout.setContentsMargins(8, 8, 8, 8)
+        outer_layout.setSpacing(6)
+        outer_layout.addLayout(columns_layout)
+
+        box.setLayout(outer_layout)
+        self._update_base_teleport_inputs_enabled()
+        self._update_walk_teleport_inputs_enabled()
         return box
+
+    def _update_walk_teleport_inputs_enabled(self) -> None:
+        enabled = getattr(self, 'walk_teleport_checkbox', None)
+        if enabled is None:
+            return
+        state = self.walk_teleport_checkbox.isChecked()
+        for widget in (
+            self.walk_teleport_probability_spinbox,
+            self.walk_teleport_interval_spinbox,
+            self.walk_teleport_bonus_interval_spinbox,
+            self.walk_teleport_bonus_step_spinbox,
+            self.walk_teleport_bonus_max_spinbox,
+        ):
+            widget.setEnabled(state)
+        if not state:
+            self._reset_walk_teleport_state()
+        self._update_detection_summary()
+
+    def _on_walk_teleport_toggled(self, checked: bool) -> None:
+        self.teleport_settings.walk_enabled = bool(checked)
+        self._update_walk_teleport_inputs_enabled()
+        self._handle_setting_changed()
+
+    def _update_base_teleport_inputs_enabled(self) -> None:
+        checkbox = getattr(self, 'teleport_enabled_checkbox', None)
+        if checkbox is None:
+            return
+        state = checkbox.isChecked()
+        for widget in (
+            self.teleport_distance_spinbox,
+            self.teleport_probability_spinbox,
+        ):
+            widget.setEnabled(state)
+
+    def _on_base_teleport_toggled(self, checked: bool) -> None:
+        self.teleport_settings.enabled = bool(checked)
+        self._update_base_teleport_inputs_enabled()
+        self._handle_setting_changed()
 
     def _on_area_config_changed(self) -> None:
         if self.latest_snapshot:
@@ -1957,6 +2127,7 @@ class HuntTab(QWidget):
 
     def _handle_setting_changed(self, *args, **kwargs) -> None:
         self._save_settings()
+        self._update_detection_summary()
 
     def _schedule_condition_poll(self, delay_ms: Optional[int] = None) -> None:
         if not self._condition_debounce_timer:
@@ -2540,14 +2711,9 @@ class HuntTab(QWidget):
                 self.data_manager.register_overlay_listener(self._handle_overlay_config_update)
             except Exception:
                 pass
-        self.refresh_model_choices()
-        if hasattr(self.data_manager, 'load_settings'):
-            settings = self.data_manager.load_settings()
-            self.last_used_model = settings.get('last_used_model')
-            if self.last_used_model:
-                index = self.model_selector.findText(self.last_used_model)
-                if index >= 0:
-                    self.model_selector.setCurrentIndex(index)
+        self.last_used_model = self._get_active_model_name()
+        if self.last_used_model:
+            self.append_log(f"학습 탭 모델 연동: '{self.last_used_model}'", "info")
         self.append_log("학습 데이터 연동 완료", "info")
         self._save_settings()
         self._load_nickname_configuration()
@@ -2659,6 +2825,12 @@ class HuntTab(QWidget):
             self.teleport_settings.enabled = bool(teleport.get('enabled', self.teleport_settings.enabled))
             self.teleport_settings.distance_px = float(teleport.get('distance_px', self.teleport_settings.distance_px))
             self.teleport_settings.probability = int(teleport.get('probability', self.teleport_settings.probability))
+            self.teleport_settings.walk_enabled = bool(teleport.get('walk_enabled', self.teleport_settings.walk_enabled))
+            self.teleport_settings.walk_probability = float(teleport.get('walk_probability', self.teleport_settings.walk_probability))
+            self.teleport_settings.walk_interval = float(teleport.get('walk_interval', self.teleport_settings.walk_interval))
+            self.teleport_settings.walk_bonus_interval = float(teleport.get('walk_bonus_interval', self.teleport_settings.walk_bonus_interval))
+            self.teleport_settings.walk_bonus_step = float(teleport.get('walk_bonus_step', self.teleport_settings.walk_bonus_step))
+            self.teleport_settings.walk_bonus_max = float(teleport.get('walk_bonus_max', self.teleport_settings.walk_bonus_max))
             self.teleport_command_left = teleport.get('command_left', self.teleport_command_left)
             self.teleport_command_right = teleport.get('command_right', self.teleport_command_right)
             self.teleport_command_left_v2 = teleport.get('command_left_v2', self.teleport_command_left_v2)
@@ -2666,6 +2838,13 @@ class HuntTab(QWidget):
             self.teleport_enabled_checkbox.setChecked(self.teleport_settings.enabled)
             self.teleport_distance_spinbox.setValue(int(self.teleport_settings.distance_px))
             self.teleport_probability_spinbox.setValue(int(self.teleport_settings.probability))
+            self.walk_teleport_checkbox.setChecked(self.teleport_settings.walk_enabled)
+            self.walk_teleport_probability_spinbox.setValue(self.teleport_settings.walk_probability)
+            self.walk_teleport_interval_spinbox.setValue(self.teleport_settings.walk_interval)
+            self.walk_teleport_bonus_interval_spinbox.setValue(self.teleport_settings.walk_bonus_interval)
+            self.walk_teleport_bonus_step_spinbox.setValue(self.teleport_settings.walk_bonus_step)
+            self.walk_teleport_bonus_max_spinbox.setValue(self.teleport_settings.walk_bonus_max)
+            self._update_walk_teleport_inputs_enabled()
 
         facing_state = data.get('last_facing')
         self._set_current_facing(facing_state if facing_state in ('left', 'right') else None, save=False)
@@ -2744,6 +2923,12 @@ class HuntTab(QWidget):
         self.teleport_settings.enabled = bool(self.teleport_enabled_checkbox.isChecked())
         self.teleport_settings.distance_px = float(self.teleport_distance_spinbox.value())
         self.teleport_settings.probability = int(self.teleport_probability_spinbox.value())
+        self.teleport_settings.walk_enabled = bool(self.walk_teleport_checkbox.isChecked())
+        self.teleport_settings.walk_probability = float(self.walk_teleport_probability_spinbox.value())
+        self.teleport_settings.walk_interval = float(self.walk_teleport_interval_spinbox.value())
+        self.teleport_settings.walk_bonus_interval = float(self.walk_teleport_bonus_interval_spinbox.value())
+        self.teleport_settings.walk_bonus_step = float(self.walk_teleport_bonus_step_spinbox.value())
+        self.teleport_settings.walk_bonus_max = float(self.walk_teleport_bonus_max_spinbox.value())
 
         settings_data = {
             'ranges': {
@@ -2781,6 +2966,12 @@ class HuntTab(QWidget):
                 'enabled': self.teleport_settings.enabled,
                 'distance_px': self.teleport_settings.distance_px,
                 'probability': self.teleport_settings.probability,
+                'walk_enabled': self.teleport_settings.walk_enabled,
+                'walk_probability': self.teleport_settings.walk_probability,
+                'walk_interval': self.teleport_settings.walk_interval,
+                'walk_bonus_interval': self.teleport_settings.walk_bonus_interval,
+                'walk_bonus_step': self.teleport_settings.walk_bonus_step,
+                'walk_bonus_max': self.teleport_settings.walk_bonus_max,
                 'command_left': self.teleport_command_left,
                 'command_right': self.teleport_command_right,
                 'command_left_v2': self.teleport_command_left_v2,
@@ -2832,23 +3023,6 @@ class HuntTab(QWidget):
         except Exception as exc:
             self.append_log(f"설정 저장 실패: {exc}", "warn")
 
-    def refresh_model_choices(self) -> None:
-        self.model_selector.clear()
-        if not self.data_manager:
-            self.model_selector.addItem("연동 필요")
-            self.model_selector.setEnabled(False)
-            return
-
-        models = sorted(self.data_manager.get_saved_models()) if hasattr(self.data_manager, "get_saved_models") else []
-        if not models:
-            self.model_selector.addItem("사용 가능한 모델 없음")
-            self.model_selector.setEnabled(False)
-        else:
-            self.model_selector.addItems(models)
-            self.model_selector.setEnabled(True)
-            if self.last_used_model and self.last_used_model in models:
-                self.model_selector.setCurrentText(self.last_used_model)
-
     def request_control(self, reason: str | None = None) -> None:
         if self.current_authority == "hunt":
             self.append_log("이미 사냥 권한을 보유 중입니다.", "warn")
@@ -2866,7 +3040,7 @@ class HuntTab(QWidget):
             "y_band_height": self.y_band_height_spinbox.value(),
             "y_offset": self.y_band_offset_spinbox.value(),
             "primary_skill_range": self.primary_skill_range_spinbox.value(),
-            "model": self.model_selector.currentText(),
+            "model": self._get_active_model_name() or "-",
             "attack_skill_count": len(self.attack_skills),
             "buff_skill_count": len(self.buff_skills),
             "latest_monster_count": self.latest_monster_count,
@@ -3019,6 +3193,7 @@ class HuntTab(QWidget):
 
         if self._movement_mode:
             self._movement_mode = None
+            self._reset_walk_teleport_state()
 
         skill = self._select_attack_skill()
         if not skill:
@@ -3064,15 +3239,21 @@ class HuntTab(QWidget):
             roll = random.randint(1, 100)
             if roll <= teleport_probability:
                 if self._issue_teleport_command(target_side, distance):
+                    self._reset_walk_teleport_state()
                     return True
-
-        return self._issue_walk_command(target_side, distance)
+        walk_issued = self._issue_walk_command(target_side, distance)
+        if walk_issued:
+            self._maybe_trigger_walk_teleport(target_side, distance)
+            return True
+        self._maybe_trigger_walk_teleport(target_side, distance)
+        return walk_issued
 
     def _issue_walk_command(self, side: str, distance: float) -> bool:
         if side not in ('left', 'right'):
             return False
         mode_key = f"walk_{side}"
         if self._movement_mode == mode_key:
+            self._mark_walk_teleport_started(side)
             return True
         command = "걷기(좌)" if side == 'left' else "걷기(우)"
         reason = f"몬스터 접근 ({'좌' if side == 'left' else '우'}, {distance:.0f}px)"
@@ -3080,6 +3261,7 @@ class HuntTab(QWidget):
         self._movement_mode = mode_key
         self.hunting_active = True
         self._last_movement_command_ts = time.time()
+        self._mark_walk_teleport_started(side)
         return True
 
     def _issue_teleport_command(self, side: str, distance: float) -> bool:
@@ -3094,6 +3276,7 @@ class HuntTab(QWidget):
         reason = f"몬스터에게 이동 ({distance:.0f}px)"
         self._emit_control_command(command, reason=reason)
         self._movement_mode = None
+        self._reset_walk_teleport_state()
         self._set_current_facing(side, save=False)
         self.hunting_active = True
         self._last_movement_command_ts = time.time()
@@ -3101,6 +3284,95 @@ class HuntTab(QWidget):
         self._set_command_cooldown(delay)
         self._log_delay_message("텔레포트 이동", delay)
         return True
+
+    def _mark_walk_teleport_started(self, side: str) -> None:
+        if not getattr(self, 'walk_teleport_checkbox', None):
+            return
+        if not self.walk_teleport_checkbox.isChecked():
+            self._reset_walk_teleport_state()
+            return
+        now = time.time()
+        if not self._walk_teleport_active or self._walk_teleport_direction != side:
+            self._walk_teleport_active = True
+            self._walk_teleport_walk_started_at = now
+            self._walk_teleport_bonus_percent = 0.0
+            self._last_walk_teleport_check_ts = 0.0
+        self._walk_teleport_direction = side
+        if self._last_walk_teleport_check_ts <= 0.0:
+            self._last_walk_teleport_check_ts = now
+        self._update_detection_summary()
+
+    def _maybe_trigger_walk_teleport(self, side: str, distance: float) -> bool:
+        if not getattr(self, 'walk_teleport_checkbox', None):
+            return False
+        if not self.walk_teleport_checkbox.isChecked():
+            return False
+        if side not in ('left', 'right'):
+            return False
+        mode_key = f"walk_{side}"
+        if self._movement_mode != mode_key:
+            return False
+        if self._get_command_delay_remaining() > 0:
+            return False
+        teleport_distance = float(self.teleport_distance_spinbox.value())
+        if distance <= teleport_distance:
+            return False
+        now = time.time()
+        if not self._walk_teleport_active or self._walk_teleport_direction != side:
+            self._mark_walk_teleport_started(side)
+            return False
+        interval = max(0.1, float(self.walk_teleport_interval_spinbox.value()))
+        if (now - self._last_walk_teleport_check_ts) < interval:
+            return False
+        self._last_walk_teleport_check_ts = now
+
+        elapsed = max(0.0, now - self._walk_teleport_walk_started_at)
+        bonus_interval = max(0.1, float(self.walk_teleport_bonus_interval_spinbox.value()))
+        bonus_step = max(0.0, float(self.walk_teleport_bonus_step_spinbox.value()))
+        bonus_max = max(0.0, float(self.walk_teleport_bonus_max_spinbox.value()))
+        bonus_percent = 0.0
+        if bonus_step > 0.0:
+            bonus_steps = math.floor(elapsed / bonus_interval)
+            bonus_percent = min(bonus_max, bonus_steps * bonus_step)
+        self._walk_teleport_bonus_percent = bonus_percent
+
+        base_percent = max(0.0, min(100.0, float(self.walk_teleport_probability_spinbox.value())))
+        effective_percent = min(100.0, base_percent + bonus_percent)
+        if effective_percent <= 0.0:
+            self._update_detection_summary()
+            return False
+
+        roll = random.uniform(0.0, 100.0)
+        if roll > effective_percent:
+            self._update_detection_summary()
+            return False
+
+        direction_text = '좌' if side == 'left' else '우'
+        reason = f"걷기({direction_text}, {distance:.0f}px) 유지"
+        self._emit_control_command(self.walk_teleport_command, reason=reason)
+        self._update_detection_summary()
+        return True
+
+    def _reset_walk_teleport_state(self) -> None:
+        self._walk_teleport_active = False
+        self._walk_teleport_walk_started_at = 0.0
+        self._last_walk_teleport_check_ts = 0.0
+        self._walk_teleport_bonus_percent = 0.0
+        self._walk_teleport_direction = None
+        self._update_detection_summary()
+
+    def _get_walk_teleport_display_percent(self) -> float:
+        checkbox = getattr(self, 'walk_teleport_checkbox', None)
+        if checkbox is None or not checkbox.isChecked():
+            return 0.0
+        base_percent = 0.0
+        try:
+            base_percent = float(self.walk_teleport_probability_spinbox.value())
+        except Exception:
+            base_percent = 0.0
+        base_percent = max(0.0, min(100.0, base_percent))
+        bonus = self._walk_teleport_bonus_percent if self._walk_teleport_active else 0.0
+        return min(100.0, base_percent + max(0.0, bonus))
 
     def _evaluate_buff_usage(self, now: float) -> bool:
         if self._get_command_delay_remaining() > 0:
@@ -3683,9 +3955,11 @@ class HuntTab(QWidget):
         self._release_pending = False
         self.hunting_active = False
         self._movement_mode = None
+        self._reset_walk_teleport_state()
 
     def _ensure_idle_keys(self, reason: Optional[str] = None) -> None:
         self._clear_pending_skill()
         self._clear_pending_direction()
+        self._reset_walk_teleport_state()
         if self.hunting_active:
             self._issue_all_keys_release(reason)
