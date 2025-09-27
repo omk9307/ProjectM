@@ -1833,6 +1833,12 @@ class LearningTab(QWidget):
         self.image_list_widget.itemDoubleClicked.connect(self.edit_selected_image)
 
         capture_options_layout = QHBoxLayout()
+        capture_options_layout.addWidget(QLabel("대기시간(초):"))
+        self.capture_delay_spinbox = QDoubleSpinBox()
+        self.capture_delay_spinbox.setRange(0.0, 10.0)
+        self.capture_delay_spinbox.setValue(0.0)
+        self.capture_delay_spinbox.setSingleStep(0.1)
+        capture_options_layout.addWidget(self.capture_delay_spinbox)
         capture_options_layout.addWidget(QLabel("횟수:"))
         self.capture_count_spinbox = QSpinBox()
         self.capture_count_spinbox.setRange(1, 50)
@@ -2765,6 +2771,7 @@ class LearningTab(QWidget):
     def capture_screen(self):
         count = self.capture_count_spinbox.value()
         interval = self.capture_interval_spinbox.value()
+        delay_seconds = self.capture_delay_spinbox.value()
         initial_class_name = self._get_selected_class_name()
 
         # 캡처 시에는 메인 윈도우를 숨길 필요가 없으므로 hide/show 로직 제거
@@ -2785,6 +2792,11 @@ class LearningTab(QWidget):
             if capture_region['width'] <= 0 or capture_region['height'] <= 0:
                 QMessageBox.warning(self, '오류', '게임 창의 크기가 유효하지 않습니다.')
                 return
+
+            delay_ms = max(0, int(delay_seconds * 1000))
+            if delay_ms:
+                self.update_status_message(f"캡처 시작 전 {delay_seconds:.1f}초 대기 중...")
+                QThread.msleep(delay_ms)
 
             captured_pixmaps = []
             with mss.mss() as sct:
