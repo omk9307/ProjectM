@@ -71,6 +71,7 @@ try:
         GLOBAL_MAP_SETTINGS_FILE,
         HYSTERESIS_EXIT_OFFSET,
         IDLE_TIME_THRESHOLD,
+        AIRBORNE_RECOVERY_WAIT_DEFAULT,
         JUMPING_STATE_FRAME_THRESHOLD,
         JUMP_LINK_ARRIVAL_X_THRESHOLD,
         JUMP_Y_MAX_THRESHOLD,
@@ -99,6 +100,7 @@ try:
         PREPARE_TIMEOUT,
         ROUTE_SLOT_IDS,
         SRC_ROOT,
+        STUCK_DETECTION_WAIT_DEFAULT,
         WAYPOINT_ARRIVAL_X_THRESHOLD,
         WORKSPACE_ROOT,
         Y_MOVEMENT_DEADZONE,
@@ -117,6 +119,7 @@ except ImportError:
         GLOBAL_MAP_SETTINGS_FILE,
         HYSTERESIS_EXIT_OFFSET,
         IDLE_TIME_THRESHOLD,
+        AIRBORNE_RECOVERY_WAIT_DEFAULT,
         JUMPING_STATE_FRAME_THRESHOLD,
         JUMP_LINK_ARRIVAL_X_THRESHOLD,
         JUMP_Y_MAX_THRESHOLD,
@@ -145,6 +148,7 @@ except ImportError:
         PREPARE_TIMEOUT,
         ROUTE_SLOT_IDS,
         SRC_ROOT,
+        STUCK_DETECTION_WAIT_DEFAULT,
         WAYPOINT_ARRIVAL_X_THRESHOLD,
         WORKSPACE_ROOT,
         Y_MOVEMENT_DEADZONE,
@@ -459,12 +463,13 @@ class MapTab(QWidget):
             self.last_action_time = 0.0                      # 마지막으로 'idle'이 아닌 상태였던 시간
             self.last_movement_command = None                # 마지막으로 전송한 이동 명령 (예: '걷기(우)')
             self.stuck_recovery_attempts = 0                 # 복구 시도 횟수
-            self.STUCK_DETECTION_THRESHOLD_S = 0.3           # 멈춤으로 간주할 시간 (초)
+            self.cfg_stuck_detection_wait = STUCK_DETECTION_WAIT_DEFAULT  # 일반 자동복구 대기시간 (초)
             self.MAX_STUCK_RECOVERY_ATTEMPTS = 30             # 최대 복구 시도 횟수
             self.CLIMBING_RECOVERY_KEYWORDS = ["오르기", "사다리타기"] # 등반 복구 식별용
             self.recovery_cooldown_until = 0.0 # 복구 후 판단을 유예할 시간
             self.last_command_sent_time = 0.0 # 마지막으로 명령을 보낸 시간
             self.NON_WALK_STUCK_THRESHOLD_S = 1.0            # 걷기/정지 이외 상태에서 멈춤으로 간주할 시간 (초)
+            self.cfg_airborne_recovery_wait = AIRBORNE_RECOVERY_WAIT_DEFAULT  # 공중 자동복구 대기시간 (초)
             self.alignment_target_x = None # ---  사다리 앞 정렬(align) 상태 변수 ---
             self.alignment_expected_floor = None
             self.alignment_expected_group = None
@@ -473,6 +478,10 @@ class MapTab(QWidget):
 
             # 공중 경로 계산 대기 메시지 중복 방지 플래그
             self.airborne_path_warning_active = False
+            self.airborne_warning_started_at = 0.0
+            self.airborne_recovery_cooldown_until = 0.0
+            self._last_airborne_recovery_log_time = 0.0
+            self._reset_airborne_recovery_state()
 
             # --- [v.1810] 좁은 발판 착지 판단 유예 플래그 ---
             self.just_landed_on_narrow_terrain = False
@@ -1196,6 +1205,8 @@ class MapTab(QWidget):
             self.cfg_arrival_frame_threshold = 2
             self.cfg_action_success_frame_threshold = 2
             # ==================== v11.5.0 기본값 초기화 추가 끝 ======================
+            self.cfg_stuck_detection_wait = STUCK_DETECTION_WAIT_DEFAULT
+            self.cfg_airborne_recovery_wait = AIRBORNE_RECOVERY_WAIT_DEFAULT
             
             config = {}
             if os.path.exists(config_file):
@@ -1231,7 +1242,9 @@ class MapTab(QWidget):
                 self.cfg_arrival_frame_threshold = state_config.get("arrival_frame_threshold", self.cfg_arrival_frame_threshold)
                 self.cfg_action_success_frame_threshold = state_config.get("action_success_frame_threshold", self.cfg_action_success_frame_threshold)
                 # ==================== v11.5.0 설정 로드 추가 끝 ======================
-                
+                self.cfg_stuck_detection_wait = state_config.get("stuck_detection_wait", self.cfg_stuck_detection_wait)
+                self.cfg_airborne_recovery_wait = state_config.get("airborne_recovery_wait", self.cfg_airborne_recovery_wait)
+
                 self.update_general_log("저장된 상태 판정 설정을 로드했습니다.", "gray")
 
             saved_options = config.get('render_options', {})
@@ -1487,6 +1500,8 @@ class MapTab(QWidget):
                 "arrival_frame_threshold": self.cfg_arrival_frame_threshold,
                 "action_success_frame_threshold": self.cfg_action_success_frame_threshold,
                 # ==================== v11.5.0 설정 저장 추가 끝 ======================
+                "stuck_detection_wait": self.cfg_stuck_detection_wait,
+                "airborne_recovery_wait": self.cfg_airborne_recovery_wait,
             }
 
             config_data = self._prepare_data_for_json({
@@ -2816,6 +2831,8 @@ class MapTab(QWidget):
             "climb_max_velocity": self.cfg_climb_max_velocity,
             "arrival_frame_threshold": self.cfg_arrival_frame_threshold,
             "action_success_frame_threshold": self.cfg_action_success_frame_threshold,
+            "stuck_detection_wait": self.cfg_stuck_detection_wait,
+            "airborne_recovery_wait": self.cfg_airborne_recovery_wait,
         }
         
         # [MODIFIED] v14.3.3: parent_tab 대신 표준 parent 인자 사용
@@ -3021,6 +3038,8 @@ class MapTab(QWidget):
             "arrival_frame_threshold": self.cfg_arrival_frame_threshold,
             "action_success_frame_threshold": self.cfg_action_success_frame_threshold,
             # ==================== v11.5.0 설정값 전달 추가 끝 ======================
+            "stuck_detection_wait": self.cfg_stuck_detection_wait,
+            "airborne_recovery_wait": self.cfg_airborne_recovery_wait,
         }
         
         dialog = StateConfigDialog(current_config, self)
@@ -4018,10 +4037,12 @@ class MapTab(QWidget):
             if not self.current_segment_path and not self.airborne_path_warning_active:
                 self.update_general_log("경로 계산 대기: 공중에서는 경로를 계산할 수 없습니다. 착지 후 재시도합니다.", "gray")
                 self.airborne_path_warning_active = True
+                self.airborne_warning_started_at = time.time()
             return
         else:
             if self.airborne_path_warning_active:
                 self.airborne_path_warning_active = False
+                self._reset_airborne_recovery_state()
 
         start_group = current_terrain.get('dynamic_name')
         if not self.journey_plan or self.current_journey_index >= len(self.journey_plan):
@@ -4304,6 +4325,9 @@ class MapTab(QWidget):
         # Phase 1: 물리적 상태 판정 (유지)
         self.player_state = self._determine_player_physical_state(final_player_pos, contact_terrain)
 
+        # 공중 경로 대기 상태 자동 복구 처리
+        self._handle_airborne_path_wait(final_player_pos, contact_terrain)
+
         # --- [v.1819] '의도된 움직임' 감지 및 복구 로직 ---
         is_moving_state = self.player_state not in ['idle']
         
@@ -4335,7 +4359,7 @@ class MapTab(QWidget):
             can_attempt_recovery = (
                 self.last_movement_command is not None
                 and self.last_command_sent_time > 0.0
-                and (now - self.last_command_sent_time) >= self.STUCK_DETECTION_THRESHOLD_S
+                and (now - self.last_command_sent_time) >= self.cfg_stuck_detection_wait
             )
 
             if (
@@ -4344,7 +4368,7 @@ class MapTab(QWidget):
                 and now > self.recovery_cooldown_until
             ):
                 if (
-                    time_since_last_movement > self.STUCK_DETECTION_THRESHOLD_S
+                    time_since_last_movement > self.cfg_stuck_detection_wait
                     and self.stuck_recovery_attempts < self.MAX_STUCK_RECOVERY_ATTEMPTS
                 ):
                     self.stuck_recovery_attempts += 1
@@ -4352,22 +4376,11 @@ class MapTab(QWidget):
                         f"[자동 복구] 멈춤 감지 ({self.stuck_recovery_attempts}/{self.MAX_STUCK_RECOVERY_ATTEMPTS}). "
                         f"'사다리 멈춤복구' 후 '{self.last_movement_command}' 재시도."
                     )
-                    self.update_general_log(log_msg, "orange")
-
-                    self.recovery_cooldown_until = now + 1.5
-
-                    if self.debug_auto_control_checkbox.isChecked():
-                        print("[자동 제어 테스트] RECOVERY-PREP: 사다리 멈춤복구")
-                    elif self.auto_control_checkbox.isChecked():
-                        self._emit_control_command("사다리 멈춤복구", None)
-
-                    QTimer.singleShot(1000, self._execute_recovery_resend)
-
-                    self.last_player_pos = final_player_pos
+                    self._trigger_stuck_recovery(final_player_pos, log_msg)
                     return
 
                 elif (
-                    time_since_last_movement > self.STUCK_DETECTION_THRESHOLD_S
+                    time_since_last_movement > self.cfg_stuck_detection_wait
                     and self.stuck_recovery_attempts >= self.MAX_STUCK_RECOVERY_ATTEMPTS
                 ):
                     if now - getattr(self, '_last_stuck_log_time', 0) > 5.0:
@@ -4394,18 +4407,7 @@ class MapTab(QWidget):
                         f"[자동 복구] 비걷기 상태 멈춤 감지 ({self.stuck_recovery_attempts}/{self.MAX_STUCK_RECOVERY_ATTEMPTS}). "
                         f"'사다리 멈춤복구' 후 '{self.last_movement_command}' 재시도."
                     )
-                    self.update_general_log(log_msg, "orange")
-
-                    self.recovery_cooldown_until = now + 1.5
-
-                    if self.debug_auto_control_checkbox.isChecked():
-                        print("[자동 제어 테스트] RECOVERY-PREP: 사다리 멈춤복구")
-                    elif self.auto_control_checkbox.isChecked():
-                        self._emit_control_command("사다리 멈춤복구", None)
-
-                    QTimer.singleShot(1000, self._execute_recovery_resend)
-
-                    self.last_player_pos = final_player_pos
+                    self._trigger_stuck_recovery(final_player_pos, log_msg)
                     return
 
                 elif (
@@ -4548,6 +4550,108 @@ class MapTab(QWidget):
                 print(f"[자동 제어 테스트] RECOVERY: {command}")
             elif self.auto_control_checkbox.isChecked():
                 self._emit_control_command(command, None)
+
+    def _trigger_stuck_recovery(self, final_player_pos, log_message):
+        """공통 멈춤 복구 절차를 실행합니다."""
+        now = time.time()
+        self.update_general_log(log_message, "orange")
+        self.recovery_cooldown_until = now + 1.5
+
+        if self.debug_auto_control_checkbox.isChecked():
+            print("[자동 제어 테스트] RECOVERY-PREP: 사다리 멈춤복구")
+        elif self.auto_control_checkbox.isChecked():
+            self._emit_control_command("사다리 멈춤복구", None)
+
+        QTimer.singleShot(1000, self._execute_recovery_resend)
+
+        self.last_player_pos = final_player_pos
+
+    def _reset_airborne_recovery_state(self):
+        """공중 경고 관련 타이머를 초기화합니다."""
+        self.airborne_warning_started_at = 0.0
+        self.airborne_recovery_cooldown_until = 0.0
+        self._last_airborne_recovery_log_time = 0.0
+        setattr(self, '_last_airborne_fail_log_time', 0.0)
+
+    def _handle_airborne_path_wait(self, final_player_pos, contact_terrain):
+        """공중 경로 대기 상태가 일정 시간 지속되면 복구를 시도합니다."""
+        if not self.airborne_path_warning_active:
+            self._reset_airborne_recovery_state()
+            return
+
+        if final_player_pos is None:
+            return
+
+        if contact_terrain:
+            self._reset_airborne_recovery_state()
+            return
+
+        now = time.time()
+
+        if self.airborne_warning_started_at <= 0.0:
+            self.airborne_warning_started_at = now
+
+        if now < self.airborne_recovery_cooldown_until:
+            return
+
+        last_reference = self.last_movement_time or self.last_action_time
+        if not last_reference:
+            return
+
+        idle_duration = now - last_reference
+        wait_threshold = self.cfg_airborne_recovery_wait
+
+        if idle_duration < wait_threshold:
+            return
+
+        if (now - self.airborne_warning_started_at) < wait_threshold:
+            return
+
+        transition_objects = self.geometry_data.get("transition_objects", [])
+        is_near_ladder, _, dist = self._check_near_ladder(
+            final_player_pos,
+            transition_objects,
+            1.0,
+            return_dist=True,
+            current_floor=self.current_player_floor
+        )
+
+        if is_near_ladder and dist >= 0 and dist <= 1.0:
+            if now - self._last_airborne_recovery_log_time > 1.0:
+                self.update_general_log("[자동 복구] 공중 경로 대기 상태 - 사다리 복구를 시도합니다.", "orange")
+                self._last_airborne_recovery_log_time = now
+
+            if self.debug_auto_control_checkbox.isChecked():
+                print("[자동 제어 테스트] AIRBORNE-RECOVERY: ladder_stop")
+            elif self.auto_control_checkbox.isChecked():
+                self._emit_control_command("사다리 멈춤복구", None)
+
+            self.airborne_warning_started_at = now
+            self.airborne_recovery_cooldown_until = now + 1.5
+            return
+
+        if self.stuck_recovery_attempts >= self.MAX_STUCK_RECOVERY_ATTEMPTS:
+            last_fail_log_time = getattr(self, '_last_airborne_fail_log_time', 0.0)
+            if now - last_fail_log_time > 5.0:
+                self.update_general_log(
+                    f"[자동 복구] 공중 경로 대기 상태 복구 실패: 최대 복구 시도({self.MAX_STUCK_RECOVERY_ATTEMPTS}회)를 초과했습니다.",
+                    "red"
+                )
+                setattr(self, '_last_airborne_fail_log_time', now)
+            self.airborne_warning_started_at = now
+            self.airborne_recovery_cooldown_until = now + 1.5
+            return
+
+        self.stuck_recovery_attempts += 1
+        log_msg = (
+            f"[자동 복구] 공중 경로 대기 상태 감지 ({self.stuck_recovery_attempts}/{self.MAX_STUCK_RECOVERY_ATTEMPTS}). "
+            f"'사다리 멈춤복구' 후 '{self.last_movement_command}' 재시도."
+        )
+        self._trigger_stuck_recovery(final_player_pos, log_msg)
+        self._last_airborne_recovery_log_time = now
+        self.airborne_warning_started_at = now
+        self.airborne_recovery_cooldown_until = now + 1.5
+        return
 
     def _update_navigator_and_view(self, final_player_pos, current_terrain_name):
         """

@@ -106,10 +106,12 @@ try:
         FALL_ON_LADDER_X_MOVEMENT_THRESHOLD,
         FALL_Y_MIN_THRESHOLD,
         IDLE_TIME_THRESHOLD,
+        AIRBORNE_RECOVERY_WAIT_DEFAULT,
         JUMPING_STATE_FRAME_THRESHOLD,
         JUMP_LINK_ARRIVAL_X_THRESHOLD,
         JUMP_Y_MAX_THRESHOLD,
         JUMP_Y_MIN_THRESHOLD,
+        STUCK_DETECTION_WAIT_DEFAULT,
         ON_TERRAIN_Y_THRESHOLD,
         load_event_profiles,
         load_skill_profiles,
@@ -134,10 +136,12 @@ except ImportError:
         FALL_ON_LADDER_X_MOVEMENT_THRESHOLD,
         FALL_Y_MIN_THRESHOLD,
         IDLE_TIME_THRESHOLD,
+        AIRBORNE_RECOVERY_WAIT_DEFAULT,
         JUMPING_STATE_FRAME_THRESHOLD,
         JUMP_LINK_ARRIVAL_X_THRESHOLD,
         JUMP_Y_MAX_THRESHOLD,
         JUMP_Y_MIN_THRESHOLD,
+        STUCK_DETECTION_WAIT_DEFAULT,
         ON_TERRAIN_Y_THRESHOLD,
         load_event_profiles,
         load_skill_profiles,
@@ -3654,6 +3658,8 @@ class StateConfigDialog(QDialog):
         add_spinbox("climb_x_movement_threshold", "등반 최대 X이동(px/f):", 0.01, 5.0, 0.01)
         add_spinbox("fall_on_ladder_x_movement_threshold", "사다리 낙하 최대 X이동(px/f):", 0.01, 5.0, 0.01)
         add_spinbox("ladder_x_grab_threshold", "사다리 근접 X오차(px):", 0.5, 20.0, 0.1)
+        add_spinbox("stuck_detection_wait", "자동 복구 대기시간(초):", 0.1, 5.0, 0.1)
+        add_spinbox("airborne_recovery_wait", "공중 자동복구 대기시간(초):", 0.5, 10.0, 0.1)
         add_spinbox("on_ladder_enter_frame_threshold", "사다리 탑승 판정 프레임:", 1, 10, 1, is_double=False)
         add_spinbox("jump_initial_velocity_threshold", "점프 초기 속도 임계값(px/f):", 1.0, 10.0, 0.1)
         add_spinbox("climb_max_velocity", "등반 최대 속도(px/f):", 1.0, 10.0, 0.1)
@@ -3757,6 +3763,8 @@ class StateConfigDialog(QDialog):
             "jump_link_arrival_x_threshold": JUMP_LINK_ARRIVAL_X_THRESHOLD,
             "arrival_frame_threshold": 2,
             "action_success_frame_threshold": 2,
+            "stuck_detection_wait": STUCK_DETECTION_WAIT_DEFAULT,
+            "airborne_recovery_wait": AIRBORNE_RECOVERY_WAIT_DEFAULT,
         }
         for key, spinbox in self.spinboxes.items():
             if key in defaults:
