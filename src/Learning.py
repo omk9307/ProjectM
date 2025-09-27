@@ -606,13 +606,6 @@ class SAMCanvasLabel(BaseCanvasLabel):
                 poly_points = [QPoint(p[0][0], p[0][1]) * self.zoom_factor for p in contour]
                 painter.drawPolygon(QPolygon([QPoint(int(p.x()), int(p.y())) for p in poly_points]))
 
-        # 사용자 클릭 포인트 그리기
-        for i, point in enumerate(self.input_points):
-            color = Qt.GlobalColor.green if self.input_labels[i] == 1 else Qt.GlobalColor.red
-            painter.setPen(QPen(color, 2)); painter.setBrush(QBrush(color))
-            scaled_point = point * self.zoom_factor
-            painter.drawEllipse(QPoint(int(scaled_point.x()), int(scaled_point.y())), 5, 5)
-
     def mousePressEvent(self, event):
         if self.parent_dialog.is_change_mode and event.button() == Qt.MouseButton.LeftButton:
             if self.change_hovered_polygon_class():
@@ -648,6 +641,18 @@ class SAMAnnotationEditor(QDialog):
         top_controls_layout = QHBoxLayout()
 
         left_controls_layout = QHBoxLayout()
+        self.zoom_1x_btn = QPushButton("1x")
+        self.zoom_1_5x_btn = QPushButton("1.5x")
+        self.zoom_2x_btn = QPushButton("2x")
+        self.zoom_1x_btn.clicked.connect(lambda: self.canvas.set_zoom(1.0))
+        self.zoom_1_5x_btn.clicked.connect(lambda: self.canvas.set_zoom(1.5))
+        self.zoom_2x_btn.clicked.connect(lambda: self.canvas.set_zoom(2.0))
+        left_controls_layout.addWidget(QLabel("확대:"))
+        left_controls_layout.addWidget(self.zoom_1x_btn)
+        left_controls_layout.addWidget(self.zoom_1_5x_btn)
+        left_controls_layout.addWidget(self.zoom_2x_btn)
+        left_controls_layout.addSpacing(20)
+
         self.change_class_btn = QPushButton("클래스 변경 (C)")
         self.change_class_btn.setCheckable(True)
         self.change_class_btn.toggled.connect(self.toggle_change_mode)
@@ -2394,15 +2399,19 @@ class LearningTab(QWidget):
         self.class_tree_widget.clear()
         manifest = self.data_manager.get_manifest()
 
-        temp_manifest = self.data_manager.get_manifest()
+        temp_manifest = manifest
         all_categories_in_manifest = list(temp_manifest.keys())
 
-        # v1.3: 카테고리 순서에서 네거티브 샘플 제외
-        ordered_categories = CATEGORIES + [cat for cat in all_categories_in_manifest if cat not in CATEGORIES and cat != NEGATIVE_SAMPLES_NAME]
+        base_categories = [category for category in CATEGORIES if category != CHARACTER_CLASS_NAME]
+        extra_categories = [
+            cat for cat in all_categories_in_manifest
+            if cat not in base_categories and cat not in (NEGATIVE_SAMPLES_NAME, CHARACTER_CLASS_NAME)
+        ]
+        ordered_categories = base_categories + extra_categories
 
-        for category_name in ordered_categories:
-            if category_name not in temp_manifest: continue
-
+        def add_category_item(category_name: str) -> None:
+            if category_name not in temp_manifest:
+                return
             category_item = QTreeWidgetItem(self.class_tree_widget, [category_name])
             category_item.setFlags(category_item.flags() & ~Qt.ItemFlag.ItemIsSelectable | Qt.ItemFlag.ItemIsDragEnabled)
 
@@ -2413,7 +2422,10 @@ class LearningTab(QWidget):
                 class_item.setCheckState(0, Qt.CheckState.Checked)
 
             category_item.setExpanded(True)
-            
+
+        for category_name in ordered_categories:
+            add_category_item(category_name)
+
         # v1.3: 네거티브 샘플 항목을 트리의 마지막에 추가
         negative_item = QTreeWidgetItem(self.class_tree_widget, [NEGATIVE_SAMPLES_NAME])
         flags = negative_item.flags()
@@ -2428,6 +2440,9 @@ class LearningTab(QWidget):
         #         negative_item.setIcon(0, QIcon(icon_path))
         # except Exception:
         #     pass
+
+        # '캐릭터' 카테고리를 네거티브 항목 아래에 배치
+        add_category_item(CHARACTER_CLASS_NAME)
 
         if self._checked_class_names:
             self._apply_checked_classes_to_tree()
@@ -2480,6 +2495,15 @@ class LearningTab(QWidget):
         self.sort_by_name_btn.setChecked(mode == 'name')
         self.sort_by_date_btn.setChecked(mode == 'date')
         self.populate_image_list()
+
+    def _get_selected_class_name(self):
+        """클래스 트리에서 현재 선택된 클래스 이름을 반환합니다."""
+        selected_item = self.class_tree_widget.currentItem() if hasattr(self, 'class_tree_widget') else None
+        if not selected_item or selected_item.text(0) == NEGATIVE_SAMPLES_NAME:
+            return None
+        if selected_item.parent():
+            return selected_item.text(0)
+        return None
 
     def populate_image_list(self):
         self.image_list_widget.clear()
@@ -2741,6 +2765,7 @@ class LearningTab(QWidget):
     def capture_screen(self):
         count = self.capture_count_spinbox.value()
         interval = self.capture_interval_spinbox.value()
+        initial_class_name = self._get_selected_class_name()
 
         # 캡처 시에는 메인 윈도우를 숨길 필요가 없으므로 hide/show 로직 제거
         try:
@@ -2776,13 +2801,13 @@ class LearningTab(QWidget):
             self.update_status_message("캡처 완료")
 
             if count == 1:
-                self.open_editor_mode_dialog(captured_pixmaps[0])
+                self.open_editor_mode_dialog(captured_pixmaps[0], initial_class_name=initial_class_name)
             else:
                 multi_dialog = MultiCaptureDialog(captured_pixmaps, self)
                 if multi_dialog.exec():
                     selected_pixmaps = multi_dialog.get_selected_pixmaps()
                     for pixmap in selected_pixmaps:
-                        self.open_editor_mode_dialog(pixmap)
+                        self.open_editor_mode_dialog(pixmap, initial_class_name=initial_class_name)
         except Exception as e:
             QMessageBox.critical(self, "캡처 오류", str(e))
         finally:
