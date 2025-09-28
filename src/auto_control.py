@@ -45,6 +45,7 @@ FULL_KEY_MAP = {
 }
 
 CATEGORY_NAMES = ("이동", "스킬", "기타", "이벤트")
+SKILL_CATEGORY_NAME = "스킬"
 
 PROFILE_MIME_TYPE = "application/x-autocontrol-profile"
 
@@ -879,6 +880,17 @@ class AutoControlTab(QWidget):
         item = self._current_command_item()
         return item.text() if item else None
 
+    def _is_skill_profile(self, command_name: str) -> bool:
+        """현재 명령이 스킬 탭에 속하는지 여부를 반환합니다."""
+        if not isinstance(command_name, str):
+            return False
+
+        base_name = command_name.strip()
+        if base_name.startswith("TEST: "):
+            base_name = base_name[6:]
+
+        return self.profile_categories.get(base_name, CATEGORY_NAMES[0]) == SKILL_CATEGORY_NAME
+
     def _find_command_item(self, command_name):
         for category, list_widget in self.category_lists.items():
             if not list_widget:
@@ -1528,7 +1540,8 @@ class AutoControlTab(QWidget):
             start_msg = f"--- (시작) {self.current_command_name} (원인: {self.current_command_reason}) ---"
         else:
             start_msg = f"--- (시작) {self.current_command_name} ---"              # <<< (추가) UI에 '(시작)' 로그를 즉시 남기기 위해 생성
-        self.log_generated.emit(start_msg, "magenta")                        # <<< (추가) UI 로그 시그널로 즉시 표시
+        start_color = "orange" if self._is_skill_profile(self.current_command_name) else "magenta"
+        self.log_generated.emit(start_msg, start_color)                        # <<< (추가) UI 로그 시그널로 즉시 표시
 
         # (와치독) 시퀀스가 멈추는 걸 감지하기 위해 재시작
         self.sequence_watchdog.start(self.SEQUENCE_STUCK_TIMEOUT_MS)
@@ -1560,7 +1573,8 @@ class AutoControlTab(QWidget):
                     log_msg = f"--- (완료) {self.current_command_name} (원인: {self.current_command_reason}) ---"
                 else:
                     log_msg = f"--- (완료) {self.current_command_name} ---"
-                self.log_generated.emit(log_msg, "lightgreen")
+                completion_color = "orange" if self._is_skill_profile(self.current_command_name) else "lightgreen"
+                self.log_generated.emit(log_msg, completion_color)
                 # 테스트 모드 후 키 남아있으면 안전 해제
                 if self.is_test_mode and self.held_keys:
                     QTimer.singleShot(2000, lambda: self._release_all_keys(force=True))
@@ -1654,10 +1668,11 @@ class AutoControlTab(QWidget):
         }
         self.active_parallel_sequences[command_name] = state
 
+        start_color = "orange" if self._is_skill_profile(command_name) else "cyan"
         if clean_reason:
-            self.log_generated.emit(f"[{command_name}] (시작) (원인: {clean_reason})", "cyan")
+            self.log_generated.emit(f"[{command_name}] (시작) (원인: {clean_reason})", start_color)
         else:
-            self.log_generated.emit(f"[{command_name}] (시작)", "cyan")
+            self.log_generated.emit(f"[{command_name}] (시작)", start_color)
 
         watchdog.start(self.SEQUENCE_STUCK_TIMEOUT_MS)
         self._process_parallel_step(command_name)
@@ -1773,7 +1788,8 @@ class AutoControlTab(QWidget):
         reason = state.get("reason")
         suffix = f" (원인: {reason})" if reason else ""
         if success:
-            self.log_generated.emit(f"[{command_name}] (완료){suffix}", "lightgreen")
+            completion_color = "orange" if self._is_skill_profile(command_name) else "lightgreen"
+            self.log_generated.emit(f"[{command_name}] (완료){suffix}", completion_color)
         else:
             self.log_generated.emit(f"[{command_name}] (중단){suffix}", "orange")
 
