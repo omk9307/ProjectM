@@ -561,6 +561,8 @@ class AutoControlTab(QWidget):
         self.action_type_combo.currentIndexChanged.connect(self._on_editor_type_changed)
         self.key_combo = QComboBox()
         self.key_combo.addItems(self.key_list_str)
+        self.force_checkbox = QCheckBox("강제 전송")
+        self.force_checkbox.setChecked(False)
         self.delay_widget = QWidget()
         delay_layout = QHBoxLayout(self.delay_widget)
         delay_layout.setContentsMargins(0,0,0,0)
@@ -574,10 +576,12 @@ class AutoControlTab(QWidget):
         editor_layout.addRow("타입:", self.action_type_combo)
         editor_layout.addRow("키:", self.key_combo)
         editor_layout.addRow("지연 시간:", self.delay_widget)
+        editor_layout.addRow("", self.force_checkbox)
         self.action_type_combo.currentTextChanged.connect(self._update_action_from_editor)
         self.key_combo.currentTextChanged.connect(self._update_action_from_editor)
         self.min_delay_spin.valueChanged.connect(self._update_action_from_editor)
         self.max_delay_spin.valueChanged.connect(self._update_action_from_editor)
+        self.force_checkbox.toggled.connect(self._update_action_from_editor)
         editor_group.setEnabled(False)
         return editor_group
 
@@ -1307,6 +1311,13 @@ class AutoControlTab(QWidget):
         label_for_delay = form_layout.labelForField(self.delay_widget)
         if label_for_delay: label_for_delay.setVisible(is_delay)
 
+        if hasattr(self, 'force_checkbox'):
+            self.force_checkbox.setVisible(is_key_based)
+            self.force_checkbox.setEnabled(is_key_based)
+            label_for_force = form_layout.labelForField(self.force_checkbox)
+            if label_for_force:
+                label_for_force.setVisible(is_key_based)
+
     def _update_editor_panel(self, action_data):
         self.action_type_combo.blockSignals(True); self.key_combo.blockSignals(True); self.min_delay_spin.blockSignals(True); self.max_delay_spin.blockSignals(True)
         action_type = action_data.get("type", "press")
@@ -1314,9 +1325,17 @@ class AutoControlTab(QWidget):
         self._on_editor_type_changed(0) 
         if action_type in ['press', 'release', 'release_specific']:
             self.key_combo.setCurrentText(action_data.get("key_str", "Key.space"))
+            if hasattr(self, 'force_checkbox'):
+                self.force_checkbox.blockSignals(True)
+                self.force_checkbox.setChecked(bool(action_data.get("force", False)))
+                self.force_checkbox.blockSignals(False)
         elif action_type == 'delay':
             self.min_delay_spin.setValue(action_data.get("min_ms", 0))
             self.max_delay_spin.setValue(action_data.get("max_ms", 0))
+            if hasattr(self, 'force_checkbox'):
+                self.force_checkbox.blockSignals(True)
+                self.force_checkbox.setChecked(False)
+                self.force_checkbox.blockSignals(False)
         self.action_type_combo.blockSignals(False); self.key_combo.blockSignals(False); self.min_delay_spin.blockSignals(False); self.max_delay_spin.blockSignals(False)
 
     def _update_action_from_editor(self, _=None):
@@ -1327,6 +1346,8 @@ class AutoControlTab(QWidget):
         new_action_data = {"type": action_type}
         if action_type in ['press', 'release', 'release_specific']:
             new_action_data["key_str"] = self.key_combo.currentText()
+            if hasattr(self, 'force_checkbox') and self.force_checkbox.isChecked():
+                new_action_data["force"] = True
         elif action_type == 'delay':
             new_action_data["min_ms"] = self.min_delay_spin.value(); new_action_data["max_ms"] = self.max_delay_spin.value()
         self.mappings[command_text][row] = new_action_data
@@ -1335,11 +1356,12 @@ class AutoControlTab(QWidget):
     def _update_action_item_text(self, item, action_data):
         step_text = ""
         type = action_data.get("type")
-        if type == "press": step_text = f"누르기: {action_data.get('key_str', 'N/A')}"
-        elif type == "release": step_text = f"떼기: {action_data.get('key_str', 'N/A')}"
+        force_prefix = "[강제] " if bool(action_data.get("force", False)) else ""
+        if type == "press": step_text = f"{force_prefix}누르기: {action_data.get('key_str', 'N/A')}"
+        elif type == "release": step_text = f"{force_prefix}떼기: {action_data.get('key_str', 'N/A')}"
         elif type == "delay": step_text = f"지연: {action_data.get('min_ms', 0)}ms ~ {action_data.get('max_ms', 0)}ms"
         elif type == "release_all": step_text = "모든 키 떼기"
-        elif type == "release_specific": step_text = f"특정 키 떼기: {action_data.get('key_str', 'N/A')}"
+        elif type == "release_specific": step_text = f"{force_prefix}특정 키 떼기: {action_data.get('key_str', 'N/A')}"
         item.setText(step_text)
 
     def _populate_action_sequence_list(self, command_text):
@@ -1813,17 +1835,22 @@ class AutoControlTab(QWidget):
                 if not key_obj:
                     self.log_generated.emit(f"오류: 알 수 없는 키 '{step.get('key_str')}'", "red")
                 elif action_type == "press":
-                    # <<< [수정] _press_key 메서드가 이제 로그와 전송을 모두 처리
-                    self._press_key(key_obj, force=False)
+                    force_requested = bool(step.get("force", False))
+                    self._press_key(key_obj, force=force_requested)
                 else:  # release
-                    released = self._release_key(key_obj, force=False)
+                    force_requested = bool(step.get("force", False))
+                    released = self._release_key(key_obj, force=force_requested)
                     if released:
-                        self.log_generated.emit(f"(떼기) {self._translate_key_for_logging(step.get('key_str'))}", "white")
+                        log_label = "(떼기-forced)" if force_requested else "(떼기)"
+                        self.log_generated.emit(f"{log_label} {self._translate_key_for_logging(step.get('key_str'))}", "white")
                     else:
-                        if self.console_log_checkbox.isChecked():
-                            print(f"[AutoControl] RELEASE skipped (not held) -> 강제 릴리즈 시도: {key_obj}")
-                        self._release_key(key_obj, force=True)
-                        self.log_generated.emit(f"(떼기-forced) {self._translate_key_for_logging(step.get('key_str'))}", "white")
+                        if force_requested:
+                            self.log_generated.emit(f"(떼기-forced) {self._translate_key_for_logging(step.get('key_str'))}", "white")
+                        else:
+                            if self.console_log_checkbox.isChecked():
+                                print(f"[AutoControl] RELEASE skipped (not held) -> 강제 릴리즈 시도: {key_obj}")
+                            self._release_key(key_obj, force=True)
+                            self.log_generated.emit(f"(떼기-forced) {self._translate_key_for_logging(step.get('key_str'))}", "white")
 
             elif action_type == "delay":
                 min_ms = step.get("min_ms", 0)
@@ -1925,31 +1952,41 @@ class AutoControlTab(QWidget):
                 if not key_obj:
                     self.log_generated.emit(f"[{command_name}] 오류: 알 수 없는 키 '{step.get('key_str')}'", "red")
                 elif action_type == "press":
-                    pressed = self._press_key_for_owner(owner, key_obj, force=False)
+                    force_requested = bool(step.get("force", False))
+                    pressed = self._press_key_for_owner(owner, key_obj, force=force_requested)
                     if pressed:
+                        action_label = "(누르기-forced)" if force_requested else "(누르기)"
                         self.log_generated.emit(
-                            f"[{command_name}] (누르기) {self._translate_key_for_logging(step.get('key_str'))}",
+                            f"[{command_name}] {action_label} {self._translate_key_for_logging(step.get('key_str'))}",
                             "white",
                         )
                     elif self.console_log_checkbox.isChecked():
                         print(f"[AutoControl] 병렬 PRESS skipped (already held): {step.get('key_str')}")
                 else:
-                    released = self._release_key_for_owner(owner, key_obj, force=False)
+                    force_requested = bool(step.get("force", False))
+                    released = self._release_key_for_owner(owner, key_obj, force=force_requested)
                     if released:
+                        action_label = "(떼기-forced)" if force_requested else "(떼기)"
                         self.log_generated.emit(
-                            f"[{command_name}] (떼기) {self._translate_key_for_logging(step.get('key_str'))}",
+                            f"[{command_name}] {action_label} {self._translate_key_for_logging(step.get('key_str'))}",
                             "white",
                         )
                     else:
-                        if self.global_key_counts.get(key_obj, 0) == 0:
-                            forced = self._release_key_for_owner(owner, key_obj, force=True)
-                            if forced:
-                                self.log_generated.emit(
-                                    f"[{command_name}] (떼기-forced) {self._translate_key_for_logging(step.get('key_str'))}",
-                                    "white",
-                                )
-                        elif self.console_log_checkbox.isChecked():
-                            print(f"[AutoControl] 병렬 RELEASE skipped (held elsewhere): {step.get('key_str')}")
+                        if force_requested:
+                            self.log_generated.emit(
+                                f"[{command_name}] (떼기-forced) {self._translate_key_for_logging(step.get('key_str'))}",
+                                "white",
+                            )
+                        else:
+                            if self.global_key_counts.get(key_obj, 0) == 0:
+                                forced = self._release_key_for_owner(owner, key_obj, force=True)
+                                if forced:
+                                    self.log_generated.emit(
+                                        f"[{command_name}] (떼기-forced) {self._translate_key_for_logging(step.get('key_str'))}",
+                                        "white",
+                                    )
+                            elif self.console_log_checkbox.isChecked():
+                                print(f"[AutoControl] 병렬 RELEASE skipped (held elsewhere): {step.get('key_str')}")
 
             elif action_type == "delay":
                 min_ms = int(step.get("min_ms", 0))
