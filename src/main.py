@@ -16,9 +16,11 @@ import traceback
 from datetime import datetime
 
 from PyQt6.QtWidgets import (
-    QApplication, QMainWindow, QTabWidget, QWidget, QVBoxLayout, QLabel, QTabBar
+    QApplication, QMainWindow, QTabWidget, QWidget, QVBoxLayout, QLabel, QTabBar,
+    QStylePainter, QStyleOptionTab, QStyle
 )
 from PyQt6.QtCore import Qt, QSettings, QTimer, QAbstractNativeEventFilter
+from PyQt6.QtGui import QColor, QPainter
 
 from status_monitor import StatusMonitorThread
 
@@ -105,25 +107,37 @@ class ColoredTabBar(QTabBar):
             self._tab_colors[index] = color
         else:
             self._tab_colors.pop(index, None)
-        self._apply_stylesheet()
+        self.update()
 
     def clear_colors(self) -> None:
         if not self._tab_colors:
             return
         self._tab_colors.clear()
-        self._apply_stylesheet()
+        self.update()
 
-    def _apply_stylesheet(self) -> None:
-        rules = []
-        for index, color in self._tab_colors.items():
-            rules.append(
-                f"QTabBar::tab:nth-child({index + 1}) {{"
-                f" background: {color};"
-                " color: white;"
-                " border-radius: 4px;"
-                "}}"
-            )
-        self.setStyleSheet("\n".join(rules))
+    def paintEvent(self, event) -> None:
+        painter = QStylePainter(self)
+
+        for index in range(self.count()):
+            option = QStyleOptionTab()
+            self.initStyleOption(option, index)
+            color_name = self._tab_colors.get(index)
+            if color_name:
+                color = QColor(color_name)
+                if color.isValid():
+                    rect = option.rect.adjusted(1, 1, -1, -1)
+                    painter.save()
+                    painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+                    border_pen = QColor(color).darker(130)
+                    painter.setPen(border_pen)
+                    painter.setBrush(color)
+                    painter.drawRoundedRect(rect, 6, 6)
+                    painter.setPen(Qt.GlobalColor.white)
+                    painter.drawText(rect, Qt.AlignmentFlag.AlignCenter, option.text)
+                    painter.restore()
+                    continue
+            painter.drawControl(QStyle.ControlElement.CE_TabBarTabShape, option)
+            painter.drawControl(QStyle.ControlElement.CE_TabBarTabLabel, option)
 
 
 class MainWindow(QMainWindow):

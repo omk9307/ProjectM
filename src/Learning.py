@@ -631,6 +631,16 @@ class ClassTreeWidget(QTreeWidget):
         self.drop_completed.emit()
 
 
+    def keyPressEvent(self, event):  # noqa: N802
+        if event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
+            current_item = self.currentItem()
+            if current_item is not None:
+                self.itemDoubleClicked.emit(current_item, 0)
+                event.accept()
+                return
+        super().keyPressEvent(event)
+
+
 class MonsterSettingsDialog(QDialog):
     """특정 몬스터 클래스에 대한 추후 확장 가능한 설정 다이얼로그."""
 
@@ -2544,7 +2554,6 @@ class LearningTab(QWidget):
         self.class_tree_widget.itemChanged.connect(self.handle_item_check)
         self.class_tree_widget.drop_completed.connect(self.save_tree_state_to_manifest)
         self.class_tree_widget.itemDoubleClicked.connect(self._handle_class_item_double_clicked)
-        self.class_tree_widget.itemActivated.connect(self._handle_class_item_double_clicked)
         self.class_tree_widget.setExpandsOnDoubleClick(False)
 
         left_layout.addWidget(self.class_tree_widget)
