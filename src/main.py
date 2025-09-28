@@ -11,11 +11,14 @@
 import sys
 import importlib
 import traceback
+from datetime import datetime
+
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QTabWidget, QWidget, QVBoxLayout, QLabel
 )
-from datetime import datetime
 from PyQt6.QtCore import Qt, QSettings
+
+from status_monitor import StatusMonitorThread
 
 def log_uncaught_exceptions(ex_cls, ex, tb):
     """
@@ -70,6 +73,7 @@ class MainWindow(QMainWindow):
 
         # [수정] 로드된 탭 인스턴스를 저장할 딕셔너리
         self.loaded_tabs = {}
+        self.status_monitor_thread: StatusMonitorThread | None = None
 
         self.load_tabs()
 
@@ -134,6 +138,18 @@ class MainWindow(QMainWindow):
             if data_manager:
                 hunt_tab.attach_data_manager(data_manager)
                 print("성공: '학습' 탭의 데이터 매니저를 '사냥' 탭에 연결했습니다.")
+
+                if self.status_monitor_thread is None:
+                    status_config = data_manager.load_status_monitor_config()
+                    self.status_monitor_thread = StatusMonitorThread(status_config)
+                    data_manager.register_status_config_listener(self.status_monitor_thread.update_config)
+                    if '사냥' in self.loaded_tabs:
+                        self.loaded_tabs['사냥'].attach_status_monitor(self.status_monitor_thread)
+                    if '맵' in self.loaded_tabs:
+                        map_tab_instance = self.loaded_tabs['맵']
+                        if hasattr(map_tab_instance, 'attach_status_monitor'):
+                            map_tab_instance.attach_status_monitor(self.status_monitor_thread, data_manager)
+                    self.status_monitor_thread.start()
             else:
                 print("경고: '학습' 탭에서 데이터 매니저를 찾을 수 없어 '사냥' 탭 연동을 건너뜁니다.")
 
@@ -194,7 +210,12 @@ class MainWindow(QMainWindow):
             if hasattr(widget, 'cleanup_on_close') and callable(getattr(widget, 'cleanup_on_close')):
                 print(f"'{self.tab_widget.tabText(i)}' 탭의 리소스를 정리합니다...")
                 widget.cleanup_on_close()
-        
+
+        monitor = getattr(self, 'status_monitor_thread', None)
+        if monitor:
+            monitor.stop()
+            monitor.wait(2000)
+
         event.accept()
 
 

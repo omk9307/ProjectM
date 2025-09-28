@@ -12,6 +12,7 @@
 # - main.py에서 이 파일을 모듈로 불러와 탭으로 사용합니다.
 
 import warnings
+
 warnings.filterwarnings("ignore", category=DeprecationWarning)
 
 import sys
@@ -26,7 +27,14 @@ import pygetwindow as gw
 import time
 import uuid
 import requests
+from pathlib import Path
 from collections import OrderedDict
+from typing import Optional
+
+try:
+    import pytesseract  # type: ignore
+except ImportError:  # pragma: no cover - 실행 환경에 따라 미설치일 수 있음
+    pytesseract = None  # type: ignore
 
 from PyQt6.QtWidgets import (
     QApplication, QWidget, QVBoxLayout, QHBoxLayout,
@@ -36,7 +44,10 @@ from PyQt6.QtWidgets import (
     QProgressBar, QStatusBar, QAbstractItemView, QTreeWidget, QTreeWidgetItem,
     QHeaderView, QLineEdit
 )
-from PyQt6.QtGui import QPixmap, QImage, QIcon, QPainter, QPen, QColor, QBrush, QCursor, QPolygon, QDropEvent
+from PyQt6.QtGui import (
+    QPixmap, QImage, QIcon, QPainter, QPen, QColor, QBrush, QCursor, QPolygon,
+    QDropEvent, QGuiApplication, QIntValidator, QDoubleValidator
+)
 from PyQt6.QtCore import Qt, QThread, pyqtSignal, QSize, QRect, QPoint, QObject, QMimeData
 
 # AI 어시스트 기능(SAM)과 훈련(YOLO)에 필요한 라이브러리를 import 합니다.
@@ -49,6 +60,15 @@ except ImportError:
     SAM_AVAILABLE = False
 
 from ultralytics import YOLO
+
+from status_monitor import (
+    PYTESSERACT_AVAILABLE,
+    ResourceConfig as StatusResourceConfig,
+    Roi as StatusRoi,
+    StatusConfigNotifier,
+    StatusMonitorConfig,
+    StatusMonitorThread,
+)
 
 # --- 0. 전역 설정 (v1.3 방해 요소 이름 추가) ---
 # 소스 코드가 위치한 src/ 폴더
@@ -160,6 +180,388 @@ class ScreenSnipper(QDialog):
         if QRect(self.begin, self.end).normalized().width() > 5: self.accept()
         else: self.reject()
     def get_roi(self): return QRect(self.begin, self.end).normalized()
+
+
+class StatusRegionSelector(QDialog):
+    """전체 화면 위에서 정밀하게 ROI를 지정하기 위한 오버레이."""
+
+    def __init__(self, parent=None, zoom_factor: int = 15, preview_size: QSize = QSize(180, 180)):
+        super().__init__(parent)
+        self.setWindowFlags(
+            Qt.WindowType.FramelessWindowHint
+            | Qt.WindowType.WindowStaysOnTopHint
+            | Qt.WindowType.Tool
+        )
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        self.setMouseTracking(True)
+        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        self.zoom_factor = max(1, int(zoom_factor))
+        self.preview_size = preview_size
+
+        screens = QApplication.screens()
+        if not screens:
+            raise RuntimeError("사용 가능한 모니터를 찾을 수 없습니다.")
+
+        virtual_rect = screens[0].geometry()
+        for screen in screens[1:]:
+            virtual_rect = virtual_rect.united(screen.geometry())
+
+        self.virtual_origin = virtual_rect.topLeft()
+        self.setGeometry(virtual_rect)
+
+        self.begin = QPoint()
+        self.end = QPoint()
+        self.is_selecting = False
+        self.selection_active = False
+
+        self._zoom_label = QLabel(self)
+        self._zoom_label.setFixedSize(self.preview_size)
+        self._zoom_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._zoom_label.setStyleSheet(
+            "background-color: rgba(0, 0, 0, 200);"
+            "border: 1px solid #ffffff;"
+        )
+        self._zoom_label.hide()
+
+        self._size_label = QLabel(self)
+        self._size_label.setStyleSheet(
+            "color: #ffffff;"
+            "background-color: rgba(0, 0, 0, 180);"
+            "padding: 2px 6px;"
+            "border: 1px solid #888888;"
+        )
+        self._size_label.hide()
+
+        pattern_pixmap = QPixmap(2, 2)
+        pattern_pixmap.fill(Qt.GlobalColor.transparent)
+        painter = QPainter(pattern_pixmap)
+        painter.fillRect(0, 0, 1, 1, QColor(255, 0, 0, 90))
+        painter.fillRect(1, 1, 1, 1, QColor(255, 0, 0, 40))
+        painter.end()
+        self._selection_brush = QBrush(pattern_pixmap)
+
+    def showEvent(self, event):  # noqa: N802
+        super().showEvent(event)
+        local_point = QCursor.pos() - self.virtual_origin
+        if not self.rect().contains(local_point):
+            local_point = self.rect().center()
+        self._update_overlays(local_point)
+
+    def mousePressEvent(self, event):  # noqa: N802
+        point = self._clamp_to_virtual(event.position().toPoint())
+        self.begin = point
+        self.end = point
+        self.is_selecting = True
+        self.selection_active = True
+        self.setFocus()
+        self._update_overlays(point)
+        self.update()
+
+    def mouseMoveEvent(self, event):  # noqa: N802
+        point = self._clamp_to_virtual(event.position().toPoint())
+        if self.is_selecting:
+            self.end = point
+        self._update_overlays(point)
+        self.update()
+
+    def mouseReleaseEvent(self, event):  # noqa: N802
+        point = self._clamp_to_virtual(event.position().toPoint())
+        if self.is_selecting:
+            self.end = point
+            self.is_selecting = False
+            self.selection_active = True
+            left = min(self.begin.x(), self.end.x())
+            right = max(self.begin.x(), self.end.x())
+            top = min(self.begin.y(), self.end.y())
+            bottom = max(self.begin.y(), self.end.y())
+            self.begin = QPoint(left, top)
+            self.end = QPoint(right, bottom)
+            rect = self._current_rect()
+            if rect.width() <= 0 or rect.height() <= 0:
+                self.selection_active = False
+                self.reject()
+                return
+        self._update_overlays(point)
+        self.update()
+
+    def keyPressEvent(self, event):  # noqa: N802
+        key = event.key()
+
+        if key in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
+            if self.selection_active and self._current_rect().width() > 0 and self._current_rect().height() > 0:
+                self.accept()
+            return
+
+        if key == Qt.Key.Key_Escape:
+            self.selection_active = False
+            self.reject()
+            return
+
+        if key in (
+            Qt.Key.Key_Left,
+            Qt.Key.Key_Right,
+            Qt.Key.Key_Up,
+            Qt.Key.Key_Down,
+        ):
+            if not self.selection_active:
+                return
+            step = 10 if event.modifiers() & Qt.KeyboardModifier.ShiftModifier else 1
+            dx = dy = 0
+            if key == Qt.Key.Key_Left:
+                dx = -step
+            elif key == Qt.Key.Key_Right:
+                dx = step
+            elif key == Qt.Key.Key_Up:
+                dy = -step
+            elif key == Qt.Key.Key_Down:
+                dy = step
+            self._adjust_end(dx, dy)
+            self._update_overlays(self.end)
+            self.update()
+            return
+
+        super().keyPressEvent(event)
+
+    def paintEvent(self, event):  # noqa: N802
+        painter = QPainter(self)
+        painter.fillRect(self.rect(), QColor(0, 0, 0, 100))
+        rect = self._current_rect()
+        if rect.width() > 0 and rect.height() > 0:
+            painter.save()
+            painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_Clear)
+            painter.fillRect(rect, Qt.GlobalColor.transparent)
+            painter.restore()
+            painter.save()
+            painter.setOpacity(0.35)
+            painter.fillRect(rect, self._selection_brush)
+            painter.restore()
+            painter.setPen(QPen(QColor(255, 0, 0, 200), 1))
+            painter.drawLine(rect.left(), rect.top(), rect.right(), rect.top())
+            painter.drawLine(rect.left(), rect.bottom(), rect.right(), rect.bottom())
+            painter.drawLine(rect.left(), rect.top(), rect.left(), rect.bottom())
+            painter.drawLine(rect.right(), rect.top(), rect.right(), rect.bottom())
+        painter.end()
+
+    def _update_overlays(self, local_point: QPoint) -> None:
+        local_point = self._clamp_to_virtual(local_point)
+        global_point = self.virtual_origin + local_point
+        self._update_zoom_preview(global_point, local_point)
+        self._update_size_label(local_point)
+
+    def _update_zoom_preview(self, global_point: QPoint, local_point: QPoint) -> None:
+        screen = QGuiApplication.screenAt(global_point)
+        if screen is None:
+            screen = QGuiApplication.primaryScreen()
+        if screen is None:
+            self._zoom_label.hide()
+            return
+
+        crop_w = max(1, self.preview_size.width() // self.zoom_factor)
+        crop_h = max(1, self.preview_size.height() // self.zoom_factor)
+        screen_geo = screen.geometry()
+        grab_x = int(global_point.x() - screen_geo.left() - crop_w // 2)
+        grab_y = int(global_point.y() - screen_geo.top() - crop_h // 2)
+        grab_x = max(0, min(screen_geo.width() - crop_w, grab_x))
+        grab_y = max(0, min(screen_geo.height() - crop_h, grab_y))
+        pixmap = screen.grabWindow(0, grab_x, grab_y, crop_w, crop_h)
+        if pixmap.isNull():
+            self._zoom_label.hide()
+            return
+        zoomed = pixmap.scaled(
+            self.preview_size,
+            Qt.AspectRatioMode.IgnoreAspectRatio,
+            Qt.TransformationMode.FastTransformation,
+        )
+
+        painter = QPainter(zoomed)
+        scale_x = self.preview_size.width() / crop_w
+        scale_y = self.preview_size.height() / crop_h
+
+        painter.setPen(QPen(QColor(0, 0, 0, 70), 1))
+        for col in range(crop_w + 1):
+            x_pos = int(round(col * scale_x))
+            painter.drawLine(x_pos, 0, x_pos, zoomed.height())
+        for row in range(crop_h + 1):
+            y_pos = int(round(row * scale_y))
+            painter.drawLine(0, y_pos, zoomed.width(), y_pos)
+
+        painter.setPen(QPen(QColor(255, 0, 0, 200), 1))
+        center_x = zoomed.width() // 2
+        center_y = zoomed.height() // 2
+        painter.drawLine(center_x, 0, center_x, zoomed.height())
+        painter.drawLine(0, center_y, zoomed.width(), center_y)
+
+        rect = self._current_rect()
+        if rect.width() > 0 and rect.height() > 0:
+            selection_global = rect.translated(self.virtual_origin)
+            capture_rect_global = QRect(
+                screen_geo.left() + grab_x,
+                screen_geo.top() + grab_y,
+                crop_w,
+                crop_h,
+            )
+            intersect = selection_global.intersected(capture_rect_global)
+            if not intersect.isNull():
+                sel_left = int(round((intersect.left() - capture_rect_global.left()) * scale_x))
+                sel_top = int(round((intersect.top() - capture_rect_global.top()) * scale_y))
+                sel_width = max(1, int(round(intersect.width() * scale_x)))
+                sel_height = max(1, int(round(intersect.height() * scale_y)))
+                pixel_w = max(1, intersect.width())
+                pixel_h = max(1, intersect.height())
+                for row in range(pixel_h):
+                    y1 = sel_top + int(round(row * scale_y))
+                    y2 = sel_top + int(round((row + 1) * scale_y))
+                    h = max(1, y2 - y1)
+                    for col in range(pixel_w):
+                        x1 = sel_left + int(round(col * scale_x))
+                        x2 = sel_left + int(round((col + 1) * scale_x))
+                        w = max(1, x2 - x1)
+                        alpha = 90 if (row + col) % 2 == 0 else 40
+                        painter.fillRect(x1, y1, w, h, QColor(255, 0, 0, alpha))
+                painter.setPen(QPen(QColor(255, 0, 0, 200), 1))
+                painter.drawRect(sel_left, sel_top, sel_width, sel_height)
+        painter.end()
+
+        label_x = local_point.x() - self.preview_size.width() // 2
+        label_y = local_point.y() - self.preview_size.height() - 24
+        label_x = max(0, min(self.width() - self.preview_size.width(), label_x))
+        label_y = max(0, min(self.height() - self.preview_size.height(), label_y))
+        self._zoom_label.move(label_x, label_y)
+        self._zoom_label.setPixmap(zoomed)
+        self._zoom_label.show()
+
+    def _update_size_label(self, local_point: QPoint) -> None:
+        rect = self._current_rect()
+        if rect.width() <= 0 or rect.height() <= 0:
+            self._size_label.hide()
+            return
+        self._size_label.setText(f"{rect.width()}px × {rect.height()}px")
+        label_x = local_point.x() + 16
+        label_y = local_point.y() + 16
+        label_x = max(0, min(self.width() - self._size_label.sizeHint().width(), label_x))
+        label_y = max(0, min(self.height() - self._size_label.sizeHint().height(), label_y))
+        self._size_label.move(label_x, label_y)
+        self._size_label.show()
+
+    def get_roi(self) -> QRect:
+        rect = self._current_rect()
+        return rect.translated(self.virtual_origin)
+
+    def _current_rect(self) -> QRect:
+        if not (self.selection_active or self.is_selecting):
+            return QRect()
+        left = min(self.begin.x(), self.end.x())
+        right = max(self.begin.x(), self.end.x())
+        top = min(self.begin.y(), self.end.y())
+        bottom = max(self.begin.y(), self.end.y())
+        width = max(1, right - left + 1)
+        height = max(1, bottom - top + 1)
+        return QRect(left, top, width, height)
+
+    def _clamp_to_virtual(self, point: QPoint) -> QPoint:
+        return QPoint(
+            max(0, min(self.width() - 1, point.x())),
+            max(0, min(self.height() - 1, point.y()))
+        )
+
+    def _adjust_end(self, dx: int, dy: int) -> None:
+        new_x = max(0, min(self.width() - 1, self.end.x() + dx))
+        new_y = max(0, min(self.height() - 1, self.end.y() + dy))
+        self.end = QPoint(new_x, new_y)
+
+
+class ExpRecognitionPreviewDialog(QDialog):
+    """EXP 탐지 ROI 캡처와 OCR 결과를 시각적으로 확인하기 위한 대화상자."""
+
+    def __init__(
+        self,
+        parent: Optional[QWidget],
+        roi_description: str,
+        original_bgr: Optional[np.ndarray],
+        processed_gray: Optional[np.ndarray],
+        summary_lines: list[str],
+    ) -> None:
+        super().__init__(parent)
+        self.setWindowTitle('EXP 인식 확인')
+        self.setModal(True)
+        self.setMinimumWidth(520)
+
+        self._buffers: list[np.ndarray] = []
+        layout = QVBoxLayout()
+
+        roi_label = QLabel(roi_description or '탐지 범위 정보가 없습니다.')
+        roi_label.setWordWrap(True)
+        layout.addWidget(roi_label)
+
+        image_layout = QHBoxLayout()
+
+        original_column = QVBoxLayout()
+        original_title = QLabel('원본 캡처')
+        original_title.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        original_column.addWidget(original_title)
+        original_view = QLabel()
+        original_view.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        original_pixmap = self._create_color_pixmap(original_bgr)
+        original_view.setPixmap(self._scaled_pixmap(original_pixmap))
+        original_column.addWidget(original_view)
+        image_layout.addLayout(original_column)
+
+        processed_column = QVBoxLayout()
+        processed_title = QLabel('전처리(Threshold)')
+        processed_title.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        processed_column.addWidget(processed_title)
+        processed_view = QLabel()
+        processed_view.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        processed_pixmap = self._create_gray_pixmap(processed_gray)
+        processed_view.setPixmap(self._scaled_pixmap(processed_pixmap))
+        processed_column.addWidget(processed_view)
+        image_layout.addLayout(processed_column)
+
+        layout.addLayout(image_layout)
+
+        info_box = QTextEdit()
+        info_box.setReadOnly(True)
+        info_box.setMinimumHeight(140)
+        info_text = '\n'.join(summary_lines) if summary_lines else '표시할 정보가 없습니다.'
+        info_box.setPlainText(info_text)
+        layout.addWidget(info_box)
+
+        button_box = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
+        button_box.rejected.connect(self.reject)
+        layout.addWidget(button_box)
+
+        self.setLayout(layout)
+
+    def _create_color_pixmap(self, image_bgr: Optional[np.ndarray]) -> QPixmap:
+        if image_bgr is None or image_bgr.size == 0:
+            return QPixmap()
+        buffer = np.ascontiguousarray(image_bgr)
+        self._buffers.append(buffer)
+        height, width, channels = buffer.shape
+        bytes_per_line = channels * width
+        qimage = QImage(buffer.data, width, height, bytes_per_line, QImage.Format.Format_BGR888)
+        return QPixmap.fromImage(qimage)
+
+    def _create_gray_pixmap(self, image_gray: Optional[np.ndarray]) -> QPixmap:
+        if image_gray is None:
+            return QPixmap()
+        buffer = np.ascontiguousarray(image_gray)
+        self._buffers.append(buffer)
+        height, width = buffer.shape[:2]
+        bytes_per_line = width
+        qimage = QImage(buffer.data, width, height, bytes_per_line, QImage.Format.Format_Grayscale8)
+        return QPixmap.fromImage(qimage)
+
+    @staticmethod
+    def _scaled_pixmap(pixmap: QPixmap) -> QPixmap:
+        if pixmap.isNull():
+            return pixmap
+        return pixmap.scaled(
+            320,
+            200,
+            Qt.AspectRatioMode.KeepAspectRatio,
+            Qt.TransformationMode.SmoothTransformation,
+        )
 
 # --- 1.5. 위젯: 드래그앤드롭 커스텀 QTreeWidget ---
 class ClassTreeWidget(QTreeWidget):
@@ -928,7 +1330,10 @@ class DataManager:
         self.direction_left_dir = os.path.join(self.direction_templates_dir, 'left')
         self.direction_right_dir = os.path.join(self.direction_templates_dir, 'right')
         self.direction_config_path = os.path.join(self.direction_dir, 'config.json')
+        self.status_config_path = os.path.join(self.config_path, 'status_monitor.json')
         self._overlay_listeners: list = []
+        self.status_config_notifier = StatusConfigNotifier()
+        self.key_mappings_path = self._resolve_key_mappings_path()
         self.ensure_dirs_and_files()
         self.migrate_manifest_if_needed()
 
@@ -995,6 +1400,15 @@ class DataManager:
                     direction_config = json.load(f)
             except (json.JSONDecodeError, FileNotFoundError):
                 self._write_direction_config(default_direction_config)
+        status_default = StatusMonitorConfig.default()
+        if not os.path.exists(self.status_config_path):
+            self._write_status_config(status_default)
+        else:
+            try:
+                with open(self.status_config_path, 'r', encoding='utf-8') as f:
+                    json.load(f)
+            except (json.JSONDecodeError, FileNotFoundError):
+                self._write_status_config(status_default)
             else:
                 changed = False
                 for key, value in default_direction_config.items():
@@ -1297,6 +1711,155 @@ class DataManager:
         current_settings.update(settings_data)
         with open(self.settings_path, 'w', encoding='utf-8') as f:
             json.dump(current_settings, f, indent=4, ensure_ascii=False)
+
+    def load_status_monitor_config(self) -> StatusMonitorConfig:
+        try:
+            with open(self.status_config_path, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+        except (json.JSONDecodeError, FileNotFoundError):
+            config = StatusMonitorConfig.default()
+            self._write_status_config(config)
+            return config
+        return StatusMonitorConfig.from_dict(data)
+
+    def update_status_monitor_config(self, updates: dict) -> StatusMonitorConfig:
+        if not isinstance(updates, dict):
+            return self.load_status_monitor_config()
+
+        config = self.load_status_monitor_config()
+
+        def apply_resource(target: StatusResourceConfig, payload: Optional[dict], *, allow_threshold: bool) -> None:
+            if not isinstance(payload, dict):
+                return
+            if 'roi' in payload:
+                roi_payload = payload.get('roi')
+                if isinstance(roi_payload, dict):
+                    target.roi = StatusRoi.from_dict(roi_payload)
+            if 'interval_sec' in payload:
+                try:
+                    val = float(payload.get('interval_sec'))
+                except (TypeError, ValueError):
+                    val = None
+                if val is not None and val > 0:
+                    target.interval_sec = max(0.1, val)
+            if allow_threshold and 'recovery_threshold' in payload:
+                threshold = payload.get('recovery_threshold')
+                if threshold is None:
+                    target.recovery_threshold = None
+                else:
+                    try:
+                        t_val = int(threshold)
+                    except (TypeError, ValueError):
+                        pass
+                    else:
+                        if 1 <= t_val <= 99:
+                            target.recovery_threshold = t_val
+            if allow_threshold and 'command_profile' in payload:
+                command = payload.get('command_profile')
+                if command is None or (isinstance(command, str) and not command.strip()):
+                    target.command_profile = None
+                elif isinstance(command, str):
+                    target.command_profile = command
+            if 'enabled' in payload:
+                target.enabled = bool(payload.get('enabled'))
+            if 'max_value' in payload:
+                raw_value = payload.get('max_value')
+                if raw_value in (None, ''):
+                    target.maximum_value = None
+                else:
+                    try:
+                        max_val = int(raw_value)
+                    except (TypeError, ValueError):
+                        pass
+                    else:
+                        if max_val > 0:
+                            target.maximum_value = max_val
+
+        apply_resource(config.hp, updates.get('hp'), allow_threshold=True)
+        apply_resource(config.mp, updates.get('mp'), allow_threshold=True)
+        apply_resource(config.exp, updates.get('exp'), allow_threshold=False)
+
+        self._write_status_config(config)
+        return config
+
+    def register_status_config_listener(self, slot) -> None:
+        if slot is None:
+            return
+        try:
+            self.status_config_notifier.status_config_changed.connect(slot)
+        except Exception:
+            pass
+
+    def _write_status_config(self, config: StatusMonitorConfig) -> None:
+        with open(self.status_config_path, 'w', encoding='utf-8') as f:
+            json.dump(config.to_dict(), f, indent=4, ensure_ascii=False)
+        try:
+            self.status_config_notifier.emit_config(config)
+        except Exception:
+            pass
+
+    def _resolve_key_mappings_path(self) -> Path:
+        legacy_relative = Path(os.path.join('Project_Maple', 'workspace', 'config', 'key_mappings.json'))
+        module_workspace = Path(__file__).resolve().parents[1] / 'workspace' / 'config' / 'key_mappings.json'
+        workspace_relative = Path('workspace') / 'config' / 'key_mappings.json'
+
+        candidates = [
+            legacy_relative,
+            Path.cwd() / legacy_relative,
+            module_workspace,
+            workspace_relative,
+            Path.cwd() / workspace_relative,
+        ]
+
+        for candidate in candidates:
+            try:
+                candidate_path = candidate if candidate.is_absolute() else (Path.cwd() / candidate)
+                if candidate_path.is_file():
+                    return candidate_path.resolve()
+            except OSError:
+                continue
+
+        fallback = candidates[1] if len(candidates) > 1 else module_workspace
+        fallback_path = fallback if fallback.is_absolute() else (Path.cwd() / fallback)
+        return fallback_path.resolve()
+
+    def list_command_profiles(self, categories: tuple[str, ...]) -> dict[str, list[str]]:
+        results = {category: [] for category in categories}
+        target_path = self.key_mappings_path
+        if not target_path or not target_path.is_file():
+            return results
+
+        raw_data = None
+        for encoding in ('utf-8', 'utf-8-sig', 'cp949', 'euc-kr'):
+            try:
+                with target_path.open('r', encoding=encoding) as f:
+                    raw_data = json.load(f)
+                break
+            except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+                raw_data = None
+
+        if not isinstance(raw_data, dict):
+            return results
+
+        category_map = raw_data.get('_categories')
+        if not isinstance(category_map, dict):
+            category_map = {}
+
+        profiles_section = raw_data.get('profiles')
+        if isinstance(profiles_section, dict):
+            profile_names = list(profiles_section.keys())
+        else:
+            profile_names = [key for key in raw_data.keys() if not str(key).startswith('_')]
+
+        for name in profile_names:
+            mapped_category = category_map.get(name)
+            if mapped_category in results:
+                results[mapped_category].append(name)
+
+        for key in results:
+            results[key] = sorted(set(results[key]))
+
+        return results
 
     # --- 닉네임 템플릿 관리 ---
     def get_nickname_config(self):
@@ -1745,10 +2308,14 @@ class LearningTab(QWidget):
         self._nickname_ui_updating = False
         self.direction_config = self.data_manager.get_direction_config()
         self._direction_ui_updating = False
+        self._status_config = self.data_manager.load_status_monitor_config()
+        self._status_ui_updating = False
+        self._status_command_options: list[tuple[str, str]] = []
         self._thumbnail_cache = OrderedDict()
         self._thumbnail_cache_limit = 256
         self.initUI()
         self.init_sam()
+        self.data_manager.register_status_config_listener(self._handle_status_config_changed)
 
     def get_data_manager(self):
         """Hunt 등 다른 탭에서 데이터 매니저를 참조할 때 사용."""
@@ -2044,6 +2611,9 @@ class LearningTab(QWidget):
         direction_group.setLayout(direction_layout)
         right_layout.addWidget(direction_group)
 
+        status_group = self._create_status_monitor_group()
+        right_layout.addWidget(status_group)
+
         self.log_viewer = QTextEdit()
         self.log_viewer.setReadOnly(True)
         log_metrics = self.log_viewer.fontMetrics()
@@ -2090,6 +2660,8 @@ class LearningTab(QWidget):
         self.populate_model_list()
         self.populate_preset_list()
         self.populate_nickname_template_list()
+        self._load_status_command_options()
+        self._apply_status_config_to_ui()
 
     def update_status_message(self, message):
         """상태바 메시지 업데이트를 위한 슬롯."""
@@ -2226,6 +2798,468 @@ class LearningTab(QWidget):
                 tooltip_lines.append(time.strftime('등록 시각: %Y-%m-%d %H:%M:%S', time.localtime(created)))
             item.setToolTip('\n'.join(tooltip_lines))
             widget.addItem(item)
+
+    # --- 상태 모니터링 UI 구성 ---
+    def _create_status_monitor_group(self) -> QGroupBox:
+        group = QGroupBox("HP / MP / EXP 설정")
+        layout = QVBoxLayout()
+        cards_layout = QHBoxLayout()
+        cards_layout.setSpacing(12)
+
+        self.hp_card = self._build_status_card('hp')
+        self.mp_card = self._build_status_card('mp')
+        self.exp_card = self._build_exp_status_card()
+
+        cards_layout.addWidget(self.hp_card)
+        cards_layout.addWidget(self.mp_card)
+        cards_layout.addWidget(self.exp_card)
+
+        layout.addLayout(cards_layout)
+        group.setLayout(layout)
+        return group
+
+    def _build_status_card(self, resource: str) -> QGroupBox:
+        title = 'HP' if resource == 'hp' else 'MP'
+        box = QGroupBox()
+        vbox = QVBoxLayout()
+
+        header_layout = QHBoxLayout()
+        title_label = QLabel(title)
+        title_label.setStyleSheet('font-weight: bold;')
+        header_layout.addWidget(title_label)
+        enabled_checkbox = QCheckBox('사용')
+        header_layout.addWidget(enabled_checkbox)
+        header_layout.addStretch(1)
+        vbox.addLayout(header_layout)
+
+        button = QPushButton('탐지 범위 설정')
+        button.clicked.connect(lambda _, key=resource: self._select_status_roi(key))
+        vbox.addWidget(button)
+
+        roi_label = QLabel('범위가 설정되지 않았습니다.')
+        roi_label.setWordWrap(True)
+        vbox.addWidget(roi_label)
+
+        max_layout = QHBoxLayout()
+        max_label = QLabel(f'최대 {title}:')
+        max_layout.addWidget(max_label)
+        max_input = QLineEdit()
+        max_input.setPlaceholderText('예: 120')
+        max_input.setValidator(QIntValidator(1, 999999, max_input))
+        max_layout.addWidget(max_input)
+        vbox.addLayout(max_layout)
+
+        threshold_layout = QHBoxLayout()
+        threshold_layout.addWidget(QLabel('회복 % 설정:'))
+        input_field = QLineEdit()
+        input_field.setPlaceholderText('예: 70')
+        input_field.setValidator(QIntValidator(1, 99, input_field))
+        threshold_layout.addWidget(input_field)
+        vbox.addLayout(threshold_layout)
+
+        command_layout = QHBoxLayout()
+        command_layout.addWidget(QLabel('명령 프로필:'))
+        combo = QComboBox()
+        command_layout.addWidget(combo)
+        vbox.addLayout(command_layout)
+
+        interval_layout = QHBoxLayout()
+        interval_label = QLabel('탐지주기(초):')
+        interval_layout.addWidget(interval_label)
+        interval_input = QLineEdit()
+        interval_input.setPlaceholderText('예: 1.0')
+        validator = QDoubleValidator(0.1, 3600.0, 2, interval_input)
+        validator.setNotation(QDoubleValidator.Notation.StandardNotation)
+        interval_input.setValidator(validator)
+        interval_layout.addWidget(interval_input)
+        vbox.addLayout(interval_layout)
+
+        vbox.addStretch(1)
+        box.setLayout(vbox)
+
+        if resource == 'hp':
+            self.hp_enabled_checkbox = enabled_checkbox
+            self.hp_roi_button = button
+            self.hp_roi_label = roi_label
+            self.hp_max_input = max_input
+            self.hp_threshold_input = input_field
+            self.hp_command_combo = combo
+            self.hp_interval_input = interval_input
+            self.hp_enabled_checkbox.toggled.connect(lambda checked: self._on_status_enabled_changed('hp', checked))
+            self.hp_max_input.editingFinished.connect(lambda: self._on_status_max_changed('hp'))
+            self.hp_threshold_input.editingFinished.connect(lambda: self._on_status_threshold_changed('hp'))
+            self.hp_command_combo.currentIndexChanged.connect(lambda _: self._on_status_command_changed('hp'))
+            self.hp_interval_input.editingFinished.connect(lambda: self._on_status_interval_changed('hp'))
+        else:
+            self.mp_enabled_checkbox = enabled_checkbox
+            self.mp_roi_button = button
+            self.mp_roi_label = roi_label
+            self.mp_max_input = max_input
+            self.mp_threshold_input = input_field
+            self.mp_command_combo = combo
+            self.mp_interval_input = interval_input
+            self.mp_enabled_checkbox.toggled.connect(lambda checked: self._on_status_enabled_changed('mp', checked))
+            self.mp_max_input.editingFinished.connect(lambda: self._on_status_max_changed('mp'))
+            self.mp_threshold_input.editingFinished.connect(lambda: self._on_status_threshold_changed('mp'))
+            self.mp_command_combo.currentIndexChanged.connect(lambda _: self._on_status_command_changed('mp'))
+            self.mp_interval_input.editingFinished.connect(lambda: self._on_status_interval_changed('mp'))
+
+        return box
+
+    def _build_exp_status_card(self) -> QGroupBox:
+        box = QGroupBox()
+        vbox = QVBoxLayout()
+        header_layout = QHBoxLayout()
+        title_label = QLabel('EXP')
+        title_label.setStyleSheet('font-weight: bold;')
+        header_layout.addWidget(title_label)
+        self.exp_enabled_checkbox = QCheckBox('사용')
+        header_layout.addWidget(self.exp_enabled_checkbox)
+        header_layout.addStretch(1)
+        vbox.addLayout(header_layout)
+        self.exp_roi_button = QPushButton('탐지 범위 설정')
+        self.exp_roi_button.clicked.connect(lambda: self._select_status_roi('exp'))
+        vbox.addWidget(self.exp_roi_button)
+
+        self.exp_roi_label = QLabel('범위가 설정되지 않았습니다.')
+        self.exp_roi_label.setWordWrap(True)
+        vbox.addWidget(self.exp_roi_label)
+
+        info_label = QLabel('탐지 주기: 60초 (고정)')
+        self.exp_interval_label = info_label
+        vbox.addWidget(info_label)
+
+        self.exp_preview_button = QPushButton('인식 확인')
+        self.exp_preview_button.setToolTip('현재 EXP 탐지 범위에서 캡처한 화면과 OCR 결과를 확인합니다.')
+        self.exp_preview_button.clicked.connect(self._handle_exp_preview)
+        vbox.addWidget(self.exp_preview_button)
+
+        vbox.addStretch(1)
+        box.setLayout(vbox)
+        self.exp_enabled_checkbox.toggled.connect(lambda checked: self._on_status_enabled_changed('exp', checked))
+        return box
+
+    def _load_status_command_options(self) -> None:
+        profiles = self.data_manager.list_command_profiles(('스킬', '기타'))
+        options: list[tuple[str, str]] = []
+        for category in ('스킬', '기타'):
+            names = profiles.get(category, []) if isinstance(profiles, dict) else []
+            for name in names:
+                options.append((category, name))
+        self._status_command_options = options
+
+    def _apply_status_config_to_ui(self) -> None:
+        if not hasattr(self, 'hp_roi_label'):
+            return
+        self._status_ui_updating = True
+        try:
+            hp_roi_text = self._format_status_roi(self._status_config.hp.roi)
+            mp_roi_text = self._format_status_roi(self._status_config.mp.roi)
+            exp_roi_text = self._format_status_roi(self._status_config.exp.roi)
+            self.hp_roi_label.setText(hp_roi_text)
+            self.mp_roi_label.setText(mp_roi_text)
+            self.exp_roi_label.setText(exp_roi_text)
+
+            self._populate_status_combo(self.hp_command_combo, self._status_config.hp.command_profile)
+            self._populate_status_combo(self.mp_command_combo, self._status_config.mp.command_profile)
+
+            self._set_line_edit_value(getattr(self, 'hp_max_input', None), self._status_config.hp.maximum_value)
+            self._set_line_edit_value(getattr(self, 'mp_max_input', None), self._status_config.mp.maximum_value)
+            self._set_line_edit_value(self.hp_threshold_input, self._status_config.hp.recovery_threshold)
+            self._set_line_edit_value(self.mp_threshold_input, self._status_config.mp.recovery_threshold)
+
+            self._set_interval_value(self.hp_interval_input, self._status_config.hp.interval_sec)
+            self._set_interval_value(self.mp_interval_input, self._status_config.mp.interval_sec)
+
+            self._set_checkbox_state(self.hp_enabled_checkbox, self._status_config.hp.enabled)
+            self._set_checkbox_state(self.mp_enabled_checkbox, self._status_config.mp.enabled)
+            self._set_checkbox_state(self.exp_enabled_checkbox, self._status_config.exp.enabled)
+
+            self._set_status_controls_enabled('hp', self._status_config.hp.enabled)
+            self._set_status_controls_enabled('mp', self._status_config.mp.enabled)
+            self._set_status_controls_enabled('exp', self._status_config.exp.enabled)
+        finally:
+            self._status_ui_updating = False
+
+    def _set_line_edit_value(self, widget: QLineEdit, value: Optional[int]) -> None:
+        if widget is None:
+            return
+        widget.blockSignals(True)
+        widget.setText('' if value is None else str(int(value)))
+        widget.blockSignals(False)
+
+    def _set_checkbox_state(self, checkbox: QCheckBox, checked: bool) -> None:
+        if checkbox is None:
+            return
+        checkbox.blockSignals(True)
+        checkbox.setChecked(bool(checked))
+        checkbox.blockSignals(False)
+
+    def _set_interval_value(self, widget: QLineEdit, value: float) -> None:
+        if widget is None:
+            return
+        widget.blockSignals(True)
+        text = f"{float(value):.2f}" if abs(value - round(value)) > 1e-6 else str(int(round(value)))
+        widget.setText(text)
+        widget.blockSignals(False)
+
+    def _set_status_controls_enabled(self, resource: str, enabled: bool) -> None:
+        enabled = bool(enabled)
+        if resource == 'hp':
+            controls = [
+                getattr(self, 'hp_roi_button', None),
+                getattr(self, 'hp_max_input', None),
+                getattr(self, 'hp_threshold_input', None),
+                getattr(self, 'hp_command_combo', None),
+                getattr(self, 'hp_interval_input', None),
+            ]
+        elif resource == 'mp':
+            controls = [
+                getattr(self, 'mp_roi_button', None),
+                getattr(self, 'mp_max_input', None),
+                getattr(self, 'mp_threshold_input', None),
+                getattr(self, 'mp_command_combo', None),
+                getattr(self, 'mp_interval_input', None),
+            ]
+        else:
+            controls = [
+                getattr(self, 'exp_roi_button', None),
+                getattr(self, 'exp_preview_button', None),
+            ]
+            if getattr(self, 'exp_interval_label', None):
+                if enabled:
+                    self.exp_interval_label.setText('탐지 주기: 60초 (고정)')
+                else:
+                    self.exp_interval_label.setText('탐지 주기: 60초 (비활성)')
+
+        for control in controls:
+            if control is not None:
+                control.setEnabled(enabled)
+
+    def _handle_exp_preview(self) -> None:
+        if not hasattr(self, '_status_config') or self._status_config is None:
+            QMessageBox.warning(self, 'EXP 인식 확인', '상태 모니터 구성이 아직 초기화되지 않았습니다.')
+            return
+
+        roi = getattr(self._status_config.exp, 'roi', StatusRoi())
+        if not roi.is_valid():
+            QMessageBox.information(self, 'EXP 인식 확인', '탐지 범위가 설정되지 않아 확인할 수 없습니다. 먼저 ROI를 지정해주세요.')
+            return
+
+        try:
+            with mss.mss() as sct:
+                monitor_dict = roi.to_monitor_dict()
+                raw = np.array(sct.grab(monitor_dict))
+        except Exception as exc:  # pragma: no cover - 시스템 환경에 따라 다름
+            QMessageBox.warning(self, 'EXP 인식 확인', f'화면 캡처에 실패했습니다.\n{exc}')
+            return
+
+        if raw.size == 0:
+            QMessageBox.warning(self, 'EXP 인식 확인', '캡처 결과가 비어 있습니다. ROI 범위를 다시 확인해주세요.')
+            return
+
+        try:
+            bgr_image = cv2.cvtColor(raw, cv2.COLOR_BGRA2BGR)
+        except cv2.error as exc:  # pragma: no cover - OpenCV 내부 오류 대비
+            QMessageBox.warning(self, 'EXP 인식 확인', f'이미지 변환 중 오류가 발생했습니다.\n{exc}')
+            return
+
+        preview = self._prepare_exp_preview(bgr_image)
+        roi_text = self._format_status_roi(roi)
+        dialog = ExpRecognitionPreviewDialog(
+            self,
+            f'탐지 범위: {roi_text}',
+            bgr_image,
+            preview.get('processed'),
+            preview.get('summary_lines', []),
+        )
+        dialog.exec()
+
+    def _prepare_exp_preview(self, image_bgr: np.ndarray) -> dict:
+        result: dict = {
+            'processed': None,
+            'summary_lines': [],
+        }
+
+        if image_bgr is None or image_bgr.size == 0:
+            result['summary_lines'] = ['상태: 캡처 이미지가 비어 있습니다.']
+            return result
+
+        gray = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2GRAY)
+        resized = cv2.resize(
+            gray,
+            (0, 0),
+            fx=1.2,
+            fy=1.2,
+            interpolation=cv2.INTER_CUBIC,
+        )
+        _, thresh = cv2.threshold(resized, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+        result['processed'] = thresh
+
+        lines: list[str] = []
+
+        if not PYTESSERACT_AVAILABLE or pytesseract is None:
+            lines.append('상태: pytesseract가 설치되어 있지 않아 OCR을 수행할 수 없습니다.')
+            return {**result, 'summary_lines': lines}
+
+        config = '--psm 7 -c tessedit_char_whitelist=0123456789.%[]'
+        try:
+            text = pytesseract.image_to_string(thresh, config=config)
+        except Exception as exc:  # pragma: no cover - pytesseract 내부 오류 대비
+            lines.append(f'상태: pytesseract 실행 중 오류가 발생했습니다. ({exc})')
+            return {**result, 'summary_lines': lines}
+
+        cleaned = text.strip().replace('\n', ' ') if text else ''
+
+        amount = StatusMonitorThread._extract_exp_amount(cleaned) if cleaned else None
+        percent = StatusMonitorThread._extract_exp_percent(cleaned) if cleaned else None
+
+        if not cleaned:
+            lines.append('상태: OCR 결과가 비어 있습니다.')
+        elif amount is None or percent is None:
+            lines.append('상태: OCR 결과를 해석하지 못했습니다.')
+        else:
+            lines.append('상태: OCR 성공')
+
+        lines.append(f'OCR 원문: {text.strip() if text else "(비어 있음)"}')
+        lines.append(f'정제된 문자열: {cleaned if cleaned else "(비어 있음)"}')
+
+        if amount is not None:
+            lines.append(f'추출된 경험치 값: {amount}')
+        else:
+            lines.append('추출된 경험치 값: 해석 실패')
+
+        if percent is not None:
+            lines.append(f'추출된 EXP 퍼센트: {percent:.2f}%')
+        else:
+            lines.append('추출된 EXP 퍼센트: 해석 실패')
+
+        return {**result, 'summary_lines': lines}
+
+
+    def _populate_status_combo(self, combo: QComboBox, selected: Optional[str]) -> None:
+        if combo is None:
+            return
+        combo.blockSignals(True)
+        combo.clear()
+        combo.addItem('(선택 없음)', '')
+        for category, name in self._status_command_options:
+            combo.addItem(f"[{category}] {name}", name)
+        if selected:
+            index = combo.findData(selected)
+            if index == -1:
+                combo.addItem(f"[기타] {selected}", selected)
+                index = combo.findData(selected)
+            combo.setCurrentIndex(max(0, index))
+        else:
+            combo.setCurrentIndex(0)
+        combo.blockSignals(False)
+
+    def _format_status_roi(self, roi: StatusRoi) -> str:
+        if not isinstance(roi, StatusRoi) or not roi.is_valid():
+            return '범위가 설정되지 않았습니다.'
+        return f"위치: ({roi.left}, {roi.top}) / 크기: {roi.width}×{roi.height}"
+
+    def _select_status_roi(self, resource: str) -> None:
+        try:
+            selector = StatusRegionSelector(self)
+        except RuntimeError as exc:
+            QMessageBox.warning(self, '오류', str(exc))
+            return
+        if selector.exec():
+            rect = selector.get_roi()
+            updates = {
+                resource: {
+                    'roi': {
+                        'left': rect.left(),
+                        'top': rect.top(),
+                        'width': rect.width(),
+                        'height': rect.height(),
+                    }
+                }
+            }
+            self._status_config = self.data_manager.update_status_monitor_config(updates)
+            self._apply_status_config_to_ui()
+
+    def _on_status_threshold_changed(self, resource: str) -> None:
+        if self._status_ui_updating:
+            return
+        widget = self.hp_threshold_input if resource == 'hp' else self.mp_threshold_input
+        text = widget.text().strip() if widget else ''
+        value = None
+        if text:
+            try:
+                val = int(text)
+                if 1 <= val <= 99:
+                    value = val
+            except ValueError:
+                pass
+        updates = {resource: {'recovery_threshold': value}}
+        self._status_config = self.data_manager.update_status_monitor_config(updates)
+        self._apply_status_config_to_ui()
+
+    def _on_status_max_changed(self, resource: str) -> None:
+        if self._status_ui_updating:
+            return
+        widget = self.hp_max_input if resource == 'hp' else self.mp_max_input
+        if widget is None:
+            return
+        text = widget.text().strip()
+        if not text:
+            updates = {resource: {'max_value': None}}
+        else:
+            try:
+                value = int(text)
+            except ValueError:
+                self._apply_status_config_to_ui()
+                return
+            if value <= 0:
+                self._apply_status_config_to_ui()
+                return
+            updates = {resource: {'max_value': value}}
+        self._status_config = self.data_manager.update_status_monitor_config(updates)
+        self._apply_status_config_to_ui()
+
+    def _on_status_interval_changed(self, resource: str) -> None:
+        if self._status_ui_updating:
+            return
+        widget = self.hp_interval_input if resource == 'hp' else self.mp_interval_input
+        text = widget.text().strip() if widget else ''
+        if not text:
+            self._apply_status_config_to_ui()
+            return
+        try:
+            val = float(text)
+            if val <= 0:
+                raise ValueError
+        except ValueError:
+            self._apply_status_config_to_ui()
+            return
+        updates = {resource: {'interval_sec': val}}
+        self._status_config = self.data_manager.update_status_monitor_config(updates)
+        self._apply_status_config_to_ui()
+
+    def _on_status_command_changed(self, resource: str) -> None:
+        if self._status_ui_updating:
+            return
+        combo = self.hp_command_combo if resource == 'hp' else self.mp_command_combo
+        data = combo.currentData() if combo else ''
+        command = data if isinstance(data, str) and data else None
+        updates = {resource: {'command_profile': command}}
+        self._status_config = self.data_manager.update_status_monitor_config(updates)
+        self._apply_status_config_to_ui()
+
+    def _on_status_enabled_changed(self, resource: str, checked: bool) -> None:
+        if self._status_ui_updating:
+            return
+        updates = {resource: {'enabled': bool(checked)}}
+        self._status_config = self.data_manager.update_status_monitor_config(updates)
+        self._apply_status_config_to_ui()
+
+    def _handle_status_config_changed(self, config: StatusMonitorConfig) -> None:
+        self._status_config = config
+        self._load_status_command_options()
+        self._apply_status_config_to_ui()
 
     def on_nickname_text_changed(self):
         if self._nickname_ui_updating:

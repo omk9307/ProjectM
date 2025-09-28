@@ -41,6 +41,7 @@ from PyQt6.QtGui import QPixmap, QPainter, QPen, QColor, QBrush
 from detection_runtime import DetectionPopup, DetectionThread, ScreenSnipper
 from direction_detection import DirectionDetector
 from nickname_detection import NicknameDetector
+from status_monitor import StatusMonitorThread, StatusMonitorConfig
 
 if os.name == 'nt':
     MOD_ALT = 0x0001
@@ -574,6 +575,26 @@ class HuntTab(QWidget):
         }
         self._active_target_names: List[str] = []
 
+        self.status_monitor: Optional[StatusMonitorThread] = None
+        self._status_config: StatusMonitorConfig = StatusMonitorConfig.default()
+        self._status_last_command_ts = {'hp': 0.0, 'mp': 0.0}
+        self._status_display_values = {'hp': None, 'mp': None}
+        self._status_summary_cache = {
+            'hp': 'HP: --',
+            'mp': 'MP: --',
+            'exp': 'EXP: -- / --',
+        }
+        self._status_exp_records: list[dict] = []
+        self._status_detection_start_ts: Optional[float] = None
+        self._status_exp_start_snapshot: Optional[dict] = None
+        self._status_ocr_warned = False
+        self._hp_guard_active = False
+        self._hp_guard_timer = QTimer(self)
+        self._hp_guard_timer.setSingleShot(True)
+        self._hp_guard_timer.timeout.connect(self._clear_hp_guard)
+        self._last_command_issued: Optional[tuple[str, object]] = None
+        self._status_mp_saved_command: Optional[tuple[str, object]] = None
+
         self.teleport_settings = TeleportSettings()
         self.teleport_command_left = "텔레포트(좌)"
         self.teleport_command_right = "텔레포트(우)"
@@ -764,7 +785,9 @@ class HuntTab(QWidget):
                 return self._pending_completion_delays.pop(idx)
         return None
 
-    def on_sequence_completed(self, command_name: str, _reason: object, success: bool) -> None:
+    def on_sequence_completed(self, command_name: str, reason: object, success: bool) -> None:
+        if isinstance(reason, str) and reason.startswith('status:'):
+            self._handle_status_sequence_completed(command_name, reason, success)
         command = str(command_name) if command_name else ''
         entry = self._pop_completion_delay(command)
         if not entry:
@@ -1313,6 +1336,18 @@ class HuntTab(QWidget):
                 self.detection_view.setText("탐지 준비 중...")
                 self.detection_view.setPixmap(QPixmap())
             self.detect_btn.setText("실시간 탐지 중단")
+            if self.status_monitor:
+                self.status_monitor.set_tab_active(hunt=True)
+            self._status_detection_start_ts = time.time()
+            self._status_exp_records = []
+            self._status_exp_start_snapshot = None
+            self._status_ocr_warned = False
+            self._hp_guard_active = False
+            self._hp_guard_timer.stop()
+            self._status_display_values = {'hp': None, 'mp': None}
+            self._update_status_summary_cache()
+            self._last_command_issued = None
+            self._status_mp_saved_command = None
 
             self.last_used_model = selected_model
             self.append_log(f"탐지 시작: 모델={selected_model}, 범위={capture_region}")
@@ -1387,6 +1422,14 @@ class HuntTab(QWidget):
         self._save_settings()
 
     def _stop_detection_thread(self) -> None:
+        if self.status_monitor:
+            self.status_monitor.set_tab_active(hunt=False)
+        self._finalize_exp_tracking()
+        self._status_exp_records = []
+        self._status_exp_start_snapshot = None
+        self._status_detection_start_ts = None
+        self._update_status_summary_cache()
+        self._status_mp_saved_command = None
         if self.detection_thread:
             try:
                 self.detection_thread.frame_ready.disconnect(self._handle_detection_frame)
@@ -1620,6 +1663,9 @@ class HuntTab(QWidget):
                 f"스킬 범위 몬스터: {self.latest_primary_monster_count}",
                 direction_line,
                 teleport_line,
+                self._status_summary_cache.get('hp', 'HP: --'),
+                self._status_summary_cache.get('mp', 'MP: --'),
+                self._status_summary_cache.get('exp', 'EXP: -- / --'),
             ]
 
             self.info_summary_view.setPlainText('\n'.join(info_lines))
@@ -2187,6 +2233,9 @@ class HuntTab(QWidget):
             elif "key.right" in lower and "key.left" not in lower:
                 self._set_current_facing('right', save=False)
         self.control_command_issued.emit(command, reason)
+        is_status = isinstance(reason, str) and reason.startswith('status:')
+        if not is_status and normalized != "모든 키 떼기":
+            self._last_command_issued = (command, reason)
 
         reason_text = reason.strip() if isinstance(reason, str) else ""
         log_message = f"{normalized} (원인: {reason_text})" if reason_text else normalized
@@ -2215,6 +2264,243 @@ class HuntTab(QWidget):
         if timestamp is None:
             timestamp = self._format_timestamp_ms()
         self.keyboard_log_view.append(f"[{timestamp}] {message}")
+
+    def _handle_status_config_update(self, config: StatusMonitorConfig) -> None:
+        self._status_config = config
+        if not getattr(config.hp, 'enabled', True):
+            self._status_display_values['hp'] = None
+        if not getattr(config.mp, 'enabled', True):
+            self._status_display_values['mp'] = None
+        if not getattr(config.exp, 'enabled', True):
+            self._status_exp_records.clear()
+        self._update_status_summary_cache()
+        self._update_detection_summary()
+
+    def _handle_status_snapshot(self, payload: dict) -> None:
+        if not isinstance(payload, dict):
+            return
+        if not getattr(self, 'detect_btn', None) or not self.detect_btn.isChecked():
+            return
+        timestamp = float(payload.get('timestamp', time.time()))
+
+        hp_cfg = getattr(self._status_config, 'hp', None)
+        mp_cfg = getattr(self._status_config, 'mp', None)
+        exp_cfg = getattr(self._status_config, 'exp', None)
+
+        if hp_cfg and getattr(hp_cfg, 'enabled', True):
+            hp_info = payload.get('hp')
+            if isinstance(hp_info, dict):
+                hp_value = hp_info.get('percentage')
+                if isinstance(hp_value, (int, float)):
+                    self._status_display_values['hp'] = float(hp_value)
+                    self._maybe_trigger_status_command('hp', float(hp_value), timestamp)
+        else:
+            self._status_display_values['hp'] = None
+
+        if mp_cfg and getattr(mp_cfg, 'enabled', True):
+            mp_info = payload.get('mp')
+            if isinstance(mp_info, dict):
+                mp_value = mp_info.get('percentage')
+                if isinstance(mp_value, (int, float)):
+                    self._status_display_values['mp'] = float(mp_value)
+                    self._maybe_trigger_status_command('mp', float(mp_value), timestamp)
+        else:
+            self._status_display_values['mp'] = None
+
+        if exp_cfg and getattr(exp_cfg, 'enabled', True):
+            exp_info = payload.get('exp')
+            if isinstance(exp_info, dict):
+                self._record_exp_snapshot(exp_info)
+        else:
+            self._status_exp_records.clear()
+
+        self._update_status_summary_cache()
+        self._update_detection_summary()
+
+    def _handle_status_ocr_unavailable(self) -> None:
+        if self._status_ocr_warned:
+            return
+        self._status_ocr_warned = True
+        self.append_log('경고: pytesseract가 설치되지 않아 EXP 인식을 사용할 수 없습니다.', 'warn')
+
+    def _handle_exp_status_log(self, level: str, message: str) -> None:
+        if not message:
+            return
+        level = (level or 'info').lower()
+        self.append_log(message, level)
+
+    def _maybe_trigger_status_command(self, resource: str, percentage: float, timestamp: float) -> None:
+        if self.current_authority != 'hunt':
+            return
+        cfg = getattr(self._status_config, resource, None)
+        if cfg is None:
+            return
+        if not getattr(cfg, 'enabled', True):
+            return
+        threshold = getattr(cfg, 'recovery_threshold', None)
+        if threshold is None:
+            return
+        command_name = getattr(cfg, 'command_profile', None) or ''
+        command_name = command_name.strip()
+        if not command_name:
+            return
+        if percentage > threshold:
+            return
+        last_ts = self._status_last_command_ts.get(resource, 0.0)
+        interval = max(0.1, getattr(cfg, 'interval_sec', 1.0))
+        if (timestamp - last_ts) < interval:
+            return
+
+        if resource == 'hp':
+            if self._hp_guard_active:
+                return
+            self._issue_all_keys_release('HP 회복 자동 명령')
+            self._issue_status_command(resource, command_name)
+            guard_delay = random.uniform(0.370, 0.400)
+            self._hp_guard_active = True
+            self._hp_guard_timer.start(int(guard_delay * 1000))
+        else:
+            if (
+                self._last_command_issued
+                and (
+                    not isinstance(self._last_command_issued[1], str)
+                    or not str(self._last_command_issued[1]).startswith('status:')
+                )
+            ):
+                self._status_mp_saved_command = self._last_command_issued
+            else:
+                self._status_mp_saved_command = None
+            self._issue_status_command(resource, command_name)
+
+        self._status_last_command_ts[resource] = timestamp
+
+    def _issue_status_command(self, resource: str, command_name: str) -> None:
+        reason = f'status:{resource}'
+        self._emit_control_command(command_name, reason=reason)
+        self.append_log(f"[{resource.upper()}] 자동 명령 '{command_name}' 실행", 'info')
+
+    def _handle_status_sequence_completed(self, command_name: str, reason: str, success: bool) -> None:
+        try:
+            _, resource = reason.split(':', 1)
+        except ValueError:
+            resource = ''
+        resource = resource.strip()
+        if resource == 'mp' and self._status_mp_saved_command:
+            command, saved_reason = self._status_mp_saved_command
+            self._status_mp_saved_command = None
+            self._emit_control_command(command, saved_reason)
+        elif resource == 'hp':
+            if success:
+                self.append_log(f"[HP] 회복 명령 '{command_name}' 완료", 'debug')
+
+    def _clear_hp_guard(self) -> None:
+        self._hp_guard_active = False
+
+    def _update_status_summary_cache(self) -> None:
+        hp_cfg = getattr(self._status_config, 'hp', None)
+        mp_cfg = getattr(self._status_config, 'mp', None)
+        exp_cfg = getattr(self._status_config, 'exp', None)
+
+        hp = self._status_display_values.get('hp')
+        mp = self._status_display_values.get('mp')
+
+        hp_enabled = hp_cfg.enabled if hp_cfg else True
+        mp_enabled = mp_cfg.enabled if mp_cfg else True
+        exp_enabled = exp_cfg.enabled if exp_cfg else True
+
+        def _format_percent(value: float) -> str:
+            rounded = round(value)
+            if abs(value - rounded) < 0.05:
+                return f"{rounded}%"
+            return f"{value:.1f}%"
+
+        def _format_resource_text(percent_value, cfg) -> str:
+            if not isinstance(percent_value, (int, float)):
+                return '--'
+            percent_text = _format_percent(float(percent_value))
+            maximum = getattr(cfg, 'maximum_value', None) if cfg else None
+            if isinstance(maximum, (int, float)) and maximum > 0:
+                current_value = int(round(float(maximum) * float(percent_value) / 100.0))
+                return f"{percent_text} ({current_value})"
+            return percent_text
+
+        hp_text = '비활성' if not hp_enabled else _format_resource_text(hp, hp_cfg)
+        mp_text = '비활성' if not mp_enabled else _format_resource_text(mp, mp_cfg)
+        exp_text = '비활성'
+        if self._status_exp_records:
+            latest = self._status_exp_records[-1]
+            amount = latest.get('amount')
+            percent = latest.get('percent')
+            if amount is not None and percent is not None:
+                exp_text = f"{amount} / {percent:.2f}%"
+        elif exp_enabled:
+            exp_text = '-- / --'
+        else:
+            exp_text = '비활성'
+        self._status_summary_cache = {
+            'hp': f"HP: {hp_text}",
+            'mp': f"MP: {mp_text}",
+            'exp': f"EXP: {exp_text}",
+        }
+
+    def _record_exp_snapshot(self, record: dict) -> None:
+        if record is None or not getattr(self._status_config.exp, 'enabled', True):
+            return
+        amount_raw = record.get('amount')
+        percent_raw = record.get('percent')
+        try:
+            amount_val = int(str(amount_raw)) if amount_raw is not None else None
+        except ValueError:
+            amount_val = None
+        try:
+            percent_val = float(percent_raw) if percent_raw is not None else None
+        except (TypeError, ValueError):
+            percent_val = None
+        if amount_val is None or percent_val is None:
+            return
+        entry = {
+            'timestamp': float(record.get('timestamp', time.time())),
+            'amount': amount_val,
+            'percent': percent_val,
+        }
+        if self._status_exp_start_snapshot is None:
+            self._status_exp_start_snapshot = entry
+        self._status_exp_records.append(entry)
+
+    def _finalize_exp_tracking(self, end_timestamp: Optional[float] = None) -> None:
+        if not self._status_exp_start_snapshot or not self._status_exp_records:
+            return
+        end_entry = self._status_exp_records[-1]
+        if end_timestamp is None:
+            end_timestamp = end_entry.get('timestamp', time.time())
+        start_amount = self._status_exp_start_snapshot.get('amount')
+        end_amount = end_entry.get('amount')
+        start_percent = self._status_exp_start_snapshot.get('percent')
+        end_percent = end_entry.get('percent')
+        if start_amount is None or end_amount is None or start_percent is None or end_percent is None:
+            return
+
+        duration = 0.0
+        if self._status_detection_start_ts:
+            duration = max(0.0, end_timestamp - self._status_detection_start_ts)
+        minutes = max(1.0 / 60.0, duration / 60.0)
+        gain = max(0, end_amount - start_amount)
+        per_minute = int(gain / minutes) if minutes > 0 else gain
+        percent_gain = end_percent - start_percent
+
+        duration_text = self._format_duration_text(duration)
+        self.append_log(
+            f"사냥 종료 - 사냥시간: {duration_text}, 분당 경험치: {per_minute} / {percent_gain:.2f}%",
+            'info',
+        )
+
+    @staticmethod
+    def _format_duration_text(seconds: float) -> str:
+        seconds = max(0.0, float(seconds))
+        hours = int(seconds // 3600)
+        minutes = int((seconds % 3600) // 60)
+        secs = int(seconds % 60)
+        return f"{hours}시간 {minutes}분 {secs}초"
 
     def handle_detection_payload(self, payload: dict) -> None:
         if not isinstance(payload, dict):
@@ -2722,6 +3008,23 @@ class HuntTab(QWidget):
         self._save_settings()
         self._load_nickname_configuration()
         self._load_direction_configuration()
+        if hasattr(self.data_manager, 'register_status_config_listener'):
+            try:
+                self.data_manager.register_status_config_listener(self._handle_status_config_update)
+            except Exception:
+                pass
+        if hasattr(self.data_manager, 'load_status_monitor_config'):
+            try:
+                self._status_config = self.data_manager.load_status_monitor_config()
+            except Exception:
+                self._status_config = StatusMonitorConfig.default()
+
+    def attach_status_monitor(self, monitor: StatusMonitorThread) -> None:
+        self.status_monitor = monitor
+        monitor.status_captured.connect(self._handle_status_snapshot)
+        monitor.ocr_unavailable.connect(self._handle_status_ocr_unavailable)
+        if hasattr(monitor, 'exp_status_logged'):
+            monitor.exp_status_logged.connect(self._handle_exp_status_log)
 
     def set_authority_bridge_active(self, request_connected: bool, release_connected: bool) -> None:
         self._authority_request_connected = bool(request_connected)
@@ -3926,6 +4229,20 @@ class HuntTab(QWidget):
         self._pre_delay_timers.clear()
         self._pending_completion_delays.clear()
         self._stop_detection_thread()
+        if self.status_monitor:
+            try:
+                self.status_monitor.status_captured.disconnect(self._handle_status_snapshot)
+            except Exception:
+                pass
+            try:
+                self.status_monitor.ocr_unavailable.disconnect(self._handle_status_ocr_unavailable)
+            except Exception:
+                pass
+            try:
+                self.status_monitor.exp_status_logged.disconnect(self._handle_exp_status_log)
+            except Exception:
+                pass
+            self.status_monitor = None
         app = QApplication.instance()
         if app and getattr(self, 'hotkey_event_filter', None):
             try:

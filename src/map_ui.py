@@ -28,6 +28,8 @@ from ctypes import wintypes
 from pathlib import Path
 from typing import Dict, Optional
 
+from status_monitor import StatusMonitorThread, StatusMonitorConfig
+
 from PyQt6.QtWidgets import (
     QApplication, QWidget, QLabel, QVBoxLayout, QHBoxLayout, QPushButton, QTextEdit,
     QMessageBox, QSpinBox, QDialog, QDialogButtonBox, QListWidget,
@@ -329,7 +331,16 @@ class MapTab(QWidget):
             
             # 탐지 스레드의 실행 상태를 명확하게 추적하기 위한 플래그
             self.is_detection_running = False
-            
+
+            self.status_monitor: Optional[StatusMonitorThread] = None
+            self._status_config: StatusMonitorConfig = StatusMonitorConfig.default()
+            self._status_log_lines = ["HP: --", "MP: --"]
+            self._status_last_command_ts = {'hp': 0.0, 'mp': 0.0}
+            self._status_active_resource: Optional[str] = None
+            self._status_saved_command: Optional[tuple[str, object]] = None
+            self._last_regular_command: Optional[tuple[str, object]] = None
+            self._status_data_manager = None
+
             self.full_map_pixmap = None
             self.full_map_bounding_rect = QRectF()
             self.my_player_global_rects = []
@@ -845,12 +856,25 @@ class MapTab(QWidget):
         if not command:
             return False
 
+        is_status_command = isinstance(reason, str) and reason.startswith('status:')
+
+        if (
+            self._status_active_resource
+            and not is_status_command
+            and command != "모든 키 떼기"
+        ):
+            self._status_saved_command = (command, reason)
+            return False
+
         if self.forbidden_wall_in_progress and not allow_forbidden and reason != self.active_forbidden_wall_reason:
             self.update_general_log("[금지벽] 명령 실행 중이어서 다른 명령은 보류됩니다.", "gray")
             self.pending_forbidden_command = (command, reason)
             return False
 
         self.control_command_issued.emit(command, reason)
+
+        if not is_status_command and command != "모든 키 떼기":
+            self._last_regular_command = (command, reason)
         return True
 
     def _normalize_route_slot_dict(self, slot_dict):
@@ -2563,6 +2587,9 @@ class MapTab(QWidget):
     @pyqtSlot(str, object, bool)
     def on_sequence_completed(self, command_name, reason, success):
         if isinstance(reason, str):
+            if reason.startswith('status:'):
+                self._handle_status_command_completed(bool(success))
+                return
             if self.event_in_progress and reason == self.active_event_reason:
                 self._finish_waypoint_event(bool(success))
                 return
@@ -2978,6 +3005,15 @@ class MapTab(QWidget):
                 self.detection_start_time = time.time()
                 self.initial_delay_active = True
 
+                self._status_log_lines = ["HP: --", "MP: --"]
+                self._status_active_resource = None
+                self._status_saved_command = None
+                self._last_regular_command = None
+                self._status_last_command_ts = {'hp': 0.0, 'mp': 0.0}
+                if self.status_monitor:
+                    self.status_monitor.set_tab_active(map_tab=True)
+                self._render_detection_log(self._last_detection_log_body)
+
                 if self.debug_view_checkbox.isChecked():
                     if not self.debug_dialog:
                         self.debug_dialog = DebugViewDialog(self)
@@ -2997,6 +3033,8 @@ class MapTab(QWidget):
                 # [핵심 수정] 스레드 중단 전에 플래그를 False로 먼저 설정
                 self.is_detection_running = False
                 self.detection_status_changed.emit(False)
+                if self.status_monitor:
+                    self.status_monitor.set_tab_active(map_tab=False)
 
                 if self.detection_thread and self.detection_thread.isRunning():
                     self.detection_thread.stop()
@@ -3038,6 +3076,11 @@ class MapTab(QWidget):
 
                 # [핵심 수정] 탐지 중지 시 딜레이 플래그 비활성화
                 self.initial_delay_active = False
+
+                self._status_active_resource = None
+                self._status_saved_command = None
+                self._status_log_lines = ["HP: --", "MP: --"]
+                self._render_detection_log(self._last_detection_log_body)
 
                 if self.debug_dialog:
                     self.debug_dialog.close()
@@ -5806,11 +5849,112 @@ class MapTab(QWidget):
     def _render_detection_log(self, body_html: str | None) -> None:
         self._last_detection_log_body = body_html or ""
         probability_html = f"<span>{self._walk_teleport_probability_text}</span>"
+        status_html = "<br>".join(self._status_log_lines) if getattr(self, '_status_log_lines', None) else ""
+        parts = []
+        if status_html:
+            parts.append(status_html)
+        parts.append(probability_html)
         if self._last_detection_log_body:
-            combined = f"{probability_html}<br>{self._last_detection_log_body}"
-        else:
-            combined = probability_html
+            parts.append(self._last_detection_log_body)
+        combined = "<br>".join(part for part in parts if part)
         self.detection_log_viewer.setHtml(combined)
+
+    def attach_status_monitor(self, monitor: StatusMonitorThread, data_manager) -> None:
+        self.status_monitor = monitor
+        self._status_data_manager = data_manager
+        monitor.status_captured.connect(self._handle_status_snapshot)
+        if data_manager and hasattr(data_manager, 'register_status_config_listener'):
+            try:
+                data_manager.register_status_config_listener(self._handle_status_config_update)
+                self._status_config = data_manager.load_status_monitor_config()
+            except Exception:
+                self._status_config = StatusMonitorConfig.default()
+        self._handle_status_config_update(self._status_config)
+
+    def _handle_status_config_update(self, config: StatusMonitorConfig) -> None:
+        self._status_config = config
+        for idx, resource in enumerate(('hp', 'mp')):
+            cfg = getattr(self._status_config, resource, None)
+            if not cfg or not getattr(cfg, 'enabled', True):
+                self._status_log_lines[idx] = f"{resource.upper()}: 비활성"
+            else:
+                current = self._status_log_lines[idx]
+                if current.endswith('비활성'):
+                    self._status_log_lines[idx] = f"{resource.upper()}: --%"
+        self._render_detection_log(self._last_detection_log_body)
+
+    def _handle_status_snapshot(self, payload: dict) -> None:
+        if not self.is_detection_running:
+            return
+        if not isinstance(payload, dict):
+            return
+        timestamp = float(payload.get('timestamp', time.time()))
+        updated = False
+        for idx, resource in enumerate(('hp', 'mp')):
+            cfg = getattr(self._status_config, resource, None)
+            if not cfg or not getattr(cfg, 'enabled', True):
+                continue
+            info = payload.get(resource)
+            if not isinstance(info, dict):
+                continue
+            value = info.get('percentage')
+            if not isinstance(value, (int, float)):
+                continue
+            display = f"{resource.upper()}: {float(value):.1f}%"
+            self._status_log_lines[idx] = display
+            self._maybe_trigger_status_command(resource, float(value), timestamp)
+            updated = True
+        if updated:
+            self._render_detection_log(self._last_detection_log_body)
+
+    def _maybe_trigger_status_command(self, resource: str, percentage: float, timestamp: float) -> None:
+        cfg = getattr(self._status_config, resource, None)
+        if cfg is None:
+            return
+        if not getattr(cfg, 'enabled', True):
+            return
+        threshold = getattr(cfg, 'recovery_threshold', None)
+        if threshold is None:
+            return
+        command_name = (getattr(cfg, 'command_profile', None) or '').strip()
+        if not command_name:
+            return
+        if percentage > threshold:
+            return
+        interval = max(0.1, getattr(cfg, 'interval_sec', 1.0))
+        if (timestamp - self._status_last_command_ts.get(resource, 0.0)) < interval:
+            return
+        if self._status_active_resource is not None:
+            return
+
+        if hasattr(self, 'auto_control_checkbox') and not self.auto_control_checkbox.isChecked():
+            return
+
+        if self._last_regular_command and (
+            not isinstance(self._last_regular_command[1], str)
+            or not str(self._last_regular_command[1]).startswith('status:')
+        ):
+            self._status_saved_command = self._last_regular_command
+
+        self._status_active_resource = resource
+        self._emit_control_command("모든 키 떼기", reason='status:prep')
+        self._issue_status_command(resource, command_name)
+        self._status_last_command_ts[resource] = timestamp
+
+    def _issue_status_command(self, resource: str, command_name: str) -> None:
+        reason = f'status:{resource}'
+        self._emit_control_command(command_name, reason=reason)
+        self.update_general_log(f"[상태] {resource.upper()} 명령 '{command_name}' 실행", "purple")
+
+    def _handle_status_command_completed(self, success: bool) -> None:
+        active = self._status_active_resource
+        self._status_active_resource = None
+        if success and active:
+            self.update_general_log(f"[상태] {active.upper()} 명령 완료", "gray")
+        if self._status_saved_command:
+            command, reason = self._status_saved_command
+            self._status_saved_command = None
+            self._emit_control_command(command, reason)
 
     def _update_walk_teleport_probability_display(self, percent: float) -> None:
         self._walk_teleport_probability_text = f"텔레포트 확률: {max(percent, 0.0):.1f}%"
@@ -6718,5 +6862,11 @@ def cleanup_on_close(self):
             self.hotkey_manager.unregister_hotkey()
         if hasattr(self, 'win_event_filter'):
             QApplication.instance().removeNativeEventFilter(self.win_event_filter)
-            
+        if self.status_monitor:
+            try:
+                self.status_monitor.status_captured.disconnect(self._handle_status_snapshot)
+            except Exception:
+                pass
+            self.status_monitor = None
+
         print("'맵' 탭 정리 완료.")
