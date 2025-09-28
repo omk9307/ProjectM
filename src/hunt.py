@@ -6,6 +6,7 @@ import random
 import time
 import math
 import ctypes
+import html
 from ctypes import wintypes
 from dataclasses import dataclass
 from typing import List, Optional, Callable
@@ -701,6 +702,35 @@ class HuntTab(QWidget):
         millis = int((now - int(now)) * 1000)
         return f"{time.strftime('%H:%M:%S', local)}.{millis:03d}"
 
+    def _configure_log_view(self, widget: QTextEdit, *, minimum_height: int) -> None:
+        if widget is None:
+            return
+        widget.setReadOnly(True)
+        widget.setMinimumHeight(minimum_height)
+        widget.setStyleSheet(
+            "QTextEdit {"
+            "background-color: #2E2E2E;"
+            "color: #E0E0E0;"
+            "border: 1px solid #555;"
+            "font-family: Consolas, monospace;"
+            "}"
+        )
+
+    def _resolve_log_color(self, color: Optional[str]) -> str:
+        if not color:
+            return "#E0E0E0"
+        qcolor = QColor(color)
+        if not qcolor.isValid():
+            return "#E0E0E0"
+        return qcolor.name()
+
+    def _append_colored_text(self, widget: Optional[QTextEdit], message: str, color: Optional[str]) -> None:
+        if widget is None:
+            return
+        color_hex = self._resolve_log_color(color)
+        sanitized = html.escape(message)
+        widget.append(f'<span style="color:{color_hex}">{sanitized}</span>')
+
     def _format_delay_ms(self, delay_sec: float) -> str:
         return f"{max(0.0, delay_sec) * 1000:.0f}ms"
 
@@ -708,7 +738,7 @@ class HuntTab(QWidget):
         if delay_sec <= 0:
             return
         message = f"{context} 후 대기 {self._format_delay_ms(delay_sec)}"
-        self._append_control_log(message)
+        self._append_control_log(message, color="gray")
 
     def _normalize_delay_range(self, min_value: float, max_value: float) -> tuple[float, float]:
         try:
@@ -755,7 +785,10 @@ class HuntTab(QWidget):
         timer.start()
         self._set_command_cooldown(delay_sec)
         self.hunting_active = True
-        self._append_control_log(f"{context} 대기 {self._format_delay_ms(delay_sec)}")
+        self._append_control_log(
+            f"{context} 대기 {self._format_delay_ms(delay_sec)}",
+            color="gray",
+        )
         return True
 
     def _queue_completion_delay(self, command: str, min_delay: float, max_delay: float, context: str) -> None:
@@ -1090,9 +1123,7 @@ class HuntTab(QWidget):
         control_log_container = QVBoxLayout()
         control_log_label = QLabel("입력 로그")
         self.control_log_view = QTextEdit()
-        self.control_log_view.setReadOnly(True)
-        self.control_log_view.setMinimumHeight(160)
-        self.control_log_view.setStyleSheet("font-family: Consolas, monospace;")
+        self._configure_log_view(self.control_log_view, minimum_height=160)
         control_log_container.addWidget(control_log_label)
         control_log_container.addWidget(self.control_log_view)
         outer_layout.addLayout(control_log_container)
@@ -1100,9 +1131,7 @@ class HuntTab(QWidget):
         keyboard_log_container = QVBoxLayout()
         keyboard_log_label = QLabel("키보드 입력 로그")
         self.keyboard_log_view = QTextEdit()
-        self.keyboard_log_view.setReadOnly(True)
-        self.keyboard_log_view.setMinimumHeight(160)
-        self.keyboard_log_view.setStyleSheet("font-family: Consolas, monospace;")
+        self._configure_log_view(self.keyboard_log_view, minimum_height=160)
         keyboard_log_container.addWidget(keyboard_log_label)
         keyboard_log_container.addWidget(self.keyboard_log_view)
         outer_layout.addLayout(keyboard_log_container)
@@ -1110,9 +1139,7 @@ class HuntTab(QWidget):
         log_container = QVBoxLayout()
         log_label = QLabel("로그")
         self.log_view = QTextEdit()
-        self.log_view.setReadOnly(True)
-        self.log_view.setMinimumHeight(200)
-        self.log_view.setStyleSheet("font-family: Consolas, monospace;")
+        self._configure_log_view(self.log_view, minimum_height=200)
         log_container.addWidget(log_label)
         log_container.addWidget(self.log_view)
         outer_layout.addLayout(log_container)
@@ -2240,11 +2267,12 @@ class HuntTab(QWidget):
         log_message = f"{normalized} (원인: {reason_text})" if reason_text else normalized
         self._append_control_log(log_message)
 
-    def _append_control_log(self, message: str) -> None:
+    def _append_control_log(self, message: str, color: Optional[str] = None) -> None:
         timestamp = self._format_timestamp_ms()
-        if hasattr(self, 'control_log_view'):
-            self.control_log_view.append(f"[{timestamp}] {message}")
-        self._append_keyboard_log(message, timestamp)
+        line = f"[{timestamp}] {message}"
+        if hasattr(self, 'control_log_view') and self.control_log_view:
+            self._append_colored_text(self.control_log_view, line, color or "white")
+        self._append_keyboard_log(message, timestamp=timestamp, color=color)
 
     def _set_command_cooldown(self, delay_sec: float) -> None:
         delay_sec = max(0.0, float(delay_sec))
@@ -2257,12 +2285,19 @@ class HuntTab(QWidget):
     def _get_command_delay_remaining(self) -> float:
         return max(0.0, self._next_command_ready_ts - time.time())
 
-    def _append_keyboard_log(self, message: str, timestamp: Optional[str] = None) -> None:
-        if not hasattr(self, 'keyboard_log_view'):
+    def _append_keyboard_log(
+        self,
+        message: str,
+        *,
+        timestamp: Optional[str] = None,
+        color: Optional[str] = None,
+    ) -> None:
+        if not hasattr(self, 'keyboard_log_view') or not self.keyboard_log_view:
             return
         if timestamp is None:
             timestamp = self._format_timestamp_ms()
-        self.keyboard_log_view.append(f"[{timestamp}] {message}")
+        line = f"[{timestamp}] {message}"
+        self._append_colored_text(self.keyboard_log_view, line, color or "white")
 
     def _handle_status_config_update(self, config: StatusMonitorConfig) -> None:
         self._status_config = config
@@ -4306,29 +4341,38 @@ class HuntTab(QWidget):
     def append_log(self, message: str, level: str = "info") -> None:
         if level == "debug":
             return
-        valid_levels = {"info", "warn", "success", "debug"}
+
+        valid_levels = {"info", "warn", "success"}
         if level not in valid_levels:
-            self._append_keyboard_log(message)
+            self._append_keyboard_log(message, color=level)
             return
+
         if level == "info" and message.lstrip().startswith("("):
             self._append_keyboard_log(message)
             return
+
         prefix_map = {
             "info": "[INFO]",
             "warn": "[WARN]",
             "success": "[OK]",
-            "debug": "[DEBUG]",
+        }
+        color_map = {
+            "info": "cyan",
+            "warn": "orange",
+            "success": "lightgreen",
         }
         prefix = prefix_map.get(level, "[INFO]")
         timestamp = self._format_timestamp_ms()
-        if hasattr(self, 'log_view'):
-            self.log_view.append(f"[{timestamp}] {prefix} {message}")
+        line = f"[{timestamp}] {prefix} {message}"
+        if hasattr(self, 'log_view') and self.log_view:
+            self._append_colored_text(self.log_view, line, color_map.get(level))
 
     def _append_log_detail(self, message: str) -> None:
         if not hasattr(self, 'log_view'):
             return
         timestamp = self._format_timestamp_ms()
-        self.log_view.append(f"[{timestamp}]    {message}")
+        line = f"[{timestamp}]    {message}"
+        self._append_colored_text(self.log_view, line, "gray")
 
     def cleanup_on_close(self) -> None:
         self.condition_timer.stop()
