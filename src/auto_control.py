@@ -685,8 +685,9 @@ class AutoControlTab(QWidget):
 
     #  전역 키보드 리스너의 상태를 관리하는 메소드
     def _update_global_listener_state(self):
+        base_listen = self.is_map_detection_running and self.log_checkbox.isChecked()
         visual_enabled = bool(self.keyboard_visual_checkbox.isChecked()) if self.keyboard_visual_checkbox else False
-        should_listen = (self.is_map_detection_running and self.log_checkbox.isChecked()) or visual_enabled
+        should_listen = base_listen or (visual_enabled and self.is_map_detection_running)
 
         # 현재 리스너가 동작해야 하는 상태인데, 리스너가 없는 경우
         if should_listen and self.global_listener is None:
