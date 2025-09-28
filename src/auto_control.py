@@ -6,6 +6,7 @@ import json
 import os
 import random
 import copy
+from collections import defaultdict
 from pathlib import Path
 
 from PyQt6.QtWidgets import (
@@ -111,6 +112,7 @@ class CommandProfileListWidget(QListWidget):
         self.setAcceptDrops(False)
         self.setDropIndicatorShown(False)
         self.setDragDropMode(QAbstractItemView.DragDropMode.DragOnly)
+        self.itemChanged.connect(self._on_item_changed)
 
     def mimeTypes(self):
         return [PROFILE_MIME_TYPE]
@@ -120,6 +122,11 @@ class CommandProfileListWidget(QListWidget):
         mime_data = QMimeData()
         mime_data.setData(PROFILE_MIME_TYPE, json.dumps(names, ensure_ascii=False).encode('utf-8'))
         return mime_data
+
+    def _on_item_changed(self, item):
+        if self.parent_tab is None or item is None:
+            return
+        self.parent_tab.handle_profile_item_changed(self.category, item)
 
 
 class CommandCategoryTabWidget(QTabWidget):
@@ -194,6 +201,7 @@ class AutoControlTab(QWidget):
         self.mappings = {}
         self.profile_categories = {}
         self.category_overrides = set()
+        self.parallel_profile_flags = {}
         self.key_list_str = self._generate_key_list()
         self.active_category = CATEGORY_NAMES[0]
         self.category_lists = {}
@@ -235,6 +243,11 @@ class AutoControlTab(QWidget):
         self.is_map_detection_running = False
         self.last_log_time = 0.0
 
+        self.SEQUENTIAL_OWNER = "__sequential__"
+        self.global_key_counts = defaultdict(int)
+        self.sequence_owned_keys = {self.SEQUENTIAL_OWNER: self.held_keys}
+        self.active_parallel_sequences = {}
+
         self.globally_pressed_keys = set()
         self.global_listener = None
         
@@ -255,6 +268,9 @@ class AutoControlTab(QWidget):
             QPushButton { padding: 4px; }
             QPushButton:checked { background-color: #c62828; color: white; border: 1px solid #999; }
         """)
+
+    def _parallel_owner(self, command_name: str) -> str:
+        return f"parallel::{command_name}"
 
     def _notify_sequence_completed(self, success):
         command_name = self.current_command_name
@@ -521,8 +537,10 @@ class AutoControlTab(QWidget):
             if hasattr(self, 'status_label'):
                 self.status_label.setText(f"'{self.key_mappings_path.name}' 매핑을 불러왔습니다.")
         else:
+            self._stop_all_parallel_sequences(forced=True)
             self.mappings = self.create_default_mappings()
             self.category_overrides.clear()
+            self.parallel_profile_flags = {name: False for name in self.mappings}
             self._ensure_profile_categories()
             self.populate_command_list()
             if hasattr(self, 'status_label'):
@@ -569,6 +587,8 @@ class AutoControlTab(QWidget):
             self.profile_categories[name] = category
             if name in overrides:
                 updated_overrides.add(name)
+            if name not in getattr(self, 'parallel_profile_flags', {}):
+                self.parallel_profile_flags[name] = False
 
         self.category_overrides = updated_overrides
 
@@ -583,9 +603,14 @@ class AutoControlTab(QWidget):
             meta_to_save = {
                 'category_overrides': sorted(self.category_overrides),
             }
+            parallel_to_save = {
+                name: bool(self.parallel_profile_flags.get(name, False))
+                for name in self.mappings.keys()
+            }
             data_to_save = {
                 '_meta': meta_to_save,
                 '_categories': categories_to_save,
+                '_parallel': parallel_to_save,
                 'profiles': self.mappings,
             }
             self.key_mappings_path.parent.mkdir(parents=True, exist_ok=True)
@@ -620,6 +645,12 @@ class AutoControlTab(QWidget):
         if overrides_from_meta is None and isinstance(categories, dict):
             overrides_from_meta = list(categories.keys())
 
+        raw_parallel = raw_data.get('_parallel')
+        if isinstance(raw_parallel, dict):
+            parallel_flags = {str(name): bool(value) for name, value in raw_parallel.items()}
+        else:
+            parallel_flags = {}
+
         if isinstance(raw_data.get('profiles'), dict):
             new_mappings = raw_data.get('profiles', {})
         else:
@@ -632,8 +663,13 @@ class AutoControlTab(QWidget):
         if not isinstance(new_mappings, dict):
             return False
 
+        self._stop_all_parallel_sequences(forced=True)
         self.mappings = new_mappings
         self.key_mappings_path = target_path.resolve()
+        self.parallel_profile_flags = {
+            name: bool(parallel_flags.get(name, False))
+            for name in self.mappings.keys()
+        }
         self._ensure_profile_categories(categories, overrides_from_meta)
         self._apply_category_heuristics()
         self.populate_command_list()
@@ -728,8 +764,10 @@ class AutoControlTab(QWidget):
         reply = QMessageBox.question(self, "기본값 복원", "모든 키 매핑을 기본값으로 되돌리시겠습니까?\n저장하지 않은 변경사항은 사라집니다.",
                                      QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel)
         if reply == QMessageBox.StandardButton.Yes:
+            self._stop_all_parallel_sequences(forced=True)
             self.mappings = self.create_default_mappings()
             self.category_overrides.clear()
+            self.parallel_profile_flags = {name: False for name in self.mappings}
             self._ensure_profile_categories()
             self.populate_command_list()
             current_list = self._current_command_list()
@@ -746,7 +784,6 @@ class AutoControlTab(QWidget):
         for list_widget in self.category_lists.values():
             list_widget.blockSignals(True)
             list_widget.clear()
-            list_widget.blockSignals(False)
 
         sorted_names = sorted(self.mappings.keys())
         for name in sorted_names:
@@ -758,7 +795,16 @@ class AutoControlTab(QWidget):
                 self.category_overrides.discard(name)
             if list_widget is None:
                 continue
-            list_widget.addItem(name)
+            item = QListWidgetItem(name)
+            flags = item.flags() | Qt.ItemFlag.ItemIsUserCheckable
+            item.setFlags(flags)
+            is_parallel = bool(self.parallel_profile_flags.get(name, False))
+            self.parallel_profile_flags[name] = is_parallel
+            item.setCheckState(Qt.CheckState.Checked if is_parallel else Qt.CheckState.Unchecked)
+            list_widget.addItem(item)
+
+        for list_widget in self.category_lists.values():
+            list_widget.blockSignals(False)
 
         if current_selection and self._select_command_in_lists(current_selection):
             return
@@ -771,6 +817,23 @@ class AutoControlTab(QWidget):
 
         self.editor_group.setEnabled(False)
         self.action_sequence_list.clear()
+
+    def handle_profile_item_changed(self, category, item):
+        if item is None:
+            return
+
+        name = item.text()
+        is_parallel = item.checkState() == Qt.CheckState.Checked
+        previous = self.parallel_profile_flags.get(name)
+        self.parallel_profile_flags[name] = is_parallel
+
+        if previous == is_parallel:
+            return
+
+        self.save_mappings()
+        if getattr(self, 'status_label', None):
+            state_text = "병렬 실행 허용" if is_parallel else "병렬 실행 해제"
+            self.status_label.setText(f"'{name}' {state_text}로 설정되었습니다.")
 
     def _on_category_tab_changed(self, index):
         if self._is_syncing_selection:
@@ -1066,6 +1129,7 @@ class AutoControlTab(QWidget):
             self.mappings[text] = []
             self.profile_categories[text] = self.active_category
             self.category_overrides.add(text)
+            self.parallel_profile_flags[text] = False
             self.populate_command_list()
             self._select_command_in_lists(text)
 
@@ -1075,9 +1139,12 @@ class AutoControlTab(QWidget):
         command_text = current_item.text()
         reply = QMessageBox.question(self, "명령 프로필 삭제", f"'{command_text}' 명령 프로필을 삭제하시겠습니까?", QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel)
         if reply == QMessageBox.StandardButton.Yes:
+            if command_text in self.active_parallel_sequences:
+                self._stop_parallel_sequence(command_text, forced=True)
             self.mappings.pop(command_text, None)
             self.profile_categories.pop(command_text, None)
             self.category_overrides.discard(command_text)
+            self.parallel_profile_flags.pop(command_text, None)
             self.populate_command_list()
 
     def rename_command_profile(self):
@@ -1109,6 +1176,9 @@ class AutoControlTab(QWidget):
         if had_override:
             self.category_overrides.add(new_name)
 
+        is_parallel = self.parallel_profile_flags.pop(old_name, False)
+        self.parallel_profile_flags[new_name] = is_parallel
+
         self._rename_active_references(old_name, new_name)
         self.populate_command_list()
         self._select_command_in_lists(new_name)
@@ -1122,6 +1192,9 @@ class AutoControlTab(QWidget):
     def _rename_active_references(self, old_name: str, new_name: str) -> None:
         if self.current_command_name == old_name:
             self.current_command_name = new_name
+
+        if old_name in self.active_parallel_sequences:
+            self._stop_parallel_sequence(old_name, forced=True)
 
     def add_action_step(self):
         command_item = self._current_command_item()
@@ -1281,24 +1354,83 @@ class AutoControlTab(QWidget):
                 print(f"[AutoControl] 데이터 전송 실패: {e}")
                 self.connect_to_pi()
 
+    def _get_key_set_for_owner(self, owner: str) -> set:
+        key_set = self.sequence_owned_keys.get(owner)
+        if key_set is None:
+            key_set = set()
+            self.sequence_owned_keys[owner] = key_set
+        return key_set
+
+    def _press_key_for_owner(self, owner: str, key_object, *, force: bool = False) -> bool:
+        if key_object is None:
+            return False
+
+        key_set = self._get_key_set_for_owner(owner)
+        already_owned = key_object in key_set
+
+        if not already_owned:
+            key_set.add(key_object)
+            prev_count = self.global_key_counts.get(key_object, 0)
+            self.global_key_counts[key_object] = prev_count + 1
+            if force or prev_count == 0:
+                self._send_command(CMD_PRESS, key_object)
+            return True
+
+        if force:
+            prev_count = self.global_key_counts.get(key_object, 0)
+            if prev_count == 0:
+                self.global_key_counts[key_object] = 1
+            self._send_command(CMD_PRESS, key_object)
+            return True
+
+        return False
+
+    def _release_key_for_owner(self, owner: str, key_object, *, force: bool = False) -> bool:
+        if key_object is None:
+            return False
+
+        key_set = self._get_key_set_for_owner(owner)
+        had_key = key_object in key_set
+
+        if had_key:
+            key_set.remove(key_object)
+            prev_count = self.global_key_counts.get(key_object, 0)
+            new_count = max(prev_count - 1, 0)
+            if new_count:
+                self.global_key_counts[key_object] = new_count
+            else:
+                self.global_key_counts.pop(key_object, None)
+            if new_count == 0:
+                self._send_command(CMD_RELEASE, key_object)
+            return True
+
+        if force and self.global_key_counts.get(key_object, 0) == 0:
+            self._send_command(CMD_RELEASE, key_object)
+            return True
+
+        return False
+
+    def _release_all_for_owner(self, owner: str, *, force: bool = False) -> None:
+        key_set = list(self._get_key_set_for_owner(owner))
+        for key_obj in key_set:
+            self._release_key_for_owner(owner, key_obj, force=force)
+        self._get_key_set_for_owner(owner).clear()
+
     def _press_key(self, key_object, force=False):
         """
         (수정) 전송이 실제로 발생했는지 True/False 반환.
         force=True면 held_keys 상태를 무시하고 강제로 전송(재시도)함.
         """
-        # <<< [수정] 복잡한 복구 로직을 제거하고 단순화
-        # force 플래그가 True이거나, 키가 현재 눌려있지 않은 상태일 때만 전송
-        if force or key_object not in self.held_keys:
-            self.held_keys.add(key_object)
-            self._send_command(CMD_PRESS, key_object)
-            
-            # <<< [수정] 로그 로직을 이곳으로 이동하여 실제 전송이 일어났을 때만 기록
+        action_taken = self._press_key_for_owner(self.SEQUENTIAL_OWNER, key_object, force=force)
+
+        if action_taken:
             log_action = "(누르기-forced)" if force else "(누르기)"
-            self.log_generated.emit(f"{log_action} {self._translate_key_for_logging(self._key_obj_to_str(key_object))}", "white")
-            
+            self.log_generated.emit(
+                f"{log_action} {self._translate_key_for_logging(self._key_obj_to_str(key_object))}",
+                "white",
+            )
             return True
-            
-        # 이미 눌려있는 것으로 간주되면 아무것도 하지 않고 False 반환
+
         if self.console_log_checkbox.isChecked():
             print(f"[AutoControl] PRESS skipped (already held): {self._key_obj_to_str(key_object)}")
         return False
@@ -1307,21 +1439,14 @@ class AutoControlTab(QWidget):
         """
         (수정) 반환값 명시, force=True면 강제 릴리즈 시도.
         """
-        if force or key_object in self.held_keys:
-            self.held_keys.discard(key_object)
-            self._send_command(CMD_RELEASE, key_object)
-            return True
-        return False
+        return self._release_key_for_owner(self.SEQUENTIAL_OWNER, key_object, force=force)
 
     def _release_all_keys(self, force=False):
         """
         (수정) 안전하게 모든 키를 떼고 held_keys를 초기화.
         force=True이면 _release_key에 force=True로 호출(하드 릴리즈).
         """
-        for key_obj in list(self.held_keys):
-            self._release_key(key_obj, force=force)
-        # 확실히 빈 상태로 만듦
-        self.held_keys.clear()
+        self._release_all_for_owner(self.SEQUENTIAL_OWNER, force=force)
 
 # [기능 추가] 테스트 종료 후 안전하게 모든 키를 떼는 슬롯
     @pyqtSlot()
@@ -1499,6 +1624,195 @@ class AutoControlTab(QWidget):
         finally:
             self.is_processing_step = False
 
+    def _start_parallel_sequence(self, sequence, command_name, reason=None):
+        sequence_copy = copy.deepcopy(sequence) if isinstance(sequence, list) else []
+
+        if command_name in self.active_parallel_sequences:
+            self._stop_parallel_sequence(command_name, forced=True)
+
+        owner = self._parallel_owner(command_name)
+        self.sequence_owned_keys[owner] = set()
+
+        timer = QTimer(self)
+        timer.setSingleShot(True)
+        timer.timeout.connect(lambda cn=command_name: self._process_parallel_step(cn))
+
+        watchdog = QTimer(self)
+        watchdog.setSingleShot(True)
+        watchdog.timeout.connect(lambda cn=command_name: self._on_parallel_sequence_stuck(cn))
+
+        clean_reason = reason.strip() if isinstance(reason, str) and reason.strip() else None
+        state = {
+            "command_name": command_name,
+            "sequence": sequence_copy,
+            "index": 0,
+            "timer": timer,
+            "watchdog": watchdog,
+            "reason": clean_reason,
+            "owner": owner,
+            "is_processing": False,
+        }
+        self.active_parallel_sequences[command_name] = state
+
+        if clean_reason:
+            self.log_generated.emit(f"[{command_name}] (시작) (원인: {clean_reason})", "cyan")
+        else:
+            self.log_generated.emit(f"[{command_name}] (시작)", "cyan")
+
+        watchdog.start(self.SEQUENCE_STUCK_TIMEOUT_MS)
+        self._process_parallel_step(command_name)
+
+    def _process_parallel_step(self, command_name: str) -> None:
+        state = self.active_parallel_sequences.get(command_name)
+        if not state:
+            return
+
+        if state.get("is_processing"):
+            if self.console_log_checkbox.isChecked():
+                print(f"[AutoControl] 병렬 스텝 재진입 차단: {command_name}")
+            return
+
+        state["is_processing"] = True
+        try:
+            if state["index"] >= len(state["sequence"]):
+                self._finalize_parallel_sequence(command_name, state, success=True)
+                return
+
+            step = state["sequence"][state["index"]] or {}
+            action_type = step.get("type")
+            delay_ms = 1
+            owner = state["owner"]
+
+            if action_type in ["press", "release", "release_specific"]:
+                key_obj = self._str_to_key_obj(step.get("key_str"))
+                if not key_obj:
+                    self.log_generated.emit(f"[{command_name}] 오류: 알 수 없는 키 '{step.get('key_str')}'", "red")
+                elif action_type == "press":
+                    pressed = self._press_key_for_owner(owner, key_obj, force=False)
+                    if pressed:
+                        self.log_generated.emit(
+                            f"[{command_name}] (누르기) {self._translate_key_for_logging(step.get('key_str'))}",
+                            "white",
+                        )
+                    elif self.console_log_checkbox.isChecked():
+                        print(f"[AutoControl] 병렬 PRESS skipped (already held): {step.get('key_str')}")
+                else:
+                    released = self._release_key_for_owner(owner, key_obj, force=False)
+                    if released:
+                        self.log_generated.emit(
+                            f"[{command_name}] (떼기) {self._translate_key_for_logging(step.get('key_str'))}",
+                            "white",
+                        )
+                    else:
+                        if self.global_key_counts.get(key_obj, 0) == 0:
+                            forced = self._release_key_for_owner(owner, key_obj, force=True)
+                            if forced:
+                                self.log_generated.emit(
+                                    f"[{command_name}] (떼기-forced) {self._translate_key_for_logging(step.get('key_str'))}",
+                                    "white",
+                                )
+                        elif self.console_log_checkbox.isChecked():
+                            print(f"[AutoControl] 병렬 RELEASE skipped (held elsewhere): {step.get('key_str')}")
+
+            elif action_type == "delay":
+                min_ms = int(step.get("min_ms", 0))
+                max_ms = int(step.get("max_ms", min_ms))
+                if min_ms >= max_ms:
+                    delay_ms = max(0, min_ms)
+                else:
+                    mean = (min_ms + max_ms) / 2
+                    std_dev = (max_ms - min_ms) / 6
+                    delay_ms = int(max(min(random.gauss(mean, std_dev), max_ms), min_ms))
+                self.log_generated.emit(f"[{command_name}] (대기) {delay_ms}ms", "gray")
+
+            elif action_type == "release_all":
+                self._release_all_for_owner(owner, force=True)
+                self.log_generated.emit(f"[{command_name}] (모든 키 떼기)", "white")
+
+            else:
+                self.log_generated.emit(
+                    f"[{command_name}] 경고: 알 수 없는 동작 '{action_type}'", "orange"
+                )
+
+            state["index"] += 1
+
+            if command_name in self.active_parallel_sequences:
+                state["watchdog"].start(self.SEQUENCE_STUCK_TIMEOUT_MS)
+                try:
+                    state["timer"].stop()
+                except Exception:
+                    pass
+                state["timer"].start(max(int(delay_ms), 1))
+
+        except Exception as exc:
+            print(f"[AutoControl] 병렬 시퀀스 예외: {command_name} -> {exc}")
+            self.log_generated.emit(
+                f"[{command_name}] 오류: 병렬 시퀀스 처리 중 예외 발생 - {exc}",
+                "red",
+            )
+            self._stop_parallel_sequence(command_name, forced=True)
+        finally:
+            if command_name in self.active_parallel_sequences:
+                self.active_parallel_sequences[command_name]["is_processing"] = False
+
+    def _finalize_parallel_sequence(self, command_name: str, state: dict, success: bool) -> None:
+        timer = state.get("timer")
+        watchdog = state.get("watchdog")
+        for qtimer in (timer, watchdog):
+            if qtimer:
+                try:
+                    qtimer.stop()
+                except Exception:
+                    pass
+
+        owner = state.get("owner", self._parallel_owner(command_name))
+        self._release_all_for_owner(owner, force=False)
+        self.sequence_owned_keys.pop(owner, None)
+        self.active_parallel_sequences.pop(command_name, None)
+
+        reason = state.get("reason")
+        suffix = f" (원인: {reason})" if reason else ""
+        if success:
+            self.log_generated.emit(f"[{command_name}] (완료){suffix}", "lightgreen")
+        else:
+            self.log_generated.emit(f"[{command_name}] (중단){suffix}", "orange")
+
+    def _stop_parallel_sequence(self, command_name: str, forced: bool = False) -> None:
+        state = self.active_parallel_sequences.pop(command_name, None)
+        if not state:
+            return
+
+        timer = state.get("timer")
+        watchdog = state.get("watchdog")
+        for qtimer in (timer, watchdog):
+            if qtimer:
+                try:
+                    qtimer.stop()
+                except Exception:
+                    pass
+
+        owner = state.get("owner", self._parallel_owner(command_name))
+        self._release_all_for_owner(owner, force=forced)
+        self.sequence_owned_keys.pop(owner, None)
+
+        if forced:
+            self.log_generated.emit(f"[{command_name}] 병렬 시퀀스를 강제 종료했습니다.", "orange")
+        else:
+            self.log_generated.emit(f"[{command_name}] 병렬 시퀀스를 중단했습니다.", "orange")
+
+    def _stop_all_parallel_sequences(self, forced: bool = False) -> None:
+        for name in list(self.active_parallel_sequences.keys()):
+            self._stop_parallel_sequence(name, forced=forced)
+
+    def _on_parallel_sequence_stuck(self, command_name: str) -> None:
+        if command_name not in self.active_parallel_sequences:
+            return
+        self.log_generated.emit(
+            f"경고: '{command_name}' 병렬 시퀀스가 멈춤. 복구 시도 중...",
+            "orange",
+        )
+        self._stop_parallel_sequence(command_name, forced=True)
+
     @pyqtSlot(str, object)
     def receive_control_command(self, command_text, reason=None):
         sequence = self.mappings.get(command_text)
@@ -1506,8 +1820,12 @@ class AutoControlTab(QWidget):
             print(f"[AutoControl] 경고: '{command_text}'에 대한 매핑이 없습니다.")
             return
 
-        # 새 동작: 만약 동일 명령이 이미 실행 중이라면 강제 재시작하도록 _start_sequence_execution이 처리
-        self._start_sequence_execution(sequence, command_text, is_test=False, reason=reason)
+        sequence_payload = copy.deepcopy(sequence)
+        if self.parallel_profile_flags.get(command_text, False):
+            self._start_parallel_sequence(sequence_payload, command_text, reason=reason)
+        else:
+            # 새 동작: 만약 동일 명령이 이미 실행 중이라면 강제 재시작하도록 _start_sequence_execution이 처리
+            self._start_sequence_execution(sequence_payload, command_text, is_test=False, reason=reason)
 
     def _on_sequence_stuck(self):
         """(신규) 시퀀스가 일정 시간 진행이 없을 때 호출되어 안전 복구를 시도합니다."""
