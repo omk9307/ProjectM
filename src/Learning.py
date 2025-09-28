@@ -46,7 +46,7 @@ from PyQt6.QtWidgets import (
 )
 from PyQt6.QtGui import (
     QPixmap, QImage, QIcon, QPainter, QPen, QColor, QBrush, QCursor, QPolygon,
-    QDropEvent, QGuiApplication, QIntValidator, QDoubleValidator
+    QDropEvent, QGuiApplication, QIntValidator, QDoubleValidator, QFont
 )
 from PyQt6.QtCore import Qt, QThread, pyqtSignal, QSize, QRect, QPoint, QObject, QMimeData
 
@@ -107,6 +107,8 @@ DEFAULT_DETECTION_RUNTIME_SETTINGS = {
     'yolo_nms_iou': 0.40,
     'yolo_max_det': 60,
 }
+
+DEFAULT_MONSTER_CONFIDENCE = 0.50
 
 # --- 0.5 SAM 관리자 클래스 ---
 class SAMManager(QObject):
@@ -627,6 +629,85 @@ class ClassTreeWidget(QTreeWidget):
         # 모든 규칙을 통과하면 기본 드롭 이벤트 실행
         super().dropEvent(event)
         self.drop_completed.emit()
+
+
+class MonsterSettingsDialog(QDialog):
+    """특정 몬스터 클래스에 대한 추후 확장 가능한 설정 다이얼로그."""
+
+    def __init__(
+        self,
+        parent: Optional[QWidget],
+        class_name: str,
+        *,
+        current_value: Optional[float],
+        default_value: float,
+    ) -> None:
+        super().__init__(parent)
+        self.setWindowTitle(f"몬스터 설정 - {class_name}")
+        self.resize(360, 180)
+
+        self._default_value = float(default_value)
+        self.override_enabled: bool = current_value is not None
+        self.override_value: float = float(current_value) if current_value is not None else self._default_value
+
+        layout = QVBoxLayout(self)
+
+        intro_label = QLabel(
+            "클래스별 탐지 옵션을 설정합니다. 필요 시 다른 설정도 추가될 예정입니다."
+        )
+        intro_label.setWordWrap(True)
+        layout.addWidget(intro_label)
+
+        settings_group = QGroupBox("탐지 설정")
+        settings_layout = QVBoxLayout(settings_group)
+
+        override_row = QHBoxLayout()
+        self.use_override_checkbox = QCheckBox("개별 신뢰도 사용")
+        self.use_override_checkbox.setChecked(self.override_enabled)
+        self.use_override_checkbox.toggled.connect(self._on_override_toggled)
+        override_row.addWidget(self.use_override_checkbox)
+
+        self.conf_spinbox = QDoubleSpinBox()
+        self.conf_spinbox.setRange(0.05, 0.95)
+        self.conf_spinbox.setSingleStep(0.05)
+        self.conf_spinbox.setDecimals(2)
+        self.conf_spinbox.setValue(self.override_value)
+        self.conf_spinbox.setEnabled(self.override_enabled)
+        self.conf_spinbox.setToolTip("사냥 탭에서 해당 몬스터를 탐지할 최소 신뢰도입니다.")
+        override_row.addWidget(self.conf_spinbox)
+        override_row.addStretch(1)
+
+        settings_layout.addLayout(override_row)
+
+        hint_label = QLabel("미사용 시 전역 몬스터 신뢰도 값을 따릅니다.")
+        hint_label.setWordWrap(True)
+        settings_layout.addWidget(hint_label)
+
+        layout.addWidget(settings_group)
+
+        button_layout = QHBoxLayout()
+        self.reset_button = QPushButton("초기화")
+        self.reset_button.clicked.connect(self._reset_to_default)
+        button_layout.addWidget(self.reset_button)
+        button_layout.addStretch(1)
+
+        button_box = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        button_box.accepted.connect(self.accept)
+        button_box.rejected.connect(self.reject)
+        button_layout.addWidget(button_box)
+        layout.addLayout(button_layout)
+
+    def _on_override_toggled(self, checked: bool) -> None:
+        self.conf_spinbox.setEnabled(checked)
+
+    def _reset_to_default(self) -> None:
+        self.use_override_checkbox.setChecked(False)
+        self.conf_spinbox.setValue(self._default_value)
+
+    def accept(self) -> None:  # noqa: D401
+        self.override_enabled = self.use_override_checkbox.isChecked()
+        self.override_value = float(self.conf_spinbox.value())
+        super().accept()
 
 # --- 2. 위젯: 다각형 편집기의 캔버스 (공통 로직 추가) ---
 class BaseCanvasLabel(QLabel):
@@ -1348,6 +1429,7 @@ class DataManager:
             model = settings.get('last_used_model') or settings.get('model')
             if isinstance(model, str) and model.strip():
                 self._last_used_model = model.strip()
+        self._prune_monster_confidence_overrides()
 
     def ensure_dirs_and_files(self):
         os.makedirs(self.images_path, exist_ok=True)
@@ -1576,6 +1658,11 @@ class DataManager:
                 presets[preset_name] = [new_name if name == old_name else name for name in class_list]
         self.save_presets(presets)
 
+        overrides = self.get_monster_confidence_overrides()
+        if old_name in overrides:
+            overrides[new_name] = overrides.pop(old_name)
+            self.save_settings({'monster_confidence_overrides': overrides})
+
         # 라벨 파일의 클래스 인덱스 업데이트
         try:
             old_idx = old_class_list.index(old_name)
@@ -1656,6 +1743,8 @@ class DataManager:
             if filename not in all_remaining_images:
                 for path in [os.path.join(self.images_path, filename), os.path.join(self.labels_path, f"{os.path.splitext(filename)[0]}.txt")]:
                     if os.path.exists(path): os.remove(path)
+
+        self.delete_monster_confidence_override(class_name)
 
         return True, f"'{class_name}' 클래스 및 관련 파일 삭제 완료."
 
@@ -1787,6 +1876,48 @@ class DataManager:
         model = model_name.strip() if isinstance(model_name, str) else None
         payload = {'last_used_model': model} if model else {'last_used_model': None}
         self.save_settings(payload)
+
+    # --- 몬스터 신뢰도 보조 메서드 ---
+    def get_monster_confidence_overrides(self) -> dict[str, float]:
+        settings = self.load_settings()
+        raw = settings.get('monster_confidence_overrides', {}) if isinstance(settings, dict) else {}
+        overrides: dict[str, float] = {}
+        if isinstance(raw, dict):
+            for key, value in raw.items():
+                if not isinstance(key, str):
+                    continue
+                try:
+                    overrides[key] = float(value)
+                except (TypeError, ValueError):
+                    continue
+        return overrides
+
+    def set_monster_confidence_override(self, class_name: str, value: float) -> None:
+        class_name = class_name.strip()
+        if not class_name:
+            return
+        overrides = self.get_monster_confidence_overrides()
+        overrides[class_name] = max(0.05, min(0.95, float(value)))
+        self.save_settings({'monster_confidence_overrides': overrides})
+
+    def delete_monster_confidence_override(self, class_name: str) -> None:
+        overrides = self.get_monster_confidence_overrides()
+        if class_name in overrides:
+            overrides.pop(class_name, None)
+            self.save_settings({'monster_confidence_overrides': overrides})
+
+    def _prune_monster_confidence_overrides(self) -> None:
+        overrides = self.get_monster_confidence_overrides()
+        if not overrides:
+            return
+        valid_names = set(self.get_class_list())
+        removed = False
+        for name in list(overrides.keys()):
+            if name not in valid_names:
+                overrides.pop(name)
+                removed = True
+        if removed:
+            self.save_settings({'monster_confidence_overrides': overrides})
 
     def load_status_monitor_config(self) -> StatusMonitorConfig:
         try:
@@ -2411,6 +2542,9 @@ class LearningTab(QWidget):
         self.class_tree_widget.itemSelectionChanged.connect(self.populate_image_list)
         self.class_tree_widget.itemChanged.connect(self.handle_item_check)
         self.class_tree_widget.drop_completed.connect(self.save_tree_state_to_manifest)
+        self.class_tree_widget.itemDoubleClicked.connect(self._handle_class_item_double_clicked)
+        self.class_tree_widget.itemActivated.connect(self._handle_class_item_double_clicked)
+        self.class_tree_widget.setExpandsOnDoubleClick(False)
 
         left_layout.addWidget(self.class_tree_widget)
 
@@ -3570,6 +3704,7 @@ class LearningTab(QWidget):
         self.class_tree_widget.blockSignals(True)
         self.class_tree_widget.clear()
         manifest = self.data_manager.get_manifest()
+        overrides = self.data_manager.get_monster_confidence_overrides() if self.data_manager else {}
 
         temp_manifest = manifest
         all_categories_in_manifest = list(temp_manifest.keys())
@@ -3592,6 +3727,7 @@ class LearningTab(QWidget):
                 class_item = QTreeWidgetItem(category_item, [class_name])
                 class_item.setFlags(class_item.flags() | Qt.ItemFlag.ItemIsUserCheckable | Qt.ItemFlag.ItemIsDragEnabled)
                 class_item.setCheckState(0, Qt.CheckState.Checked)
+                self._apply_monster_confidence_indicator(class_item, class_name, overrides)
 
             category_item.setExpanded(True)
 
@@ -3661,6 +3797,74 @@ class LearningTab(QWidget):
             self.data_manager.save_settings({'hunt_checked_classes': checked_names})
         except Exception:
             pass
+
+    def _default_monster_confidence(self) -> float:
+        return DEFAULT_MONSTER_CONFIDENCE
+
+    def _apply_monster_confidence_indicator(
+        self,
+        item: Optional[QTreeWidgetItem],
+        class_name: str,
+        overrides: Optional[dict[str, float]] = None,
+    ) -> None:
+        if item is None:
+            return
+        if overrides is None:
+            overrides = (
+                self.data_manager.get_monster_confidence_overrides()
+                if getattr(self, 'data_manager', None)
+                else {}
+            )
+        value = overrides.get(class_name)
+        font = item.font(0)
+        if value is not None:
+            font.setItalic(True)
+            item.setFont(0, font)
+            item.setToolTip(0, f"개별 신뢰도: {value:.2f}")
+            item.setForeground(0, QBrush(QColor(47, 133, 90)))
+        else:
+            font.setItalic(False)
+            item.setFont(0, font)
+            item.setToolTip(0, "")
+            item.setForeground(0, QBrush())
+
+    def _handle_class_item_double_clicked(self, item: Optional[QTreeWidgetItem], column: int) -> None:
+        if not item or not item.parent():
+            return
+        parent_name = item.parent().text(0)
+        if parent_name == NEGATIVE_SAMPLES_NAME:
+            return
+        class_name = item.text(0)
+        if class_name == CHARACTER_CLASS_NAME:
+            return
+        if not getattr(self, 'data_manager', None):
+            return
+
+        overrides = self.data_manager.get_monster_confidence_overrides()
+        current_value = overrides.get(class_name)
+        dialog = MonsterSettingsDialog(
+            self,
+            class_name,
+            current_value=current_value,
+            default_value=self._default_monster_confidence(),
+        )
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+
+        if dialog.override_enabled:
+            self.data_manager.set_monster_confidence_override(class_name, dialog.override_value)
+            if hasattr(self, 'log_viewer'):
+                self.log_viewer.append(
+                    f"'{class_name}' 개별 신뢰도를 {dialog.override_value:.2f}로 설정했습니다."
+                )
+        else:
+            self.data_manager.delete_monster_confidence_override(class_name)
+            if hasattr(self, 'log_viewer'):
+                self.log_viewer.append(
+                    f"'{class_name}' 개별 신뢰도를 전역 값으로 되돌렸습니다."
+                )
+
+        self._apply_monster_confidence_indicator(item, class_name)
 
     def set_image_sort_mode(self, mode):
         self.current_image_sort_mode = mode

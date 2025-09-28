@@ -9,6 +9,8 @@
 # - 각 탭은 QWidget을 상속받은 클래스로 구현되어야 합니다.
 
 import sys
+import os
+import ctypes
 import importlib
 import traceback
 from datetime import datetime
@@ -16,9 +18,53 @@ from datetime import datetime
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QTabWidget, QWidget, QVBoxLayout, QLabel
 )
-from PyQt6.QtCore import Qt, QSettings
+from PyQt6.QtCore import Qt, QSettings, QTimer, QAbstractNativeEventFilter
 
 from status_monitor import StatusMonitorThread
+
+
+if os.name == 'nt':
+    from ctypes import wintypes
+
+    WM_HOTKEY = 0x0312
+    VK_ESCAPE = 0x1B
+
+    class _EscHotkeyEventFilter(QAbstractNativeEventFilter):
+        def __init__(self, hotkey_id: int, callback):
+            super().__init__()
+            self.hotkey_id = hotkey_id
+            self.callback = callback
+
+        def nativeEventFilter(self, event_type, message):
+            if event_type == "windows_generic_MSG":
+                msg = wintypes.MSG.from_address(int(message))
+                if msg.message == WM_HOTKEY and msg.wParam == self.hotkey_id:
+                    self.callback()
+            return False, 0
+
+    class _EscHotkeyManager:
+        _NEXT_ID = 1000
+
+        def __init__(self):
+            self.user32 = ctypes.windll.user32
+            self.hotkey_id = None
+
+        def register_hotkey(self) -> int:
+            self.unregister_hotkey()
+            hotkey_id = _EscHotkeyManager._NEXT_ID
+            _EscHotkeyManager._NEXT_ID += 1
+            if not self.user32.RegisterHotKey(None, hotkey_id, 0, VK_ESCAPE):
+                raise RuntimeError("RegisterHotKey for ESC failed")
+            self.hotkey_id = hotkey_id
+            return hotkey_id
+
+        def unregister_hotkey(self) -> None:
+            if self.hotkey_id is not None:
+                self.user32.UnregisterHotKey(None, self.hotkey_id)
+                self.hotkey_id = None
+else:
+    _EscHotkeyEventFilter = None
+    _EscHotkeyManager = None
 
 def log_uncaught_exceptions(ex_cls, ex, tb):
     """
@@ -74,6 +120,8 @@ class MainWindow(QMainWindow):
         # [수정] 로드된 탭 인스턴스를 저장할 딕셔너리
         self.loaded_tabs = {}
         self.status_monitor_thread: StatusMonitorThread | None = None
+        self.esc_hotkey_manager = None
+        self.esc_hotkey_filter = None
 
         self.load_tabs()
 
@@ -93,6 +141,7 @@ class MainWindow(QMainWindow):
             
         # [추가] 모든 탭 로드 후 시그널-슬롯 연결
         self.connect_tabs()
+        self._setup_global_hotkeys()
 
     def load_tab(self, module_name, class_name, tab_title):
         """
@@ -216,7 +265,76 @@ class MainWindow(QMainWindow):
             monitor.stop()
             monitor.wait(2000)
 
+        self._teardown_global_hotkeys()
+
         event.accept()
+
+    def _setup_global_hotkeys(self) -> None:
+        if _EscHotkeyManager is None or _EscHotkeyEventFilter is None:
+            return
+
+        app = QApplication.instance()
+        if app is None:
+            return
+
+        try:
+            self.esc_hotkey_manager = _EscHotkeyManager()
+            hotkey_id = self.esc_hotkey_manager.register_hotkey()
+            self.esc_hotkey_filter = _EscHotkeyEventFilter(hotkey_id, self._handle_global_escape)
+            app.installNativeEventFilter(self.esc_hotkey_filter)
+            print("성공: ESC 전역 단축키를 등록했습니다.")
+        except Exception as exc:
+            print(f"경고: ESC 전역 단축키 등록에 실패했습니다: {exc}")
+            self._teardown_global_hotkeys()
+
+    def _teardown_global_hotkeys(self) -> None:
+        app = QApplication.instance()
+        if self.esc_hotkey_filter and app:
+            try:
+                app.removeNativeEventFilter(self.esc_hotkey_filter)
+            except Exception:
+                pass
+        if self.esc_hotkey_manager:
+            try:
+                self.esc_hotkey_manager.unregister_hotkey()
+            except Exception:
+                pass
+        self.esc_hotkey_filter = None
+        self.esc_hotkey_manager = None
+
+    def _handle_global_escape(self) -> None:
+        stopped_any = False
+
+        hunt_tab = self.loaded_tabs.get('사냥')
+        if hasattr(hunt_tab, 'force_stop_detection'):
+            try:
+                stopped_any = hunt_tab.force_stop_detection() or stopped_any
+            except Exception as exc:
+                print(f"경고: 사냥 탭 강제 중단 중 오류: {exc}")
+
+        map_tab = self.loaded_tabs.get('맵')
+        if hasattr(map_tab, 'force_stop_detection'):
+            try:
+                stopped_any = map_tab.force_stop_detection() or stopped_any
+            except Exception as exc:
+                print(f"경고: 맵 탭 강제 중단 중 오류: {exc}")
+
+        if stopped_any:
+            self._schedule_release_all_keys()
+
+    def _schedule_release_all_keys(self) -> None:
+        auto_control_tab = self.loaded_tabs.get('자동 제어')
+        if not auto_control_tab:
+            print("경고: '자동 제어' 탭을 찾을 수 없어 '모든 키 떼기' 명령을 전송하지 못했습니다.")
+            return
+
+        def _send_release():
+            try:
+                auto_control_tab.receive_control_command("모든 키 떼기", reason="esc:global_stop")
+            except Exception as exc:
+                print(f"경고: '모든 키 떼기' 명령 전송 실패: {exc}")
+
+        QTimer.singleShot(500, _send_release)
 
 
 if __name__ == '__main__':

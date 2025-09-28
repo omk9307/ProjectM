@@ -2918,10 +2918,33 @@ class MapTab(QWidget):
                 
                 new_x = int(center_x - PLAYER_ICON_STD_WIDTH / 2)
                 new_y = int(center_y - PLAYER_ICON_STD_HEIGHT / 2)
-                
+
                 valid_rects.append(QRect(new_x, new_y, PLAYER_ICON_STD_WIDTH, PLAYER_ICON_STD_HEIGHT))
                 
         return valid_rects
+
+    def force_stop_detection(self) -> bool:
+        stopped = False
+        if not hasattr(self, 'detect_anchor_btn'):
+            return False
+
+        try:
+            is_checked = bool(self.detect_anchor_btn.isChecked())
+        except Exception:
+            is_checked = False
+
+        if is_checked:
+            self.detect_anchor_btn.click()
+            stopped = True
+        elif getattr(self, 'is_detection_running', False):
+            if hasattr(self.detect_anchor_btn, 'setChecked'):
+                self.detect_anchor_btn.setChecked(True)
+            self.detect_anchor_btn.click()
+            stopped = True
+
+        if stopped:
+            self.update_general_log("ESC 단축키로 탐지를 강제 중단했습니다.", "orange")
+        return stopped
 
     def toggle_anchor_detection(self, checked):
             #  외부 호출(sender() is None) 또는 버튼 직접 클릭 시 상태를 동기화

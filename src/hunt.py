@@ -10,7 +10,7 @@ import ctypes
 import html
 from ctypes import wintypes
 from dataclasses import dataclass
-from typing import List, Optional, Callable, TextIO
+from typing import Iterable, List, Optional, Callable, TextIO
 
 import pygetwindow as gw
 
@@ -551,6 +551,7 @@ class HuntTab(QWidget):
         self._request_pending = False
         self._cached_monster_boxes: List[DetectionBox] = []
         self._cached_monster_boxes_ts = 0.0
+        self._active_monster_confidence_overrides: dict[int, float] = {}
 
         self.detection_thread: Optional[DetectionThread] = None
         self.detection_popup: Optional[DetectionPopup] = None
@@ -695,6 +696,30 @@ class HuntTab(QWidget):
 
     def _is_detection_active(self) -> bool:
         return bool(self.detect_btn.isChecked())
+
+    def force_stop_detection(self) -> bool:
+        stopped = False
+        if not hasattr(self, 'detect_btn'):
+            return False
+
+        try:
+            is_checked = bool(self.detect_btn.isChecked())
+        except Exception:
+            is_checked = False
+
+        if is_checked:
+            self.detect_btn.setChecked(False)
+            self._toggle_detection(False)
+            stopped = True
+        elif self._is_detection_active():
+            self._toggle_detection(False)
+            if hasattr(self.detect_btn, 'setChecked'):
+                self.detect_btn.setChecked(False)
+            stopped = True
+
+        if stopped:
+            self.append_log("ESC 단축키로 탐지를 강제 중단했습니다.", "warn")
+        return stopped
 
     def _schedule_facing_reset(self) -> None:
         if not hasattr(self, 'facing_reset_timer'):
@@ -1368,6 +1393,52 @@ class HuntTab(QWidget):
         self._active_target_names = [class_list[idx] for idx in target_indices]
         return target_indices, char_index
 
+    def _resolve_monster_confidence_overrides(self, target_indices: Iterable[int]) -> dict[int, float]:
+        if not self.data_manager or not hasattr(self.data_manager, "get_monster_confidence_overrides"):
+            return {}
+        try:
+            overrides_by_name = self.data_manager.get_monster_confidence_overrides()
+        except Exception:
+            return {}
+        if not overrides_by_name:
+            return {}
+        try:
+            class_list = self.data_manager.get_class_list()
+        except Exception:
+            return {}
+        name_to_index = {name: idx for idx, name in enumerate(class_list)}
+        valid_indices = {int(idx) for idx in target_indices}
+        resolved: dict[int, float] = {}
+        for name, value in overrides_by_name.items():
+            index = name_to_index.get(name)
+            if index is None or index not in valid_indices:
+                continue
+            try:
+                resolved[index] = max(0.05, min(0.95, float(value)))
+            except (TypeError, ValueError):
+                continue
+        return resolved
+
+    def _log_monster_confidence_overrides(self, overrides: dict[int, float]) -> None:
+        if not overrides:
+            return
+        class_names: List[str] = []
+        if self.data_manager and hasattr(self.data_manager, "get_class_list"):
+            try:
+                class_list = self.data_manager.get_class_list()
+            except Exception:
+                class_list = []
+        else:
+            class_list = []
+        for index, value in sorted(overrides.items()):
+            if 0 <= index < len(class_list):
+                label = class_list[index]
+            else:
+                label = f"클래스#{index}"
+            class_names.append(f"{label}={value:.2f}")
+        summary = ', '.join(class_names) if class_names else '사용'
+        self.append_log(f"몬스터 개별 신뢰도 적용: {summary}", "info")
+
     def _set_manual_area(self) -> None:
         snipper = ScreenSnipper(self)
         if snipper.exec():
@@ -1646,6 +1717,13 @@ class HuntTab(QWidget):
                 "info",
             )
 
+            monster_conf_overrides = self._resolve_monster_confidence_overrides(target_indices)
+            if monster_conf_overrides:
+                self._active_monster_confidence_overrides = monster_conf_overrides
+                self._log_monster_confidence_overrides(monster_conf_overrides)
+            else:
+                self._active_monster_confidence_overrides = {}
+
             try:
                 self.detection_thread = DetectionThread(
                     model_path=model_path,
@@ -1662,6 +1740,7 @@ class HuntTab(QWidget):
                     nms_iou=self.yolo_nms_iou,
                     max_det=self.yolo_max_det,
                     allowed_subregions=capture_subregions,
+                    monster_confidence_overrides=monster_conf_overrides,
                 )
             except TypeError:
                 # 구버전 런타임과의 호환성 확보
@@ -1679,6 +1758,7 @@ class HuntTab(QWidget):
                     nms_iou=self.yolo_nms_iou,
                     max_det=self.yolo_max_det,
                     allowed_subregions=capture_subregions,
+                    monster_confidence_overrides=monster_conf_overrides,
                 )
                 # 방향 감지를 비활성화하고 상태 초기화
                 direction_detector_instance = None
@@ -1836,6 +1916,7 @@ class HuntTab(QWidget):
         self._cancel_facing_reset_timer()
         self._issue_all_keys_release("탐지 스레드 종료")
         self.clear_detection_snapshot()
+        self._active_monster_confidence_overrides = {}
 
     def _handle_detection_log(self, messages: List[str]) -> None:
         for msg in messages:
@@ -3786,6 +3867,9 @@ class HuntTab(QWidget):
         perf_settings = data.get('perf', {})
         if isinstance(perf_settings, dict):
             self._perf_logging_enabled = bool(perf_settings.get('logging_enabled', self._perf_logging_enabled))
+
+        # 분석 완료 후 기본적으로 성능 로그는 비활성화 상태를 유지한다.
+        self._perf_logging_enabled = False
 
         detection_cfg = data.get('detection', {})
         if isinstance(detection_cfg, dict):

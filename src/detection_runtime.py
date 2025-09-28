@@ -212,6 +212,7 @@ class DetectionThread(QThread):
         nms_iou: float = 0.45,
         max_det: int = 100,
         allowed_subregions: Optional[Iterable[dict]] = None,
+        monster_confidence_overrides: Optional[Dict[int, float]] = None,
     ) -> None:
         super().__init__()
         self.model_path = model_path
@@ -238,6 +239,18 @@ class DetectionThread(QThread):
             self.max_det = max(1, int(max_det))
         except (TypeError, ValueError):
             self.max_det = 100
+
+        self.monster_confidence_overrides: Dict[int, float] = {}
+        if monster_confidence_overrides:
+            for key, value in monster_confidence_overrides.items():
+                try:
+                    index = int(key)
+                    threshold = float(value)
+                except (TypeError, ValueError):
+                    continue
+                if index < 0:
+                    continue
+                self.monster_confidence_overrides[index] = max(0.05, min(0.95, threshold))
 
         self.allowed_subregions: List[dict] = []
         if allowed_subregions:
@@ -304,6 +317,15 @@ class DetectionThread(QThread):
             "emit_ms": 0.0,
         }
 
+    def _monster_threshold_for_class(self, class_id: int) -> float:
+        return self.monster_confidence_overrides.get(class_id, self.conf_monster)
+
+    def _minimum_monster_confidence(self) -> float:
+        if not self.monster_confidence_overrides:
+            return self.conf_monster
+        min_override = min(self.monster_confidence_overrides.values(), default=self.conf_monster)
+        return min(self.conf_monster, min_override)
+
     def set_authority(self, owner: Optional[str]) -> None:
         if isinstance(owner, str):
             self.current_authority = owner
@@ -319,10 +341,11 @@ class DetectionThread(QThread):
             model = YOLO(self.model_path)
             sct = mss.mss()
             use_char_class = self.char_class_index >= 0
+            monster_base_conf = self._minimum_monster_confidence()
             low_conf = (
-                min(self.conf_char, self.conf_monster)
+                min(self.conf_char, monster_base_conf)
                 if use_char_class
-                else self.conf_monster
+                else monster_base_conf
             )
             # 클래스 ID별 색상을 저장할 딕셔너리
             class_color_map = {}
@@ -439,7 +462,7 @@ class DetectionThread(QThread):
                         if cls_id == self.char_class_index:
                             if conf >= self.conf_char:
                                 char_indices_with_conf.append((i, conf))
-                        elif conf >= self.conf_monster:
+                        elif conf >= self._monster_threshold_for_class(cls_id):
                             if (
                                 width >= self.min_monster_box_size
                                 and height >= self.min_monster_box_size
