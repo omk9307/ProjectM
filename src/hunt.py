@@ -38,7 +38,7 @@ from PyQt6.QtWidgets import (
     QSizePolicy,
 )
 
-from PyQt6.QtGui import QPixmap, QPainter, QPen, QColor, QBrush
+from PyQt6.QtGui import QPixmap, QPainter, QPen, QColor, QBrush, QTextCursor
 
 from detection_runtime import DetectionPopup, DetectionThread, ScreenSnipper
 from direction_detection import DirectionDetector
@@ -133,6 +133,7 @@ DIRECTION_ROI_EDGE = QPen(QColor(170, 80, 255, 200), 1, Qt.PenStyle.DashLine)
 DIRECTION_MATCH_EDGE_LEFT = QPen(QColor(0, 200, 255, 220), 2, Qt.PenStyle.SolidLine)
 DIRECTION_MATCH_EDGE_RIGHT = QPen(QColor(255, 200, 0, 220), 2, Qt.PenStyle.SolidLine)
 MONSTER_LOSS_GRACE_SEC = 0.2  # 단기 미검출 시 방향 유지용 유예시간(초)
+LOG_LINE_LIMIT = 200
 
 try:
     COMPOSITION_MODE_DEST_OVER = QPainter.CompositionMode.CompositionMode_DestinationOver
@@ -749,6 +750,24 @@ class HuntTab(QWidget):
         color_hex = self._resolve_log_color(color)
         sanitized = html.escape(message)
         widget.append(f'<span style="color:{color_hex}">{sanitized}</span>')
+        self._trim_text_edit(widget, LOG_LINE_LIMIT)
+
+    def _trim_text_edit(self, widget: Optional[QTextEdit], max_blocks: int) -> None:
+        if widget is None or max_blocks <= 0:
+            return
+        doc = widget.document()
+        while doc.blockCount() > max_blocks:
+            cursor = QTextCursor(doc)
+            cursor.movePosition(QTextCursor.MoveOperation.Start)
+            cursor.select(QTextCursor.SelectionType.BlockUnderCursor)
+            cursor.removeSelectedText()
+            cursor.deleteChar()
+
+    def _is_log_enabled(self, checkbox_attr: str) -> bool:
+        checkbox = getattr(self, checkbox_attr, None)
+        if checkbox is None:
+            return True
+        return bool(checkbox.isChecked())
 
     def _format_delay_ms(self, delay_sec: float) -> str:
         return f"{max(0.0, delay_sec) * 1000:.0f}ms"
@@ -1239,26 +1258,47 @@ class HuntTab(QWidget):
         self.detection_view = None
 
         control_log_container = QVBoxLayout()
+        control_log_header = QHBoxLayout()
         control_log_label = QLabel("입력 로그")
+        self.control_log_checkbox = QCheckBox()
+        self.control_log_checkbox.setChecked(True)
+        self.control_log_checkbox.toggled.connect(self._on_log_checkbox_toggled)
+        control_log_header.addWidget(control_log_label)
+        control_log_header.addWidget(self.control_log_checkbox)
+        control_log_header.addStretch(1)
+        control_log_container.addLayout(control_log_header)
         self.control_log_view = QTextEdit()
         self._configure_log_view(self.control_log_view, minimum_height=160)
-        control_log_container.addWidget(control_log_label)
         control_log_container.addWidget(self.control_log_view)
         outer_layout.addLayout(control_log_container)
 
         keyboard_log_container = QVBoxLayout()
+        keyboard_log_header = QHBoxLayout()
         keyboard_log_label = QLabel("키보드 입력 로그")
+        self.keyboard_log_checkbox = QCheckBox()
+        self.keyboard_log_checkbox.setChecked(True)
+        self.keyboard_log_checkbox.toggled.connect(self._on_log_checkbox_toggled)
+        keyboard_log_header.addWidget(keyboard_log_label)
+        keyboard_log_header.addWidget(self.keyboard_log_checkbox)
+        keyboard_log_header.addStretch(1)
+        keyboard_log_container.addLayout(keyboard_log_header)
         self.keyboard_log_view = QTextEdit()
         self._configure_log_view(self.keyboard_log_view, minimum_height=160)
-        keyboard_log_container.addWidget(keyboard_log_label)
         keyboard_log_container.addWidget(self.keyboard_log_view)
         outer_layout.addLayout(keyboard_log_container)
 
         log_container = QVBoxLayout()
+        log_header = QHBoxLayout()
         log_label = QLabel("로그")
+        self.main_log_checkbox = QCheckBox()
+        self.main_log_checkbox.setChecked(True)
+        self.main_log_checkbox.toggled.connect(self._on_log_checkbox_toggled)
+        log_header.addWidget(log_label)
+        log_header.addWidget(self.main_log_checkbox)
+        log_header.addStretch(1)
+        log_container.addLayout(log_header)
         self.log_view = QTextEdit()
         self._configure_log_view(self.log_view, minimum_height=200)
-        log_container.addWidget(log_label)
         log_container.addWidget(self.log_view)
         outer_layout.addLayout(log_container)
 
@@ -1973,6 +2013,9 @@ class HuntTab(QWidget):
         self._update_detection_summary()
         self._save_settings()
 
+    def _on_log_checkbox_toggled(self, _checked: bool) -> None:
+        self._save_settings()
+
     def _on_screen_output_toggled(self, checked: bool) -> None:
         if checked and self.detect_btn.isChecked() and not self.is_popup_active:
             self._toggle_detection_popup()
@@ -2585,7 +2628,11 @@ class HuntTab(QWidget):
     def _append_control_log(self, message: str, color: Optional[str] = None) -> None:
         timestamp = self._format_timestamp_ms()
         line = f"[{timestamp}] {message}"
-        if hasattr(self, 'control_log_view') and self.control_log_view:
+        if (
+            hasattr(self, 'control_log_view')
+            and self.control_log_view
+            and self._is_log_enabled('control_log_checkbox')
+        ):
             self._append_colored_text(self.control_log_view, line, color or "white")
         self._append_keyboard_log(message, timestamp=timestamp, color=color)
 
@@ -2608,6 +2655,8 @@ class HuntTab(QWidget):
         color: Optional[str] = None,
     ) -> None:
         if not hasattr(self, 'keyboard_log_view') or not self.keyboard_log_view:
+            return
+        if not self._is_log_enabled('keyboard_log_checkbox'):
             return
         if timestamp is None:
             timestamp = self._format_timestamp_ms()
@@ -3582,6 +3631,9 @@ class HuntTab(QWidget):
             summary_confidence = bool(display.get('summary_confidence', self.show_confidence_summary_checkbox.isChecked()))
             summary_frame = bool(display.get('summary_frame', self.show_frame_summary_checkbox.isChecked()))
             summary_info = bool(display.get('summary_info', self.show_info_summary_checkbox.isChecked()))
+            control_log_enabled = bool(display.get('log_control', self.control_log_checkbox.isChecked()))
+            keyboard_log_enabled = bool(display.get('log_keyboard', self.keyboard_log_checkbox.isChecked()))
+            main_log_enabled = bool(display.get('log_main', self.main_log_checkbox.isChecked()))
 
             self.show_hunt_area_checkbox.setChecked(show_hunt)
             self.show_primary_skill_checkbox.setChecked(show_primary)
@@ -3592,6 +3644,9 @@ class HuntTab(QWidget):
             self.show_confidence_summary_checkbox.setChecked(summary_confidence)
             self.show_frame_summary_checkbox.setChecked(summary_frame)
             self.show_info_summary_checkbox.setChecked(summary_info)
+            self.control_log_checkbox.setChecked(control_log_enabled)
+            self.keyboard_log_checkbox.setChecked(keyboard_log_enabled)
+            self.main_log_checkbox.setChecked(main_log_enabled)
 
         detection_cfg = data.get('detection', {})
         if isinstance(detection_cfg, dict):
@@ -3807,6 +3862,9 @@ class HuntTab(QWidget):
                 'summary_confidence': self.show_confidence_summary_checkbox.isChecked(),
                 'summary_frame': self.show_frame_summary_checkbox.isChecked(),
                 'summary_info': self.show_info_summary_checkbox.isChecked(),
+                'log_control': bool(self.control_log_checkbox.isChecked()) if hasattr(self, 'control_log_checkbox') else True,
+                'log_keyboard': bool(self.keyboard_log_checkbox.isChecked()) if hasattr(self, 'keyboard_log_checkbox') else True,
+                'log_main': bool(self.main_log_checkbox.isChecked()) if hasattr(self, 'main_log_checkbox') else True,
             },
             'misc': {
                 'direction_delay_min': self.direction_delay_min_spinbox.value(),
@@ -4762,11 +4820,19 @@ class HuntTab(QWidget):
         prefix = prefix_map.get(level, "[INFO]")
         timestamp = self._format_timestamp_ms()
         line = f"[{timestamp}] {prefix} {message}"
-        if hasattr(self, 'log_view') and self.log_view:
+        if (
+            hasattr(self, 'log_view')
+            and self.log_view
+            and self._is_log_enabled('main_log_checkbox')
+        ):
             self._append_colored_text(self.log_view, line, color_map.get(level))
 
     def _append_log_detail(self, message: str) -> None:
-        if not hasattr(self, 'log_view'):
+        if (
+            not hasattr(self, 'log_view')
+            or not self.log_view
+            or not self._is_log_enabled('main_log_checkbox')
+        ):
             return
         timestamp = self._format_timestamp_ms()
         line = f"[{timestamp}]    {message}"
