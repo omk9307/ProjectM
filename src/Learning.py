@@ -2521,6 +2521,7 @@ class LearningTab(QWidget):
         self._thumbnail_cache = OrderedDict()
         self._thumbnail_cache_limit = 256
         self._runtime_ui_updating = False
+        self._monster_settings_dialog_open = False
         self.initUI()
         self.init_sam()
         self.data_manager.register_status_config_listener(self._handle_status_config_changed)
@@ -3839,6 +3840,8 @@ class LearningTab(QWidget):
             return
         if not getattr(self, 'data_manager', None):
             return
+        if getattr(self, '_monster_settings_dialog_open', False):
+            return
 
         overrides = self.data_manager.get_monster_confidence_overrides()
         current_value = overrides.get(class_name)
@@ -3848,23 +3851,27 @@ class LearningTab(QWidget):
             current_value=current_value,
             default_value=self._default_monster_confidence(),
         )
-        if dialog.exec() != QDialog.DialogCode.Accepted:
-            return
+        self._monster_settings_dialog_open = True
+        try:
+            if dialog.exec() != QDialog.DialogCode.Accepted:
+                return
 
-        if dialog.override_enabled:
-            self.data_manager.set_monster_confidence_override(class_name, dialog.override_value)
-            if hasattr(self, 'log_viewer'):
-                self.log_viewer.append(
-                    f"'{class_name}' 개별 신뢰도를 {dialog.override_value:.2f}로 설정했습니다."
-                )
-        else:
-            self.data_manager.delete_monster_confidence_override(class_name)
-            if hasattr(self, 'log_viewer'):
-                self.log_viewer.append(
-                    f"'{class_name}' 개별 신뢰도를 전역 값으로 되돌렸습니다."
-                )
+            if dialog.override_enabled:
+                self.data_manager.set_monster_confidence_override(class_name, dialog.override_value)
+                if hasattr(self, 'log_viewer'):
+                    self.log_viewer.append(
+                        f"'{class_name}' 개별 신뢰도를 {dialog.override_value:.2f}로 설정했습니다."
+                    )
+            else:
+                self.data_manager.delete_monster_confidence_override(class_name)
+                if hasattr(self, 'log_viewer'):
+                    self.log_viewer.append(
+                        f"'{class_name}' 개별 신뢰도를 전역 값으로 되돌렸습니다."
+                    )
 
-        self._apply_monster_confidence_indicator(item, class_name)
+            self._apply_monster_confidence_indicator(item, class_name)
+        finally:
+            self._monster_settings_dialog_open = False
 
     def set_image_sort_mode(self, mode):
         self.current_image_sort_mode = mode
