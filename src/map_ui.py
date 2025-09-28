@@ -550,6 +550,9 @@ class MapTab(QWidget):
             self._walk_teleport_active = False
             self._walk_teleport_walk_started_at = 0.0
             self._walk_teleport_bonus_percent = 0.0
+            self.waiting_for_safe_down_jump = False  # 아래점프 전 안전 지대 이동 필요 여부
+            self.SAFE_MOVE_COMMAND_COOLDOWN = 0.35
+            self.last_safe_move_command_time = 0.0
             self.alignment_target_x = None # ---  사다리 앞 정렬(align) 상태 변수 ---
             self.alignment_expected_floor = None
             self.alignment_expected_group = None
@@ -4458,6 +4461,7 @@ class MapTab(QWidget):
         """주어진 액션 준비 상태로 전환합니다."""
         if self.navigation_action == new_action_state: return
         self.navigation_action = new_action_state
+        self.waiting_for_safe_down_jump = (new_action_state == 'prepare_to_down_jump')
         self.prepare_timeout_start = time.time()
         prev_node_name = self.nav_nodes.get(prev_node_key, {}).get('name', '??')
         # [PATCH] v14.3.9: print문을 조건문으로 감쌈
@@ -4480,6 +4484,7 @@ class MapTab(QWidget):
             self.update_general_log(f"[경로 이탈 감지] 행동 준비 중 층을 벗어났습니다. (예상: {action_node_floor}층, 현재: {self.current_player_floor}층)", "orange")
             self.current_segment_path = []
             self.navigation_action = 'move_to_target'
+            self.waiting_for_safe_down_jump = False
             return
         
         action_started = False
@@ -4494,6 +4499,7 @@ class MapTab(QWidget):
             self.navigation_action = self.navigation_action.replace('prepare_to_', '') + '_in_progress'
             self.navigation_state_locked = True
             self.lock_timeout_start = time.time()
+            self.waiting_for_safe_down_jump = False
             
             # [PATCH] v14.3.9: print문을 조건문으로 감쌈
             if self.debug_basic_pathfinding_checkbox and self.debug_basic_pathfinding_checkbox.isChecked():
@@ -4540,6 +4546,7 @@ class MapTab(QWidget):
 
                 self.current_segment_path = []
                 self.navigation_action = 'move_to_target'
+                self.waiting_for_safe_down_jump = False
     
     def _process_action_completion(self, final_player_pos, contact_terrain):
         """
@@ -4684,7 +4691,10 @@ class MapTab(QWidget):
             self.navigation_action = 'move_to_target'
             self.navigation_state_locked = False
             self.current_segment_path = [] # 경로 초기화하여 재탐색 유도
-        
+
+        if self.navigation_action != 'prepare_to_down_jump':
+            self.waiting_for_safe_down_jump = False
+
         # Phase 1: 물리적 상태 판정 (유지)
         self.player_state = self._determine_player_physical_state(final_player_pos, contact_terrain)
 
@@ -5317,6 +5327,7 @@ class MapTab(QWidget):
                     direction_changed = current_direction != self.last_printed_direction
                     player_state_changed = current_player_state != self.last_printed_player_state
                     is_on_ground = self._get_contact_terrain(final_player_pos) is not None
+                    needs_safe_move = (self.guidance_text == "안전 지점으로 이동")
                     
                     # --- [신규] '정렬' 및 '위로 오르기' 명령 전송 로직 ---
                     if current_action_key == 'prepare_to_climb_upward' and action_changed:
@@ -5345,6 +5356,18 @@ class MapTab(QWidget):
                             command_to_send = "사다리타기(우)" if current_direction == "→" else "사다리타기(좌)"
                             self.last_printed_direction = current_direction
 
+                    elif current_action_key == 'prepare_to_down_jump':
+                        if needs_safe_move:
+                            self.waiting_for_safe_down_jump = True
+                        elif (
+                            (self.waiting_for_safe_down_jump or action_changed)
+                            and is_on_ground
+                            and self.guidance_text not in ["점프 불가: 안전 지대 없음", "이동할 안전 지대 없음"]
+                        ):
+                            command_to_send = "아래점프"
+                            self.waiting_for_safe_down_jump = False
+                        self.last_printed_direction = None
+
                     elif action_changed:
                         # <<< [수정] 점프 명령 분기 처리
                         if current_action_key == 'prepare_to_jump':
@@ -5355,8 +5378,6 @@ class MapTab(QWidget):
                             else:
                                 command_to_send = "점프키 누르기" # Fallback
                             self.jump_direction = None # 사용 후 초기화
-                        elif current_action_key == 'prepare_to_down_jump': 
-                            command_to_send = "아래점프"
                         self.last_printed_direction = None
 
                     if player_state_changed:
@@ -5366,14 +5387,25 @@ class MapTab(QWidget):
                         if self.last_printed_player_state == 'falling' and current_player_state in ['on_terrain', 'idle']:
                             self.last_printed_direction = None
 
-                    if (current_action_key == 'move_to_target' or self.guidance_text == "안전 지점으로 이동") and direction_changed and is_on_ground:
-                        if self.navigation_action in ['prepare_to_down_jump', 'prepare_to_fall']:
-                            pass  # 아래점프 준비 중에는 걷기 명령을 덮어쓰지 않음
+                    if (current_action_key == 'move_to_target' or needs_safe_move) and direction_changed and is_on_ground:
+                        if self.navigation_action in ['prepare_to_down_jump', 'prepare_to_fall'] and not needs_safe_move:
+                            pass  # 아래점프/낙하 준비 중 안전 이동이 필요 없으면 걷기 명령으로 덮어쓰지 않음
                         else:
-                            if current_direction in ["→", "←"]:
-                                command_to_send = "걷기(우)" if current_direction == "→" else "걷기(좌)"
-                                self.last_printed_direction = current_direction
-                                self._start_walk_teleport_tracking()
+                            if current_direction in ["→", "←"] and (command_to_send is None or needs_safe_move):
+                                if needs_safe_move:
+                                    now_time = time.time()
+                                    if (now_time - self.last_safe_move_command_time) < self.SAFE_MOVE_COMMAND_COOLDOWN:
+                                        command_to_send = None
+                                    else:
+                                        command_to_send = "걷기(우)" if current_direction == "→" else "걷기(좌)"
+                                        self.last_safe_move_command_time = now_time
+                                        self.waiting_for_safe_down_jump = True
+                                else:
+                                    command_to_send = "걷기(우)" if current_direction == "→" else "걷기(좌)"
+
+                                if command_to_send:
+                                    self.last_printed_direction = current_direction
+                                    self._start_walk_teleport_tracking()
 
                     # 명령 전송 (테스트 또는 실제)
                     if command_to_send:
@@ -5706,6 +5738,8 @@ class MapTab(QWidget):
                                 self.intermediate_target_pos = QPointF(closest_point_x, final_player_pos.y())
                             else:
                                 self.intermediate_target_pos = None
+                            if self.navigation_action == 'prepare_to_down_jump':
+                                self.waiting_for_safe_down_jump = True
                             self._process_action_preparation(final_player_pos)
                             return
 
@@ -5720,10 +5754,14 @@ class MapTab(QWidget):
                     safe_zones, _ = self._find_safe_landing_zones(ideal_landing_group)
                     if not safe_zones:
                         self.guidance_text = "점프 불가: 안전 지대 없음"; self.intermediate_target_pos = None
+                        if self.navigation_action == 'prepare_to_down_jump':
+                            self.waiting_for_safe_down_jump = False
                     else:
                         self.guidance_text = "안전 지점으로 이동"
                         closest_point_x = min([p for zone in safe_zones for p in zone], key=lambda p: abs(player_x - p))
                         self.intermediate_target_pos = QPointF(closest_point_x, final_player_pos.y())
+                        if self.navigation_action == 'prepare_to_down_jump':
+                            self.waiting_for_safe_down_jump = True
                     self._process_action_preparation(final_player_pos)
                     return
 
@@ -5734,6 +5772,8 @@ class MapTab(QWidget):
                     self.guidance_text = "안전 지점으로 이동"
                     closest_point_x = min([p for zone in safe_zones for p in zone], key=lambda p: abs(player_x - p))
                     self.intermediate_target_pos = QPointF(closest_point_x, final_player_pos.y())
+                    if self.navigation_action == 'prepare_to_down_jump':
+                        self.waiting_for_safe_down_jump = True
                 else:
                     # <<< 핵심 수정 지점 (원래 로직으로 복원) >>>
                     # 지상에서는 실시간 예측 착지 지점을 안내
