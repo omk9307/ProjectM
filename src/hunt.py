@@ -2524,7 +2524,7 @@ class HuntTab(QWidget):
         start_entry = processed_records[0]
         end_entry = processed_records[-1]
         if end_timestamp is None:
-            end_timestamp = end_entry.get('timestamp', time.time())
+            end_timestamp = time.time()
 
         start_amount = start_entry['amount']
         start_percent = start_entry['percent']
@@ -2580,19 +2580,30 @@ class HuntTab(QWidget):
         total_amount_gain = max(0, int(total_amount_gain))
         total_percent_gain = max(0.0, total_percent_gain)
 
-        duration = 0.0
-        if self._status_detection_start_ts:
-            duration = max(0.0, end_timestamp - self._status_detection_start_ts)
+        duration_start_ts = self._status_detection_start_ts
+        if not duration_start_ts:
+            duration_start_ts = start_entry.get('timestamp', time.time())
+        duration = max(0.0, float(end_timestamp) - float(duration_start_ts))
         minutes = max(1.0 / 60.0, duration / 60.0)
         per_minute_amount = int(total_amount_gain / minutes) if minutes > 0 else total_amount_gain
+
+        def _format_percent_value(value: float) -> str:
+            text = f"{value:.2f}"
+            if '.' in text:
+                text = text.rstrip('0').rstrip('.')
+            return text
+
+        total_percent_text = _format_percent_value(total_percent_gain)
+        start_percent_text = _format_percent_value(start_percent)
+        end_percent_text = _format_percent_value(end_percent)
 
         duration_text = self._format_duration_text(duration)
         self.append_log(
             (
                 "사냥 종료 - 사냥시간: "
-                f"{duration_text}, 분당 경험치: {per_minute_amount} / {total_percent_gain:.2f}%, "
-                f"획득 경험치: {total_amount_gain} ({end_amount} - {start_amount}) / "
-                f"{total_percent_gain:.2f}% ({end_percent:.2f}% - {start_percent:.2f}%)"
+                f"{duration_text}, 분당 경험치: {per_minute_amount} / {total_percent_text}%, "
+                f"획득 경험치: {total_amount_gain} ({start_amount} > {end_amount}) / "
+                f"{total_percent_text}% ({start_percent_text}% > {end_percent_text}%)"
             ),
             'info',
         )
