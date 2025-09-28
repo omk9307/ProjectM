@@ -6035,6 +6035,13 @@ class MapTab(QWidget):
                     self._status_last_command_ts[resource] = timestamp
                     return
 
+        if resource == 'hp':
+            # HP 명령은 병렬 수행을 전제로 하므로 기존 명령 보관/차단 로직을 우회한다.
+            self._status_saved_command = None
+            self._issue_status_command(resource, command_name)
+            self._status_last_command_ts[resource] = timestamp
+            return
+
         if self._last_regular_command and (
             not isinstance(self._last_regular_command[1], str)
             or not str(self._last_regular_command[1]).startswith('status:')
