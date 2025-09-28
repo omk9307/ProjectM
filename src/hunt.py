@@ -2166,9 +2166,8 @@ class HuntTab(QWidget):
         if reason:
             detail_parts.append(f"요청 사유: {reason}")
         self.append_log("사냥 권한 요청", "info")
-        if hasattr(self, 'log_view'):
-            for line in detail_parts:
-                self.log_view.append(f"    {line}")
+        for line in detail_parts:
+            self._append_log_detail(line)
 
     def _handle_capture_mode_toggle(self, checked: bool) -> None:
         if hasattr(self, 'set_area_btn'):
@@ -2470,27 +2469,131 @@ class HuntTab(QWidget):
     def _finalize_exp_tracking(self, end_timestamp: Optional[float] = None) -> None:
         if not self._status_exp_start_snapshot or not self._status_exp_records:
             return
-        end_entry = self._status_exp_records[-1]
+        processed_records: list[dict] = []
+        for entry in self._status_exp_records:
+            if not isinstance(entry, dict):
+                continue
+            amount_raw = entry.get('amount')
+            percent_raw = entry.get('percent')
+            try:
+                amount_val = max(0, int(str(amount_raw)))
+                percent_val = max(0.0, float(percent_raw))
+            except (TypeError, ValueError):
+                continue
+            processed_records.append({
+                'timestamp': float(entry.get('timestamp', time.time())),
+                'amount': amount_val,
+                'percent': percent_val,
+            })
+
+        if not processed_records:
+            return
+
+        processed_records.sort(key=lambda item: item.get('timestamp', 0.0))
+
+        start_snapshot = self._status_exp_start_snapshot
+        start_amount: Optional[int] = None
+        start_percent: Optional[float] = None
+        start_timestamp: float = processed_records[0].get('timestamp', time.time())
+        if isinstance(start_snapshot, dict):
+            try:
+                start_amount = max(0, int(str(start_snapshot.get('amount'))))
+                start_percent = max(0.0, float(start_snapshot.get('percent')))
+                start_timestamp = float(start_snapshot.get('timestamp', start_timestamp))
+            except (TypeError, ValueError):
+                start_amount = None
+                start_percent = None
+
+        if start_amount is None or start_percent is None:
+            start_amount = processed_records[0]['amount']
+            start_percent = processed_records[0]['percent']
+        else:
+            first = processed_records[0]
+            if (
+                start_amount != first['amount']
+                or abs(start_percent - first['percent']) > 1e-6
+            ):
+                processed_records.insert(0, {
+                    'timestamp': start_timestamp,
+                    'amount': start_amount,
+                    'percent': start_percent,
+                })
+            else:
+                first['timestamp'] = min(first.get('timestamp', start_timestamp), start_timestamp)
+
+        start_entry = processed_records[0]
+        end_entry = processed_records[-1]
         if end_timestamp is None:
             end_timestamp = end_entry.get('timestamp', time.time())
-        start_amount = self._status_exp_start_snapshot.get('amount')
-        end_amount = end_entry.get('amount')
-        start_percent = self._status_exp_start_snapshot.get('percent')
-        end_percent = end_entry.get('percent')
-        if start_amount is None or end_amount is None or start_percent is None or end_percent is None:
-            return
+
+        start_amount = start_entry['amount']
+        start_percent = start_entry['percent']
+        end_amount = end_entry['amount']
+        end_percent = end_entry['percent']
+
+        total_amount_gain = 0
+        total_percent_gain = 0.0
+
+        prev_amount = start_amount
+        prev_percent = start_percent
+
+        LEVELUP_AMOUNT_DROP_MIN = 10
+        LEVELUP_PERCENT_DROP_MIN = 0.2
+        LEVELUP_PERCENT_RESET_THRESHOLD = 5.0
+        LEVELUP_AMOUNT_RATIO_THRESHOLD = 0.2
+        LEVELUP_PERCENT_RATIO_THRESHOLD = 0.5
+        POSITIVE_PERCENT_EPS = 0.001
+
+        for entry in processed_records[1:]:
+            amount = entry['amount']
+            percent = entry['percent']
+
+            amount_delta = amount - prev_amount
+            percent_delta = percent - prev_percent
+            amount_drop = prev_amount - amount
+            percent_drop = prev_percent - percent
+
+            level_up_detected = (
+                amount_drop > LEVELUP_AMOUNT_DROP_MIN
+                and percent_drop > LEVELUP_PERCENT_DROP_MIN
+                and (
+                    percent <= LEVELUP_PERCENT_RESET_THRESHOLD
+                    or amount <= max(0.0, prev_amount * LEVELUP_AMOUNT_RATIO_THRESHOLD)
+                    or percent <= prev_percent * LEVELUP_PERCENT_RATIO_THRESHOLD
+                )
+            )
+
+            if level_up_detected:
+                if amount > 0:
+                    total_amount_gain += amount
+                if percent > 0:
+                    total_percent_gain += percent
+            else:
+                if amount_delta > 0:
+                    total_amount_gain += amount_delta
+                if percent_delta > POSITIVE_PERCENT_EPS:
+                    total_percent_gain += percent_delta
+
+            prev_amount = amount
+            prev_percent = percent
+
+        total_amount_gain = max(0, int(total_amount_gain))
+        total_percent_gain = max(0.0, total_percent_gain)
 
         duration = 0.0
         if self._status_detection_start_ts:
             duration = max(0.0, end_timestamp - self._status_detection_start_ts)
         minutes = max(1.0 / 60.0, duration / 60.0)
-        gain = max(0, end_amount - start_amount)
-        per_minute = int(gain / minutes) if minutes > 0 else gain
-        percent_gain = end_percent - start_percent
+        per_minute_amount = int(total_amount_gain / minutes) if minutes > 0 else total_amount_gain
 
         duration_text = self._format_duration_text(duration)
         self.append_log(
-            f"사냥 종료 - 사냥시간: {duration_text}, 분당 경험치: {per_minute} / {percent_gain:.2f}%",
+            (
+                "사냥 종료 - 사냥시간: "
+                f"{duration_text}, 분당 경험치: {per_minute_amount} / {total_percent_gain:.2f}%, "
+                f"획득 경험치: {total_amount_gain} ({end_amount} - {start_amount}) / "
+                f"{total_percent_gain:.2f}% ({end_percent:.2f}% - {start_percent:.2f}%)"
+            ),
             'info',
         )
 
@@ -4207,8 +4310,15 @@ class HuntTab(QWidget):
             "debug": "[DEBUG]",
         }
         prefix = prefix_map.get(level, "[INFO]")
+        timestamp = self._format_timestamp_ms()
         if hasattr(self, 'log_view'):
-            self.log_view.append(f"{prefix} {message}")
+            self.log_view.append(f"[{timestamp}] {prefix} {message}")
+
+    def _append_log_detail(self, message: str) -> None:
+        if not hasattr(self, 'log_view'):
+            return
+        timestamp = self._format_timestamp_ms()
+        self.log_view.append(f"[{timestamp}]    {message}")
 
     def cleanup_on_close(self) -> None:
         self.condition_timer.stop()

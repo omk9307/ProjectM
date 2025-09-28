@@ -34,43 +34,68 @@ __all__ = ["ScreenSnipper", "DetectionPopup", "DetectionThread"]
 
 
 class ScreenSnipper(QDialog):
-    """화면 전체에 반투명 오버레이를 씌우고 사용자가 영역을 선택하게 하는 도구."""
+    """전체 화면을 캡처한 정지 화면 위에서 영역을 지정하도록 돕는 도구."""
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setWindowFlags(
-            Qt.WindowType.FramelessWindowHint | Qt.WindowType.WindowStaysOnTopHint
+            Qt.WindowType.FramelessWindowHint
+            | Qt.WindowType.WindowStaysOnTopHint
+            | Qt.WindowType.Tool
         )
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
-        screens = QApplication.screens()
-        if not screens:
-            raise RuntimeError("사용 가능한 모니터를 찾을 수 없습니다.")
+        self.setMouseTracking(True)
 
-        virtual_rect = screens[0].geometry()
-        for screen in screens[1:]:
-            virtual_rect = virtual_rect.united(screen.geometry())
+        self.virtual_origin = QPoint(0, 0)
+        self.screenshot = self._capture_virtual_desktop()
+        if self.screenshot.isNull():
+            raise RuntimeError("화면 캡처에 실패했습니다.")
 
-        self.virtual_geometry = virtual_rect
-        self.virtual_origin = virtual_rect.topLeft()
-        self.setGeometry(virtual_rect)
-
-        self.screenshot = QPixmap(virtual_rect.size())
-        self.screenshot.fill(Qt.GlobalColor.transparent)
-        painter = QPainter(self.screenshot)
-        for screen in screens:
-            geo = screen.geometry()
-            offset = geo.topLeft() - self.virtual_origin
-            painter.drawPixmap(offset, screen.grabWindow(0))
-        painter.end()
+        geometry = QRect(self.virtual_origin, self.screenshot.size())
+        self.setGeometry(geometry)
 
         self.begin = QPoint()
         self.end = QPoint()
         self.is_selecting = False
 
+    def _capture_virtual_desktop(self) -> QPixmap:
+        pixmap: Optional[QPixmap] = None
+        try:
+            with mss.mss() as sct:
+                monitor = sct.monitors[0]
+                shot = sct.grab(monitor)
+            img = QImage(shot.rgb, shot.width, shot.height, QImage.Format_RGB888)
+            pixmap = QPixmap.fromImage(img.copy())
+            self.virtual_origin = QPoint(monitor.get('left', 0), monitor.get('top', 0))
+        except Exception:
+            pixmap = None
+
+        if pixmap is not None and not pixmap.isNull():
+            return pixmap
+
+        screens = QApplication.screens()
+        if not screens:
+            return QPixmap()
+
+        virtual_rect = screens[0].geometry()
+        for screen in screens[1:]:
+            virtual_rect = virtual_rect.united(screen.geometry())
+
+        self.virtual_origin = virtual_rect.topLeft()
+        snapshot = QPixmap(virtual_rect.size())
+        snapshot.fill(Qt.GlobalColor.transparent)
+        painter = QPainter(snapshot)
+        for screen in screens:
+            geo = screen.geometry()
+            offset = geo.topLeft() - self.virtual_origin
+            painter.drawPixmap(offset, screen.grabWindow(0))
+        painter.end()
+        return snapshot
+
     def paintEvent(self, event):  # noqa: N802 (Qt 시그니처 유지)
         painter = QPainter(self)
         painter.drawPixmap(QPoint(0, 0), self.screenshot)
-        painter.fillRect(self.rect(), QColor(0, 0, 0, 100))
+        painter.fillRect(self.rect(), QColor(0, 0, 0, 120))
         if self.is_selecting:
             selected_rect = QRect(self.begin, self.end).normalized()
             painter.drawPixmap(selected_rect, self.screenshot, selected_rect)
@@ -78,24 +103,36 @@ class ScreenSnipper(QDialog):
             painter.drawRect(selected_rect)
 
     def mousePressEvent(self, event):  # noqa: N802
-        self.begin = event.position().toPoint()
-        self.end = event.position().toPoint()
+        point = event.position().toPoint()
+        self.begin = point
+        self.end = point
         self.is_selecting = True
         self.update()
 
     def mouseMoveEvent(self, event):  # noqa: N802
+        if not self.is_selecting:
+            return
         self.end = event.position().toPoint()
         self.update()
 
     def mouseReleaseEvent(self, event):  # noqa: N802
+        if not self.is_selecting:
+            return
         self.is_selecting = False
-        if QRect(self.begin, self.end).normalized().width() > 5:
+        self.end = event.position().toPoint()
+        rect = QRect(self.begin, self.end).normalized()
+        if rect.width() > 5 and rect.height() > 5:
             self.accept()
         else:
             self.reject()
 
+    def keyPressEvent(self, event):  # noqa: N802
+        if event.key() == Qt.Key.Key_Escape:
+            self.reject()
+
     def get_roi(self) -> QRect:
-        return QRect(self.begin, self.end).normalized().translated(self.virtual_origin)
+        rect = QRect(self.begin, self.end).normalized()
+        return rect.translated(self.virtual_origin)
 
 
 class DetectionPopup(QDialog):
