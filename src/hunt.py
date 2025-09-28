@@ -573,6 +573,7 @@ class HuntTab(QWidget):
             'yolo_ms': 0.0,
             'nickname_ms': 0.0,
             'direction_ms': 0.0,
+            'status_ms': 0.0,
         }
         self._active_target_names: List[str] = []
 
@@ -1654,10 +1655,11 @@ class HuntTab(QWidget):
             yolo_ms = float(perf.get('yolo_ms', 0.0))
             nickname_ms = float(perf.get('nickname_ms', 0.0))
             direction_ms = float(perf.get('direction_ms', 0.0))
+            status_ms = float(perf.get('status_ms', 0.0))
 
             fps_line = f"FPS: {fps:.0f}"
             total_line = (
-                f"Total: {total_ms:.1f} ms ( {yolo_ms:.1f} ms + {nickname_ms:.1f} ms + {direction_ms:.1f} ms)"
+                f"Total: {total_ms:.1f} ms ( {yolo_ms:.1f} ms + {nickname_ms:.1f} ms + {direction_ms:.1f} ms) + HP/MP/EXP: {status_ms:.1f} ms"
             )
 
             if self.current_authority == "hunt":
@@ -2320,6 +2322,10 @@ class HuntTab(QWidget):
         hp_cfg = getattr(self._status_config, 'hp', None)
         mp_cfg = getattr(self._status_config, 'mp', None)
         exp_cfg = getattr(self._status_config, 'exp', None)
+
+        status_ms = payload.get('status_ms')
+        if isinstance(status_ms, (int, float)):
+            self.latest_perf_stats['status_ms'] = float(status_ms)
 
         if hp_cfg and getattr(hp_cfg, 'enabled', True):
             hp_info = payload.get('hp')
