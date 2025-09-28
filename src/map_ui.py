@@ -339,6 +339,8 @@ class MapTab(QWidget):
             self._status_active_resource: Optional[str] = None
             self._status_saved_command: Optional[tuple[str, object]] = None
             self._last_regular_command: Optional[tuple[str, object]] = None
+            self._hp_recovery_in_progress = False
+            self._hp_recovery_started_at = 0.0
             self._status_data_manager = None
 
             self.full_map_pixmap = None
@@ -2588,7 +2590,7 @@ class MapTab(QWidget):
     def on_sequence_completed(self, command_name, reason, success):
         if isinstance(reason, str):
             if reason.startswith('status:'):
-                self._handle_status_command_completed(bool(success))
+                self._handle_status_command_completed(bool(success), reason, command_name)
                 return
             if self.event_in_progress and reason == self.active_event_reason:
                 self._finish_waypoint_event(bool(success))
@@ -3010,6 +3012,8 @@ class MapTab(QWidget):
                 self._status_saved_command = None
                 self._last_regular_command = None
                 self._status_last_command_ts = {'hp': 0.0, 'mp': 0.0}
+                self._hp_recovery_in_progress = False
+                self._hp_recovery_started_at = 0.0
                 if self.status_monitor:
                     self.status_monitor.set_tab_active(map_tab=True)
                 self._render_detection_log(self._last_detection_log_body)
@@ -3080,6 +3084,8 @@ class MapTab(QWidget):
                 self._status_active_resource = None
                 self._status_saved_command = None
                 self._status_log_lines = ["HP: --", "MP: --"]
+                self._hp_recovery_in_progress = False
+                self._hp_recovery_started_at = 0.0
                 self._render_detection_log(self._last_detection_log_body)
 
                 if self.debug_dialog:
@@ -4701,7 +4707,7 @@ class MapTab(QWidget):
         # 2. 움직여야 하는데 멈춰있고, 현재 복구 쿨다운 상태가 아닐 때만 멈춤 감지
         should_be_moving = self.navigation_action in ['move_to_target', 'prepare_to_climb', 'prepare_to_jump', 'prepare_to_down_jump', 'prepare_to_fall', 'align_for_climb'] and self.start_waypoint_found
         
-        if not self.event_in_progress:
+        if not self.event_in_progress and not self._is_hp_recovery_active():
             now = time.time()
             last_movement_reference = self.last_movement_time or self.last_action_time
             if last_movement_reference:
@@ -4891,6 +4897,9 @@ class MapTab(QWidget):
 
     def _execute_recovery_resend(self):
         """마지막 이동 명령을 실제로 재전송하는 역할을 합니다."""
+        if self._is_hp_recovery_active():
+            return
+
         command = self.last_movement_command
 
         if self.guidance_text == "안전 지점으로 이동" and command in ["걷기(우)", "걷기(좌)", None]:
@@ -4908,6 +4917,9 @@ class MapTab(QWidget):
 
     def _trigger_stuck_recovery(self, final_player_pos, log_message):
         """공통 멈춤 복구 절차를 실행합니다."""
+        if self._is_hp_recovery_active():
+            return
+
         now = time.time()
         self.update_general_log(log_message, "orange")
         self.recovery_cooldown_until = now + 1.5
@@ -4948,6 +4960,9 @@ class MapTab(QWidget):
 
     def _handle_airborne_path_wait(self, final_player_pos, contact_terrain):
         """공중 경로 대기 상태가 일정 시간 지속되면 복구를 시도합니다."""
+        if self._is_hp_recovery_active():
+            return
+
         if not self.airborne_path_warning_active:
             self._reset_airborne_recovery_state()
             return
@@ -5032,6 +5047,9 @@ class MapTab(QWidget):
     def _attempt_ladder_float_recovery(self, final_player_pos):
         """탐지 직후 밧줄 매달림 상태에서 사다리 복구를 시도합니다."""
         if final_player_pos is None:
+            return False
+
+        if self._is_hp_recovery_active():
             return False
 
         if not (self.auto_control_checkbox.isChecked() or self.debug_auto_control_checkbox.isChecked()):
@@ -5937,6 +5955,9 @@ class MapTab(QWidget):
             self._status_saved_command = self._last_regular_command
 
         self._status_active_resource = resource
+        if resource == 'hp':
+            self._hp_recovery_in_progress = True
+            self._hp_recovery_started_at = timestamp
         self._emit_control_command("모든 키 떼기", reason='status:prep')
         self._issue_status_command(resource, command_name)
         self._status_last_command_ts[resource] = timestamp
@@ -5946,15 +5967,66 @@ class MapTab(QWidget):
         self._emit_control_command(command_name, reason=reason)
         self.update_general_log(f"[상태] {resource.upper()} 명령 '{command_name}' 실행", "purple")
 
-    def _handle_status_command_completed(self, success: bool) -> None:
-        active = self._status_active_resource
+    def _is_hp_recovery_active(self) -> bool:
+        return self._hp_recovery_in_progress
+
+    def _handle_status_command_completed(self, success: bool, reason: str, command_name: Optional[str] = None) -> None:
+        reason = reason or ''
+
+        if reason == 'status:prep':
+            active = self._status_active_resource
+            if not success:
+                if active:
+                    self.update_general_log(
+                        f"[상태] {active.upper()} 준비 명령이 실패했습니다.",
+                        "orange"
+                    )
+                self._status_active_resource = None
+                if active == 'hp':
+                    self._hp_recovery_in_progress = False
+                self._hp_recovery_started_at = 0.0
+                self._status_saved_command = None
+            return
+
+        active_resource = self._status_active_resource
+        resource_from_reason = ''
+        if isinstance(reason, str) and reason.startswith('status:'):
+            _, _, resource_part = reason.partition(':')
+            resource_from_reason = resource_part.strip()
+            if resource_from_reason:
+                active_resource = resource_from_reason
+
+        if active_resource == 'hp':
+            now = time.time()
+            self._hp_recovery_in_progress = False
+            self._hp_recovery_started_at = 0.0
+            self.last_action_time = now
+            self.last_movement_time = now
+            self.last_command_sent_time = now
+            self.recovery_cooldown_until = now + self.cfg_stuck_detection_wait
+            self.stuck_recovery_attempts = 0
+            self._reset_airborne_recovery_state()
+
         self._status_active_resource = None
-        if success and active:
-            self.update_general_log(f"[상태] {active.upper()} 명령 완료", "gray")
+
+        if success and active_resource:
+            self.update_general_log(f"[상태] {active_resource.upper()} 명령 완료", "gray")
+        elif not success and active_resource:
+            if command_name:
+                self.update_general_log(
+                    f"[상태] {active_resource.upper()} 명령 '{command_name}' 실행이 실패했습니다.",
+                    "orange"
+                )
+            else:
+                self.update_general_log(
+                    f"[상태] {active_resource.upper()} 명령이 실패했습니다.",
+                    "orange"
+                )
+
         if self._status_saved_command:
-            command, reason = self._status_saved_command
+            command, saved_reason = self._status_saved_command
             self._status_saved_command = None
-            self._emit_control_command(command, reason)
+            self._emit_control_command(command, saved_reason)
 
     def _update_walk_teleport_probability_display(self, percent: float) -> None:
         self._walk_teleport_probability_text = f"텔레포트 확률: {max(percent, 0.0):.1f}%"
