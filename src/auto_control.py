@@ -12,9 +12,10 @@ from pathlib import Path
 from PyQt6.QtWidgets import (
     QApplication, QWidget, QVBoxLayout, QHBoxLayout, QLabel, QListWidget, QPushButton,
     QGroupBox, QFormLayout, QComboBox, QSpinBox, QMessageBox, QFrame, QCheckBox,
-    QListWidgetItem, QInputDialog, QAbstractItemView, QTabWidget, QFileDialog
+    QListWidgetItem, QInputDialog, QAbstractItemView, QTabWidget, QFileDialog,
+    QGridLayout
 )
-from PyQt6.QtCore import pyqtSlot, Qt, QTimer, pyqtSignal, QMimeData, QSize
+from PyQt6.QtCore import pyqtSlot, Qt, QTimer, pyqtSignal, QMimeData, QSize, QSettings
 from PyQt6.QtGui import QIcon, QColor
 from pynput.keyboard import Key, Listener
 from datetime import datetime
@@ -43,6 +44,127 @@ FULL_KEY_MAP = {
     Key.alt_r: 230,
     Key.cmd_r: 231,
 }
+
+
+class _VisualKey(QLabel):
+    """시각화용 키 한 개를 표현한다."""
+
+    _BASE_STYLE = (
+        "padding: 6px 12px; border: 1px solid #7fa3d4; border-radius: 8px;"
+        "background-color: #f5f8ff; color: #1f2330; font-weight: 600;"
+    )
+    _PRESSED_STYLE = (
+        "padding: 6px 12px; border: 2px solid #2456a6; border-radius: 8px;"
+        "background-color: #2f6fd1; color: white; font-weight: 700;"
+    )
+
+    def __init__(self, label_text: str, key_aliases: tuple[str, ...], parent=None):
+        super().__init__(label_text, parent)
+        self.key_aliases = key_aliases
+        self._pressed = False
+        self.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.setMinimumWidth(52)
+        self.setFixedHeight(36)
+        self.setStyleSheet(self._BASE_STYLE)
+
+    def set_pressed(self, pressed: bool) -> None:
+        if self._pressed == pressed:
+            return
+        self._pressed = pressed
+        self.setStyleSheet(self._PRESSED_STYLE if pressed else self._BASE_STYLE)
+
+
+class KeyboardVisualizer(QWidget):
+    """주요 이동·수식·편집 키 상태를 카드 형태로 표시한다."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._key_to_widget: dict[str, _VisualKey] = {}
+        self._visual_keys: list[_VisualKey] = []
+        self._init_layout()
+
+    def _init_layout(self) -> None:
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(4, 4, 4, 4)
+        layout.setSpacing(18)
+
+        # 좌측: 수식키 + 예제 문자 키
+        modifier_column = QVBoxLayout()
+        modifier_column.setSpacing(8)
+
+        top_row = QHBoxLayout()
+        top_row.setSpacing(8)
+        shift_key = self._create_key("Shift", ("Key.shift", "Key.shift_l", "Key.shift_r"))
+        shift_key.setMinimumWidth(94)
+        z_key = self._create_key("Z", ("z",))
+        top_row.addWidget(shift_key)
+        top_row.addWidget(z_key)
+
+        bottom_row = QHBoxLayout()
+        bottom_row.setSpacing(8)
+        ctrl_key = self._create_key("Ctrl", ("Key.ctrl", "Key.ctrl_l", "Key.ctrl_r"))
+        alt_key = self._create_key("Alt", ("Key.alt", "Key.alt_l", "Key.alt_r"))
+        bottom_row.addWidget(ctrl_key)
+        bottom_row.addWidget(alt_key)
+
+        modifier_column.addLayout(top_row)
+        modifier_column.addLayout(bottom_row)
+        layout.addLayout(modifier_column)
+
+        # 우측: 편집 키 + 방향키 블록
+        right_column = QVBoxLayout()
+        right_column.setSpacing(12)
+
+        edit_grid = QGridLayout()
+        edit_grid.setHorizontalSpacing(8)
+        edit_grid.setVerticalSpacing(6)
+        insert_key = self._create_key("Insert", ("Key.insert",))
+        home_key = self._create_key("Home", ("Key.home",))
+        pg_up_key = self._create_key("Pg Up", ("Key.page_up",))
+        delete_key = self._create_key("Delete", ("Key.delete",))
+        end_key = self._create_key("End", ("Key.end",))
+        pg_dn_key = self._create_key("Pg Dn", ("Key.page_down",))
+        for row, widgets in enumerate(((insert_key, home_key, pg_up_key), (delete_key, end_key, pg_dn_key))):
+            for col, widget in enumerate(widgets):
+                edit_grid.addWidget(widget, row, col)
+
+        right_column.addLayout(edit_grid)
+
+        arrow_grid = QGridLayout()
+        arrow_grid.setHorizontalSpacing(8)
+        arrow_grid.setVerticalSpacing(6)
+        up_key = self._create_key("↑", ("Key.up",))
+        left_key = self._create_key("←", ("Key.left",))
+        down_key = self._create_key("↓", ("Key.down",))
+        right_key = self._create_key("→", ("Key.right",))
+        arrow_grid.addWidget(up_key, 0, 1)
+        arrow_grid.addWidget(left_key, 1, 0)
+        arrow_grid.addWidget(down_key, 1, 1)
+        arrow_grid.addWidget(right_key, 1, 2)
+
+        right_column.addLayout(arrow_grid)
+        layout.addLayout(right_column)
+
+        layout.addStretch(1)
+
+    def _create_key(self, label: str, aliases: tuple[str, ...]) -> _VisualKey:
+        widget = _VisualKey(label, aliases, self)
+        self._visual_keys.append(widget)
+        for alias in aliases:
+            self._key_to_widget[alias] = widget
+        return widget
+
+    def update_key_state(self, key_name: str, pressed: bool) -> None:
+        widget = self._key_to_widget.get(key_name)
+        if widget is None and key_name.lower() != key_name:
+            widget = self._key_to_widget.get(key_name.lower())
+        if widget is None:
+            return
+        widget.set_pressed(pressed)
+
+    def reset(self) -> None:
+        for widget in self._visual_keys:
+            widget.set_pressed(False)
 
 CATEGORY_NAMES = ("이동", "스킬", "기타", "이벤트")
 SKILL_CATEGORY_NAME = "스킬"
@@ -194,9 +316,21 @@ class AutoControlTab(QWidget):
     request_detection_toggle = pyqtSignal()
     sequence_completed = pyqtSignal(str, object, bool)
     command_profile_renamed = pyqtSignal(str, str)
+    keyboard_state_changed = pyqtSignal(str, bool)
+    keyboard_state_reset = pyqtSignal()
 
     def __init__(self):
         super().__init__()
+        self.settings = QSettings("Gemini Inc.", "Maple AI Trainer")
+        saved_visual_enabled = self.settings.value("auto_control/keyboard_visual_enabled", None)
+        if saved_visual_enabled is None:
+            self.keyboard_visual_enabled = True
+        elif isinstance(saved_visual_enabled, bool):
+            self.keyboard_visual_enabled = saved_visual_enabled
+        else:
+            self.keyboard_visual_enabled = str(saved_visual_enabled).lower() == "true"
+        self.keyboard_visual_checkbox = None
+        self.keyboard_visual_widget = None
         self.ser = None
         self.held_keys = set()
         self.mappings = {}
@@ -253,14 +387,17 @@ class AutoControlTab(QWidget):
         self.global_listener = None
         
         self.init_ui()
+        self._apply_initial_keyboard_visual_state()
         self.load_mappings()
         self.connect_to_pi()
-        
+
         # --- 시그널/슬롯 연결 ---
         self.recording_status_changed.connect(self.update_status_label)
         self.reset_auto_stop_timer_signal.connect(self._handle_reset_auto_stop_timer)
         self.stop_recording_signal.connect(self.stop_recording)
         self.log_generated.connect(self._add_log_entry)
+        self.keyboard_state_changed.connect(self._handle_keyboard_state_change)
+        self.keyboard_state_reset.connect(self._handle_keyboard_state_reset)
       
         self.setStyleSheet("""
             QFrame { border: 1px solid #444; border-radius: 5px; }
@@ -390,6 +527,8 @@ class AutoControlTab(QWidget):
         main_v_layout.addWidget(self.editor_group)
         self.recording_settings_group = self._create_recording_settings_panel()
         main_v_layout.addWidget(self.recording_settings_group)
+        self.keyboard_visual_group = self._create_keyboard_visual_panel()
+        main_v_layout.addWidget(self.keyboard_visual_group)
         main_v_layout.addStretch()
         
         bottom_layout = QVBoxLayout()
@@ -462,6 +601,35 @@ class AutoControlTab(QWidget):
         layout.addRow("자동 종료 시간:", self.auto_stop_spin)
         return group
 
+    def _create_keyboard_visual_panel(self):
+        group = QGroupBox()
+        group.setTitle("")
+        outer_layout = QVBoxLayout(group)
+        outer_layout.setContentsMargins(8, 8, 8, 8)
+        outer_layout.setSpacing(6)
+
+        header_layout = QHBoxLayout()
+        header_layout.setContentsMargins(0, 0, 0, 0)
+        title_label = QLabel("실시간 키보드")
+        title_label.setObjectName("TitleLabel")
+        header_layout.addWidget(title_label)
+        header_layout.addStretch()
+
+        self.keyboard_visual_checkbox = QCheckBox("활성화")
+        self.keyboard_visual_checkbox.toggled.connect(self._on_keyboard_visual_checkbox_toggled)
+        self.keyboard_visual_checkbox.blockSignals(True)
+        self.keyboard_visual_checkbox.setChecked(self.keyboard_visual_enabled)
+        self.keyboard_visual_checkbox.blockSignals(False)
+        header_layout.addWidget(self.keyboard_visual_checkbox)
+
+        outer_layout.addLayout(header_layout)
+
+        self.keyboard_visual_widget = KeyboardVisualizer(self)
+        self.keyboard_visual_widget.setEnabled(self.keyboard_visual_checkbox.isChecked())
+        outer_layout.addWidget(self.keyboard_visual_widget)
+
+        return group
+
     def _create_right_panel(self):
         right_widget = QFrame()
         right_layout = QVBoxLayout(right_widget)
@@ -513,7 +681,8 @@ class AutoControlTab(QWidget):
 
     #  전역 키보드 리스너의 상태를 관리하는 메소드
     def _update_global_listener_state(self):
-        should_listen = self.is_map_detection_running and self.log_checkbox.isChecked()
+        visual_enabled = bool(self.keyboard_visual_checkbox.isChecked()) if self.keyboard_visual_checkbox else False
+        should_listen = (self.is_map_detection_running and self.log_checkbox.isChecked()) or visual_enabled
 
         # 현재 리스너가 동작해야 하는 상태인데, 리스너가 없는 경우
         if should_listen and self.global_listener is None:
@@ -530,8 +699,57 @@ class AutoControlTab(QWidget):
             self.global_listener.stop()
             self.global_listener = None
             self.globally_pressed_keys.clear() # 키 상태 초기화
+            self.keyboard_state_reset.emit()
             if self.console_log_checkbox.isChecked():
                 print("[AutoControl] 전역 키보드 리스너를 중지합니다.")
+
+    def _apply_initial_keyboard_visual_state(self):
+        if not self.keyboard_visual_checkbox or not self.keyboard_visual_widget:
+            return
+        checked = self.keyboard_visual_checkbox.isChecked()
+        self.keyboard_visual_enabled = checked
+        self.keyboard_visual_widget.setEnabled(checked)
+        self.keyboard_visual_widget.reset()
+        if checked:
+            self._sync_keyboard_visual_state()
+        if hasattr(self, "log_checkbox"):
+            self._update_global_listener_state()
+
+    def _on_keyboard_visual_checkbox_toggled(self, checked: bool):
+        checked = bool(checked)
+        if self.keyboard_visual_enabled != checked:
+            self.keyboard_visual_enabled = checked
+            self.settings.setValue("auto_control/keyboard_visual_enabled", checked)
+        if self.keyboard_visual_widget:
+            self.keyboard_visual_widget.setEnabled(checked)
+            if checked:
+                self._sync_keyboard_visual_state()
+            else:
+                self.keyboard_state_reset.emit()
+        self._update_global_listener_state()
+
+    def _sync_keyboard_visual_state(self):
+        if not self.keyboard_visual_widget or not self.keyboard_visual_checkbox or not self.keyboard_visual_checkbox.isChecked():
+            return
+        active_keys = set(self.globally_pressed_keys)
+        active_keys.update(self.currently_pressed_keys_for_recording)
+        self.keyboard_visual_widget.reset()
+        for key_str in active_keys:
+            self.keyboard_visual_widget.update_key_state(key_str, True)
+
+    @pyqtSlot(str, bool)
+    def _handle_keyboard_state_change(self, key_str: str, pressed: bool):
+        if not self.keyboard_visual_checkbox or not self.keyboard_visual_checkbox.isChecked():
+            return
+        if not self.keyboard_visual_widget:
+            return
+        self.keyboard_visual_widget.update_key_state(key_str, pressed)
+
+    @pyqtSlot()
+    def _handle_keyboard_state_reset(self):
+        if not self.keyboard_visual_widget:
+            return
+        self.keyboard_visual_widget.reset()
 
     def load_mappings(self):
         if self._load_mappings_from_path(self.key_mappings_path):
@@ -1357,11 +1575,15 @@ class AutoControlTab(QWidget):
         #  KEY_MAP 대신 FULL_KEY_MAP 사용
         key_code = FULL_KEY_MAP.get(key_object)
         if key_code is not None:
+            key_str_id = self._key_obj_to_str(key_object)
             try:
                 self.ser.write(bytes([command, key_code]))
                 # --- (신규) 전송 직후 타임스탬프 저장 (에코/리스너 무시에 사용) ---
-                key_str_id = self._key_obj_to_str(key_object)  # 새로운 헬퍼 사용
                 self.last_sent_timestamps[key_str_id] = time.time()  # 전송 시각 저장
+                if command == CMD_PRESS:
+                    self.keyboard_state_changed.emit(key_str_id, True)
+                elif command == CMD_RELEASE:
+                    self.keyboard_state_changed.emit(key_str_id, False)
             except serial.SerialException as e:
                 print(f"[AutoControl] 데이터 전송 실패: {e}")
                 self.connect_to_pi()
@@ -1907,7 +2129,8 @@ class AutoControlTab(QWidget):
         self.auto_stop_timer.stop()
         self.is_recording = False
         self.is_waiting_for_start_key = False
-        
+        self.currently_pressed_keys_for_recording.clear()
+
         command_item = self._current_command_item()
         if command_item and self.recorded_sequence:
             command_text = command_item.text()
@@ -1919,6 +2142,7 @@ class AutoControlTab(QWidget):
             
         self.record_btn.setChecked(False)
         self.record_btn.setText(" 녹화")
+        self._sync_keyboard_visual_state()
 
     def _key_to_str(self, key):
         if isinstance(key, Key): return f"Key.{key.name}"
@@ -1933,6 +2157,7 @@ class AutoControlTab(QWidget):
 
     def _on_press(self, key):
         key_str = self._key_to_str(key)
+        self.keyboard_state_changed.emit(key_str, True)
         
         if self.is_waiting_for_start_key:
             if key_str == self.start_key_str:
@@ -1969,6 +2194,7 @@ class AutoControlTab(QWidget):
 
     def _on_release(self, key):
         key_str = self._key_to_str(key)
+        self.keyboard_state_changed.emit(key_str, False)
 
         if self.is_recording:
             # [핵심 수정] 시퀀스 기록 여부와 상관없이, 키 이벤트가 발생하면 무조건 타이머를 리셋
@@ -2017,6 +2243,8 @@ class AutoControlTab(QWidget):
         if not is_running:
             # 탐지가 중지되면 눌린 키 상태를 확실히 초기화
             self.globally_pressed_keys.clear()
+            self.keyboard_state_reset.emit()
+            self._sync_keyboard_visual_state()
 
     def _on_global_press(self, key):
         key_str = self._key_to_str(key)  # 기존에 있던 헬퍼 사용 (문자열 일관화용)
@@ -2035,7 +2263,8 @@ class AutoControlTab(QWidget):
         self.globally_pressed_keys.add(key_str)
         friendly_key_name = self._translate_key_for_logging(key_str)
         self.log_generated.emit(f"(누르기) {friendly_key_name}", "white")
-        
+        self.keyboard_state_changed.emit(key_str, True)
+
     def _on_global_release(self, key):
         key_str = self._key_to_str(key)
 
@@ -2049,6 +2278,7 @@ class AutoControlTab(QWidget):
         self.globally_pressed_keys.discard(key_str)
         friendly_key_name = self._translate_key_for_logging(key_str)
         self.log_generated.emit(f"(떼기) {friendly_key_name}", "white")
+        self.keyboard_state_changed.emit(key_str, False)
 
     #  모든 로그를 처리하는 통합 슬롯
     @pyqtSlot(str, str)
@@ -2146,6 +2376,7 @@ class AutoControlTab(QWidget):
         if self.global_listener:
             self.global_listener.stop()
             self.global_listener = None
+            self.keyboard_state_reset.emit()
 
         if self.ser and self.ser.is_open:
             self._release_all_keys()
