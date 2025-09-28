@@ -654,11 +654,35 @@ class MonsterSettingsDialog(QDialog):
     ) -> None:
         super().__init__(parent)
         self.setWindowTitle(f"몬스터 설정 - {class_name}")
-        self.resize(360, 180)
+        self.resize(420, 520)
 
+        self.learning_tab = parent
+        self.data_manager = getattr(parent, 'data_manager', None)
         self._default_value = float(default_value)
         self.override_enabled: bool = current_value is not None
         self.override_value: float = float(current_value) if current_value is not None else self._default_value
+        self.class_name = class_name
+
+        nameplate_entry = {'threshold': None, 'templates': []}
+        if self.data_manager and hasattr(self.data_manager, 'get_monster_nameplate_entry'):
+            try:
+                entry = self.data_manager.get_monster_nameplate_entry(class_name)
+                if isinstance(entry, dict):
+                    nameplate_entry.update(entry)
+            except Exception:
+                pass
+        self.nameplate_threshold_enabled = nameplate_entry.get('threshold') is not None
+        default_nameplate_threshold = 0.60
+        if getattr(parent, 'nameplate_config', None):
+            try:
+                default_nameplate_threshold = float(parent.nameplate_config.get('match_threshold', 0.60))
+            except (TypeError, ValueError):
+                default_nameplate_threshold = 0.60
+        self.nameplate_threshold_value = float(nameplate_entry.get('threshold') or default_nameplate_threshold)
+        self._initial_nameplate_threshold_enabled = self.nameplate_threshold_enabled
+        self._initial_nameplate_threshold_value = self.nameplate_threshold_value
+        self.test_samples: list[dict] = []
+        self._test_item_map: dict[str, QListWidgetItem] = {}
 
         layout = QVBoxLayout(self)
 
@@ -695,6 +719,79 @@ class MonsterSettingsDialog(QDialog):
 
         layout.addWidget(settings_group)
 
+        nameplate_group = QGroupBox("몬스터 이름표 설정")
+        nameplate_layout = QVBoxLayout(nameplate_group)
+
+        threshold_row = QHBoxLayout()
+        self.use_nameplate_threshold_checkbox = QCheckBox("이름표 임계값 사용")
+        self.use_nameplate_threshold_checkbox.setChecked(self.nameplate_threshold_enabled)
+        self.use_nameplate_threshold_checkbox.toggled.connect(self._on_nameplate_threshold_toggled)
+        threshold_row.addWidget(self.use_nameplate_threshold_checkbox)
+
+        self.nameplate_threshold_spin = QDoubleSpinBox()
+        self.nameplate_threshold_spin.setRange(0.10, 0.99)
+        self.nameplate_threshold_spin.setSingleStep(0.01)
+        self.nameplate_threshold_spin.setDecimals(2)
+        self.nameplate_threshold_spin.setValue(self.nameplate_threshold_value)
+        self.nameplate_threshold_spin.setEnabled(self.nameplate_threshold_enabled)
+        threshold_row.addWidget(self.nameplate_threshold_spin)
+        threshold_row.addStretch(1)
+        nameplate_layout.addLayout(threshold_row)
+
+        templates_label = QLabel("이름표 템플릿 (검은 박스 + 흰 글씨 이미지)")
+        templates_label.setWordWrap(True)
+        nameplate_layout.addWidget(templates_label)
+
+        self.nameplate_template_list = QListWidget()
+        self.nameplate_template_list.setViewMode(QListWidget.ViewMode.IconMode)
+        self.nameplate_template_list.setIconSize(QSize(160, 64))
+        self.nameplate_template_list.setResizeMode(QListWidget.ResizeMode.Adjust)
+        self.nameplate_template_list.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
+        self.nameplate_template_list.setMinimumHeight(140)
+        nameplate_layout.addWidget(self.nameplate_template_list)
+
+        template_buttons = QHBoxLayout()
+        self.add_nameplate_template_btn = QPushButton("파일 추가")
+        self.add_nameplate_template_btn.clicked.connect(self._import_nameplate_templates)
+        template_buttons.addWidget(self.add_nameplate_template_btn)
+        self.delete_nameplate_template_btn = QPushButton("선택 삭제")
+        self.delete_nameplate_template_btn.clicked.connect(self._delete_selected_nameplate_templates)
+        template_buttons.addWidget(self.delete_nameplate_template_btn)
+        template_buttons.addStretch(1)
+        nameplate_layout.addLayout(template_buttons)
+
+        test_group = QGroupBox("이름표 인식 테스트")
+        test_layout = QVBoxLayout(test_group)
+        test_layout.addWidget(QLabel("예제 이미지와 현재 템플릿으로 인식 가능 여부를 확인합니다."))
+
+        self.test_sample_list = QListWidget()
+        self.test_sample_list.setViewMode(QListWidget.ViewMode.IconMode)
+        self.test_sample_list.setIconSize(QSize(160, 64))
+        self.test_sample_list.setResizeMode(QListWidget.ResizeMode.Adjust)
+        self.test_sample_list.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
+        self.test_sample_list.setMinimumHeight(140)
+        test_layout.addWidget(self.test_sample_list)
+
+        test_button_row = QHBoxLayout()
+        self.add_test_sample_btn = QPushButton("테스트 이미지 추가")
+        self.add_test_sample_btn.clicked.connect(self._add_test_samples)
+        test_button_row.addWidget(self.add_test_sample_btn)
+        self.remove_test_sample_btn = QPushButton("선택 삭제")
+        self.remove_test_sample_btn.clicked.connect(self._remove_selected_test_samples)
+        test_button_row.addWidget(self.remove_test_sample_btn)
+        self.run_test_btn = QPushButton("테스트 실행")
+        self.run_test_btn.clicked.connect(self._run_nameplate_test)
+        test_button_row.addWidget(self.run_test_btn)
+        test_button_row.addStretch(1)
+        test_layout.addLayout(test_button_row)
+
+        self.test_result_label = QLabel("테스트 준비됨")
+        test_layout.addWidget(self.test_result_label)
+
+        nameplate_layout.addWidget(test_group)
+
+        layout.addWidget(nameplate_group)
+
         button_layout = QHBoxLayout()
         self.reset_button = QPushButton("초기화")
         self.reset_button.clicked.connect(self._reset_to_default)
@@ -707,6 +804,8 @@ class MonsterSettingsDialog(QDialog):
         button_layout.addWidget(button_box)
         layout.addLayout(button_layout)
 
+        self._populate_nameplate_templates()
+
     def _on_override_toggled(self, checked: bool) -> None:
         self.conf_spinbox.setEnabled(checked)
 
@@ -714,10 +813,245 @@ class MonsterSettingsDialog(QDialog):
         self.use_override_checkbox.setChecked(False)
         self.conf_spinbox.setValue(self._default_value)
 
+    def _on_nameplate_threshold_toggled(self, checked: bool) -> None:
+        self.nameplate_threshold_spin.setEnabled(checked)
+
+    def _populate_nameplate_templates(self) -> None:
+        if self.nameplate_template_list is None:
+            return
+        self.nameplate_template_list.clear()
+        templates = []
+        if self.data_manager and hasattr(self.data_manager, 'list_monster_nameplate_templates'):
+            try:
+                templates = self.data_manager.list_monster_nameplate_templates(self.class_name)
+            except Exception:
+                templates = []
+        if not templates:
+            placeholder = QListWidgetItem(QIcon(), "등록된 템플릿이 없습니다")
+            placeholder.setFlags(Qt.ItemFlag.NoItemFlags)
+            self.nameplate_template_list.addItem(placeholder)
+            self.delete_nameplate_template_btn.setEnabled(False)
+            self._update_test_buttons()
+            return
+        self.delete_nameplate_template_btn.setEnabled(True)
+        for entry in templates:
+            path = entry.get('path')
+            pixmap = QPixmap(path) if path else QPixmap()
+            if pixmap.isNull():
+                pixmap = QPixmap(self.nameplate_template_list.iconSize())
+                pixmap.fill(Qt.GlobalColor.darkGray)
+            icon = QIcon(pixmap)
+            display = entry.get('original_name') or entry.get('id', '템플릿')
+            item = QListWidgetItem(icon, display)
+            item.setData(Qt.ItemDataRole.UserRole, entry.get('id'))
+            tooltip_lines = [f"ID: {entry.get('id')}"]
+            size_text = f"크기: {entry.get('width', '?')}x{entry.get('height', '?')}"
+            tooltip_lines.append(size_text)
+            created = entry.get('created_at')
+            if created:
+                tooltip_lines.append(time.strftime('등록 시각: %Y-%m-%d %H:%M:%S', time.localtime(created)))
+            item.setToolTip('\n'.join(tooltip_lines))
+            self.nameplate_template_list.addItem(item)
+        self._update_test_buttons()
+
+    def _import_nameplate_templates(self) -> None:
+        if not self.data_manager:
+            QMessageBox.warning(self, "오류", "데이터 매니저를 찾을 수 없습니다.")
+            return
+        files, _ = QFileDialog.getOpenFileNames(self, "이름표 이미지 선택", str(Path.home()), "이미지 파일 (*.png *.jpg *.jpeg *.bmp)")
+        if not files:
+            return
+        added = 0
+        for file_path in files:
+            try:
+                entry = self.data_manager.import_monster_nameplate_template(self.class_name, file_path)
+            except Exception as exc:
+                QMessageBox.warning(self, "오류", f"이름표 이미지를 추가하지 못했습니다: {exc}")
+                continue
+            if entry:
+                added += 1
+        if added:
+            QMessageBox.information(self, "완료", f"이름표 템플릿 {added}개를 추가했습니다.")
+        self._populate_nameplate_templates()
+
+    def _delete_selected_nameplate_templates(self) -> None:
+        if not self.data_manager:
+            QMessageBox.warning(self, "오류", "데이터 매니저를 찾을 수 없습니다.")
+            return
+        selected = [item for item in self.nameplate_template_list.selectedItems() if item.flags() != Qt.ItemFlag.NoItemFlags]
+        if not selected:
+            QMessageBox.information(self, "안내", "삭제할 템플릿을 선택해주세요.")
+            return
+        template_ids = [item.data(Qt.ItemDataRole.UserRole) for item in selected]
+        removed = self.data_manager.delete_monster_nameplate_templates(self.class_name, template_ids)
+        QMessageBox.information(self, "완료", f"이름표 템플릿 {removed}개를 삭제했습니다.")
+        self._populate_nameplate_templates()
+        self._update_test_buttons()
+
     def accept(self) -> None:  # noqa: D401
         self.override_enabled = self.use_override_checkbox.isChecked()
         self.override_value = float(self.conf_spinbox.value())
+        self.nameplate_threshold_enabled = self.use_nameplate_threshold_checkbox.isChecked()
+        self.nameplate_threshold_value = float(self.nameplate_threshold_spin.value())
         super().accept()
+
+    def _update_test_buttons(self) -> None:
+        has_samples = bool(self.test_samples)
+        has_templates = bool(self.nameplate_template_list.count()) and not (
+            self.nameplate_template_list.count() == 1 and self.nameplate_template_list.item(0).flags() == Qt.ItemFlag.NoItemFlags
+        )
+        self.remove_test_sample_btn.setEnabled(has_samples)
+        self.run_test_btn.setEnabled(has_samples and has_templates)
+
+    def _add_test_samples(self) -> None:
+        files, _ = QFileDialog.getOpenFileNames(self, "테스트용 이름표 이미지 선택", str(Path.home()), "이미지 파일 (*.png *.jpg *.jpeg *.bmp)")
+        if not files:
+            return
+        added = 0
+        for path in files:
+            image = cv2.imread(path, cv2.IMREAD_UNCHANGED)
+            if image is None:
+                QMessageBox.warning(self, "오류", f"이미지를 불러오지 못했습니다: {path}")
+                continue
+            sample_id = f"sample_{uuid.uuid4().hex[:8]}"
+            icon = self._build_icon_from_image(image)
+            label = os.path.basename(path)
+            item = QListWidgetItem(icon, label)
+            item.setData(Qt.ItemDataRole.UserRole, sample_id)
+            self.test_sample_list.addItem(item)
+            self.test_samples.append({'id': sample_id, 'path': path, 'image': image})
+            self._test_item_map[sample_id] = item
+            added += 1
+        if added:
+            self.test_result_label.setText(f"테스트 이미지 {added}개를 추가했습니다.")
+        self._update_test_buttons()
+
+    def _remove_selected_test_samples(self) -> None:
+        selected = [item for item in self.test_sample_list.selectedItems() if item.flags() != Qt.ItemFlag.NoItemFlags]
+        if not selected:
+            return
+        ids_to_remove = {item.data(Qt.ItemDataRole.UserRole) for item in selected}
+        self.test_samples = [sample for sample in self.test_samples if sample['id'] not in ids_to_remove]
+        for item in selected:
+            row = self.test_sample_list.row(item)
+            self.test_sample_list.takeItem(row)
+        for sample_id in ids_to_remove:
+            self._test_item_map.pop(sample_id, None)
+        self.test_result_label.setText("선택한 테스트 이미지를 삭제했습니다.")
+        self._update_test_buttons()
+
+    def _run_nameplate_test(self) -> None:
+        if not self.data_manager:
+            QMessageBox.warning(self, "오류", "데이터 매니저를 찾을 수 없습니다.")
+            return
+        templates = self.data_manager.list_monster_nameplate_templates(self.class_name)
+        if not templates:
+            QMessageBox.information(self, "안내", "등록된 이름표 템플릿이 없습니다.")
+            return
+        template_images: list[tuple[str, np.ndarray]] = []
+        for entry in templates:
+            path = entry.get('path')
+            if not path:
+                continue
+            image = cv2.imread(path, cv2.IMREAD_UNCHANGED)
+            if image is None:
+                continue
+            if image.ndim == 3 and image.shape[2] == 3:
+                image = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+            elif image.ndim == 3 and image.shape[2] == 4:
+                image = cv2.cvtColor(image, cv2.COLOR_BGRA2GRAY)
+            template_images.append((entry.get('id', ''), image))
+        if not template_images:
+            QMessageBox.warning(self, "오류", "템플릿 이미지를 불러오지 못했습니다.")
+            return
+
+        if self.use_nameplate_threshold_checkbox.isChecked():
+            threshold = float(self.nameplate_threshold_spin.value())
+        else:
+            fallback = getattr(self.learning_tab, 'nameplate_config', {}) or {}
+            threshold = float(fallback.get('match_threshold', 0.60))
+
+        results = []
+        for sample in self.test_samples:
+            sample_id = sample['id']
+            item = self._test_item_map.get(sample_id)
+            best_score = -1.0
+            best_template = None
+            roi = self._preprocess_test_roi(sample['image'])
+            if roi is None or roi.size == 0:
+                results.append((sample_id, False, best_score))
+                if item:
+                    item.setText(f"{item.text()} - 오류")
+                continue
+            for tpl_id, tpl_img in template_images:
+                if roi.shape[0] < tpl_img.shape[0] or roi.shape[1] < tpl_img.shape[1]:
+                    continue
+                result = cv2.matchTemplate(roi, tpl_img, cv2.TM_CCOEFF_NORMED)
+                _, max_val, _, _ = cv2.minMaxLoc(result)
+                if max_val > best_score:
+                    best_score = float(max_val)
+                    best_template = tpl_id
+            matched = best_score >= threshold if best_score >= 0 else False
+            results.append((sample_id, matched, best_score))
+            if item:
+                base_label = os.path.basename(sample['path'])
+                item.setBackground(QBrush())
+                status = "성공" if matched else "실패"
+                item.setText(f"{base_label} - {status} ({best_score:.2f})")
+                if matched:
+                    item.setBackground(QColor(20, 120, 60, 80))
+                else:
+                    item.setBackground(QColor(200, 40, 40, 80))
+        success_count = sum(1 for _, matched, _ in results if matched)
+        if results:
+            self.test_result_label.setText(
+                f"총 {len(results)}개 테스트 중 {success_count}개 성공 (임계값 {threshold:.2f})"
+            )
+        else:
+            self.test_result_label.setText("테스트할 이미지가 없습니다.")
+        self._update_test_buttons()
+
+    @staticmethod
+    def _build_icon_from_image(image: np.ndarray) -> QIcon:
+        display = image
+        if display.ndim == 2:
+            display = cv2.cvtColor(display, cv2.COLOR_GRAY2BGR)
+        elif display.ndim == 3 and display.shape[2] == 4:
+            display = cv2.cvtColor(display, cv2.COLOR_BGRA2BGR)
+        rgb = cv2.cvtColor(display, cv2.COLOR_BGR2RGB)
+        h, w, ch = rgb.shape
+        qimg = QImage(rgb.data, w, h, ch * w, QImage.Format.Format_RGB888)
+        pixmap = QPixmap.fromImage(qimg).scaled(160, 64, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation)
+        return QIcon(pixmap)
+
+    @staticmethod
+    def _preprocess_test_roi(image: np.ndarray) -> Optional[np.ndarray]:
+        if image is None or not hasattr(image, 'ndim'):
+            return None
+        if image.ndim == 3 and image.shape[2] == 4:
+            gray = cv2.cvtColor(image, cv2.COLOR_BGRA2GRAY)
+        elif image.ndim == 3 and image.shape[2] == 3:
+            gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+        elif image.ndim == 2:
+            gray = image
+        else:
+            return None
+        roi = cv2.normalize(gray, None, 0, 255, cv2.NORM_MINMAX)
+        roi = cv2.GaussianBlur(roi, (3, 3), 0)
+        roi = cv2.adaptiveThreshold(
+            roi,
+            255,
+            cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+            cv2.THRESH_BINARY,
+            11,
+            2,
+        )
+        fg_mean = np.mean(roi[roi == 255]) if np.any(roi == 255) else 255
+        bg_mean = np.mean(roi[roi == 0]) if np.any(roi == 0) else 0
+        if fg_mean < bg_mean:
+            roi = cv2.bitwise_not(roi)
+        roi = cv2.dilate(roi, np.ones((2, 2), np.uint8), iterations=1)
+        return roi
 
 # --- 2. 위젯: 다각형 편집기의 캔버스 (공통 로직 추가) ---
 class BaseCanvasLabel(QLabel):
@@ -1426,6 +1760,9 @@ class DataManager:
         self.direction_left_dir = os.path.join(self.direction_templates_dir, 'left')
         self.direction_right_dir = os.path.join(self.direction_templates_dir, 'right')
         self.direction_config_path = os.path.join(self.direction_dir, 'config.json')
+        self.nameplate_dir = os.path.join(self.config_path, 'monster_nameplate')
+        self.nameplate_templates_dir = os.path.join(self.nameplate_dir, 'templates')
+        self.nameplate_config_path = os.path.join(self.nameplate_dir, 'config.json')
         self.status_config_path = os.path.join(self.config_path, 'status_monitor.json')
         self._overlay_listeners: list = []
         self._model_listeners: list[callable] = []
@@ -1452,6 +1789,8 @@ class DataManager:
         os.makedirs(self.direction_templates_dir, exist_ok=True)
         os.makedirs(self.direction_left_dir, exist_ok=True)
         os.makedirs(self.direction_right_dir, exist_ok=True)
+        os.makedirs(self.nameplate_dir, exist_ok=True)
+        os.makedirs(self.nameplate_templates_dir, exist_ok=True)
         # v1.3: manifest 생성/확인 시 네거티브 샘플 항목 추가
         if not os.path.exists(self.manifest_path):
             initial_manifest = {category: {} for category in CATEGORIES}
@@ -1497,13 +1836,32 @@ class DataManager:
                     self._write_nickname_config(nickname_config)
         default_direction_config = self._default_direction_config()
         if not os.path.exists(self.direction_config_path):
-            self._write_direction_config(default_direction_config)
+            direction_config = default_direction_config
+            self._write_direction_config(direction_config)
         else:
             try:
                 with open(self.direction_config_path, 'r', encoding='utf-8') as f:
-                    direction_config = json.load(f)
+                    loaded_direction_config = json.load(f)
             except (json.JSONDecodeError, FileNotFoundError):
-                self._write_direction_config(default_direction_config)
+                direction_config = default_direction_config
+                self._write_direction_config(direction_config)
+            else:
+                direction_config, changed = self._merge_direction_config(loaded_direction_config)
+                if changed:
+                    self._write_direction_config(direction_config)
+        default_nameplate_config = self._default_nameplate_config()
+        if not os.path.exists(self.nameplate_config_path):
+            self._write_nameplate_config(default_nameplate_config)
+        else:
+            try:
+                with open(self.nameplate_config_path, 'r', encoding='utf-8') as f:
+                    loaded_nameplate_config = json.load(f)
+            except (json.JSONDecodeError, FileNotFoundError):
+                self._write_nameplate_config(default_nameplate_config)
+            else:
+                merged_nameplate, changed = self._merge_nameplate_config(loaded_nameplate_config)
+                if changed:
+                    self._write_nameplate_config(merged_nameplate)
         status_default = StatusMonitorConfig.default()
         if not os.path.exists(self.status_config_path):
             self._write_status_config(status_default)
@@ -1513,14 +1871,6 @@ class DataManager:
                     json.load(f)
             except (json.JSONDecodeError, FileNotFoundError):
                 self._write_status_config(status_default)
-            else:
-                changed = False
-                for key, value in default_direction_config.items():
-                    if key not in direction_config:
-                        direction_config[key] = value if key not in {'templates_left', 'templates_right'} else list(value)
-                        changed = True
-                if changed:
-                    self._write_direction_config(direction_config)
 
     def _default_nickname_config(self):
         return {
@@ -1550,6 +1900,405 @@ class DataManager:
     def _write_direction_config(self, config_data):
         with open(self.direction_config_path, 'w', encoding='utf-8') as f:
             json.dump(config_data, f, indent=4, ensure_ascii=False)
+
+    def _merge_direction_config(self, loaded_config):
+        default_config = self._default_direction_config()
+        if not isinstance(loaded_config, dict):
+            return default_config, True
+        merged = dict(loaded_config)
+        changed = False
+        for key, value in default_config.items():
+            if key not in merged:
+                merged[key] = value if key not in {'templates_left', 'templates_right'} else list(value)
+                changed = True
+        for side_key in ('templates_left', 'templates_right'):
+            if not isinstance(merged.get(side_key), list):
+                merged[side_key] = []
+                changed = True
+        return merged, changed
+
+    def _default_nameplate_config(self):
+        return {
+            'enabled': False,
+            'show_overlay': True,
+            'match_threshold': 0.60,
+            'roi': {
+                'width': 135,
+                'height': 65,
+                'offset_x': 0,
+                'offset_y': 0,
+            },
+            'per_class': {},
+        }
+
+    def _write_nameplate_config(self, config_data):
+        with open(self.nameplate_config_path, 'w', encoding='utf-8') as f:
+            json.dump(config_data, f, indent=4, ensure_ascii=False)
+
+    def _merge_nameplate_config(self, loaded_config):
+        default_config = self._default_nameplate_config()
+        if not isinstance(loaded_config, dict):
+            return default_config, True
+        merged = dict(loaded_config)
+        changed = False
+        if 'enabled' not in merged:
+            merged['enabled'] = default_config['enabled']
+            changed = True
+        if 'show_overlay' not in merged:
+            merged['show_overlay'] = default_config['show_overlay']
+            changed = True
+        if 'match_threshold' not in merged:
+            merged['match_threshold'] = default_config['match_threshold']
+            changed = True
+        roi = merged.get('roi') if isinstance(merged.get('roi'), dict) else None
+        if roi is None:
+            merged['roi'] = dict(default_config['roi'])
+            changed = True
+        else:
+            roi_changed = False
+            for key, value in default_config['roi'].items():
+                if key not in roi:
+                    roi[key] = value
+                    roi_changed = True
+            if roi_changed:
+                merged['roi'] = roi
+                changed = True
+        if not isinstance(merged.get('per_class'), dict):
+            merged['per_class'] = {}
+            changed = True
+        else:
+            per_class = merged['per_class']
+            for class_name, entry in list(per_class.items()):
+                if not isinstance(entry, dict):
+                    per_class[class_name] = {'templates': []}
+                    changed = True
+                    continue
+                if 'templates' not in entry or not isinstance(entry['templates'], list):
+                    entry['templates'] = []
+                    changed = True
+                if 'threshold' in entry and entry['threshold'] is not None:
+                    try:
+                        entry['threshold'] = float(entry['threshold'])
+                    except (TypeError, ValueError):
+                        entry['threshold'] = None
+                        changed = True
+        return merged, changed
+
+    def _ensure_nameplate_class_entry(self, config: dict, class_name: str):
+        if not isinstance(config, dict):
+            config = self._default_nameplate_config()
+        per_class = config.setdefault('per_class', {})
+        entry = per_class.get(class_name)
+        changed = False
+        if not isinstance(entry, dict):
+            entry = {}
+            changed = True
+        templates = entry.get('templates') if isinstance(entry.get('templates'), list) else None
+        if templates is None:
+            entry['templates'] = []
+            changed = True
+        if 'threshold' in entry and entry['threshold'] is not None:
+            try:
+                entry['threshold'] = float(entry['threshold'])
+            except (TypeError, ValueError):
+                entry['threshold'] = None
+                changed = True
+        per_class[class_name] = entry
+        return entry, changed
+
+    def _resolve_nameplate_templates(self, config: dict, class_name: str):
+        entry, changed = self._ensure_nameplate_class_entry(config, class_name)
+        templates = entry.get('templates', [])
+        resolved_templates = []
+        retained_templates = []
+        for template in templates:
+            if not isinstance(template, dict):
+                changed = True
+                continue
+            template_id = template.get('id')
+            filename = template.get('filename')
+            if not template_id or not filename:
+                changed = True
+                continue
+            path = os.path.join(self.nameplate_templates_dir, filename)
+            if not os.path.exists(path):
+                changed = True
+                continue
+            resolved_entry = dict(template)
+            resolved_entry['path'] = path
+            resolved_templates.append(resolved_entry)
+            retained_templates.append(template)
+        if len(retained_templates) != len(templates):
+            entry['templates'] = retained_templates
+            changed = True
+        return resolved_templates, changed
+
+    def get_monster_nameplate_config(self):
+        try:
+            with open(self.nameplate_config_path, 'r', encoding='utf-8') as f:
+                config = json.load(f)
+        except (json.JSONDecodeError, FileNotFoundError):
+            config = self._default_nameplate_config()
+            self._write_nameplate_config(config)
+            return config
+        config, changed = self._merge_nameplate_config(config)
+        if changed:
+            self._write_nameplate_config(config)
+        return config
+
+    def update_monster_nameplate_config(self, updates: dict):
+        if not isinstance(updates, dict):
+            return self.get_monster_nameplate_config()
+        config = self.get_monster_nameplate_config()
+        changed = False
+
+        if 'enabled' in updates:
+            new_state = bool(updates['enabled'])
+            if config.get('enabled') != new_state:
+                config['enabled'] = new_state
+                changed = True
+
+        if 'show_overlay' in updates:
+            new_overlay = bool(updates['show_overlay'])
+            if config.get('show_overlay') != new_overlay:
+                config['show_overlay'] = new_overlay
+                changed = True
+
+        if 'match_threshold' in updates:
+            try:
+                threshold = float(updates['match_threshold'])
+                threshold = max(0.10, min(0.99, threshold))
+            except (TypeError, ValueError):
+                threshold = config.get('match_threshold', self._default_nameplate_config()['match_threshold'])
+            if abs(config.get('match_threshold', 0.0) - threshold) > 1e-6:
+                config['match_threshold'] = threshold
+                changed = True
+
+        if 'roi' in updates and isinstance(updates['roi'], dict):
+            roi = dict(config.get('roi', {}))
+            roi_updates = updates['roi']
+            roi_changed = False
+            for key in ('width', 'height', 'offset_x', 'offset_y'):
+                if key not in roi_updates:
+                    continue
+                try:
+                    value = int(roi_updates[key])
+                except (TypeError, ValueError):
+                    continue
+                if key in {'width', 'height'}:
+                    value = max(1, value)
+                if roi.get(key) != value:
+                    roi[key] = value
+                    roi_changed = True
+            if roi_changed:
+                config['roi'] = roi
+                changed = True
+
+        if changed:
+            self._write_nameplate_config(config)
+        self._notify_overlay_listeners({
+            'target': 'monster_nameplate',
+            'show_overlay': bool(config.get('show_overlay', True)),
+            'enabled': bool(config.get('enabled', False)),
+            'roi': dict(config.get('roi', {})),
+            'match_threshold': float(config.get('match_threshold', 0.60)),
+        })
+        return config
+
+    def get_monster_nameplate_entry(self, class_name: str):
+        config = self.get_monster_nameplate_config()
+        entry, entry_changed = self._ensure_nameplate_class_entry(config, class_name)
+        resolved, templates_changed = self._resolve_nameplate_templates(config, class_name)
+        if entry_changed or templates_changed:
+            self._write_nameplate_config(config)
+        result = {
+            'threshold': entry.get('threshold'),
+            'templates': resolved,
+        }
+        return result
+
+    def list_monster_nameplate_templates(self, class_name: str):
+        config = self.get_monster_nameplate_config()
+        resolved, changed = self._resolve_nameplate_templates(config, class_name)
+        if changed:
+            self._write_nameplate_config(config)
+        return resolved
+
+    def _preprocess_nameplate_image(self, image: np.ndarray) -> np.ndarray:
+        if image is None or not hasattr(image, 'ndim'):
+            raise ValueError('유효한 이미지가 필요합니다.')
+
+        alpha = None
+        if image.ndim == 3 and image.shape[2] == 4:
+            alpha = image[:, :, 3]
+            bgr = cv2.cvtColor(image, cv2.COLOR_BGRA2BGR)
+        elif image.ndim == 3 and image.shape[2] == 3:
+            bgr = image
+        elif image.ndim == 2:
+            bgr = cv2.cvtColor(image, cv2.COLOR_GRAY2BGR)
+        else:
+            raise ValueError('지원하지 않는 이름표 이미지 형식입니다.')
+
+        gray = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
+        mask = None
+        if alpha is not None:
+            mask = alpha > 0
+            if np.count_nonzero(mask) == 0:
+                mask = None
+        if mask is not None:
+            gray = gray.copy()
+            gray[~mask] = 255
+        _, thresh = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+        if mask is not None:
+            thresh[~mask] = 0
+
+        # ensure text pixels are white (255)
+        fg_mean = np.mean(thresh[thresh > 0]) if np.any(thresh > 0) else 255
+        bg_mean = np.mean(thresh[thresh == 0]) if np.any(thresh == 0) else 0
+        if fg_mean < bg_mean:
+            thresh = cv2.bitwise_not(thresh)
+        if mask is not None:
+            thresh[~mask] = 0
+
+        # slight dilation to stabilize thin fonts
+        kernel = np.ones((2, 2), np.uint8)
+        thresh = cv2.dilate(thresh, kernel, iterations=1)
+        return thresh
+
+    def add_monster_nameplate_template(self, class_name: str, image_bgr, *, source='import', original_name=None):
+        if image_bgr is None or not hasattr(image_bgr, 'shape'):
+            raise ValueError('유효한 이미지 배열이 필요합니다.')
+
+        processed = self._preprocess_nameplate_image(image_bgr)
+
+        template_id = f"np_{int(time.time()*1000)%1_000_000:06d}_{uuid.uuid4().hex[:6]}"
+        filename = f"{template_id}.png"
+        save_path = os.path.join(self.nameplate_templates_dir, filename)
+        if not cv2.imwrite(save_path, processed):
+            raise IOError('몬스터 이름표 템플릿을 저장하지 못했습니다.')
+
+        config = self.get_monster_nameplate_config()
+        entry, entry_changed = self._ensure_nameplate_class_entry(config, class_name)
+        template_entry = {
+            'id': template_id,
+            'filename': filename,
+            'source': source,
+            'original_name': original_name,
+            'created_at': time.time(),
+            'width': int(processed.shape[1]),
+            'height': int(processed.shape[0]),
+        }
+        entry['templates'].append(template_entry)
+        config['per_class'][class_name] = entry
+        self._write_nameplate_config(config)
+        template_entry_with_path = dict(template_entry)
+        template_entry_with_path['path'] = save_path
+        return template_entry_with_path
+
+    def import_monster_nameplate_template(self, class_name: str, file_path: str):
+        if not file_path:
+            raise ValueError('파일 경로가 필요합니다.')
+        image = cv2.imread(file_path, cv2.IMREAD_UNCHANGED)
+        if image is None:
+            raise IOError(f"이미지를 불러올 수 없습니다: {file_path}")
+        return self.add_monster_nameplate_template(
+            class_name,
+            image,
+            source='import',
+            original_name=os.path.basename(file_path),
+        )
+
+    def delete_monster_nameplate_templates(self, class_name: str, template_ids):
+        if not template_ids:
+            return 0
+        if isinstance(template_ids, str):
+            template_ids = [template_ids]
+        template_ids = set(template_ids)
+
+        config = self.get_monster_nameplate_config()
+        entry, entry_changed = self._ensure_nameplate_class_entry(config, class_name)
+        templates = entry.get('templates', [])
+        remaining = []
+        removed_count = 0
+        for template in templates:
+            template_id = template.get('id')
+            if template_id in template_ids:
+                filename = template.get('filename')
+                if filename:
+                    path = os.path.join(self.nameplate_templates_dir, filename)
+                    if os.path.exists(path):
+                        try:
+                            os.remove(path)
+                        except OSError:
+                            pass
+                removed_count += 1
+            else:
+                remaining.append(template)
+        if removed_count or entry_changed:
+            entry['templates'] = remaining
+            config['per_class'][class_name] = entry
+            self._write_nameplate_config(config)
+        return removed_count
+
+    def set_monster_nameplate_threshold(self, class_name: str, threshold: Optional[float]):
+        config = self.get_monster_nameplate_config()
+        entry, entry_changed = self._ensure_nameplate_class_entry(config, class_name)
+        new_value: Optional[float]
+        if threshold is None:
+            new_value = None
+        else:
+            try:
+                new_value = float(threshold)
+            except (TypeError, ValueError):
+                new_value = None
+            else:
+                new_value = max(0.10, min(0.99, new_value))
+        if entry.get('threshold') != new_value or entry_changed:
+            if new_value is None and 'threshold' in entry:
+                entry.pop('threshold', None)
+            elif new_value is not None:
+                entry['threshold'] = new_value
+            config['per_class'][class_name] = entry
+            self._write_nameplate_config(config)
+        return new_value
+
+    def get_monster_nameplate_threshold(self, class_name: str) -> Optional[float]:
+        config = self.get_monster_nameplate_config()
+        entry, entry_changed = self._ensure_nameplate_class_entry(config, class_name)
+        if entry_changed:
+            self._write_nameplate_config(config)
+        return entry.get('threshold')
+
+    def clear_monster_nameplate_templates(self, class_name: str):
+        config = self.get_monster_nameplate_config()
+        entry, _ = self._ensure_nameplate_class_entry(config, class_name)
+        for template in entry.get('templates', []):
+            filename = template.get('filename')
+            if not filename:
+                continue
+            path = os.path.join(self.nameplate_templates_dir, filename)
+            if os.path.exists(path):
+                try:
+                    os.remove(path)
+                except OSError:
+                    pass
+        entry['templates'] = []
+        config['per_class'][class_name] = entry
+        self._write_nameplate_config(config)
+
+    def get_monster_nameplate_resources(self):
+        config = self.get_monster_nameplate_config()
+        per_class = config.get('per_class', {})
+        resolved = {}
+        changed = False
+        for class_name in list(per_class.keys()):
+            templates, entry_changed = self._resolve_nameplate_templates(config, class_name)
+            resolved[class_name] = templates
+            if entry_changed:
+                changed = True
+        if changed:
+            self._write_nameplate_config(config)
+        return config, resolved
 
     def register_overlay_listener(self, callback):
         if callable(callback) and callback not in self._overlay_listeners:
@@ -1673,6 +2422,12 @@ class DataManager:
             overrides[new_name] = overrides.pop(old_name)
             self.save_settings({'monster_confidence_overrides': overrides})
 
+        nameplate_config = self.get_monster_nameplate_config()
+        per_class = nameplate_config.get('per_class', {})
+        if old_name in per_class:
+            per_class[new_name] = per_class.pop(old_name)
+            self._write_nameplate_config(nameplate_config)
+
         # 라벨 파일의 클래스 인덱스 업데이트
         try:
             old_idx = old_class_list.index(old_name)
@@ -1755,6 +2510,23 @@ class DataManager:
                     if os.path.exists(path): os.remove(path)
 
         self.delete_monster_confidence_override(class_name)
+
+        nameplate_config = self.get_monster_nameplate_config()
+        per_class = nameplate_config.get('per_class', {})
+        entry = per_class.pop(class_name, None) if isinstance(per_class, dict) else None
+        if entry:
+            templates = entry.get('templates', []) if isinstance(entry, dict) else []
+            for template in templates:
+                filename = template.get('filename') if isinstance(template, dict) else None
+                if not filename:
+                    continue
+                path = os.path.join(self.nameplate_templates_dir, filename)
+                if os.path.exists(path):
+                    try:
+                        os.remove(path)
+                    except OSError:
+                        pass
+            self._write_nameplate_config(nameplate_config)
 
         return True, f"'{class_name}' 클래스 및 관련 파일 삭제 완료."
 
@@ -2525,6 +3297,8 @@ class LearningTab(QWidget):
         self._nickname_ui_updating = False
         self.direction_config = self.data_manager.get_direction_config()
         self._direction_ui_updating = False
+        self.nameplate_config = self.data_manager.get_monster_nameplate_config()
+        self._nameplate_ui_updating = False
         self._status_config = self.data_manager.load_status_monitor_config()
         self._status_ui_updating = False
         self._status_command_options: list[tuple[str, str]] = []
@@ -2619,6 +3393,7 @@ class LearningTab(QWidget):
         self.image_list_widget.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
         self.image_list_widget.setDragDropMode(QAbstractItemView.DragDropMode.NoDragDrop)
         self.image_list_widget.itemDoubleClicked.connect(self.edit_selected_image)
+        self.image_list_widget.setFixedHeight(370)
 
         capture_options_layout = QHBoxLayout()
         capture_options_layout.addWidget(QLabel("대기시간(초):"))
@@ -2653,11 +3428,70 @@ class LearningTab(QWidget):
         center_buttons_layout.addWidget(self.edit_image_btn)
         center_buttons_layout.addWidget(self.delete_image_btn)
 
+        nameplate_group = QGroupBox("몬스터 이름표")
+        nameplate_group.setCheckable(True)
+        nameplate_group.setChecked(False)
+        self.nameplate_group = nameplate_group
+        nameplate_layout = QVBoxLayout()
+
+        roi_size_layout = QHBoxLayout()
+        roi_size_layout.addWidget(QLabel("가로:"))
+        self.nameplate_width_spin = QSpinBox()
+        self.nameplate_width_spin.setRange(10, 600)
+        self.nameplate_width_spin.setSingleStep(5)
+        roi_size_layout.addWidget(self.nameplate_width_spin)
+        roi_size_layout.addSpacing(8)
+        roi_size_layout.addWidget(QLabel("세로:"))
+        self.nameplate_height_spin = QSpinBox()
+        self.nameplate_height_spin.setRange(10, 400)
+        self.nameplate_height_spin.setSingleStep(5)
+        roi_size_layout.addWidget(self.nameplate_height_spin)
+        roi_size_layout.addStretch(1)
+        nameplate_layout.addLayout(roi_size_layout)
+
+        roi_offset_layout = QHBoxLayout()
+        roi_offset_layout.addWidget(QLabel("X 오프셋:"))
+        self.nameplate_offset_x_spin = QSpinBox()
+        self.nameplate_offset_x_spin.setRange(-300, 300)
+        self.nameplate_offset_x_spin.setSingleStep(5)
+        roi_offset_layout.addWidget(self.nameplate_offset_x_spin)
+        roi_offset_layout.addSpacing(8)
+        roi_offset_layout.addWidget(QLabel("Y 오프셋:"))
+        self.nameplate_offset_y_spin = QSpinBox()
+        self.nameplate_offset_y_spin.setRange(-300, 300)
+        self.nameplate_offset_y_spin.setSingleStep(5)
+        roi_offset_layout.addWidget(self.nameplate_offset_y_spin)
+        roi_offset_layout.addStretch(1)
+
+        self.nameplate_overlay_checkbox = QCheckBox("범위 표시")
+        roi_offset_layout.addWidget(self.nameplate_overlay_checkbox)
+        nameplate_layout.addLayout(roi_offset_layout)
+
+        threshold_layout = QHBoxLayout()
+        threshold_layout.addWidget(QLabel("전역 임계값:"))
+        self.nameplate_threshold_spin = QDoubleSpinBox()
+        self.nameplate_threshold_spin.setRange(0.10, 0.99)
+        self.nameplate_threshold_spin.setSingleStep(0.01)
+        self.nameplate_threshold_spin.setDecimals(2)
+        threshold_layout.addWidget(self.nameplate_threshold_spin)
+        threshold_layout.addStretch(1)
+        nameplate_layout.addLayout(threshold_layout)
+
+        nameplate_group.setLayout(nameplate_layout)
+        nameplate_group.toggled.connect(self._handle_nameplate_enabled_toggled)
+        self.nameplate_width_spin.valueChanged.connect(self._handle_nameplate_roi_changed)
+        self.nameplate_height_spin.valueChanged.connect(self._handle_nameplate_roi_changed)
+        self.nameplate_offset_x_spin.valueChanged.connect(self._handle_nameplate_roi_changed)
+        self.nameplate_offset_y_spin.valueChanged.connect(self._handle_nameplate_roi_changed)
+        self.nameplate_overlay_checkbox.toggled.connect(self._handle_nameplate_overlay_toggled)
+        self.nameplate_threshold_spin.valueChanged.connect(self._handle_nameplate_threshold_changed)
+
         center_layout.addLayout(image_list_header_layout)
         center_layout.addWidget(self.image_list_widget)
         center_layout.addLayout(capture_options_layout)
         center_layout.addLayout(center_buttons_layout)
-        
+        center_layout.addWidget(nameplate_group)
+
         main_layout.addLayout(left_layout, 1)
         main_layout.addLayout(center_layout, 2)
 
@@ -2897,6 +3731,7 @@ class LearningTab(QWidget):
         self.setLayout(overall_layout)
 
 
+        self._apply_nameplate_config_to_ui()
         self._apply_nickname_config_to_ui()
         self._apply_direction_config_to_ui()
         self.nickname_text_input.editingFinished.connect(self.on_nickname_text_changed)
@@ -3071,6 +3906,81 @@ class LearningTab(QWidget):
                 tooltip_lines.append(time.strftime('등록 시각: %Y-%m-%d %H:%M:%S', time.localtime(created)))
             item.setToolTip('\n'.join(tooltip_lines))
             widget.addItem(item)
+
+    def _apply_nameplate_config_to_ui(self):
+        config = self.data_manager.get_monster_nameplate_config()
+        self.nameplate_config = config
+        roi = config.get('roi', {}) if isinstance(config.get('roi'), dict) else {}
+        self._nameplate_ui_updating = True
+        try:
+            enabled = bool(config.get('enabled', False))
+            self.nameplate_group.blockSignals(True)
+            self.nameplate_group.setChecked(enabled)
+            self.nameplate_group.blockSignals(False)
+
+            width_val = int(roi.get('width', 135) or 135)
+            height_val = int(roi.get('height', 65) or 65)
+            offset_x_val = int(roi.get('offset_x', 0) or 0)
+            offset_y_val = int(roi.get('offset_y', 0) or 0)
+
+            for spinbox, value in (
+                (self.nameplate_width_spin, width_val),
+                (self.nameplate_height_spin, height_val),
+                (self.nameplate_offset_x_spin, offset_x_val),
+                (self.nameplate_offset_y_spin, offset_y_val),
+            ):
+                spinbox.blockSignals(True)
+                spinbox.setValue(value)
+                spinbox.blockSignals(False)
+
+            overlay_enabled = bool(config.get('show_overlay', True))
+            self.nameplate_overlay_checkbox.blockSignals(True)
+            self.nameplate_overlay_checkbox.setChecked(overlay_enabled)
+            self.nameplate_overlay_checkbox.blockSignals(False)
+
+            threshold_value = float(config.get('match_threshold', 0.60) or 0.60)
+            self.nameplate_threshold_spin.blockSignals(True)
+            self.nameplate_threshold_spin.setValue(threshold_value)
+            self.nameplate_threshold_spin.blockSignals(False)
+        finally:
+            self._nameplate_ui_updating = False
+
+    def _handle_nameplate_enabled_toggled(self, checked: bool) -> None:
+        if self._nameplate_ui_updating:
+            return
+        updated = self.data_manager.update_monster_nameplate_config({'enabled': bool(checked)})
+        self.nameplate_config = updated
+        if hasattr(self, 'log_viewer'):
+            state_text = '활성화' if checked else '비활성화'
+            self.log_viewer.append(f"몬스터 이름표 탐지를 {state_text}했습니다.")
+        self._apply_nameplate_config_to_ui()
+
+    def _handle_nameplate_overlay_toggled(self, checked: bool) -> None:
+        if self._nameplate_ui_updating:
+            return
+        updated = self.data_manager.update_monster_nameplate_config({'show_overlay': bool(checked)})
+        self.nameplate_config = updated
+        self._apply_nameplate_config_to_ui()
+
+    def _handle_nameplate_roi_changed(self, _value=None) -> None:
+        if self._nameplate_ui_updating:
+            return
+        roi_updates = {
+            'width': self.nameplate_width_spin.value(),
+            'height': self.nameplate_height_spin.value(),
+            'offset_x': self.nameplate_offset_x_spin.value(),
+            'offset_y': self.nameplate_offset_y_spin.value(),
+        }
+        updated = self.data_manager.update_monster_nameplate_config({'roi': roi_updates})
+        self.nameplate_config = updated
+        self._apply_nameplate_config_to_ui()
+
+    def _handle_nameplate_threshold_changed(self, value: float) -> None:
+        if self._nameplate_ui_updating:
+            return
+        updated = self.data_manager.update_monster_nameplate_config({'match_threshold': float(value)})
+        self.nameplate_config = updated
+        self._apply_nameplate_config_to_ui()
 
     # --- 상태 모니터링 UI 구성 ---
     def _create_status_monitor_group(self) -> QGroupBox:
@@ -3877,6 +4787,21 @@ class LearningTab(QWidget):
                     self.log_viewer.append(
                         f"'{class_name}' 개별 신뢰도를 전역 값으로 되돌렸습니다."
                     )
+
+            if hasattr(dialog, 'nameplate_threshold_enabled') and hasattr(dialog, 'nameplate_threshold_value'):
+                previous_threshold = self.data_manager.get_monster_nameplate_threshold(class_name)
+                threshold_to_apply = dialog.nameplate_threshold_value if dialog.nameplate_threshold_enabled else None
+                new_threshold = self.data_manager.set_monster_nameplate_threshold(class_name, threshold_to_apply)
+                self.nameplate_config = self.data_manager.get_monster_nameplate_config()
+                if hasattr(self, 'log_viewer') and new_threshold != previous_threshold:
+                    if new_threshold is None:
+                        self.log_viewer.append(
+                            f"'{class_name}' 이름표 임계값을 전역 값으로 되돌렸습니다."
+                        )
+                    else:
+                        self.log_viewer.append(
+                            f"'{class_name}' 이름표 임계값을 {new_threshold:.2f}로 설정했습니다."
+                        )
 
             self._apply_monster_confidence_indicator(item, class_name)
         finally:

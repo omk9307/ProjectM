@@ -6,6 +6,7 @@ Learning 탭과 Hunt 탭에서 공유할 화면 영역 지정, 탐지 팝업,
 
 from __future__ import annotations
 
+import os
 import time
 from typing import Dict, Iterable, List, Optional
 
@@ -209,6 +210,10 @@ class DetectionThread(QThread):
         direction_detector: Optional[DirectionDetector] = None,
         show_nickname_overlay: bool = True,
         show_direction_overlay: bool = True,
+        nameplate_config: Optional[dict] = None,
+        nameplate_templates: Optional[Dict[int, List[dict]]] = None,
+        nameplate_thresholds: Optional[Dict[int, float]] = None,
+        show_nameplate_overlay: bool = True,
         nms_iou: float = 0.45,
         max_det: int = 100,
         allowed_subregions: Optional[Iterable[dict]] = None,
@@ -230,6 +235,7 @@ class DetectionThread(QThread):
         self.direction_detector = direction_detector
         self.show_nickname_overlay = bool(show_nickname_overlay)
         self.show_direction_overlay = bool(show_direction_overlay)
+        self.show_nameplate_overlay = bool(show_nameplate_overlay)
         self.is_running = True
         self.min_monster_box_size = MIN_MONSTER_BOX_SIZE
         self.current_authority: str = "map"
@@ -296,6 +302,35 @@ class DetectionThread(QThread):
                 if mask.any():
                     self._region_mask = mask
 
+        self.nameplate_config = nameplate_config if isinstance(nameplate_config, dict) else {}
+        roi_cfg = self.nameplate_config.get('roi', {}) if isinstance(self.nameplate_config.get('roi'), dict) else {}
+        self.nameplate_roi_width = max(4, int(roi_cfg.get('width', 135) or 135))
+        self.nameplate_roi_height = max(4, int(roi_cfg.get('height', 65) or 65))
+        self.nameplate_roi_offset_x = int(roi_cfg.get('offset_x', 0) or 0)
+        self.nameplate_roi_offset_y = int(roi_cfg.get('offset_y', 0) or 0)
+        try:
+            self.nameplate_match_threshold = float(self.nameplate_config.get('match_threshold', 0.60) or 0.60)
+        except (TypeError, ValueError):
+            self.nameplate_match_threshold = 0.60
+        self.nameplate_thresholds: Dict[int, float] = {}
+        if nameplate_thresholds:
+            for key, value in nameplate_thresholds.items():
+                try:
+                    idx = int(key)
+                    thr = float(value)
+                except (TypeError, ValueError):
+                    continue
+                self.nameplate_thresholds[idx] = max(0.10, min(0.99, thr))
+        self._nameplate_template_images: Dict[int, List[dict]] = {}
+        if nameplate_templates:
+            prepared_templates = self._prepare_nameplate_templates(nameplate_templates)
+            if prepared_templates:
+                self._nameplate_template_images = prepared_templates
+        self.nameplate_enabled = bool(
+            self.nameplate_config.get('enabled', False)
+            and self._nameplate_template_images
+        )
+
         # FPS 계산 변수
         self.fps = 0.0
         self.frame_count = 0
@@ -305,6 +340,7 @@ class DetectionThread(QThread):
         self.perf_stats = {
             "nickname_ms": 0.0,
             "direction_ms": 0.0,
+            "nameplate_ms": 0.0,
             "yolo_ms": 0.0,
             "yolo_speed_preprocess_ms": 0.0,
             "yolo_speed_inference_ms": 0.0,
@@ -546,6 +582,15 @@ class DetectionThread(QThread):
                         else:
                             payload["monsters"].append(item)
 
+                    nameplate_start = time.perf_counter()
+                    nameplate_matches = self._detect_nameplates(frame, boxes_for_payload)
+                    nameplate_end = time.perf_counter()
+                    self.perf_stats["nameplate_ms"] = (nameplate_end - nameplate_start) * 1000
+                else:
+                    nameplate_matches = []
+                    self.perf_stats["nameplate_ms"] = 0.0
+                payload["nameplates"] = nameplate_matches
+
                 if self.is_debug_mode:
                     log_messages: List[str] = []
                     boxes = result.boxes
@@ -678,6 +723,7 @@ class DetectionThread(QThread):
                     ),
                     "nickname_ms": float(self.perf_stats["nickname_ms"]),
                     "direction_ms": float(self.perf_stats["direction_ms"]),
+                    "nameplate_ms": float(self.perf_stats["nameplate_ms"]),
                     "capture_ms": float(self.perf_stats["capture_ms"]),
                     "preprocess_ms": float(self.perf_stats["preprocess_ms"]),
                     "post_ms": float(self.perf_stats["post_ms"]),
@@ -697,3 +743,175 @@ class DetectionThread(QThread):
 
     def stop(self) -> None:
         self.is_running = False
+
+    def _prepare_nameplate_templates(self, templates: Dict[int, List[dict]]) -> Dict[int, List[dict]]:
+        prepared: Dict[int, List[dict]] = {}
+        for raw_key, entries in templates.items():
+            try:
+                class_id = int(raw_key)
+            except (TypeError, ValueError):
+                continue
+            if not entries:
+                continue
+            loaded_entries: List[dict] = []
+            for entry in entries:
+                if not isinstance(entry, dict):
+                    continue
+                path = entry.get('path')
+                if not path or not os.path.exists(path):
+                    continue
+                template_image = cv2.imread(path, cv2.IMREAD_UNCHANGED)
+                if template_image is None:
+                    continue
+                if template_image.ndim == 3:
+                    channels = template_image.shape[2]
+                    if channels == 1:
+                        template_image = template_image[:, :, 0]
+                    elif channels == 3:
+                        template_image = cv2.cvtColor(template_image, cv2.COLOR_BGR2GRAY)
+                    elif channels == 4:
+                        template_image = cv2.cvtColor(template_image, cv2.COLOR_BGRA2GRAY)
+                    else:
+                        continue
+                elif template_image.ndim != 2:
+                    continue
+                loaded_entries.append({'id': entry.get('id'), 'image': template_image})
+            if loaded_entries:
+                prepared[class_id] = loaded_entries
+        return prepared
+
+    def _box_intersects_allowed_regions(self, item: Dict[str, float]) -> bool:
+        if not self.allowed_subregions:
+            return True
+        try:
+            left = float(item.get('x', 0.0))
+            top = float(item.get('y', 0.0))
+            width = float(item.get('width', 0.0))
+            height = float(item.get('height', 0.0))
+        except (TypeError, ValueError):
+            return False
+        if width <= 0 or height <= 0:
+            return False
+        right = left + width
+        bottom = top + height
+        for sub in self.allowed_subregions:
+            sub_left = float(sub.get('left', 0))
+            sub_top = float(sub.get('top', 0))
+            sub_right = sub_left + float(sub.get('width', 0))
+            sub_bottom = sub_top + float(sub.get('height', 0))
+            if right <= sub_left or sub_right <= left or bottom <= sub_top or sub_bottom <= top:
+                continue
+            return True
+        return False
+
+    def _compute_nameplate_roi(self, item: Dict[str, float], frame_width: int, frame_height: int):
+        try:
+            x = float(item.get('x', 0.0))
+            y = float(item.get('y', 0.0))
+            width = float(item.get('width', 0.0))
+            height = float(item.get('height', 0.0))
+        except (TypeError, ValueError):
+            return None
+        if width <= 0 or height <= 0:
+            return None
+        center_x = x + width / 2.0 + float(self.nameplate_roi_offset_x)
+        base_y = y + height + float(self.nameplate_roi_offset_y)
+        left = int(round(center_x - self.nameplate_roi_width / 2.0))
+        top = int(round(base_y))
+        right = left + self.nameplate_roi_width
+        bottom = top + self.nameplate_roi_height
+        left = max(0, left)
+        top = max(0, top)
+        right = min(frame_width, right)
+        bottom = min(frame_height, bottom)
+        if right - left < 4 or bottom - top < 4:
+            return None
+        return left, top, right, bottom
+
+    def _detect_nameplates(self, frame: np.ndarray, boxes: List[Dict[str, float]]) -> List[dict]:
+        if not self.nameplate_enabled or not boxes or not self._nameplate_template_images:
+            return []
+        frame_height, frame_width = frame.shape[:2]
+        frame_gray = None
+        matches: List[dict] = []
+        for item in boxes:
+            try:
+                class_id = int(item.get('class_id', -1))
+            except (TypeError, ValueError):
+                continue
+            templates = self._nameplate_template_images.get(class_id)
+            if not templates:
+                continue
+            if not self._box_intersects_allowed_regions(item):
+                continue
+            roi_coords = self._compute_nameplate_roi(item, frame_width, frame_height)
+            if roi_coords is None:
+                continue
+            left, top, right, bottom = roi_coords
+            if frame_gray is None:
+                frame_gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+            roi_gray = frame_gray[top:bottom, left:right]
+            if roi_gray.size == 0:
+                continue
+            roi_bin = self._preprocess_nameplate_roi(roi_gray)
+            if roi_bin is None or roi_bin.size == 0:
+                continue
+            best_score = -1.0
+            best_template_id = None
+            for template in templates:
+                tpl_img = template.get('image')
+                if tpl_img is None:
+                    continue
+                th, tw = tpl_img.shape[:2]
+                if roi_bin.shape[0] < th or roi_bin.shape[1] < tw:
+                    continue
+                result = cv2.matchTemplate(roi_bin, tpl_img, cv2.TM_CCOEFF_NORMED)
+                _, max_val, _, _ = cv2.minMaxLoc(result)
+                if max_val > best_score:
+                    best_score = float(max_val)
+                    best_template_id = template.get('id')
+            threshold = self.nameplate_thresholds.get(class_id, self.nameplate_match_threshold)
+            matched = best_score >= threshold if best_score >= 0 else False
+            roi_dict = {
+                'x': float(left),
+                'y': float(top),
+                'width': float(right - left),
+                'height': float(bottom - top),
+            }
+            match_entry = {
+                'class_id': class_id,
+                'class_name': item.get('class_name'),
+                'score': float(max(best_score, 0.0)),
+                'threshold': float(threshold),
+                'matched': bool(matched),
+                'roi': roi_dict,
+                'template_id': best_template_id,
+            }
+            if matched:
+                item['nameplate_confirmed'] = True
+                item['nameplate_score'] = float(best_score)
+                item['nameplate_roi'] = roi_dict
+            if matched or self.show_nameplate_overlay:
+                matches.append(match_entry)
+        return matches
+
+    @staticmethod
+    def _preprocess_nameplate_roi(roi_gray: np.ndarray) -> Optional[np.ndarray]:
+        if roi_gray is None or roi_gray.size == 0:
+            return None
+        roi = cv2.normalize(roi_gray, None, 0, 255, cv2.NORM_MINMAX)
+        roi = cv2.GaussianBlur(roi, (3, 3), 0)
+        roi = cv2.adaptiveThreshold(
+            roi,
+            255,
+            cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+            cv2.THRESH_BINARY,
+            11,
+            2,
+        )
+        fg_mean = np.mean(roi[roi == 255]) if np.any(roi == 255) else 255
+        bg_mean = np.mean(roi[roi == 0]) if np.any(roi == 0) else 0
+        if fg_mean < bg_mean:
+            roi = cv2.bitwise_not(roi)
+        roi = cv2.dilate(roi, np.ones((2, 2), np.uint8), iterations=1)
+        return roi

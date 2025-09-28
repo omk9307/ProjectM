@@ -132,7 +132,10 @@ NICKNAME_EDGE = QPen(QColor(255, 255, 0, 220), 2, Qt.PenStyle.DotLine)
 DIRECTION_ROI_EDGE = QPen(QColor(170, 80, 255, 200), 1, Qt.PenStyle.DashLine)
 DIRECTION_MATCH_EDGE_LEFT = QPen(QColor(0, 200, 255, 220), 2, Qt.PenStyle.SolidLine)
 DIRECTION_MATCH_EDGE_RIGHT = QPen(QColor(255, 200, 0, 220), 2, Qt.PenStyle.SolidLine)
+NAMEPLATE_ROI_EDGE = QPen(QColor(210, 210, 210, 220), 1, Qt.PenStyle.DashLine)
+NAMEPLATE_MATCH_EDGE = QPen(QColor(0, 210, 120, 240), 2, Qt.PenStyle.SolidLine)
 MONSTER_LOSS_GRACE_SEC = 0.2  # 단기 미검출 시 방향 유지용 유예시간(초)
+NAMEPLATE_PERSISTENCE_SEC = 0.6  # 이름표 인식 시 추가 유지 시간(초)
 LOG_LINE_LIMIT = 200
 
 try:
@@ -526,8 +529,10 @@ class HuntTab(QWidget):
             'hunt_area': True,
             'primary_area': True,
             'direction_area': True,
+            'nameplate_area': True,
         }
         self._direction_area_user_pref = True
+        self._nameplate_area_user_pref = True
         self._last_character_boxes: List[DetectionBox] = []
         self._last_character_details: List[dict] = []
         self._last_character_seen_ts: float = 0.0
@@ -536,6 +541,12 @@ class HuntTab(QWidget):
         self._nickname_templates: list[dict] = []
         self._latest_nickname_box: Optional[dict] = None
         self._last_nickname_match: Optional[dict] = None
+        self._nameplate_config: dict = {}
+        self._nameplate_templates: dict[int, list] = {}
+        self._show_nameplate_overlay_config = True
+        self._latest_nameplate_rois: list[dict] = []
+        self._nameplate_enabled = False
+        self._nameplate_hold_until = 0.0
 
         self.attack_interval_sec = 0.35
         self.last_attack_ts = 0.0
@@ -575,6 +586,7 @@ class HuntTab(QWidget):
             'monsters': [],
             'nickname': None,
             'direction': None,
+            'nameplates': [],
         }
         self.latest_perf_stats = {
             'fps': 0.0,
@@ -585,6 +597,7 @@ class HuntTab(QWidget):
             'yolo_speed_postprocess_ms': 0.0,
             'nickname_ms': 0.0,
             'direction_ms': 0.0,
+            'nameplate_ms': 0.0,
             'capture_ms': 0.0,
             'preprocess_ms': 0.0,
             'post_ms': 0.0,
@@ -1284,6 +1297,10 @@ class HuntTab(QWidget):
         self.show_direction_checkbox.setChecked(True)
         self.show_direction_checkbox.toggled.connect(self._on_overlay_toggle_changed)
 
+        self.show_nameplate_checkbox = QCheckBox("이름표범위")
+        self.show_nameplate_checkbox.setChecked(True)
+        self.show_nameplate_checkbox.toggled.connect(self._on_overlay_toggle_changed)
+
         self.auto_request_checkbox = QCheckBox("자동사냥")
         self.auto_request_checkbox.toggled.connect(self._handle_setting_changed)
 
@@ -1292,6 +1309,7 @@ class HuntTab(QWidget):
             self.show_hunt_area_checkbox,
             self.show_primary_skill_checkbox,
             self.show_direction_checkbox,
+            self.show_nameplate_checkbox,
             self.auto_request_checkbox,
         ):
             checkbox.setSizePolicy(
@@ -1316,6 +1334,7 @@ class HuntTab(QWidget):
         button_row.addWidget(self.show_hunt_area_checkbox)
         button_row.addWidget(self.show_primary_skill_checkbox)
         button_row.addWidget(self.show_direction_checkbox)
+        button_row.addWidget(self.show_nameplate_checkbox)
         button_row.addWidget(self.auto_request_checkbox)
 
         button_row.addStretch(1)
@@ -1696,6 +1715,55 @@ class HuntTab(QWidget):
             if direction_detector_instance is None:
                 self.append_log("방향 템플릿이 없어 이미지 기반 방향 탐지를 비활성화합니다.", "info")
 
+            self._load_nameplate_configuration()
+            nameplate_config_payload: Optional[dict] = None
+            nameplate_templates_payload: Optional[dict[int, list[dict]]] = None
+            nameplate_thresholds_payload: Optional[dict[int, float]] = None
+            if self._nameplate_enabled and self._nameplate_templates:
+                try:
+                    class_list = self.data_manager.get_class_list()
+                except Exception:
+                    class_list = []
+                name_to_index = {name: idx for idx, name in enumerate(class_list)}
+                relevant_templates: dict[int, list[dict]] = {}
+                total_templates = 0
+                for class_name, entries in self._nameplate_templates.items():
+                    index = name_to_index.get(class_name)
+                    if index is None or index not in target_indices:
+                        continue
+                    sanitized_entries: list[dict] = []
+                    for entry in entries:
+                        if not isinstance(entry, dict):
+                            continue
+                        path = entry.get('path')
+                        if not path or not os.path.exists(path):
+                            continue
+                        sanitized_entries.append({'id': entry.get('id'), 'path': path})
+                    if sanitized_entries:
+                        relevant_templates[index] = sanitized_entries
+                        total_templates += len(sanitized_entries)
+                if relevant_templates:
+                    nameplate_config_payload = dict(self._nameplate_config)
+                    nameplate_templates_payload = relevant_templates
+                    thresholds: dict[int, float] = {}
+                    per_class_cfg = self._nameplate_config.get('per_class', {}) if isinstance(self._nameplate_config.get('per_class'), dict) else {}
+                    for class_name, entry in per_class_cfg.items():
+                        index = name_to_index.get(class_name)
+                        if index is None or index not in relevant_templates:
+                            continue
+                        threshold_value = entry.get('threshold') if isinstance(entry, dict) else None
+                        if threshold_value is None:
+                            continue
+                        try:
+                            thresholds[index] = float(threshold_value)
+                        except (TypeError, ValueError):
+                            continue
+                    nameplate_thresholds_payload = thresholds if thresholds else None
+                    if total_templates > 0:
+                        self.append_log(f"이름표 템플릿 {total_templates}개 로드", "info")
+                else:
+                    self._nameplate_enabled = False
+
             self._reset_character_cache()
             self._direction_active = False
             self._direction_last_seen_ts = 0.0
@@ -1749,6 +1817,10 @@ class HuntTab(QWidget):
                     direction_detector=direction_detector_instance,
                     show_nickname_overlay=self._is_nickname_overlay_active(),
                     show_direction_overlay=self._is_direction_range_overlay_active(),
+                    nameplate_config=nameplate_config_payload,
+                    nameplate_templates=nameplate_templates_payload,
+                    nameplate_thresholds=nameplate_thresholds_payload,
+                    show_nameplate_overlay=self._is_nameplate_overlay_active(),
                     nms_iou=self.yolo_nms_iou,
                     max_det=self.yolo_max_det,
                     allowed_subregions=capture_subregions,
@@ -1767,6 +1839,10 @@ class HuntTab(QWidget):
                     is_debug_mode=False,
                     nickname_detector=nickname_detector_instance,
                     show_nickname_overlay=self._is_nickname_overlay_active(),
+                    nameplate_config=nameplate_config_payload,
+                    nameplate_templates=nameplate_templates_payload,
+                    nameplate_thresholds=nameplate_thresholds_payload,
+                    show_nameplate_overlay=self._is_nameplate_overlay_active(),
                     nms_iou=self.yolo_nms_iou,
                     max_det=self.yolo_max_det,
                     allowed_subregions=capture_subregions,
@@ -1999,6 +2075,16 @@ class HuntTab(QWidget):
                     pen = DIRECTION_MATCH_EDGE_LEFT if self._direction_last_side == 'left' else DIRECTION_MATCH_EDGE_RIGHT
                     painter.setPen(pen)
                     painter.drawRect(rect)
+            if self._is_nameplate_overlay_active() and self._latest_nameplate_rois:
+                for entry in self._latest_nameplate_rois:
+                    roi_info = entry.get('roi') if isinstance(entry, dict) else entry
+                    rect = self._dict_to_rect(roi_info, image.width(), image.height())
+                    if rect.isNull():
+                        continue
+                    pen = NAMEPLATE_MATCH_EDGE if bool(entry.get('matched')) else NAMEPLATE_ROI_EDGE
+                    painter.setPen(pen)
+                    painter.setBrush(Qt.BrushStyle.NoBrush)
+                    painter.drawRect(rect)
         finally:
             painter.end()
 
@@ -2055,6 +2141,7 @@ class HuntTab(QWidget):
         if show_confidence:
             characters = self.latest_detection_details.get('characters', [])
             monsters = self.latest_detection_details.get('monsters', [])
+            nameplates = self.latest_detection_details.get('nameplates', [])
 
             lines: List[str] = []
 
@@ -2084,6 +2171,18 @@ class HuntTab(QWidget):
             else:
                 lines.append("몬스터 없음")
 
+            if nameplates:
+                matched = [entry for entry in nameplates if entry.get('matched')]
+                best_score = max((float(entry.get('score', 0.0)) for entry in nameplates), default=0.0)
+                lines.append(
+                    f"이름표 탐지: {len(nameplates)}건 / 신뢰도 최고 {best_score:.2f}"
+                )
+                if matched:
+                    avg_score = sum(float(entry.get('score', 0.0)) for entry in matched) / len(matched)
+                    lines.append(f"  └ 확정 {len(matched)}건 (평균 {avg_score:.2f})")
+            else:
+                lines.append("이름표 탐지 없음")
+
             self.confidence_summary_view.setPlainText('\n'.join(lines))
         else:
             self.confidence_summary_view.clear()
@@ -2095,12 +2194,13 @@ class HuntTab(QWidget):
             capture_ms = float(perf.get('capture_ms', 0.0))
             yolo_ms = float(perf.get('yolo_ms', 0.0))
             nickname_ms = float(perf.get('nickname_ms', 0.0))
+            nameplate_ms = float(perf.get('nameplate_ms', 0.0))
 
             frame_lines = [
                 f"FPS: {fps:.0f}",
                 f"Total: {total_ms:.1f} ms",
                 f"Capture {capture_ms:.1f} ms / YOLO {yolo_ms:.1f} ms",
-                f"Nickname {nickname_ms:.1f} ms",
+                f"Nickname {nickname_ms:.1f} ms / Nameplate {nameplate_ms:.1f} ms",
             ]
 
             if show_frame_detail:
@@ -2148,6 +2248,8 @@ class HuntTab(QWidget):
 
             teleport_percent = self._get_walk_teleport_display_percent()
             teleport_line = f"텔레포트 확률: {teleport_percent:.1f}%"
+            nameplate_count = len(self.latest_detection_details.get('nameplates', []) or [])
+            nameplate_line = f"이름표 탐지: {nameplate_count}건"
 
             info_lines = [
                 f"이동권한: {authority_text}",
@@ -2155,6 +2257,7 @@ class HuntTab(QWidget):
                 f"스킬 범위 몬스터: {self.latest_primary_monster_count}",
                 direction_line,
                 teleport_line,
+                nameplate_line,
                 self._status_summary_cache.get('hp', 'HP: --'),
                 self._status_summary_cache.get('mp', 'MP: --'),
                 self._status_summary_cache.get('exp', 'EXP: -- / --'),
@@ -2216,6 +2319,17 @@ class HuntTab(QWidget):
 
     def _is_direction_match_overlay_active(self) -> bool:
         return bool(self._show_direction_overlay_config)
+
+    def _is_nameplate_overlay_active(self) -> bool:
+        if not self._show_nameplate_overlay_config:
+            return False
+        if not self.overlay_preferences.get('nameplate_area', True):
+            return False
+        checkbox = getattr(self, 'show_nameplate_checkbox', None)
+        if checkbox is not None:
+            if not checkbox.isEnabled() or not checkbox.isChecked():
+                return False
+        return bool(self._nameplate_config.get('show_overlay', True))
 
     def _toggle_detection_popup(self) -> None:
         if self.is_popup_active:
@@ -2636,6 +2750,9 @@ class HuntTab(QWidget):
         direction_state = self.show_direction_checkbox.isChecked()
         self.overlay_preferences['direction_area'] = direction_state
         self._direction_area_user_pref = direction_state
+        nameplate_state = self.show_nameplate_checkbox.isChecked()
+        self.overlay_preferences['nameplate_area'] = nameplate_state
+        self._nameplate_area_user_pref = nameplate_state
         self._emit_area_overlays()
         self._update_detection_thread_overlay_flags()
         self._save_settings()
@@ -2645,6 +2762,13 @@ class HuntTab(QWidget):
             return
         self.detection_thread.show_nickname_overlay = bool(self._is_nickname_overlay_active())
         self.detection_thread.show_direction_overlay = bool(self._is_direction_range_overlay_active())
+        if hasattr(self.detection_thread, 'show_nameplate_overlay'):
+            active = self._is_nameplate_overlay_active() and self.overlay_preferences.get('nameplate_area', True)
+            if hasattr(self, 'show_nameplate_checkbox') and not self.show_nameplate_checkbox.isEnabled():
+                active = False
+            elif hasattr(self, 'show_nameplate_checkbox') and not self.show_nameplate_checkbox.isChecked():
+                active = False
+            self.detection_thread.show_nameplate_overlay = bool(active)
 
     def _sync_detection_thread_status(self) -> None:
         if not self.detection_thread:
@@ -3209,6 +3333,7 @@ class HuntTab(QWidget):
         characters_data = payload.get('characters') or []
         monsters_data = payload.get('monsters') or []
         nickname_data = payload.get('nickname')
+        nameplate_data = payload.get('nameplates') or []
         perf_data = payload.get('perf') or {}
 
         if isinstance(perf_data, dict):
@@ -3218,6 +3343,7 @@ class HuntTab(QWidget):
                 'capture_ms',
                 'yolo_ms',
                 'nickname_ms',
+                'nameplate_ms',
             )
             detail_keys = (
                 'preprocess_ms',
@@ -3284,6 +3410,9 @@ class HuntTab(QWidget):
         monsters = [box for box in (_to_box(item) for item in monsters_data) if box]
 
         now = time.time()
+        filtered_nameplate_details: List[dict] = []
+        overlay_nameplates: List[dict] = []
+        nameplate_confirmed = False
         fallback_used = False
         nickname_used = False
         nickname_record = None
@@ -3339,6 +3468,72 @@ class HuntTab(QWidget):
                 else:
                     self._reset_character_cache()
 
+        if isinstance(nameplate_data, list) and nameplate_data:
+            reference_character: Optional[DetectionBox] = None
+            if characters:
+                reference_character = self._select_reference_character_box(characters)
+            elif self._last_character_boxes:
+                reference_character = self._select_reference_character_box(self._last_character_boxes)
+            primary_area: Optional[AreaRect] = None
+            char_center_x: Optional[float] = None
+            if reference_character is not None:
+                hunt_area_tmp = self._compute_hunt_area_rect(reference_character)
+                primary_area = self._compute_primary_skill_rect(reference_character, hunt_area_tmp)
+                char_center_x = reference_character.center_x
+            facing = self.last_facing if self.last_facing in ('left', 'right') else None
+            for entry in nameplate_data:
+                if not isinstance(entry, dict):
+                    continue
+                roi_dict = entry.get('roi')
+                if not isinstance(roi_dict, dict):
+                    continue
+                try:
+                    left = float(roi_dict.get('x', 0.0))
+                    top = float(roi_dict.get('y', 0.0))
+                    width = float(roi_dict.get('width', 0.0))
+                    height = float(roi_dict.get('height', 0.0))
+                except (TypeError, ValueError):
+                    continue
+                if width <= 0 or height <= 0:
+                    continue
+                center_x = left + width / 2.0
+                center_y = top + height / 2.0
+                passes_area = True
+                if primary_area is not None:
+                    if not (
+                        primary_area.x <= center_x <= primary_area.right
+                        and primary_area.y <= center_y <= primary_area.bottom
+                    ):
+                        passes_area = False
+                passes_direction = True
+                if facing and char_center_x is not None:
+                    if facing == 'left' and center_x > char_center_x:
+                        passes_direction = False
+                    elif facing == 'right' and center_x < char_center_x:
+                        passes_direction = False
+                matched = bool(entry.get('matched'))
+                overlay_entry = {
+                    'roi': {
+                        'x': left,
+                        'y': top,
+                        'width': width,
+                        'height': height,
+                    },
+                    'matched': matched,
+                    'score': float(entry.get('score', 0.0)),
+                    'threshold': float(entry.get('threshold', 0.0)),
+                }
+                if passes_area and passes_direction:
+                    filtered_entry = dict(entry)
+                    filtered_entry['passes_filters'] = True
+                    filtered_nameplate_details.append(filtered_entry)
+                    if matched:
+                        nameplate_confirmed = True
+                    if self._is_nameplate_overlay_active():
+                        overlay_nameplates.append(overlay_entry)
+        else:
+            overlay_nameplates = []
+
         snapshot_ts = float(payload.get('timestamp', now))
         if fallback_used and self._last_character_seen_ts:
             snapshot_ts = max(snapshot_ts, self._last_character_seen_ts)
@@ -3354,7 +3549,16 @@ class HuntTab(QWidget):
             'monsters': monsters_data,
             'nickname': nickname_record,
             'direction': direction_record,
+            'nameplates': filtered_nameplate_details,
         }
+        if self._is_nameplate_overlay_active():
+            self._latest_nameplate_rois = overlay_nameplates
+        else:
+            self._latest_nameplate_rois = []
+        if nameplate_confirmed:
+            self._nameplate_hold_until = max(self._nameplate_hold_until, now + NAMEPLATE_PERSISTENCE_SEC)
+        elif now > self._nameplate_hold_until:
+            self._nameplate_hold_until = 0.0
         if fallback_used and not characters_data and self._last_character_details:
             self.latest_detection_details['characters'] = [dict(item) for item in self._last_character_details]
         if nickname_used:
@@ -3444,12 +3648,14 @@ class HuntTab(QWidget):
     def clear_detection_snapshot(self) -> None:
         self.latest_snapshot = None
         self._clear_detection_metrics()
-        self.latest_detection_details = {'characters': [], 'monsters': [], 'nickname': None, 'direction': None}
+        self.latest_detection_details = {'characters': [], 'monsters': [], 'nickname': None, 'direction': None, 'nameplates': []}
         self._reset_character_cache()
         self._direction_active = False
         self._direction_last_side = None
         self._direction_last_seen_ts = 0.0
         self._last_direction_score = None
+        self._latest_nameplate_rois = []
+        self._nameplate_hold_until = 0.0
         self._update_detection_summary()
 
     def _recalculate_hunt_metrics(self) -> None:
@@ -3473,16 +3679,17 @@ class HuntTab(QWidget):
             self._cached_monster_boxes = [DetectionBox(**vars(box)) for box in raw_monsters]
             self._cached_monster_boxes_ts = now
         else:
-            if (
-                self._cached_monster_boxes
-                and now - self._cached_monster_boxes_ts <= MONSTER_LOSS_GRACE_SEC
-            ):
+            grace_active = now - self._cached_monster_boxes_ts <= MONSTER_LOSS_GRACE_SEC
+            nameplate_active = now <= self._nameplate_hold_until
+            if self._cached_monster_boxes and (grace_active or nameplate_active):
                 effective_monsters = [DetectionBox(**vars(box)) for box in self._cached_monster_boxes]
                 using_cached_monsters = True
             else:
                 effective_monsters = []
                 self._cached_monster_boxes = []
                 self._cached_monster_boxes_ts = 0.0
+                if now > self._nameplate_hold_until:
+                    self._nameplate_hold_until = 0.0
 
         if using_cached_monsters:
             self.latest_snapshot.monster_boxes = effective_monsters
@@ -3512,6 +3719,8 @@ class HuntTab(QWidget):
         self._latest_nickname_box = None
         self._latest_direction_roi = None
         self._latest_direction_match = None
+        self._latest_nameplate_rois = []
+        self._nameplate_hold_until = 0.0
         self._update_monster_count_label()
         self._emit_area_overlays()
         self.monster_stats_updated.emit(0, 0)
@@ -3522,9 +3731,14 @@ class HuntTab(QWidget):
         now = time.time()
         if (
             self._cached_monster_boxes
-            and now - self._cached_monster_boxes_ts <= MONSTER_LOSS_GRACE_SEC
+            and (
+                now - self._cached_monster_boxes_ts <= MONSTER_LOSS_GRACE_SEC
+                or now <= self._nameplate_hold_until
+            )
         ):
             return [DetectionBox(**vars(box)) for box in self._cached_monster_boxes]
+        if now > self._nameplate_hold_until:
+            self._nameplate_hold_until = 0.0
         return []
 
     def _apply_detected_direction(self, side: str, score: float) -> None:
@@ -3679,6 +3893,43 @@ class HuntTab(QWidget):
             checkbox.blockSignals(False)
         self._update_detection_thread_overlay_flags()
 
+    def _load_nameplate_configuration(self) -> None:
+        if not self.data_manager or not hasattr(self.data_manager, 'get_monster_nameplate_resources'):
+            self._nameplate_config = {}
+            self._nameplate_templates = {}
+            self._nameplate_enabled = False
+            self._latest_nameplate_rois = []
+            return
+        try:
+            config, templates = self.data_manager.get_monster_nameplate_resources()
+        except Exception as exc:
+            self._nameplate_config = {}
+            self._nameplate_templates = {}
+            self._nameplate_enabled = False
+            self._latest_nameplate_rois = []
+            self.append_log(f"이름표 설정을 불러오지 못했습니다: {exc}", "warn")
+            return
+        self._nameplate_config = config or {}
+        self._nameplate_templates = templates if isinstance(templates, dict) else {}
+        self._show_nameplate_overlay_config = bool(self._nameplate_config.get('show_overlay', True))
+        self._nameplate_enabled = bool(self._nameplate_config.get('enabled', False) and self._nameplate_templates)
+        checkbox = getattr(self, 'show_nameplate_checkbox', None)
+        if checkbox is not None:
+            checkbox.blockSignals(True)
+            if not self._show_nameplate_overlay_config:
+                self._nameplate_area_user_pref = self.overlay_preferences.get('nameplate_area', True)
+                self.overlay_preferences['nameplate_area'] = False
+                checkbox.setChecked(False)
+                checkbox.setEnabled(False)
+            else:
+                if not checkbox.isEnabled():
+                    checkbox.setEnabled(True)
+                restored_state = self._nameplate_area_user_pref if isinstance(self._nameplate_area_user_pref, bool) else True
+                self.overlay_preferences['nameplate_area'] = restored_state
+                checkbox.setChecked(restored_state)
+            checkbox.blockSignals(False)
+        self._update_detection_thread_overlay_flags()
+
     def _handle_overlay_config_update(self, payload: dict) -> None:
         if not isinstance(payload, dict):
             return
@@ -3709,6 +3960,26 @@ class HuntTab(QWidget):
             if not show_overlay:
                 self._latest_direction_roi = None
                 self._latest_direction_match = None
+        elif target == 'monster_nameplate':
+            if not show_overlay:
+                self._nameplate_area_user_pref = self.overlay_preferences.get('nameplate_area', True)
+                self.overlay_preferences['nameplate_area'] = False
+            else:
+                restored = self._nameplate_area_user_pref if isinstance(self._nameplate_area_user_pref, bool) else True
+                self.overlay_preferences['nameplate_area'] = restored
+            self._show_nameplate_overlay_config = show_overlay
+            checkbox = getattr(self, 'show_nameplate_checkbox', None)
+            if checkbox is not None:
+                previous = checkbox.blockSignals(True)
+                if show_overlay:
+                    checkbox.setChecked(self.overlay_preferences.get('nameplate_area', True))
+                    checkbox.setEnabled(True)
+                else:
+                    checkbox.setChecked(False)
+                    checkbox.setEnabled(False)
+                checkbox.blockSignals(previous)
+            if not show_overlay:
+                self._latest_nameplate_rois = []
         else:
             return
         self._update_detection_thread_overlay_flags()
@@ -3771,6 +4042,7 @@ class HuntTab(QWidget):
         self._save_settings()
         self._load_nickname_configuration()
         self._load_direction_configuration()
+        self._load_nameplate_configuration()
         if hasattr(self.data_manager, 'register_status_config_listener'):
             try:
                 self.data_manager.register_status_config_listener(self._handle_status_config_update)
@@ -3844,6 +4116,7 @@ class HuntTab(QWidget):
                 show_direction = bool(display.get('show_nickname_area'))
             else:
                 show_direction = self.show_direction_checkbox.isChecked()
+            show_nameplate = bool(display.get('show_nameplate_area', self.show_nameplate_checkbox.isChecked()))
             auto_target = bool(display.get('auto_target', self.auto_target_radio.isChecked()))
             screen_output_enabled = bool(
                 display.get(
@@ -3867,6 +4140,7 @@ class HuntTab(QWidget):
             self.show_hunt_area_checkbox.setChecked(show_hunt)
             self.show_primary_skill_checkbox.setChecked(show_primary)
             self.show_direction_checkbox.setChecked(show_direction)
+            self.show_nameplate_checkbox.setChecked(show_nameplate)
             self.auto_target_radio.setChecked(auto_target)
             self.manual_target_radio.setChecked(not auto_target)
             self.screen_output_checkbox.setChecked(screen_output_enabled)
@@ -4096,6 +4370,7 @@ class HuntTab(QWidget):
                 'show_hunt_area': self.show_hunt_area_checkbox.isChecked(),
                 'show_primary_area': self.show_primary_skill_checkbox.isChecked(),
                 'show_direction_area': self.show_direction_checkbox.isChecked(),
+                'show_nameplate_area': self.show_nameplate_checkbox.isChecked(),
                 'auto_target': self.auto_target_radio.isChecked(),
                 'screen_output': self.screen_output_checkbox.isChecked(),
                 'summary_confidence': self.show_confidence_summary_checkbox.isChecked(),
