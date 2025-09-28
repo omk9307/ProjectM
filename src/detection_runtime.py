@@ -293,6 +293,9 @@ class DetectionThread(QThread):
             "nickname_ms": 0.0,
             "direction_ms": 0.0,
             "yolo_ms": 0.0,
+            "yolo_speed_preprocess_ms": 0.0,
+            "yolo_speed_inference_ms": 0.0,
+            "yolo_speed_postprocess_ms": 0.0,
             "total_ms": 0.0,
             "capture_ms": 0.0,
             "preprocess_ms": 0.0,
@@ -397,6 +400,30 @@ class DetectionThread(QThread):
                 self.perf_stats["yolo_ms"] = (yolo_end - yolo_start) * 1000
 
                 result = results[0]
+                speed_info = getattr(result, "speed", None)
+                if isinstance(speed_info, dict):
+                    try:
+                        self.perf_stats["yolo_speed_preprocess_ms"] = float(
+                            speed_info.get("preprocess", 0.0)
+                        )
+                    except (TypeError, ValueError):
+                        self.perf_stats["yolo_speed_preprocess_ms"] = 0.0
+                    try:
+                        self.perf_stats["yolo_speed_inference_ms"] = float(
+                            speed_info.get("inference", 0.0)
+                        )
+                    except (TypeError, ValueError):
+                        self.perf_stats["yolo_speed_inference_ms"] = 0.0
+                    try:
+                        self.perf_stats["yolo_speed_postprocess_ms"] = float(
+                            speed_info.get("postprocess", 0.0)
+                        )
+                    except (TypeError, ValueError):
+                        self.perf_stats["yolo_speed_postprocess_ms"] = 0.0
+                else:
+                    self.perf_stats["yolo_speed_preprocess_ms"] = 0.0
+                    self.perf_stats["yolo_speed_inference_ms"] = 0.0
+                    self.perf_stats["yolo_speed_postprocess_ms"] = 0.0
 
                 post_start = time.perf_counter()
 
@@ -617,6 +644,15 @@ class DetectionThread(QThread):
                     "fps": float(self.fps),
                     "total_ms": float(self.perf_stats["total_ms"]),
                     "yolo_ms": float(self.perf_stats["yolo_ms"]),
+                    "yolo_speed_preprocess_ms": float(
+                        self.perf_stats["yolo_speed_preprocess_ms"]
+                    ),
+                    "yolo_speed_inference_ms": float(
+                        self.perf_stats["yolo_speed_inference_ms"]
+                    ),
+                    "yolo_speed_postprocess_ms": float(
+                        self.perf_stats["yolo_speed_postprocess_ms"]
+                    ),
                     "nickname_ms": float(self.perf_stats["nickname_ms"]),
                     "direction_ms": float(self.perf_stats["direction_ms"]),
                     "capture_ms": float(self.perf_stats["capture_ms"]),

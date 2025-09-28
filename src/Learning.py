@@ -1337,10 +1337,17 @@ class DataManager:
         self.direction_config_path = os.path.join(self.direction_dir, 'config.json')
         self.status_config_path = os.path.join(self.config_path, 'status_monitor.json')
         self._overlay_listeners: list = []
+        self._model_listeners: list[callable] = []
+        self._last_used_model: Optional[str] = None
         self.status_config_notifier = StatusConfigNotifier()
         self.key_mappings_path = self._resolve_key_mappings_path()
         self.ensure_dirs_and_files()
         self.migrate_manifest_if_needed()
+        settings = self.load_settings()
+        if isinstance(settings, dict):
+            model = settings.get('last_used_model') or settings.get('model')
+            if isinstance(model, str) and model.strip():
+                self._last_used_model = model.strip()
 
     def ensure_dirs_and_files(self):
         os.makedirs(self.images_path, exist_ok=True)
@@ -1455,6 +1462,25 @@ class DataManager:
     def register_overlay_listener(self, callback):
         if callable(callback) and callback not in self._overlay_listeners:
             self._overlay_listeners.append(callback)
+
+    def unregister_overlay_listener(self, callback):
+        if callback in self._overlay_listeners:
+            self._overlay_listeners.remove(callback)
+
+    def register_model_listener(self, callback):
+        if callable(callback) and callback not in self._model_listeners:
+            self._model_listeners.append(callback)
+
+    def unregister_model_listener(self, callback):
+        if callback in self._model_listeners:
+            self._model_listeners.remove(callback)
+
+    def _notify_model_listeners(self, model_name: Optional[str]) -> None:
+        for callback in list(self._model_listeners):
+            try:
+                callback(model_name)
+            except Exception:
+                continue
 
     def _notify_overlay_listeners(self, payload: dict) -> None:
         for callback in list(self._overlay_listeners):
@@ -1716,6 +1742,13 @@ class DataManager:
         current_settings.update(settings_data)
         with open(self.settings_path, 'w', encoding='utf-8') as f:
             json.dump(current_settings, f, indent=4, ensure_ascii=False)
+        if 'last_used_model' in settings_data:
+            value = settings_data.get('last_used_model')
+            if isinstance(value, str) and value.strip():
+                self._last_used_model = value.strip()
+            else:
+                self._last_used_model = None
+            self._notify_model_listeners(self._last_used_model)
 
     def get_detection_runtime_settings(self) -> dict:
         settings = self.load_settings()
@@ -1735,12 +1768,25 @@ class DataManager:
             'yolo_max_det': max_det_val,
         }
 
-    def update_detection_runtime_settings(self, *, yolo_nms_iou: float, yolo_max_det: int) -> None:
+    def update_detection_runtime_settings(
+        self,
+        *,
+        yolo_nms_iou: float,
+        yolo_max_det: int,
+    ) -> None:
         current = self.load_settings()
         detection = dict(current.get('detection', {})) if isinstance(current, dict) else {}
         detection['yolo_nms_iou'] = max(0.05, min(0.95, float(yolo_nms_iou)))
         detection['yolo_max_det'] = max(1, int(yolo_max_det))
         self.save_settings({'detection': detection})
+
+    def get_last_used_model(self) -> Optional[str]:
+        return self._last_used_model
+
+    def set_last_used_model(self, model_name: Optional[str]) -> None:
+        model = model_name.strip() if isinstance(model_name, str) else None
+        payload = {'last_used_model': model} if model else {'last_used_model': None}
+        self.save_settings(payload)
 
     def load_status_monitor_config(self) -> StatusMonitorConfig:
         try:
@@ -2332,7 +2378,7 @@ class LearningTab(QWidget):
         self.current_image_sort_mode = 'date'
         # v1.4: 마지막 사용 모델 로드
         settings = self.data_manager.load_settings()
-        self.last_used_model = settings.get('last_used_model', None)
+        self.last_used_model = self.data_manager.get_last_used_model()
         self._checked_class_names: set[str] = set(settings.get('hunt_checked_classes', []))
         self.nickname_config = self.data_manager.get_nickname_config()
         self._nickname_ui_updating = False
@@ -2519,14 +2565,6 @@ class LearningTab(QWidget):
         train_runtime_layout.addWidget(runtime_group, 1)
         right_layout.addLayout(train_runtime_layout)
 
-        runtime_settings = self.data_manager.get_detection_runtime_settings()
-        self._runtime_ui_updating = True
-        self.yolo_nms_spin.setValue(runtime_settings['yolo_nms_iou'])
-        self.yolo_max_det_spin.setValue(runtime_settings['yolo_max_det'])
-        self._runtime_ui_updating = False
-        self.yolo_nms_spin.valueChanged.connect(self._handle_runtime_settings_changed)
-        self.yolo_max_det_spin.valueChanged.connect(self._handle_runtime_settings_changed)
-
         model_manage_group = QGroupBox("저장된 모델 관리")
         model_manage_layout = QVBoxLayout()
         self.save_model_btn = QPushButton('최신 훈련 결과 저장'); self.save_model_btn.clicked.connect(self.save_latest_training_result); self.save_model_btn.setEnabled(False)
@@ -2544,6 +2582,14 @@ class LearningTab(QWidget):
         model_manage_layout.addLayout(model_buttons_layout)
         model_manage_group.setLayout(model_manage_layout)
         right_layout.addWidget(model_manage_group)
+
+        runtime_settings = self.data_manager.get_detection_runtime_settings()
+        self._runtime_ui_updating = True
+        self.yolo_nms_spin.setValue(runtime_settings['yolo_nms_iou'])
+        self.yolo_max_det_spin.setValue(runtime_settings['yolo_max_det'])
+        self._runtime_ui_updating = False
+        self.yolo_nms_spin.valueChanged.connect(self._handle_runtime_settings_changed)
+        self.yolo_max_det_spin.valueChanged.connect(self._handle_runtime_settings_changed)
 
         nickname_group = QGroupBox("닉네임 탐지 설정")
         nickname_layout = QVBoxLayout()
@@ -2722,6 +2768,7 @@ class LearningTab(QWidget):
 
         self.populate_class_list()
         self.populate_model_list()
+        self.model_selector.currentTextChanged.connect(self._handle_model_selection_changed)
         self.populate_preset_list()
         self.populate_nickname_template_list()
         self._load_status_command_options()
@@ -2759,13 +2806,31 @@ class LearningTab(QWidget):
             self.progress_bar.hide()
 
     def populate_model_list(self):
+        self.model_selector.blockSignals(True)
+        try:
             self.model_selector.clear()
             saved_models = self.data_manager.get_saved_models()
             self.model_selector.addItems(saved_models)
-            
-            # v1.4: 마지막으로 사용한 모델이 목록에 있으면 선택
-            if self.last_used_model and self.last_used_model in saved_models:
-                self.model_selector.setCurrentText(self.last_used_model)
+
+            active_model = self.data_manager.get_last_used_model() or self.last_used_model
+            if active_model and active_model in saved_models:
+                self.model_selector.setCurrentText(active_model)
+            elif saved_models:
+                self.model_selector.setCurrentIndex(0)
+                active_model = self.model_selector.currentText()
+            else:
+                active_model = None
+        finally:
+            self.model_selector.blockSignals(False)
+
+        if active_model:
+            self.last_used_model = active_model
+            self.data_manager.set_last_used_model(active_model)
+
+    def _handle_model_selection_changed(self, model_name: str) -> None:
+        normalized = model_name.strip()
+        self.last_used_model = normalized if normalized else None
+        self.data_manager.set_last_used_model(self.last_used_model or None)
 
     def _refresh_nickname_config_cache(self):
         self.nickname_config = self.data_manager.get_nickname_config()

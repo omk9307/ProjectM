@@ -559,6 +559,7 @@ class HuntTab(QWidget):
         self.manual_capture_region: Optional[dict] = None
         self.manual_capture_regions: list[dict] = []
         self.last_used_model: Optional[str] = None
+        self._model_listener_registered = False
         self._authority_request_connected = False
         self._authority_release_connected = False
         self._release_pending = False
@@ -577,6 +578,9 @@ class HuntTab(QWidget):
             'fps': 0.0,
             'total_ms': 0.0,
             'yolo_ms': 0.0,
+            'yolo_speed_preprocess_ms': 0.0,
+            'yolo_speed_inference_ms': 0.0,
+            'yolo_speed_postprocess_ms': 0.0,
             'nickname_ms': 0.0,
             'direction_ms': 0.0,
             'capture_ms': 0.0,
@@ -636,6 +640,7 @@ class HuntTab(QWidget):
         self._perf_log_path: Optional[str] = None
         self._perf_log_handle: Optional[TextIO] = None
         self._perf_log_writer: Optional[csv.writer] = None
+        self._perf_logging_enabled = False
         self.yolo_nms_iou = DEFAULT_YOLO_NMS_IOU
         self.yolo_max_det = DEFAULT_YOLO_MAX_DET
         self._show_direction_overlay_config = True
@@ -769,6 +774,20 @@ class HuntTab(QWidget):
             return True
         return bool(checkbox.isChecked())
 
+    def _is_frame_summary_enabled(self) -> bool:
+        checkbox = getattr(self, 'show_frame_summary_checkbox', None)
+        if checkbox is None:
+            return True
+        return bool(checkbox.isChecked())
+
+    def _is_frame_detail_enabled(self) -> bool:
+        if not self._is_frame_summary_enabled():
+            return False
+        checkbox = getattr(self, 'show_frame_detail_checkbox', None)
+        if checkbox is None:
+            return False
+        return bool(checkbox.isChecked())
+
     def _format_delay_ms(self, delay_sec: float) -> str:
         return f"{max(0.0, delay_sec) * 1000:.0f}ms"
 
@@ -779,6 +798,8 @@ class HuntTab(QWidget):
         self._append_control_log(message, color="gray")
 
     def _start_perf_logging(self) -> None:
+        if not self._perf_logging_enabled:
+            return
         if self._perf_log_handle is not None:
             return
         try:
@@ -802,6 +823,9 @@ class HuntTab(QWidget):
             'capture_ms',
             'preprocess_ms',
             'yolo_ms',
+            'yolo_speed_preprocess_ms',
+            'yolo_speed_inference_ms',
+            'yolo_speed_postprocess_ms',
             'nickname_ms',
             'direction_ms',
             'post_ms',
@@ -818,7 +842,8 @@ class HuntTab(QWidget):
         self._perf_log_handle = handle
         self._perf_log_writer = writer
         self._perf_log_path = path
-        self.append_log(f"성능 로그 기록 시작: {path}", "info")
+        if self._perf_logging_enabled:
+            self.append_log(f"성능 로그 기록 시작: {path}", "info")
 
     def _stop_perf_logging(self) -> None:
         if self._perf_log_handle is None:
@@ -836,11 +861,15 @@ class HuntTab(QWidget):
             self._perf_log_handle = None
             self._perf_log_writer = None
             self._perf_log_path = None
-        if path:
+        if path and self._perf_logging_enabled:
             self.append_log(f"성능 로그 기록 종료: {path}", "info")
 
     def _append_perf_log(self, warning_text: str = "") -> None:
-        if self._perf_log_writer is None or self._perf_log_handle is None:
+        if (
+            not self._perf_logging_enabled
+            or self._perf_log_writer is None
+            or self._perf_log_handle is None
+        ):
             return
         perf = self.latest_perf_stats or {}
         try:
@@ -851,6 +880,9 @@ class HuntTab(QWidget):
                 float(perf.get('capture_ms', 0.0)),
                 float(perf.get('preprocess_ms', 0.0)),
                 float(perf.get('yolo_ms', 0.0)),
+                float(perf.get('yolo_speed_preprocess_ms', 0.0)),
+                float(perf.get('yolo_speed_inference_ms', 0.0)),
+                float(perf.get('yolo_speed_postprocess_ms', 0.0)),
                 float(perf.get('nickname_ms', 0.0)),
                 float(perf.get('direction_ms', 0.0)),
                 float(perf.get('post_ms', 0.0)),
@@ -1476,7 +1508,12 @@ class HuntTab(QWidget):
 
     def _get_active_model_name(self) -> Optional[str]:
         model_name: Optional[str] = None
-        if self.data_manager and hasattr(self.data_manager, 'load_settings'):
+        if self.data_manager and hasattr(self.data_manager, 'get_last_used_model'):
+            try:
+                model_name = self.data_manager.get_last_used_model()
+            except Exception:
+                model_name = None
+        if not model_name and self.data_manager and hasattr(self.data_manager, 'load_settings'):
             try:
                 settings = self.data_manager.load_settings()
             except Exception:
@@ -1491,6 +1528,14 @@ class HuntTab(QWidget):
                 self.last_used_model = model_name
                 return model_name
         return None
+
+    def _handle_model_changed(self, model_name: Optional[str]) -> None:
+        normalized = model_name.strip() if isinstance(model_name, str) else None
+        if normalized and normalized != self.last_used_model:
+            self.last_used_model = normalized
+            self.append_log(f"모델 변경 감지: '{normalized}'", "info")
+        elif not normalized:
+            self.last_used_model = None
 
     def _toggle_detection(self, checked: bool) -> None:
         if checked:
@@ -1906,7 +1951,8 @@ class HuntTab(QWidget):
             return
 
         show_confidence = self.show_confidence_summary_checkbox.isChecked()
-        show_frame = self.show_frame_summary_checkbox.isChecked()
+        show_frame = self._is_frame_summary_enabled()
+        show_frame_detail = self._is_frame_detail_enabled()
         show_info = self.show_info_summary_checkbox.isChecked()
 
         if show_confidence:
@@ -1949,24 +1995,36 @@ class HuntTab(QWidget):
             perf = getattr(self, 'latest_perf_stats', {}) or {}
             fps = float(perf.get('fps', 0.0))
             total_ms = float(perf.get('total_ms', 0.0))
+            capture_ms = float(perf.get('capture_ms', 0.0))
             yolo_ms = float(perf.get('yolo_ms', 0.0))
             nickname_ms = float(perf.get('nickname_ms', 0.0))
-            direction_ms = float(perf.get('direction_ms', 0.0))
-            capture_ms = float(perf.get('capture_ms', 0.0))
-            preprocess_ms = float(perf.get('preprocess_ms', 0.0))
-            post_ms = float(perf.get('post_ms', 0.0))
-            render_ms = float(perf.get('render_ms', 0.0))
-            emit_ms = float(perf.get('emit_ms', 0.0))
-            latency_ms = float(perf.get('payload_latency_ms', 0.0))
-            handler_ms = float(perf.get('handler_ms', 0.0))
 
             frame_lines = [
                 f"FPS: {fps:.0f}",
-                f"Total: {total_ms:.1f} ms | Latency: {latency_ms:.1f} ms",
-                f"Capture {capture_ms:.1f} / Pre {preprocess_ms:.1f} / YOLO {yolo_ms:.1f}",
-                f"Nickname {nickname_ms:.1f} / Direction {direction_ms:.1f} / Post {post_ms:.1f}",
-                f"Render {render_ms:.1f} / Emit {emit_ms:.1f} / Handler {handler_ms:.1f}",
+                f"Total: {total_ms:.1f} ms",
+                f"Capture {capture_ms:.1f} ms / YOLO {yolo_ms:.1f} ms",
+                f"Nickname {nickname_ms:.1f} ms",
             ]
+
+            if show_frame_detail:
+                preprocess_ms = float(perf.get('preprocess_ms', 0.0))
+                direction_ms = float(perf.get('direction_ms', 0.0))
+                post_ms = float(perf.get('post_ms', 0.0))
+                render_ms = float(perf.get('render_ms', 0.0))
+                emit_ms = float(perf.get('emit_ms', 0.0))
+                latency_ms = float(perf.get('payload_latency_ms', 0.0))
+                handler_ms = float(perf.get('handler_ms', 0.0))
+
+                frame_lines.append(
+                    f"Latency {latency_ms:.1f} ms / Handler {handler_ms:.1f} ms"
+                )
+                frame_lines.append(
+                    f"Pre {preprocess_ms:.1f} ms / Direction {direction_ms:.1f} ms / Post {post_ms:.1f} ms"
+                )
+                frame_lines.append(
+                    f"Render {render_ms:.1f} ms / Emit {emit_ms:.1f} ms"
+                )
+
             self.frame_summary_view.setPlainText('\n'.join(frame_lines))
         else:
             self.frame_summary_view.clear()
@@ -2010,11 +2068,22 @@ class HuntTab(QWidget):
             self.info_summary_view.clear()
 
     def _on_summary_checkbox_changed(self, _checked: bool) -> None:
+        self._sync_frame_detail_checkbox_state()
         self._update_detection_summary()
         self._save_settings()
 
     def _on_log_checkbox_toggled(self, _checked: bool) -> None:
         self._save_settings()
+
+    def _on_frame_detail_toggled(self, _checked: bool) -> None:
+        self._update_detection_summary()
+        self._save_settings()
+
+    def _sync_frame_detail_checkbox_state(self) -> None:
+        if not hasattr(self, 'show_frame_detail_checkbox'):
+            return
+        show_frame = bool(self.show_frame_summary_checkbox.isChecked()) if hasattr(self, 'show_frame_summary_checkbox') else True
+        self.show_frame_detail_checkbox.setEnabled(show_frame)
 
     def _on_screen_output_toggled(self, checked: bool) -> None:
         if checked and self.detect_btn.isChecked() and not self.is_popup_active:
@@ -2150,8 +2219,12 @@ class HuntTab(QWidget):
         self.show_frame_summary_checkbox = QCheckBox()
         self.show_frame_summary_checkbox.setChecked(True)
         self.show_frame_summary_checkbox.toggled.connect(self._on_summary_checkbox_changed)
+        self.show_frame_detail_checkbox = QCheckBox("상세")
+        self.show_frame_detail_checkbox.setChecked(False)
+        self.show_frame_detail_checkbox.toggled.connect(self._on_frame_detail_toggled)
         frame_header.addWidget(frame_label)
         frame_header.addWidget(self.show_frame_summary_checkbox)
+        frame_header.addWidget(self.show_frame_detail_checkbox)
         frame_header.addStretch(1)
         self.frame_summary_view = QTextEdit()
         self.frame_summary_view.setReadOnly(True)
@@ -2187,6 +2260,7 @@ class HuntTab(QWidget):
         content_layout.addWidget(self.summary_info_container, 1)
 
         layout.addLayout(content_layout)
+        self._sync_frame_detail_checkbox_state()
         return group
 
     def _create_attack_section(self) -> QGroupBox:
@@ -2984,6 +3058,7 @@ class HuntTab(QWidget):
         duration = max(0.0, float(end_timestamp) - float(duration_start_ts))
         minutes = max(1.0 / 60.0, duration / 60.0)
         per_minute_amount = int(total_amount_gain / minutes) if minutes > 0 else total_amount_gain
+        per_minute_percent_gain = total_percent_gain / minutes if minutes > 0 else total_percent_gain
 
         def _format_percent_value(value: float) -> str:
             text = f"{value:.2f}"
@@ -2992,6 +3067,7 @@ class HuntTab(QWidget):
             return text
 
         total_percent_text = _format_percent_value(total_percent_gain)
+        per_minute_percent_text = _format_percent_value(per_minute_percent_gain)
         start_percent_text = _format_percent_value(start_percent)
         end_percent_text = _format_percent_value(end_percent)
 
@@ -2999,7 +3075,7 @@ class HuntTab(QWidget):
         self.append_log(
             (
                 "사냥 종료 - 사냥시간: "
-                f"{duration_text}, 분당 경험치: {per_minute_amount} / {total_percent_text}%, "
+                f"{duration_text}, 분당 경험치: {per_minute_amount} / {per_minute_percent_text}%, "
                 f"획득 경험치: {total_amount_gain} ({start_amount} > {end_amount}) / "
                 f"{total_percent_text}% ({start_percent_text}% > {end_percent_text}%)"
             ),
@@ -3026,7 +3102,12 @@ class HuntTab(QWidget):
         except (TypeError, ValueError):
             payload_ts = received_ts
         latency_ms = max(0.0, (received_ts - payload_ts) * 1000.0)
-        self.latest_perf_stats['payload_latency_ms'] = latency_ms
+        collect_frame_stats = self._is_frame_summary_enabled()
+        collect_detail_stats = self._is_frame_detail_enabled()
+        if collect_detail_stats:
+            self.latest_perf_stats['payload_latency_ms'] = latency_ms
+        else:
+            self.latest_perf_stats.pop('payload_latency_ms', None)
 
         characters_data = payload.get('characters') or []
         monsters_data = payload.get('monsters') or []
@@ -3034,25 +3115,59 @@ class HuntTab(QWidget):
         perf_data = payload.get('perf') or {}
 
         if isinstance(perf_data, dict):
-            perf_keys = (
+            base_keys = (
                 'fps',
                 'total_ms',
+                'capture_ms',
                 'yolo_ms',
                 'nickname_ms',
-                'direction_ms',
-                'capture_ms',
+            )
+            detail_keys = (
                 'preprocess_ms',
+                'direction_ms',
                 'post_ms',
                 'render_ms',
                 'emit_ms',
             )
-            for key in perf_keys:
-                if key not in perf_data:
-                    continue
-                try:
-                    self.latest_perf_stats[key] = float(perf_data.get(key, self.latest_perf_stats.get(key, 0.0)))
-                except (TypeError, ValueError):
-                    continue
+
+            if collect_frame_stats:
+                for key in base_keys:
+                    if key not in perf_data:
+                        continue
+                    try:
+                        self.latest_perf_stats[key] = float(perf_data.get(key, self.latest_perf_stats.get(key, 0.0)))
+                    except (TypeError, ValueError):
+                        continue
+
+                speed_keys = (
+                    'yolo_speed_preprocess_ms',
+                    'yolo_speed_inference_ms',
+                    'yolo_speed_postprocess_ms',
+                )
+                for key in speed_keys:
+                    if key not in perf_data:
+                        continue
+                    try:
+                        self.latest_perf_stats[key] = float(
+                            perf_data.get(key, self.latest_perf_stats.get(key, 0.0))
+                        )
+                    except (TypeError, ValueError):
+                        continue
+
+                if collect_detail_stats:
+                    for key in detail_keys:
+                        if key not in perf_data:
+                            continue
+                        try:
+                            self.latest_perf_stats[key] = float(perf_data.get(key, self.latest_perf_stats.get(key, 0.0)))
+                        except (TypeError, ValueError):
+                            continue
+                else:
+                    for key in detail_keys:
+                        self.latest_perf_stats.pop(key, None)
+            else:
+                for key in base_keys + detail_keys:
+                    self.latest_perf_stats.pop(key, None)
         direction_data = payload.get('direction')
 
         def _to_box(data):
@@ -3182,16 +3297,21 @@ class HuntTab(QWidget):
         self.update_detection_snapshot(snapshot)
 
         handler_elapsed_ms = (time.perf_counter() - handler_start) * 1000.0
-        self.latest_perf_stats['handler_ms'] = handler_elapsed_ms
+        if collect_detail_stats:
+            self.latest_perf_stats['handler_ms'] = handler_elapsed_ms
+        else:
+            self.latest_perf_stats.pop('handler_ms', None)
 
         warn_messages: List[str] = []
-        total_ms = float(self.latest_perf_stats.get('total_ms', 0.0))
-        if total_ms > 70.0:
+        total_ms = float(self.latest_perf_stats.get('total_ms', 0.0)) if collect_frame_stats else 0.0
+        if collect_frame_stats and total_ms > 70.0:
             warn_messages.append(f"total {total_ms:.1f}ms")
-        if latency_ms > 120.0:
-            warn_messages.append(f"latency {latency_ms:.1f}ms")
-        if handler_elapsed_ms > 25.0:
-            warn_messages.append(f"handler {handler_elapsed_ms:.1f}ms")
+        if collect_detail_stats:
+            latency_val = float(self.latest_perf_stats.get('payload_latency_ms', latency_ms))
+            if latency_val > 120.0:
+                warn_messages.append(f"latency {latency_val:.1f}ms")
+            if handler_elapsed_ms > 25.0:
+                warn_messages.append(f"handler {handler_elapsed_ms:.1f}ms")
         if warn_messages and (time.time() - self._perf_warn_last_ts) >= self._perf_warn_min_interval:
             self.append_log("성능 경고: " + ", ".join(warn_messages), "warn")
             self._perf_warn_last_ts = time.time()
@@ -3541,6 +3661,12 @@ class HuntTab(QWidget):
                 self.data_manager.register_overlay_listener(self._handle_overlay_config_update)
             except Exception:
                 pass
+        if hasattr(self.data_manager, 'register_model_listener') and not self._model_listener_registered:
+            try:
+                self.data_manager.register_model_listener(self._handle_model_changed)
+                self._model_listener_registered = True
+            except Exception:
+                self._model_listener_registered = False
         self.last_used_model = self._get_active_model_name()
         if self.last_used_model:
             self.append_log(f"학습 탭 모델 연동: '{self.last_used_model}'", "info")
@@ -3631,6 +3757,12 @@ class HuntTab(QWidget):
             summary_confidence = bool(display.get('summary_confidence', self.show_confidence_summary_checkbox.isChecked()))
             summary_frame = bool(display.get('summary_frame', self.show_frame_summary_checkbox.isChecked()))
             summary_info = bool(display.get('summary_info', self.show_info_summary_checkbox.isChecked()))
+            summary_frame_detail = bool(
+                display.get(
+                    'summary_frame_detail',
+                    self.show_frame_detail_checkbox.isChecked(),
+                )
+            )
             control_log_enabled = bool(display.get('log_control', self.control_log_checkbox.isChecked()))
             keyboard_log_enabled = bool(display.get('log_keyboard', self.keyboard_log_checkbox.isChecked()))
             main_log_enabled = bool(display.get('log_main', self.main_log_checkbox.isChecked()))
@@ -3644,9 +3776,16 @@ class HuntTab(QWidget):
             self.show_confidence_summary_checkbox.setChecked(summary_confidence)
             self.show_frame_summary_checkbox.setChecked(summary_frame)
             self.show_info_summary_checkbox.setChecked(summary_info)
+            self.show_frame_detail_checkbox.setChecked(summary_frame_detail)
             self.control_log_checkbox.setChecked(control_log_enabled)
             self.keyboard_log_checkbox.setChecked(keyboard_log_enabled)
             self.main_log_checkbox.setChecked(main_log_enabled)
+
+        self._sync_frame_detail_checkbox_state()
+
+        perf_settings = data.get('perf', {})
+        if isinstance(perf_settings, dict):
+            self._perf_logging_enabled = bool(perf_settings.get('logging_enabled', self._perf_logging_enabled))
 
         detection_cfg = data.get('detection', {})
         if isinstance(detection_cfg, dict):
@@ -3862,6 +4001,7 @@ class HuntTab(QWidget):
                 'summary_confidence': self.show_confidence_summary_checkbox.isChecked(),
                 'summary_frame': self.show_frame_summary_checkbox.isChecked(),
                 'summary_info': self.show_info_summary_checkbox.isChecked(),
+                'summary_frame_detail': self.show_frame_detail_checkbox.isChecked(),
                 'log_control': bool(self.control_log_checkbox.isChecked()) if hasattr(self, 'control_log_checkbox') else True,
                 'log_keyboard': bool(self.keyboard_log_checkbox.isChecked()) if hasattr(self, 'keyboard_log_checkbox') else True,
                 'log_main': bool(self.main_log_checkbox.isChecked()) if hasattr(self, 'main_log_checkbox') else True,
@@ -3886,6 +4026,9 @@ class HuntTab(QWidget):
                 'command_right': self.teleport_command_right,
                 'command_left_v2': self.teleport_command_left_v2,
                 'command_right_v2': self.teleport_command_right_v2,
+            },
+            'perf': {
+                'logging_enabled': bool(self._perf_logging_enabled),
             },
             'attack_skills': [
                 {
@@ -4858,6 +5001,12 @@ class HuntTab(QWidget):
         self._pre_delay_timers.clear()
         self._pending_completion_delays.clear()
         self._stop_detection_thread()
+        if self.data_manager and self._model_listener_registered and hasattr(self.data_manager, 'unregister_model_listener'):
+            try:
+                self.data_manager.unregister_model_listener(self._handle_model_changed)
+            except Exception:
+                pass
+            self._model_listener_registered = False
         if self.status_monitor:
             try:
                 self.status_monitor.status_captured.disconnect(self._handle_status_snapshot)
