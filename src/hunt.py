@@ -1,5 +1,6 @@
 ﻿from __future__ import annotations
 
+import csv
 import json
 import os
 import random
@@ -9,7 +10,7 @@ import ctypes
 import html
 from ctypes import wintypes
 from dataclasses import dataclass
-from typing import List, Optional, Callable
+from typing import List, Optional, Callable, TextIO
 
 import pygetwindow as gw
 
@@ -115,6 +116,9 @@ SRC_ROOT = os.path.dirname(os.path.abspath(__file__))
 WORKSPACE_ROOT = os.path.abspath(os.path.join(SRC_ROOT, '..', 'workspace'))
 CONFIG_ROOT = os.path.join(WORKSPACE_ROOT, 'config')
 HUNT_SETTINGS_FILE = os.path.join(CONFIG_ROOT, 'hunt_settings.json')
+
+DEFAULT_YOLO_NMS_IOU = 0.40
+DEFAULT_YOLO_MAX_DET = 60
 
 HUNT_AREA_COLOR = QColor(0, 170, 255, 70)
 HUNT_AREA_EDGE = QPen(QColor(0, 120, 200, 200), 2, Qt.PenStyle.DashLine)
@@ -552,6 +556,7 @@ class HuntTab(QWidget):
         self.is_popup_active = False
         self.last_popup_scale = 50
         self.manual_capture_region: Optional[dict] = None
+        self.manual_capture_regions: list[dict] = []
         self.last_used_model: Optional[str] = None
         self._authority_request_connected = False
         self._authority_release_connected = False
@@ -573,6 +578,13 @@ class HuntTab(QWidget):
             'yolo_ms': 0.0,
             'nickname_ms': 0.0,
             'direction_ms': 0.0,
+            'capture_ms': 0.0,
+            'preprocess_ms': 0.0,
+            'post_ms': 0.0,
+            'render_ms': 0.0,
+            'emit_ms': 0.0,
+            'payload_latency_ms': 0.0,
+            'handler_ms': 0.0,
         }
         self._active_target_names: List[str] = []
 
@@ -618,6 +630,13 @@ class HuntTab(QWidget):
         self._latest_direction_roi: Optional[dict] = None
         self._latest_direction_match: Optional[dict] = None
         self._show_nickname_overlay_config = True
+        self._perf_warn_last_ts = 0.0
+        self._perf_warn_min_interval = 3.0
+        self._perf_log_path: Optional[str] = None
+        self._perf_log_handle: Optional[TextIO] = None
+        self._perf_log_writer: Optional[csv.writer] = None
+        self.yolo_nms_iou = DEFAULT_YOLO_NMS_IOU
+        self.yolo_max_det = DEFAULT_YOLO_MAX_DET
         self._show_direction_overlay_config = True
         self._direction_detector_available = False
         self._last_direction_score: Optional[float] = None
@@ -739,6 +758,100 @@ class HuntTab(QWidget):
             return
         message = f"{context} 후 대기 {self._format_delay_ms(delay_sec)}"
         self._append_control_log(message, color="gray")
+
+    def _start_perf_logging(self) -> None:
+        if self._perf_log_handle is not None:
+            return
+        try:
+            logs_dir = os.path.join(WORKSPACE_ROOT, 'perf_logs')
+            os.makedirs(logs_dir, exist_ok=True)
+            file_name = time.strftime('hunt_perf_%Y%m%d_%H%M%S.csv')
+            path = os.path.join(logs_dir, file_name)
+            handle = open(path, 'w', newline='', encoding='utf-8')
+        except Exception as exc:
+            self.append_log(f"성능 로그 파일을 생성하지 못했습니다: {exc}", "warn")
+            self._perf_log_handle = None
+            self._perf_log_writer = None
+            self._perf_log_path = None
+            return
+
+        writer = csv.writer(handle)
+        header = [
+            'timestamp',
+            'fps',
+            'total_ms',
+            'capture_ms',
+            'preprocess_ms',
+            'yolo_ms',
+            'nickname_ms',
+            'direction_ms',
+            'post_ms',
+            'render_ms',
+            'emit_ms',
+            'payload_latency_ms',
+            'handler_ms',
+            'monster_count',
+            'primary_monster_count',
+            'warning',
+        ]
+        writer.writerow(header)
+        handle.flush()
+        self._perf_log_handle = handle
+        self._perf_log_writer = writer
+        self._perf_log_path = path
+        self.append_log(f"성능 로그 기록 시작: {path}", "info")
+
+    def _stop_perf_logging(self) -> None:
+        if self._perf_log_handle is None:
+            return
+        path = self._perf_log_path
+        try:
+            self._perf_log_handle.flush()
+        except Exception:
+            pass
+        try:
+            self._perf_log_handle.close()
+        except Exception:
+            pass
+        finally:
+            self._perf_log_handle = None
+            self._perf_log_writer = None
+            self._perf_log_path = None
+        if path:
+            self.append_log(f"성능 로그 기록 종료: {path}", "info")
+
+    def _append_perf_log(self, warning_text: str = "") -> None:
+        if self._perf_log_writer is None or self._perf_log_handle is None:
+            return
+        perf = self.latest_perf_stats or {}
+        try:
+            row = [
+                time.time(),
+                float(perf.get('fps', 0.0)),
+                float(perf.get('total_ms', 0.0)),
+                float(perf.get('capture_ms', 0.0)),
+                float(perf.get('preprocess_ms', 0.0)),
+                float(perf.get('yolo_ms', 0.0)),
+                float(perf.get('nickname_ms', 0.0)),
+                float(perf.get('direction_ms', 0.0)),
+                float(perf.get('post_ms', 0.0)),
+                float(perf.get('render_ms', 0.0)),
+                float(perf.get('emit_ms', 0.0)),
+                float(perf.get('payload_latency_ms', 0.0)),
+                float(perf.get('handler_ms', 0.0)),
+                int(getattr(self, 'latest_monster_count', 0)),
+                int(getattr(self, 'latest_primary_monster_count', 0)),
+                warning_text or "",
+            ]
+        except Exception as exc:
+            self.append_log(f"성능 로그 행 구성 실패: {exc}", "warn")
+            return
+        try:
+            self._perf_log_writer.writerow(row)
+            self._perf_log_handle.flush()
+        except Exception as exc:
+            self.append_log(f"성능 로그 기록 실패: {exc}", "warn")
+            self._stop_perf_logging()
 
     def _normalize_delay_range(self, min_value: float, max_value: float) -> tuple[float, float]:
         try:
@@ -1034,9 +1147,14 @@ class HuntTab(QWidget):
         self.set_area_btn = QPushButton("영역 지정")
         self.set_area_btn.setEnabled(False)
         self.set_area_btn.clicked.connect(self._set_manual_area)
+        self.add_area_btn = QPushButton("+")
+        self.add_area_btn.setEnabled(False)
+        self.add_area_btn.setFixedWidth(28)
+        self.add_area_btn.clicked.connect(self._add_manual_area)
         self.manual_target_radio.toggled.connect(self._handle_capture_mode_toggle)
         self.auto_target_radio.toggled.connect(self._handle_setting_changed)
         target_layout.addWidget(self.set_area_btn)
+        target_layout.addWidget(self.add_area_btn)
 
         control_row = QHBoxLayout()
         control_row.setSpacing(12)
@@ -1182,14 +1300,116 @@ class HuntTab(QWidget):
         snipper = ScreenSnipper(self)
         if snipper.exec():
             roi = snipper.get_roi()
-            self.manual_capture_region = {
+            new_region = {
                 'top': roi.top(),
                 'left': roi.left(),
                 'width': roi.width(),
                 'height': roi.height(),
             }
-            self.append_log(f"수동 탐지 영역 설정 완료: {self.manual_capture_region}")
+            if new_region['width'] <= 0 or new_region['height'] <= 0:
+                self.append_log('지정한 영역의 크기가 유효하지 않아 무시합니다.', 'warn')
+                return
+            self.manual_capture_region = dict(new_region)
+            self.manual_capture_regions = [dict(new_region)]
+            if hasattr(self, 'add_area_btn'):
+                self.add_area_btn.setEnabled(True)
+            self.append_log(f"수동 탐지 영역 초기화: {self.manual_capture_region}")
+            self._update_manual_area_summary()
             self._save_settings()
+        else:
+            # 취소(우클릭) 시 기존 영역 유지
+            self.append_log('영역 지정이 취소되어 기존 영역을 유지합니다.', 'info')
+
+    def _add_manual_area(self) -> None:
+        if not self.manual_capture_region:
+            self.append_log('기본 영역이 없어 영역을 추가할 수 없습니다. 먼저 "영역 지정"을 실행하세요.', 'warn')
+            return
+        snipper = ScreenSnipper(self)
+        if snipper.exec():
+            roi = snipper.get_roi()
+            new_region = {
+                'top': roi.top(),
+                'left': roi.left(),
+                'width': roi.width(),
+                'height': roi.height(),
+            }
+            if new_region['width'] <= 0 or new_region['height'] <= 0:
+                self.append_log('추가한 영역의 크기가 유효하지 않아 무시합니다.', 'warn')
+                return
+            self.manual_capture_regions.append(dict(new_region))
+            self.manual_capture_region = self._merge_manual_capture_regions()
+            if hasattr(self, 'add_area_btn') and not self.add_area_btn.isEnabled():
+                self.add_area_btn.setEnabled(True)
+            self.append_log(f"영역 추가 완료. 합성 영역: {self.manual_capture_region}")
+            self._update_manual_area_summary()
+            self._save_settings()
+        else:
+            self.append_log('영역 추가가 취소되었습니다.', 'info')
+
+    def _merge_manual_capture_regions(self) -> Optional[dict]:
+        if not self.manual_capture_regions:
+            return self.manual_capture_region
+        top_values = [region['top'] for region in self.manual_capture_regions]
+        left_values = [region['left'] for region in self.manual_capture_regions]
+        bottoms = [region['top'] + region['height'] for region in self.manual_capture_regions]
+        rights = [region['left'] + region['width'] for region in self.manual_capture_regions]
+        merged = {
+            'top': min(top_values),
+            'left': min(left_values),
+            'width': max(rights) - min(left_values),
+            'height': max(bottoms) - min(top_values),
+        }
+        return merged
+
+    def _resolve_manual_subregions(self, capture_region: dict) -> Optional[list[dict]]:
+        if not isinstance(capture_region, dict):
+            return None
+        if not self.manual_capture_regions or len(self.manual_capture_regions) <= 1:
+            return None
+        try:
+            base_top = int(capture_region['top'])
+            base_left = int(capture_region['left'])
+            base_width = int(capture_region['width'])
+            base_height = int(capture_region['height'])
+        except (KeyError, TypeError, ValueError):
+            return None
+        if base_width <= 0 or base_height <= 0:
+            return None
+        subregions: list[dict] = []
+        for region in self.manual_capture_regions:
+            try:
+                top = int(region['top']) - base_top
+                left = int(region['left']) - base_left
+                width = int(region['width'])
+                height = int(region['height'])
+            except (KeyError, TypeError, ValueError):
+                continue
+            if width <= 0 or height <= 0:
+                continue
+            rel_top = max(0, min(base_height, top))
+            rel_left = max(0, min(base_width, left))
+            rel_bottom = max(rel_top, min(base_height, rel_top + height))
+            rel_right = max(rel_left, min(base_width, rel_left + width))
+            if rel_top >= rel_bottom or rel_left >= rel_right:
+                continue
+            subregions.append(
+                {
+                    'top': rel_top,
+                    'left': rel_left,
+                    'width': rel_right - rel_left,
+                    'height': rel_bottom - rel_top,
+                }
+            )
+        return subregions or None
+
+    def _update_manual_area_summary(self) -> None:
+        count = len(self.manual_capture_regions)
+        if count <= 1:
+            return
+        self.append_log(
+            f"추가된 영역 수: {count}, 합성 캡처 범위: {self.manual_capture_region}."
+            " 합성 범위 내부에서도 지정된 영역만 탐지에 사용됩니다."
+        )
 
     def _activate_maple_window(self) -> Optional[object]:
         try:
@@ -1291,6 +1511,10 @@ class HuntTab(QWidget):
                 self.detect_btn.setChecked(False)
                 return
 
+            capture_subregions = None
+            if not self.auto_target_radio.isChecked():
+                capture_subregions = self._resolve_manual_subregions(capture_region)
+
             self._load_nickname_configuration()
             nickname_detector_instance = self._build_thread_nickname_detector()
             if nickname_detector_instance is None:
@@ -1313,6 +1537,30 @@ class HuntTab(QWidget):
             self._direction_detector_available = direction_detector_instance is not None
             self.append_log("YOLO 캐릭터 탐지를 사용하지 않고 닉네임 기반 탐지에 의존합니다.", "info")
 
+            runtime_settings = {}
+            if self.data_manager and hasattr(self.data_manager, 'get_detection_runtime_settings'):
+                try:
+                    runtime_settings = self.data_manager.get_detection_runtime_settings() or {}
+                except Exception as exc:
+                    self.append_log(f"실시간 탐지 설정을 불러오지 못했습니다: {exc}", "warn")
+                    runtime_settings = {}
+            nms_iou = runtime_settings.get('yolo_nms_iou', self.yolo_nms_iou)
+            max_det_value = runtime_settings.get('yolo_max_det', self.yolo_max_det)
+            try:
+                nms_iou = max(0.05, min(0.95, float(nms_iou)))
+            except (TypeError, ValueError):
+                nms_iou = self.yolo_nms_iou
+            try:
+                max_det_value = max(1, int(max_det_value))
+            except (TypeError, ValueError):
+                max_det_value = self.yolo_max_det
+            self.yolo_nms_iou = nms_iou
+            self.yolo_max_det = max_det_value
+            self.append_log(
+                f"YOLO NMS IoU={self.yolo_nms_iou:.2f}, 최대 박스={self.yolo_max_det}",
+                "info",
+            )
+
             try:
                 self.detection_thread = DetectionThread(
                     model_path=model_path,
@@ -1326,6 +1574,9 @@ class HuntTab(QWidget):
                     direction_detector=direction_detector_instance,
                     show_nickname_overlay=self._is_nickname_overlay_active(),
                     show_direction_overlay=self._is_direction_range_overlay_active(),
+                    nms_iou=self.yolo_nms_iou,
+                    max_det=self.yolo_max_det,
+                    allowed_subregions=capture_subregions,
                 )
             except TypeError:
                 # 구버전 런타임과의 호환성 확보
@@ -1340,6 +1591,9 @@ class HuntTab(QWidget):
                     is_debug_mode=False,
                     nickname_detector=nickname_detector_instance,
                     show_nickname_overlay=self._is_nickname_overlay_active(),
+                    nms_iou=self.yolo_nms_iou,
+                    max_det=self.yolo_max_det,
+                    allowed_subregions=capture_subregions,
                 )
                 # 방향 감지를 비활성화하고 상태 초기화
                 direction_detector_instance = None
@@ -1357,6 +1611,7 @@ class HuntTab(QWidget):
             self.detection_thread.finished.connect(self._on_detection_thread_finished)
 
             self.detection_thread.start()
+            self._start_perf_logging()
             self._update_detection_thread_overlay_flags()
             self._sync_detection_thread_status()
             if self.detection_view:
@@ -1389,6 +1644,7 @@ class HuntTab(QWidget):
         else:
             thread_active = self.detection_thread is not None and self.detection_thread.isRunning()
             self._release_pending = True
+            self._stop_perf_logging()
             self._stop_detection_thread()
             self.detect_btn.setText("실시간 탐지 시작")
             if self.detection_view:
@@ -1491,6 +1747,7 @@ class HuntTab(QWidget):
             self.detection_view.setText("탐지 중단됨")
             self.detection_view.setPixmap(QPixmap())
         self.detection_thread = None
+        self._stop_perf_logging()
         self._cancel_facing_reset_timer()
         self._issue_all_keys_release("탐지 스레드 종료")
         self.clear_detection_snapshot()
@@ -1609,6 +1866,7 @@ class HuntTab(QWidget):
             return
 
         show_confidence = self.show_confidence_summary_checkbox.isChecked()
+        show_frame = self.show_frame_summary_checkbox.isChecked()
         show_info = self.show_info_summary_checkbox.isChecked()
 
         if show_confidence:
@@ -1647,18 +1905,33 @@ class HuntTab(QWidget):
         else:
             self.confidence_summary_view.clear()
 
-        if show_info:
+        if show_frame:
             perf = getattr(self, 'latest_perf_stats', {}) or {}
             fps = float(perf.get('fps', 0.0))
             total_ms = float(perf.get('total_ms', 0.0))
             yolo_ms = float(perf.get('yolo_ms', 0.0))
             nickname_ms = float(perf.get('nickname_ms', 0.0))
             direction_ms = float(perf.get('direction_ms', 0.0))
-            fps_line = f"FPS: {fps:.0f}"
-            total_line = (
-                f"Total: {total_ms:.1f} ms ( {yolo_ms:.1f} ms + {nickname_ms:.1f} ms + {direction_ms:.1f} ms)"
-            )
+            capture_ms = float(perf.get('capture_ms', 0.0))
+            preprocess_ms = float(perf.get('preprocess_ms', 0.0))
+            post_ms = float(perf.get('post_ms', 0.0))
+            render_ms = float(perf.get('render_ms', 0.0))
+            emit_ms = float(perf.get('emit_ms', 0.0))
+            latency_ms = float(perf.get('payload_latency_ms', 0.0))
+            handler_ms = float(perf.get('handler_ms', 0.0))
 
+            frame_lines = [
+                f"FPS: {fps:.0f}",
+                f"Total: {total_ms:.1f} ms | Latency: {latency_ms:.1f} ms",
+                f"Capture {capture_ms:.1f} / Pre {preprocess_ms:.1f} / YOLO {yolo_ms:.1f}",
+                f"Nickname {nickname_ms:.1f} / Direction {direction_ms:.1f} / Post {post_ms:.1f}",
+                f"Render {render_ms:.1f} / Emit {emit_ms:.1f} / Handler {handler_ms:.1f}",
+            ]
+            self.frame_summary_view.setPlainText('\n'.join(frame_lines))
+        else:
+            self.frame_summary_view.clear()
+
+        if show_info:
             if self.current_authority == "hunt":
                 authority_text = "사냥 탭"
             elif self.current_authority == "map":
@@ -1682,8 +1955,6 @@ class HuntTab(QWidget):
             teleport_line = f"텔레포트 확률: {teleport_percent:.1f}%"
 
             info_lines = [
-                fps_line,
-                total_line,
                 f"이동권한: {authority_text}",
                 f"X축 범위 내 몬스터: {self.latest_monster_count}",
                 f"스킬 범위 몬스터: {self.latest_primary_monster_count}",
@@ -1803,6 +2074,11 @@ class HuntTab(QWidget):
         content_layout = QHBoxLayout()
         content_layout.setSpacing(12)
 
+        self.summary_left_container = QWidget()
+        left_layout = QVBoxLayout(self.summary_left_container)
+        left_layout.setContentsMargins(0, 0, 0, 0)
+        left_layout.setSpacing(8)
+
         self.summary_confidence_container = QWidget()
         confidence_layout = QVBoxLayout(self.summary_confidence_container)
         confidence_layout.setContentsMargins(0, 0, 0, 0)
@@ -1817,11 +2093,35 @@ class HuntTab(QWidget):
         confidence_header.addStretch(1)
         self.confidence_summary_view = QTextEdit()
         self.confidence_summary_view.setReadOnly(True)
-        self.confidence_summary_view.setMinimumHeight(140)
+        self.confidence_summary_view.setMinimumHeight(120)
         self.confidence_summary_view.setStyleSheet("font-family: Consolas, monospace;")
         confidence_layout.addLayout(confidence_header)
         confidence_layout.addWidget(self.confidence_summary_view)
-        content_layout.addWidget(self.summary_confidence_container, 1)
+
+        self.summary_frame_container = QWidget()
+        frame_layout = QVBoxLayout(self.summary_frame_container)
+        frame_layout.setContentsMargins(0, 0, 0, 0)
+        frame_layout.setSpacing(4)
+        frame_header = QHBoxLayout()
+        frame_label = QLabel("프레임 정보")
+        self.show_frame_summary_checkbox = QCheckBox()
+        self.show_frame_summary_checkbox.setChecked(True)
+        self.show_frame_summary_checkbox.toggled.connect(self._on_summary_checkbox_changed)
+        frame_header.addWidget(frame_label)
+        frame_header.addWidget(self.show_frame_summary_checkbox)
+        frame_header.addStretch(1)
+        self.frame_summary_view = QTextEdit()
+        self.frame_summary_view.setReadOnly(True)
+        self.frame_summary_view.setMinimumHeight(100)
+        self.frame_summary_view.setStyleSheet("font-family: Consolas, monospace;")
+        frame_layout.addLayout(frame_header)
+        frame_layout.addWidget(self.frame_summary_view)
+
+        left_layout.addWidget(self.summary_confidence_container)
+        left_layout.addWidget(self.summary_frame_container)
+        left_layout.addStretch(1)
+
+        content_layout.addWidget(self.summary_left_container, 1)
 
         self.summary_info_container = QWidget()
         info_layout = QVBoxLayout(self.summary_info_container)
@@ -2198,6 +2498,8 @@ class HuntTab(QWidget):
     def _handle_capture_mode_toggle(self, checked: bool) -> None:
         if hasattr(self, 'set_area_btn'):
             self.set_area_btn.setEnabled(bool(checked))
+        if hasattr(self, 'add_area_btn'):
+            self.add_area_btn.setEnabled(bool(checked) and bool(self.manual_capture_region))
         self._save_settings()
 
     def _handle_setting_changed(self, *args, **kwargs) -> None:
@@ -2667,32 +2969,41 @@ class HuntTab(QWidget):
         if not isinstance(payload, dict):
             return
 
+        handler_start = time.perf_counter()
+        received_ts = time.time()
+        payload_ts_raw = payload.get('timestamp', received_ts)
+        try:
+            payload_ts = float(payload_ts_raw)
+        except (TypeError, ValueError):
+            payload_ts = received_ts
+        latency_ms = max(0.0, (received_ts - payload_ts) * 1000.0)
+        self.latest_perf_stats['payload_latency_ms'] = latency_ms
+
         characters_data = payload.get('characters') or []
         monsters_data = payload.get('monsters') or []
         nickname_data = payload.get('nickname')
         perf_data = payload.get('perf') or {}
 
         if isinstance(perf_data, dict):
-            try:
-                self.latest_perf_stats['fps'] = float(perf_data.get('fps', self.latest_perf_stats['fps']))
-            except (TypeError, ValueError):
-                pass
-            try:
-                self.latest_perf_stats['total_ms'] = float(perf_data.get('total_ms', self.latest_perf_stats['total_ms']))
-            except (TypeError, ValueError):
-                pass
-            try:
-                self.latest_perf_stats['yolo_ms'] = float(perf_data.get('yolo_ms', self.latest_perf_stats['yolo_ms']))
-            except (TypeError, ValueError):
-                pass
-            try:
-                self.latest_perf_stats['nickname_ms'] = float(perf_data.get('nickname_ms', self.latest_perf_stats['nickname_ms']))
-            except (TypeError, ValueError):
-                pass
-            try:
-                self.latest_perf_stats['direction_ms'] = float(perf_data.get('direction_ms', self.latest_perf_stats['direction_ms']))
-            except (TypeError, ValueError):
-                pass
+            perf_keys = (
+                'fps',
+                'total_ms',
+                'yolo_ms',
+                'nickname_ms',
+                'direction_ms',
+                'capture_ms',
+                'preprocess_ms',
+                'post_ms',
+                'render_ms',
+                'emit_ms',
+            )
+            for key in perf_keys:
+                if key not in perf_data:
+                    continue
+                try:
+                    self.latest_perf_stats[key] = float(perf_data.get(key, self.latest_perf_stats.get(key, 0.0)))
+                except (TypeError, ValueError):
+                    continue
         direction_data = payload.get('direction')
 
         def _to_box(data):
@@ -2820,6 +3131,25 @@ class HuntTab(QWidget):
         self._evaluate_direction_timeout()
 
         self.update_detection_snapshot(snapshot)
+
+        handler_elapsed_ms = (time.perf_counter() - handler_start) * 1000.0
+        self.latest_perf_stats['handler_ms'] = handler_elapsed_ms
+
+        warn_messages: List[str] = []
+        total_ms = float(self.latest_perf_stats.get('total_ms', 0.0))
+        if total_ms > 70.0:
+            warn_messages.append(f"total {total_ms:.1f}ms")
+        if latency_ms > 120.0:
+            warn_messages.append(f"latency {latency_ms:.1f}ms")
+        if handler_elapsed_ms > 25.0:
+            warn_messages.append(f"handler {handler_elapsed_ms:.1f}ms")
+        if warn_messages and (time.time() - self._perf_warn_last_ts) >= self._perf_warn_min_interval:
+            self.append_log("성능 경고: " + ", ".join(warn_messages), "warn")
+            self._perf_warn_last_ts = time.time()
+
+        warning_text = ", ".join(warn_messages)
+        self._append_perf_log(warning_text)
+
         self._update_detection_summary()
         self._schedule_condition_poll()
 
@@ -3250,6 +3580,7 @@ class HuntTab(QWidget):
                 )
             )
             summary_confidence = bool(display.get('summary_confidence', self.show_confidence_summary_checkbox.isChecked()))
+            summary_frame = bool(display.get('summary_frame', self.show_frame_summary_checkbox.isChecked()))
             summary_info = bool(display.get('summary_info', self.show_info_summary_checkbox.isChecked()))
 
             self.show_hunt_area_checkbox.setChecked(show_hunt)
@@ -3259,10 +3590,62 @@ class HuntTab(QWidget):
             self.manual_target_radio.setChecked(not auto_target)
             self.screen_output_checkbox.setChecked(screen_output_enabled)
             self.show_confidence_summary_checkbox.setChecked(summary_confidence)
+            self.show_frame_summary_checkbox.setChecked(summary_frame)
             self.show_info_summary_checkbox.setChecked(summary_info)
 
-        self.manual_capture_region = data.get('manual_capture_region', self.manual_capture_region)
-        self.set_area_btn.setEnabled(self.manual_target_radio.isChecked())
+        detection_cfg = data.get('detection', {})
+        if isinstance(detection_cfg, dict):
+            nms_val = detection_cfg.get('yolo_nms_iou', self.yolo_nms_iou)
+            max_det_val = detection_cfg.get('yolo_max_det', self.yolo_max_det)
+            try:
+                self.yolo_nms_iou = max(0.05, min(0.95, float(nms_val)))
+            except (TypeError, ValueError):
+                self.yolo_nms_iou = DEFAULT_YOLO_NMS_IOU
+            try:
+                self.yolo_max_det = max(1, int(max_det_val))
+            except (TypeError, ValueError):
+                self.yolo_max_det = DEFAULT_YOLO_MAX_DET
+
+        regions_data = data.get('manual_capture_regions', [])
+        valid_regions: list[dict] = []
+        if isinstance(regions_data, list):
+            for region in regions_data:
+                if not isinstance(region, dict):
+                    continue
+                try:
+                    top = int(region['top'])
+                    left = int(region['left'])
+                    width = int(region['width'])
+                    height = int(region['height'])
+                except (KeyError, TypeError, ValueError):
+                    continue
+                if width <= 0 or height <= 0:
+                    continue
+                valid_regions.append({'top': top, 'left': left, 'width': width, 'height': height})
+
+        legacy_region = data.get('manual_capture_region')
+        if not valid_regions and isinstance(legacy_region, dict):
+            try:
+                top = int(legacy_region['top'])
+                left = int(legacy_region['left'])
+                width = int(legacy_region['width'])
+                height = int(legacy_region['height'])
+            except (KeyError, TypeError, ValueError):
+                legacy_region = None
+            else:
+                if width > 0 and height > 0:
+                    valid_regions = [{'top': top, 'left': left, 'width': width, 'height': height}]
+
+        self.manual_capture_regions = valid_regions
+        if self.manual_capture_regions:
+            self.manual_capture_region = self._merge_manual_capture_regions()
+        else:
+            self.manual_capture_region = None
+
+        manual_enabled = self.manual_target_radio.isChecked()
+        self.set_area_btn.setEnabled(manual_enabled)
+        if hasattr(self, 'add_area_btn'):
+            self.add_area_btn.setEnabled(manual_enabled and bool(self.manual_capture_region))
 
         self.overlay_preferences['hunt_area'] = self.show_hunt_area_checkbox.isChecked()
         self.overlay_preferences['primary_area'] = self.show_primary_skill_checkbox.isChecked()
@@ -3422,6 +3805,7 @@ class HuntTab(QWidget):
                 'auto_target': self.auto_target_radio.isChecked(),
                 'screen_output': self.screen_output_checkbox.isChecked(),
                 'summary_confidence': self.show_confidence_summary_checkbox.isChecked(),
+                'summary_frame': self.show_frame_summary_checkbox.isChecked(),
                 'summary_info': self.show_info_summary_checkbox.isChecked(),
             },
             'misc': {
@@ -3479,6 +3863,7 @@ class HuntTab(QWidget):
                 for skill in self.buff_skills
             ],
             'manual_capture_region': self.manual_capture_region,
+            'manual_capture_regions': self.manual_capture_regions,
             'auto_hunt_enabled': self.auto_hunt_enabled,
             'attack_interval_sec': self.attack_interval_sec,
             'last_popup_scale': self.last_popup_scale,
@@ -4397,6 +4782,7 @@ class HuntTab(QWidget):
         if self._request_timeout_timer:
             self._request_timeout_timer.stop()
         self._request_pending = False
+        self._stop_perf_logging()
         for timer in list(self._pre_delay_timers.values()):
             try:
                 timer.stop()

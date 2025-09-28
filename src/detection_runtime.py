@@ -209,6 +209,9 @@ class DetectionThread(QThread):
         direction_detector: Optional[DirectionDetector] = None,
         show_nickname_overlay: bool = True,
         show_direction_overlay: bool = True,
+        nms_iou: float = 0.45,
+        max_det: int = 100,
+        allowed_subregions: Optional[Iterable[dict]] = None,
     ) -> None:
         super().__init__()
         self.model_path = model_path
@@ -230,7 +233,56 @@ class DetectionThread(QThread):
         self.min_monster_box_size = MIN_MONSTER_BOX_SIZE
         self.current_authority: str = "map"
         self.current_facing: Optional[str] = None
-        
+        self.nms_iou = max(0.05, min(0.95, float(nms_iou)))
+        try:
+            self.max_det = max(1, int(max_det))
+        except (TypeError, ValueError):
+            self.max_det = 100
+
+        self.allowed_subregions: List[dict] = []
+        if allowed_subregions:
+            for region in allowed_subregions:
+                if not isinstance(region, dict):
+                    continue
+                try:
+                    rel_top = int(region['top'])
+                    rel_left = int(region['left'])
+                    rel_width = int(region['width'])
+                    rel_height = int(region['height'])
+                except (KeyError, TypeError, ValueError):
+                    continue
+                if rel_width <= 0 or rel_height <= 0:
+                    continue
+                self.allowed_subregions.append(
+                    {
+                        'top': rel_top,
+                        'left': rel_left,
+                        'width': rel_width,
+                        'height': rel_height,
+                    }
+                )
+
+        self._region_mask: Optional[np.ndarray] = None
+        if self.allowed_subregions:
+            try:
+                mask_height = int(self.capture_region['height'])
+                mask_width = int(self.capture_region['width'])
+            except (KeyError, TypeError, ValueError):
+                mask_height = 0
+                mask_width = 0
+            if mask_height > 0 and mask_width > 0:
+                mask = np.zeros((mask_height, mask_width), dtype=bool)
+                for sub in self.allowed_subregions:
+                    top = max(0, min(mask_height, sub['top']))
+                    left = max(0, min(mask_width, sub['left']))
+                    bottom = max(top, min(mask_height, sub['top'] + sub['height']))
+                    right = max(left, min(mask_width, sub['left'] + sub['width']))
+                    if top >= bottom or left >= right:
+                        continue
+                    mask[top:bottom, left:right] = True
+                if mask.any():
+                    self._region_mask = mask
+
         # FPS 계산 변수
         self.fps = 0.0
         self.frame_count = 0
@@ -242,6 +294,11 @@ class DetectionThread(QThread):
             "direction_ms": 0.0,
             "yolo_ms": 0.0,
             "total_ms": 0.0,
+            "capture_ms": 0.0,
+            "preprocess_ms": 0.0,
+            "post_ms": 0.0,
+            "render_ms": 0.0,
+            "emit_ms": 0.0,
         }
 
     def set_authority(self, owner: Optional[str]) -> None:
@@ -278,8 +335,23 @@ class DetectionThread(QThread):
                     self.frame_count = 0
                     self.start_time = current_time
 
-                frame_np = np.array(sct.grab(self.capture_region))
+                capture_start = time.perf_counter()
+                grabbed = sct.grab(self.capture_region)
+                capture_end = time.perf_counter()
+
+                frame_np = np.array(grabbed)
                 frame = cv2.cvtColor(frame_np, cv2.COLOR_BGRA2BGR)
+                if self._region_mask is not None:
+                    if (
+                        self._region_mask.shape[0] == frame.shape[0]
+                        and self._region_mask.shape[1] == frame.shape[1]
+                    ):
+                        frame = frame.copy()
+                        frame[~self._region_mask] = 0
+                preprocess_end = time.perf_counter()
+
+                self.perf_stats["capture_ms"] = (capture_end - capture_start) * 1000
+                self.perf_stats["preprocess_ms"] = (preprocess_end - capture_end) * 1000
 
                 nick_start = time.perf_counter()
                 nickname_info = None
@@ -317,12 +389,16 @@ class DetectionThread(QThread):
                     frame,
                     conf=low_conf,
                     classes=self.target_class_indices,
+                    iou=self.nms_iou,
+                    max_det=self.max_det,
                     verbose=False,
                 )
                 yolo_end = time.perf_counter()
                 self.perf_stats["yolo_ms"] = (yolo_end - yolo_start) * 1000
 
                 result = results[0]
+
+                post_start = time.perf_counter()
 
                 if len(result.boxes) > 0 and use_char_class:
                     char_indices_with_conf: List[tuple[int, float]] = []
@@ -489,15 +565,9 @@ class DetectionThread(QThread):
                         tipLength=0.35,
                     )
                 
-                loop_end_time = time.perf_counter()
-                self.perf_stats["total_ms"] = (loop_end_time - loop_start_time) * 1000
-                payload["perf"] = {
-                    "fps": float(self.fps),
-                    "total_ms": float(self.perf_stats["total_ms"]),
-                    "yolo_ms": float(self.perf_stats["yolo_ms"]),
-                    "nickname_ms": float(self.perf_stats["nickname_ms"]),
-                    "direction_ms": float(self.perf_stats["direction_ms"]),
-                }
+                post_end = time.perf_counter()
+                self.perf_stats["post_ms"] = (post_end - post_start) * 1000
+                self.perf_stats["total_ms"] = (post_end - loop_start_time) * 1000
 
                 cv2.rectangle(annotated_frame, (5, 5), (180, 80), (0, 0, 0), -1)
                 fps_text = f"FPS {self.fps:.1f}"
@@ -535,13 +605,33 @@ class DetectionThread(QThread):
                     2,
                 )
 
-                self.detections_ready.emit(payload)
-
+                render_start = time.perf_counter()
                 rgb_image = cv2.cvtColor(annotated_frame, cv2.COLOR_BGR2RGB)
                 h, w, ch = rgb_image.shape
                 bytes_per_line = ch * w
                 qt_image = QImage(rgb_image.data, w, h, bytes_per_line, QImage.Format.Format_RGB888)
+                render_end = time.perf_counter()
+                self.perf_stats["render_ms"] = (render_end - render_start) * 1000
+
+                payload["perf"] = {
+                    "fps": float(self.fps),
+                    "total_ms": float(self.perf_stats["total_ms"]),
+                    "yolo_ms": float(self.perf_stats["yolo_ms"]),
+                    "nickname_ms": float(self.perf_stats["nickname_ms"]),
+                    "direction_ms": float(self.perf_stats["direction_ms"]),
+                    "capture_ms": float(self.perf_stats["capture_ms"]),
+                    "preprocess_ms": float(self.perf_stats["preprocess_ms"]),
+                    "post_ms": float(self.perf_stats["post_ms"]),
+                    "render_ms": float(self.perf_stats["render_ms"]),
+                    "emit_ms": float(self.perf_stats["emit_ms"]),
+                }
+
+                emit_start = time.perf_counter()
+                self.detections_ready.emit(payload)
+
                 self.frame_ready.emit(qt_image.copy())
+                emit_end = time.perf_counter()
+                self.perf_stats["emit_ms"] = (emit_end - emit_start) * 1000
                 self.msleep(15)
         except Exception as exc:
             print(f"탐지 스레드 오류: {exc}")

@@ -42,7 +42,7 @@ from PyQt6.QtWidgets import (
     QListWidgetItem, QInputDialog, QTextEdit, QDialogButtonBox, QCheckBox,
     QComboBox, QDoubleSpinBox, QGroupBox, QScrollArea, QSpinBox,
     QProgressBar, QStatusBar, QAbstractItemView, QTreeWidget, QTreeWidgetItem,
-    QHeaderView, QLineEdit
+    QHeaderView, QLineEdit, QFormLayout, QSizePolicy
 )
 from PyQt6.QtGui import (
     QPixmap, QImage, QIcon, QPainter, QPen, QColor, QBrush, QCursor, QPolygon,
@@ -102,6 +102,11 @@ MIN_MONSTER_LABEL_SIZE = 30
 # 편집기에서 마우스 커서를 올린 다각형을 강조하기 위한 색상입니다.
 HIGHLIGHT_BRUSH_COLOR = QColor(255, 255, 0, 100) # 채우기 색상
 HIGHLIGHT_PEN_COLOR = QColor(255, 255, 255)   # 외곽선 색상 (흰색)
+
+DEFAULT_DETECTION_RUNTIME_SETTINGS = {
+    'yolo_nms_iou': 0.40,
+    'yolo_max_det': 60,
+}
 
 # --- 0.5 SAM 관리자 클래스 ---
 class SAMManager(QObject):
@@ -1712,6 +1717,31 @@ class DataManager:
         with open(self.settings_path, 'w', encoding='utf-8') as f:
             json.dump(current_settings, f, indent=4, ensure_ascii=False)
 
+    def get_detection_runtime_settings(self) -> dict:
+        settings = self.load_settings()
+        detection = settings.get('detection', {}) if isinstance(settings, dict) else {}
+        nms = detection.get('yolo_nms_iou', DEFAULT_DETECTION_RUNTIME_SETTINGS['yolo_nms_iou'])
+        max_det = detection.get('yolo_max_det', DEFAULT_DETECTION_RUNTIME_SETTINGS['yolo_max_det'])
+        try:
+            nms_val = max(0.05, min(0.95, float(nms)))
+        except (TypeError, ValueError):
+            nms_val = DEFAULT_DETECTION_RUNTIME_SETTINGS['yolo_nms_iou']
+        try:
+            max_det_val = max(1, int(max_det))
+        except (TypeError, ValueError):
+            max_det_val = DEFAULT_DETECTION_RUNTIME_SETTINGS['yolo_max_det']
+        return {
+            'yolo_nms_iou': nms_val,
+            'yolo_max_det': max_det_val,
+        }
+
+    def update_detection_runtime_settings(self, *, yolo_nms_iou: float, yolo_max_det: int) -> None:
+        current = self.load_settings()
+        detection = dict(current.get('detection', {})) if isinstance(current, dict) else {}
+        detection['yolo_nms_iou'] = max(0.05, min(0.95, float(yolo_nms_iou)))
+        detection['yolo_max_det'] = max(1, int(yolo_max_det))
+        self.save_settings({'detection': detection})
+
     def load_status_monitor_config(self) -> StatusMonitorConfig:
         try:
             with open(self.status_config_path, 'r', encoding='utf-8') as f:
@@ -2313,6 +2343,7 @@ class LearningTab(QWidget):
         self._status_command_options: list[tuple[str, str]] = []
         self._thumbnail_cache = OrderedDict()
         self._thumbnail_cache_limit = 256
+        self._runtime_ui_updating = False
         self.initUI()
         self.init_sam()
         self.data_manager.register_status_config_listener(self._handle_status_config_changed)
@@ -2461,7 +2492,40 @@ class LearningTab(QWidget):
         train_options_layout.addWidget(self.train_btn)
         train_layout.addLayout(train_options_layout)
         train_group.setLayout(train_layout)
-        right_layout.addWidget(train_group)
+
+        runtime_group = QGroupBox("YOLO 실시간 설정")
+        runtime_group.setSizePolicy(QSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred))
+        runtime_form = QFormLayout()
+        runtime_form.setLabelAlignment(Qt.AlignmentFlag.AlignLeft)
+
+        self.yolo_nms_spin = QDoubleSpinBox()
+        self.yolo_nms_spin.setRange(0.10, 0.90)
+        self.yolo_nms_spin.setSingleStep(0.05)
+        self.yolo_nms_spin.setDecimals(2)
+        self.yolo_nms_spin.setToolTip("NMS IoU 임계값. 낮을수록 겹치는 박스를 더 많이 제거합니다.")
+        runtime_form.addRow("NMS IoU", self.yolo_nms_spin)
+
+        self.yolo_max_det_spin = QSpinBox()
+        self.yolo_max_det_spin.setRange(10, 300)
+        self.yolo_max_det_spin.setSingleStep(5)
+        self.yolo_max_det_spin.setToolTip("한 프레임에서 유지할 최대 박스 수를 제한합니다.")
+        runtime_form.addRow("최대 박스 수", self.yolo_max_det_spin)
+
+        runtime_group.setLayout(runtime_form)
+
+        train_group.setSizePolicy(QSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred))
+        train_runtime_layout = QHBoxLayout()
+        train_runtime_layout.addWidget(train_group, 1)
+        train_runtime_layout.addWidget(runtime_group, 1)
+        right_layout.addLayout(train_runtime_layout)
+
+        runtime_settings = self.data_manager.get_detection_runtime_settings()
+        self._runtime_ui_updating = True
+        self.yolo_nms_spin.setValue(runtime_settings['yolo_nms_iou'])
+        self.yolo_max_det_spin.setValue(runtime_settings['yolo_max_det'])
+        self._runtime_ui_updating = False
+        self.yolo_nms_spin.valueChanged.connect(self._handle_runtime_settings_changed)
+        self.yolo_max_det_spin.valueChanged.connect(self._handle_runtime_settings_changed)
 
         model_manage_group = QGroupBox("저장된 모델 관리")
         model_manage_layout = QVBoxLayout()
@@ -3547,6 +3611,22 @@ class LearningTab(QWidget):
         if selected_item.parent():
             return selected_item.text(0)
         return None
+
+    def _handle_runtime_settings_changed(self, _value=None) -> None:
+        if self._runtime_ui_updating:
+            return
+        try:
+            nms_val = float(self.yolo_nms_spin.value())
+        except (TypeError, ValueError):
+            nms_val = DEFAULT_DETECTION_RUNTIME_SETTINGS['yolo_nms_iou']
+        try:
+            max_det_val = int(self.yolo_max_det_spin.value())
+        except (TypeError, ValueError):
+            max_det_val = DEFAULT_DETECTION_RUNTIME_SETTINGS['yolo_max_det']
+        self.data_manager.update_detection_runtime_settings(
+            yolo_nms_iou=nms_val,
+            yolo_max_det=max_det_val,
+        )
 
     def populate_image_list(self):
         self.image_list_widget.clear()
