@@ -504,6 +504,7 @@ class HuntTab(QWidget):
     hunt_area_updated = pyqtSignal(object)
     primary_skill_area_updated = pyqtSignal(object)
     monster_stats_updated = pyqtSignal(int, int)
+    detection_status_changed = pyqtSignal(bool)
 
     def __init__(self) -> None:
         super().__init__()
@@ -642,6 +643,7 @@ class HuntTab(QWidget):
         self._perf_log_handle: Optional[TextIO] = None
         self._perf_log_writer: Optional[csv.writer] = None
         self._perf_logging_enabled = False
+        self._detection_status = False
         self.yolo_nms_iou = DEFAULT_YOLO_NMS_IOU
         self.yolo_max_det = DEFAULT_YOLO_MAX_DET
         self._show_direction_overlay_config = True
@@ -696,6 +698,16 @@ class HuntTab(QWidget):
 
     def _is_detection_active(self) -> bool:
         return bool(self.detect_btn.isChecked())
+
+    def _set_detection_status(self, active: bool) -> None:
+        active = bool(active)
+        if self._detection_status == active:
+            return
+        self._detection_status = active
+        try:
+            self.detection_status_changed.emit(active)
+        except Exception:
+            pass
 
     def force_stop_detection(self) -> bool:
         stopped = False
@@ -1776,6 +1788,7 @@ class HuntTab(QWidget):
             self.detection_thread.finished.connect(self._on_detection_thread_finished)
 
             self.detection_thread.start()
+            self._set_detection_status(True)
             self._start_perf_logging()
             self._update_detection_thread_overlay_flags()
             self._sync_detection_thread_status()
@@ -1811,6 +1824,7 @@ class HuntTab(QWidget):
             self._release_pending = True
             self._stop_perf_logging()
             self._stop_detection_thread()
+            self._set_detection_status(False)
             self.detect_btn.setText("실시간 탐지 시작")
             if self.detection_view:
                 self.detection_view.setText("탐지 중단됨")
@@ -1878,6 +1892,7 @@ class HuntTab(QWidget):
         self._status_detection_start_ts = None
         self._update_status_summary_cache()
         self._status_mp_saved_command = None
+        self._set_detection_status(False)
         if self.detection_thread:
             try:
                 self.detection_thread.frame_ready.disconnect(self._handle_detection_frame)
@@ -1917,6 +1932,7 @@ class HuntTab(QWidget):
         self._issue_all_keys_release("탐지 스레드 종료")
         self.clear_detection_snapshot()
         self._active_monster_confidence_overrides = {}
+        self._set_detection_status(False)
 
     def _handle_detection_log(self, messages: List[str]) -> None:
         for msg in messages:

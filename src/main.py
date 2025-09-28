@@ -16,7 +16,7 @@ import traceback
 from datetime import datetime
 
 from PyQt6.QtWidgets import (
-    QApplication, QMainWindow, QTabWidget, QWidget, QVBoxLayout, QLabel
+    QApplication, QMainWindow, QTabWidget, QWidget, QVBoxLayout, QLabel, QTabBar
 )
 from PyQt6.QtCore import Qt, QSettings, QTimer, QAbstractNativeEventFilter
 
@@ -95,6 +95,37 @@ def log_uncaught_exceptions(ex_cls, ex, tb):
     # Qt 기본 핸들러도 호출 (선택 사항, 하지만 보통 함께 호출해주는 것이 좋음)
     sys.__excepthook__(ex_cls, ex, tb)
     
+class ColoredTabBar(QTabBar):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._tab_colors: dict[int, str] = {}
+
+    def set_tab_color(self, index: int, color: str | None) -> None:
+        if color:
+            self._tab_colors[index] = color
+        else:
+            self._tab_colors.pop(index, None)
+        self._apply_stylesheet()
+
+    def clear_colors(self) -> None:
+        if not self._tab_colors:
+            return
+        self._tab_colors.clear()
+        self._apply_stylesheet()
+
+    def _apply_stylesheet(self) -> None:
+        rules = []
+        for index, color in self._tab_colors.items():
+            rules.append(
+                f"QTabBar::tab:nth-child({index + 1}) {{"
+                f" background: {color};"
+                " color: white;"
+                " border-radius: 4px;"
+                "}}"
+            )
+        self.setStyleSheet("\n".join(rules))
+
+
 class MainWindow(QMainWindow):
     """
     메인 윈도우 클래스.
@@ -115,6 +146,10 @@ class MainWindow(QMainWindow):
         self.tab_widget.setTabPosition(QTabWidget.TabPosition.North)
         self.tab_widget.setMovable(True)
 
+        tab_bar = ColoredTabBar()
+        tab_bar.tabMoved.connect(self._handle_tab_moved)
+        self.tab_widget.setTabBar(tab_bar)
+
         self.setCentralWidget(self.tab_widget)
 
         # [수정] 로드된 탭 인스턴스를 저장할 딕셔너리
@@ -122,6 +157,7 @@ class MainWindow(QMainWindow):
         self.status_monitor_thread: StatusMonitorThread | None = None
         self.esc_hotkey_manager = None
         self.esc_hotkey_filter = None
+        self._tab_color_states: dict[str, str] = {}
 
         self.load_tabs()
 
@@ -214,6 +250,14 @@ class MainWindow(QMainWindow):
                 hunt_tab.append_log("자동 제어 탭과 연동이 설정되었습니다.")
 
             print("성공: '사냥' 탭과 '자동 제어' 탭을 연결했습니다.")
+
+            if hasattr(hunt_tab, 'detection_status_changed'):
+                try:
+                    hunt_tab.detection_status_changed.connect(self._on_hunt_detection_status_changed)
+                    current = bool(getattr(hunt_tab, '_detection_status', False))
+                    self._on_hunt_detection_status_changed(current)
+                except Exception:
+                    pass
         else:
             print("경고: '사냥' 또는 '자동 제어' 탭을 찾을 수 없어 연결하지 못했습니다.")
 
@@ -230,6 +274,14 @@ class MainWindow(QMainWindow):
             auto_control_tab.command_profile_renamed.connect(map_tab.on_command_profile_renamed)
 
             print("성공: '맵' 탭과 '자동 제어' 탭을 연결했습니다.")
+
+            if hasattr(map_tab, 'detection_status_changed'):
+                try:
+                    map_tab.detection_status_changed.connect(self._on_map_detection_status_changed)
+                    current = bool(getattr(map_tab, 'is_detection_running', False))
+                    self._on_map_detection_status_changed(current)
+                except Exception:
+                    pass
         else:
             print("경고: '맵' 또는 '자동 제어' 탭을 찾을 수 없어 연결하지 못했습니다.")
 
@@ -335,6 +387,50 @@ class MainWindow(QMainWindow):
                 print(f"경고: '모든 키 떼기' 명령 전송 실패: {exc}")
 
         QTimer.singleShot(500, _send_release)
+
+    def _handle_tab_moved(self, from_index: int, to_index: int) -> None:  # noqa: ARG002
+        self._reapply_tab_colors()
+
+    def _set_tab_color(self, tab_title: str, color: str | None) -> None:
+        widget = self.loaded_tabs.get(tab_title)
+        if widget is None:
+            return
+        index = self.tab_widget.indexOf(widget)
+        if index == -1:
+            return
+
+        tab_bar = self.tab_widget.tabBar()
+        if not isinstance(tab_bar, ColoredTabBar):
+            return
+
+        if color:
+            self._tab_color_states[tab_title] = color
+        else:
+            self._tab_color_states.pop(tab_title, None)
+
+        tab_bar.set_tab_color(index, color)
+
+    def _reapply_tab_colors(self) -> None:
+        tab_bar = self.tab_widget.tabBar()
+        if not isinstance(tab_bar, ColoredTabBar):
+            return
+
+        tab_bar.clear_colors()
+        for tab_title, color in self._tab_color_states.items():
+            widget = self.loaded_tabs.get(tab_title)
+            if widget is None:
+                continue
+            index = self.tab_widget.indexOf(widget)
+            if index != -1:
+                tab_bar.set_tab_color(index, color)
+
+    def _on_hunt_detection_status_changed(self, active: bool) -> None:
+        color = "#D32F2F" if active else None
+        self._set_tab_color('사냥', color)
+
+    def _on_map_detection_status_changed(self, active: bool) -> None:
+        color = "#1E88E5" if active else None
+        self._set_tab_color('맵', color)
 
 
 if __name__ == '__main__':
