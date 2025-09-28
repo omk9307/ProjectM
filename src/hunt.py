@@ -2353,7 +2353,6 @@ class HuntTab(QWidget):
         if resource == 'hp':
             if self._hp_guard_active:
                 return
-            self._issue_all_keys_release('HP 회복 자동 명령')
             self._issue_status_command(resource, command_name)
             guard_delay = random.uniform(0.370, 0.400)
             self._hp_guard_active = True
