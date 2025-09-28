@@ -383,6 +383,9 @@ class AutoControlTab(QWidget):
         self.sequence_owned_keys = {self.SEQUENTIAL_OWNER: self.held_keys}
         self.active_parallel_sequences = {}
 
+        self.MAX_SEQUENCE_RECOVERY_ATTEMPTS = 2
+        self.sequence_recovery_attempts = defaultdict(int)
+
         self.globally_pressed_keys = set()
         self.global_listener = None
         
@@ -417,6 +420,7 @@ class AutoControlTab(QWidget):
                 self.sequence_completed.emit(command_name, self.current_command_reason, success)
             except Exception:
                 pass
+            self.sequence_recovery_attempts.pop(command_name, None)
         self.current_command_name = ""
         self.current_command_reason = None
         self.current_sequence = []
@@ -1705,6 +1709,31 @@ class AutoControlTab(QWidget):
         """
         self._release_all_for_owner(self.SEQUENTIAL_OWNER, force=force)
 
+    def _abort_sequence_for_recovery(self):
+        try:
+            self.sequence_timer.stop()
+        except Exception:
+            pass
+        try:
+            self.sequence_watchdog.stop()
+        except Exception:
+            pass
+        self._release_all_keys(force=True)
+        self.last_sent_timestamps.clear()
+        self.is_sequence_running = False
+        self.is_processing_step = False
+        self.current_sequence = []
+        self.current_sequence_index = 0
+        self.is_first_key_event_in_sequence = True
+
+    def _reconnect_serial_for_recovery(self):
+        if self.ser and self.ser.is_open:
+            try:
+                self.ser.close()
+            except Exception:
+                pass
+        self.connect_to_pi()
+
 # [기능 추가] 테스트 종료 후 안전하게 모든 키를 떼는 슬롯
     @pyqtSlot()
     def _safe_release_all_keys(self):
@@ -2105,19 +2134,61 @@ class AutoControlTab(QWidget):
 
     def _on_sequence_stuck(self):
         """(신규) 시퀀스가 일정 시간 진행이 없을 때 호출되어 안전 복구를 시도합니다."""
-        print(f"[AutoControl] Sequence watchdog fired for '{self.current_command_name}'. Performing safe recovery.")
-        self.log_generated.emit(f"경고: '{self.current_command_name}' 시퀀스가 멈춤. 복구 시도 중...", "orange")
-        # 시퀀스 강제 중단 및 키 정리
-        try:
-            self.sequence_timer.stop()
-        except Exception:
-            pass
-        try:
-            self.sequence_watchdog.stop()
-        except Exception:
-            pass
-        self._release_all_keys(force=True)
-        self._notify_sequence_completed(False)
+        if not self.is_sequence_running:
+            return
+
+        command_name = self.current_command_name or ""
+        reason = self.current_command_reason
+        is_test_mode = self.is_test_mode
+
+        print(f"[AutoControl] Sequence watchdog fired for '{command_name}'. Attempting recovery.")
+        self.log_generated.emit(
+            f"경고: '{command_name}' 시퀀스가 멈춤. 복구 시도 중...",
+            "orange",
+        )
+
+        self._abort_sequence_for_recovery()
+
+        if is_test_mode or not command_name:
+            if command_name:
+                self.log_generated.emit(
+                    f"'{command_name}' 테스트 모드이므로 자동 재시도를 건너뜁니다.",
+                    "orange",
+                )
+            self._notify_sequence_completed(False)
+            return
+
+        self.sequence_recovery_attempts[command_name] += 1
+        attempt = self.sequence_recovery_attempts[command_name]
+        if attempt > self.MAX_SEQUENCE_RECOVERY_ATTEMPTS:
+            self.log_generated.emit(
+                f"경고: '{command_name}' 자동 복구 횟수 초과. 수동 조치가 필요합니다.",
+                "red",
+            )
+            self._notify_sequence_completed(False)
+            return
+
+        self.status_label.setText(
+            f"'{command_name}' 복구 시도 {attempt}/{self.MAX_SEQUENCE_RECOVERY_ATTEMPTS}."
+        )
+
+        self._reconnect_serial_for_recovery()
+
+        sequence_template = self.mappings.get(command_name)
+        if not isinstance(sequence_template, list) or not sequence_template:
+            self.log_generated.emit(
+                f"경고: '{command_name}'에 대한 시퀀스 원본을 찾을 수 없어 복구를 중단합니다.",
+                "red",
+            )
+            self._notify_sequence_completed(False)
+            return
+
+        sequence_payload = copy.deepcopy(sequence_template)
+        self.log_generated.emit(
+            f"'{command_name}' 자동 재실행을 시작합니다.({attempt}/{self.MAX_SEQUENCE_RECOVERY_ATTEMPTS})",
+            "orange",
+        )
+        self._start_sequence_execution(sequence_payload, command_name, is_test=False, reason=reason)
 
     def toggle_recording(self):
         if self.is_recording or self.is_waiting_for_start_key:

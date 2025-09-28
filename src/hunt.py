@@ -573,7 +573,6 @@ class HuntTab(QWidget):
             'yolo_ms': 0.0,
             'nickname_ms': 0.0,
             'direction_ms': 0.0,
-            'status_ms': 0.0,
         }
         self._active_target_names: List[str] = []
 
@@ -1655,11 +1654,9 @@ class HuntTab(QWidget):
             yolo_ms = float(perf.get('yolo_ms', 0.0))
             nickname_ms = float(perf.get('nickname_ms', 0.0))
             direction_ms = float(perf.get('direction_ms', 0.0))
-            status_ms = float(perf.get('status_ms', 0.0))
-
             fps_line = f"FPS: {fps:.0f}"
             total_line = (
-                f"Total: {total_ms:.1f} ms ( {yolo_ms:.1f} ms + {nickname_ms:.1f} ms + {direction_ms:.1f} ms) + HP/MP/EXP: {status_ms:.1f} ms"
+                f"Total: {total_ms:.1f} ms ( {yolo_ms:.1f} ms + {nickname_ms:.1f} ms + {direction_ms:.1f} ms)"
             )
 
             if self.current_authority == "hunt":
@@ -2241,14 +2238,29 @@ class HuntTab(QWidget):
 
     def _emit_control_command(self, command: str, reason: Optional[str] = None) -> None:
         normalized = str(command).strip()
-        if (
-            self._get_command_delay_remaining() > 0
-            and command not in ("모든 키 떼기",)
-            and not normalized.startswith("방향설정(")
-        ):
-            return
         if not command:
             return
+        if not normalized:
+            return
+
+        is_status_command = isinstance(reason, str) and reason.startswith('status:')
+        allow_during_cooldown = False
+        if is_status_command:
+            try:
+                _, resource = str(reason).split(':', 1)
+            except ValueError:
+                resource = ''
+            if resource.strip().lower() == 'hp':
+                allow_during_cooldown = True
+
+        if (
+            self._get_command_delay_remaining() > 0
+            and normalized != "모든 키 떼기"
+            and not normalized.startswith("방향설정(")
+            and not allow_during_cooldown
+        ):
+            return
+
         if normalized.startswith("방향설정("):
             if "좌" in normalized:
                 self._set_current_facing('left')
@@ -2261,8 +2273,7 @@ class HuntTab(QWidget):
             elif "key.right" in lower and "key.left" not in lower:
                 self._set_current_facing('right', save=False)
         self.control_command_issued.emit(command, reason)
-        is_status = isinstance(reason, str) and reason.startswith('status:')
-        if not is_status and normalized != "모든 키 떼기":
+        if not is_status_command and normalized != "모든 키 떼기":
             self._last_command_issued = (command, reason)
 
         reason_text = reason.strip() if isinstance(reason, str) else ""
@@ -2322,10 +2333,6 @@ class HuntTab(QWidget):
         hp_cfg = getattr(self._status_config, 'hp', None)
         mp_cfg = getattr(self._status_config, 'mp', None)
         exp_cfg = getattr(self._status_config, 'exp', None)
-
-        status_ms = payload.get('status_ms')
-        if isinstance(status_ms, (int, float)):
-            self.latest_perf_stats['status_ms'] = float(status_ms)
 
         if hp_cfg and getattr(hp_cfg, 'enabled', True):
             hp_info = payload.get('hp')

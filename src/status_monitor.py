@@ -259,10 +259,10 @@ class StatusMonitorThread(QThread):
             print(f"[StatusMonitorThread] 스레드 오류: {exc}")
 
     # -------------------- 내부 로직 --------------------
-    def _evaluate_once(self, sct: "mss.mss") -> Dict[str, dict]:
+    def _evaluate_once(self, sct: "mss.mss") -> Dict[str, object]:
         now = time.time()
         tasks: Tuple[str, ...] = ("hp", "mp", "exp")
-        snapshot: Dict[str, dict] = {}
+        snapshot: Dict[str, object] = {}
 
         with QMutexLocker(self._lock):
             config = self._config
