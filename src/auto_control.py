@@ -1665,8 +1665,15 @@ class AutoControlTab(QWidget):
                 self._send_command(CMD_RELEASE, key_object)
             return True
 
-        if force and self.global_key_counts.get(key_object, 0) == 0:
+        if force:
+            # 강제 해제 시에는 다른 소유자와 글로벌 상태도 함께 정리해야 이후 입력이 정상 동작
+            for owner_set in list(self.sequence_owned_keys.values()):
+                owner_set.discard(key_object)
+
+            self.global_key_counts.pop(key_object, None)
             self._send_command(CMD_RELEASE, key_object)
+
+            # 기본 해제 경로와 동일하게 해제됐음을 반환
             return True
 
         return False
