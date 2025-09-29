@@ -3785,12 +3785,22 @@ class LearningTab(QWidget):
         self._apply_nickname_config_to_ui()
         self._apply_direction_config_to_ui()
         self.nickname_text_input.editingFinished.connect(self.on_nickname_text_changed)
-        self.nickname_threshold_spin.valueChanged.connect(self.on_nickname_threshold_changed)
-        self.nickname_offset_x_spin.valueChanged.connect(self.on_nickname_offset_changed)
-        self.nickname_offset_y_spin.valueChanged.connect(self.on_nickname_offset_changed)
-        self.nickname_margin_x_spin.valueChanged.connect(self.on_nickname_roi_margin_changed)
-        self.nickname_margin_top_spin.valueChanged.connect(self.on_nickname_roi_margin_changed)
-        self.nickname_margin_bottom_spin.valueChanged.connect(self.on_nickname_roi_margin_changed)
+        for spin in (
+            self.nickname_threshold_spin,
+            self.nickname_offset_x_spin,
+            self.nickname_offset_y_spin,
+            self.nickname_margin_x_spin,
+            self.nickname_margin_top_spin,
+            self.nickname_margin_bottom_spin,
+        ):
+            spin.setKeyboardTracking(False)
+
+        self.nickname_threshold_spin.editingFinished.connect(self.on_nickname_threshold_committed)
+        self.nickname_offset_x_spin.editingFinished.connect(self.on_nickname_offset_committed)
+        self.nickname_offset_y_spin.editingFinished.connect(self.on_nickname_offset_committed)
+        self.nickname_margin_x_spin.editingFinished.connect(self.on_nickname_margin_committed)
+        self.nickname_margin_top_spin.editingFinished.connect(self.on_nickname_margin_committed)
+        self.nickname_margin_bottom_spin.editingFinished.connect(self.on_nickname_margin_committed)
         self.nickname_overlay_checkbox.toggled.connect(self.on_nickname_overlay_toggled)
         self.direction_threshold_spin.valueChanged.connect(self.on_direction_threshold_changed)
         self.direction_offset_spin.valueChanged.connect(self.on_direction_offset_changed)
@@ -4541,12 +4551,13 @@ class LearningTab(QWidget):
         state_text = '표시' if checked else '비표시'
         self.log_viewer.append(f"닉네임 실시간 표기를 {state_text}로 전환했습니다.")
 
-    def on_nickname_threshold_changed(self, value: float):
+    def on_nickname_threshold_committed(self):
         if self._nickname_ui_updating:
             return
-        self.nickname_config = self.data_manager.update_nickname_config({'match_threshold': float(value)})
+        value = float(self.nickname_threshold_spin.value())
+        self.nickname_config = self.data_manager.update_nickname_config({'match_threshold': value})
 
-    def on_nickname_offset_changed(self):
+    def on_nickname_offset_committed(self):
         if self._nickname_ui_updating:
             return
         updates = {
@@ -4555,7 +4566,7 @@ class LearningTab(QWidget):
         }
         self.nickname_config = self.data_manager.update_nickname_config(updates)
 
-    def on_nickname_roi_margin_changed(self, _value: int):
+    def on_nickname_margin_committed(self):
         if self._nickname_ui_updating:
             return
         updates = {
