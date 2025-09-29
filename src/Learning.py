@@ -17,6 +17,7 @@ warnings.filterwarnings("ignore", category=DeprecationWarning)
 
 import sys
 import os
+import glob
 import shutil
 import json
 import yaml
@@ -26,6 +27,7 @@ import mss
 import pygetwindow as gw
 import time
 import uuid
+import hashlib
 import requests
 from pathlib import Path
 from collections import OrderedDict
@@ -3406,6 +3408,9 @@ class LearningTab(QWidget):
         self._status_command_options: list[tuple[str, str]] = []
         self._thumbnail_cache = OrderedDict()
         self._thumbnail_cache_limit = 256
+        self._thumbnail_cache_dir = os.path.join(WORKSPACE_ROOT, "cache", "thumbnails")
+        os.makedirs(self._thumbnail_cache_dir, exist_ok=True)
+        self._thumbnail_disk_limit = 512
         self._runtime_ui_updating = False
         self._monster_settings_dialog_open = False
         self.initUI()
@@ -5163,6 +5168,63 @@ class LearningTab(QWidget):
             item.setData(Qt.ItemDataRole.UserRole, path)
             self.image_list_widget.addItem(item)
 
+    def _thumbnail_disk_prefix(self, image_path):
+        return hashlib.sha1(image_path.encode('utf-8', 'ignore')).hexdigest()
+
+    def _thumbnail_disk_key(self, image_path, size_tuple, file_mtime):
+        prefix = self._thumbnail_disk_prefix(image_path)
+        mtime_tag = str(int(file_mtime * 1000))
+        size_tag = f"{size_tuple[0]}x{size_tuple[1]}"
+        return f"{prefix}_{mtime_tag}_{size_tag}"
+
+    def _thumbnail_disk_path(self, cache_key):
+        return os.path.join(self._thumbnail_cache_dir, f"{cache_key}.png")
+
+    def _load_thumbnail_from_disk(self, cache_key):
+        cache_path = self._thumbnail_disk_path(cache_key)
+        if not os.path.exists(cache_path):
+            return None
+        pixmap = QPixmap(cache_path)
+        if pixmap.isNull():
+            try:
+                os.remove(cache_path)
+            except OSError:
+                pass
+            return None
+        return QIcon(pixmap)
+
+    def _save_thumbnail_to_disk(self, cache_key, pixmap):
+        cache_path = self._thumbnail_disk_path(cache_key)
+        try:
+            pixmap.save(cache_path, 'PNG')
+            self._trim_thumbnail_disk_cache()
+        except Exception:
+            try:
+                if os.path.exists(cache_path):
+                    os.remove(cache_path)
+            except OSError:
+                pass
+
+    def _trim_thumbnail_disk_cache(self):
+        try:
+            entries = glob.glob(os.path.join(self._thumbnail_cache_dir, '*.png'))
+        except Exception:
+            return
+        if len(entries) <= self._thumbnail_disk_limit:
+            return
+        def mtime_key(path):
+            try:
+                return os.path.getmtime(path)
+            except OSError:
+                return float('inf')
+        entries.sort(key=mtime_key)
+        excess = len(entries) - self._thumbnail_disk_limit
+        for path in entries[:excess]:
+            try:
+                os.remove(path)
+            except OSError:
+                pass
+
     def _get_thumbnail_icon(self, image_path):
         """이미지 경로에 대한 썸네일 QIcon을 캐시에서 반환하거나 새로 생성합니다."""
         icon_size = self.image_list_widget.iconSize()
@@ -5189,6 +5251,18 @@ class LearningTab(QWidget):
                 self._thumbnail_cache.move_to_end(image_path)
                 return cached_icon
             self._thumbnail_cache.pop(image_path, None)
+            cache_entry = None
+
+        disk_key = None
+        if file_mtime is not None:
+            disk_key = self._thumbnail_disk_key(image_path, size_tuple, file_mtime)
+            disk_icon = self._load_thumbnail_from_disk(disk_key)
+            if disk_icon is not None:
+                self._thumbnail_cache[image_path] = (file_mtime, size_tuple, disk_icon)
+                self._thumbnail_cache.move_to_end(image_path)
+                while len(self._thumbnail_cache) > self._thumbnail_cache_limit:
+                    self._thumbnail_cache.popitem(last=False)
+                return disk_icon
 
         placeholder = None
         pixmap = QPixmap()
@@ -5206,12 +5280,30 @@ class LearningTab(QWidget):
             self._thumbnail_cache.move_to_end(image_path)
             while len(self._thumbnail_cache) > self._thumbnail_cache_limit:
                 self._thumbnail_cache.popitem(last=False)
+            if disk_key is not None and placeholder is None:
+                self._save_thumbnail_to_disk(disk_key, pixmap)
 
         return icon
 
     def _invalidate_thumbnail_cache(self, image_path):
         """지정한 이미지 경로에 대한 캐시를 제거합니다."""
         self._thumbnail_cache.pop(image_path, None)
+        prefix = self._thumbnail_disk_prefix(image_path)
+        pattern = os.path.join(self._thumbnail_cache_dir, f"{prefix}_*.png")
+        for cached_path in glob.glob(pattern):
+            try:
+                os.remove(cached_path)
+            except OSError:
+                pass
+
+    def _clear_all_thumbnail_cache(self):
+        self._thumbnail_cache.clear()
+        pattern = os.path.join(self._thumbnail_cache_dir, '*.png')
+        for cached_path in glob.glob(pattern):
+            try:
+                os.remove(cached_path)
+            except OSError:
+                pass
 
     def add_class(self):
         selected_item = self.class_tree_widget.currentItem()
@@ -5273,7 +5365,7 @@ class LearningTab(QWidget):
         if reply == QMessageBox.StandardButton.Yes:
             success, message = self.data_manager.delete_class(class_name)
             if success:
-                self._thumbnail_cache.clear()
+                self._clear_all_thumbnail_cache()
                 self.populate_class_list()
                 self.image_list_widget.clear()
                 self.log_viewer.append(message)
@@ -5293,7 +5385,7 @@ class LearningTab(QWidget):
             success, message = self.data_manager.rebuild_manifest_from_labels()
 
             if success:
-                self._thumbnail_cache.clear()
+                self._clear_all_thumbnail_cache()
                 self.update_status_message(message)
                 self.log_viewer.append(message)
                 self.populate_class_list()
