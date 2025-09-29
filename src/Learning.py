@@ -29,7 +29,7 @@ import uuid
 import requests
 from pathlib import Path
 from collections import OrderedDict
-from typing import Optional
+from typing import Optional, ClassVar
 
 try:
     import pytesseract  # type: ignore
@@ -646,8 +646,27 @@ class ClassTreeWidget(QTreeWidget):
 class MonsterSettingsDialog(QDialog):
     """특정 몬스터 클래스에 대한 추후 확장 가능한 설정 다이얼로그."""
 
-    _LAST_TEMPLATE_DIR = str(Path.home())
-    _LAST_TEST_DIR = str(Path.home())
+    _DEFAULT_BROWSE_DIR: ClassVar[str] = str(Path.home())
+    _LAST_TEMPLATE_DIRS: ClassVar[dict[str, str]] = {}
+    _LAST_TEST_DIRS: ClassVar[dict[str, str]] = {}
+
+    @classmethod
+    def _resolve_start_directory(cls, cache: dict[str, str], class_name: str) -> str:
+        stored = cache.get(class_name)
+        if stored and os.path.isdir(stored):
+            return stored
+        if cls._DEFAULT_BROWSE_DIR and os.path.isdir(cls._DEFAULT_BROWSE_DIR):
+            return cls._DEFAULT_BROWSE_DIR
+        return str(Path.home())
+
+    @classmethod
+    def _remember_directory(cls, cache: dict[str, str], class_name: str, selected_files: list[str]) -> None:
+        if not selected_files:
+            return
+        first_dir = os.path.dirname(selected_files[0])
+        if first_dir and os.path.isdir(first_dir):
+            cache[class_name] = first_dir
+            cls._DEFAULT_BROWSE_DIR = first_dir
 
     def __init__(
         self,
@@ -863,7 +882,7 @@ class MonsterSettingsDialog(QDialog):
         if not self.data_manager:
             QMessageBox.warning(self, "오류", "데이터 매니저를 찾을 수 없습니다.")
             return
-        start_dir = self.__class__._LAST_TEMPLATE_DIR
+        start_dir = self._resolve_start_directory(self.__class__._LAST_TEMPLATE_DIRS, self.class_name)
         files, _ = QFileDialog.getOpenFileNames(
             self,
             "이름표 이미지 선택",
@@ -883,9 +902,7 @@ class MonsterSettingsDialog(QDialog):
                 added += 1
         if added:
             QMessageBox.information(self, "완료", f"이름표 템플릿 {added}개를 추가했습니다.")
-            first_dir = os.path.dirname(files[0])
-            if first_dir:
-                self.__class__._LAST_TEMPLATE_DIR = first_dir
+            self._remember_directory(self.__class__._LAST_TEMPLATE_DIRS, self.class_name, files)
         self._populate_nameplate_templates()
 
     def _delete_selected_nameplate_templates(self) -> None:
@@ -918,7 +935,7 @@ class MonsterSettingsDialog(QDialog):
         self.run_test_btn.setEnabled(has_samples and has_templates)
 
     def _add_test_samples(self) -> None:
-        start_dir = self.__class__._LAST_TEST_DIR
+        start_dir = self._resolve_start_directory(self.__class__._LAST_TEST_DIRS, self.class_name)
         files, _ = QFileDialog.getOpenFileNames(
             self,
             "테스트용 이름표 이미지 선택",
@@ -944,9 +961,7 @@ class MonsterSettingsDialog(QDialog):
             added += 1
         if added:
             self.test_result_label.setText(f"테스트 이미지 {added}개를 추가했습니다.")
-            first_dir = os.path.dirname(files[0])
-            if first_dir:
-                self.__class__._LAST_TEST_DIR = first_dir
+            self._remember_directory(self.__class__._LAST_TEST_DIRS, self.class_name, files)
         self._update_test_buttons()
 
     def _remove_selected_test_samples(self) -> None:
