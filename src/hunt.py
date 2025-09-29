@@ -4133,6 +4133,9 @@ class HuntTab(QWidget):
                 match_threshold=float(config.get('match_threshold', 0.72)),
                 offset_x=float(config.get('char_offset_x', 0.0)),
                 offset_y=float(config.get('char_offset_y', 0.0)),
+                search_margin_x=float(config.get('search_margin_x', config.get('search_margin', NicknameDetector.DEFAULT_MARGIN_X))),
+                search_margin_top=float(config.get('search_margin_top', config.get('search_margin_vertical', NicknameDetector.DEFAULT_MARGIN_TOP))),
+                search_margin_bottom=float(config.get('search_margin_bottom', config.get('search_margin_vertical', NicknameDetector.DEFAULT_MARGIN_BOTTOM))),
             )
             detector.load_templates(self._nickname_templates)
             return detector

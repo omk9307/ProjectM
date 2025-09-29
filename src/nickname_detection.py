@@ -23,23 +23,31 @@ class NicknameDetector:
     WIDTH_SCALE = 1.0
     HEIGHT_SCALE = 2.2
 
+    DEFAULT_MARGIN_X = 210.0
+    DEFAULT_MARGIN_TOP = 100.0
+    DEFAULT_MARGIN_BOTTOM = 100.0
+
     def __init__(
         self,
         target_text: str,
         match_threshold: float,
         offset_x: float,
         offset_y: float,
+        search_margin_x: float = DEFAULT_MARGIN_X,
+        search_margin_top: float = DEFAULT_MARGIN_TOP,
+        search_margin_bottom: float = DEFAULT_MARGIN_BOTTOM,
     ) -> None:
         self.target_text = target_text
         self.match_threshold = max(0.1, min(0.99, float(match_threshold)))
         self.offset_x = float(offset_x)
         self.offset_y = float(offset_y)
+        self.search_margin_x = self._sanitize_margin(search_margin_x, self.DEFAULT_MARGIN_X)
+        self.search_margin_top = self._sanitize_margin(search_margin_top, self.DEFAULT_MARGIN_TOP)
+        self.search_margin_bottom = self._sanitize_margin(search_margin_bottom, self.DEFAULT_MARGIN_BOTTOM)
         self.templates: list[NicknameTemplate] = []
         self._last_result: Optional[dict] = None
         self._lost_frames: int = 0
         self.max_roi_lost_frames = 8
-        self.search_margin_x = 210.0  # 가로(텔레포트) 검색 여백
-        self.search_margin_y = 100.0  # 세로(점프) 검색 여백
         self._last_successful_template: Optional[NicknameTemplate] = None # 마지막으로 성공한 템플릿을 기억하기 위한 변수
         self._full_scan_template_index: int = 0 #  전체 화면 스캔 시 순환할 템플릿 인덱스
         self._last_search_region: Optional[dict] = None  # 마지막 템플릿 탐색 영역
@@ -52,6 +60,9 @@ class NicknameDetector:
         match_threshold: Optional[float] = None,
         offset_x: Optional[float] = None,
         offset_y: Optional[float] = None,
+        search_margin_x: Optional[float] = None,
+        search_margin_top: Optional[float] = None,
+        search_margin_bottom: Optional[float] = None,
     ) -> None:
         if target_text is not None:
             self.target_text = target_text
@@ -61,6 +72,12 @@ class NicknameDetector:
             self.offset_x = float(offset_x)
         if offset_y is not None:
             self.offset_y = float(offset_y)
+        if search_margin_x is not None:
+            self.search_margin_x = self._sanitize_margin(search_margin_x, self.DEFAULT_MARGIN_X)
+        if search_margin_top is not None:
+            self.search_margin_top = self._sanitize_margin(search_margin_top, self.DEFAULT_MARGIN_TOP)
+        if search_margin_bottom is not None:
+            self.search_margin_bottom = self._sanitize_margin(search_margin_bottom, self.DEFAULT_MARGIN_BOTTOM)
 
     def load_templates(self, templates: Iterable[dict]) -> None:
         self.templates = []
@@ -112,9 +129,13 @@ class NicknameDetector:
             if prev_box:
                 box_x, box_y = float(prev_box.get('x', 0.0)), float(prev_box.get('y', 0.0))
                 box_w, box_h = float(prev_box.get('width', 0.0)), float(prev_box.get('height', 0.0))
-                margin_x, margin_y = max(self.search_margin_x, box_w * 1.5), max(self.search_margin_y, box_h * 1.5)
-                x1, y1 = int(np.clip(box_x - margin_x, 0.0, frame_w)), int(np.clip(box_y - margin_y, 0.0, frame_h))
-                x2, y2 = int(np.clip(box_x + box_w + margin_x, 0.0, frame_w)), int(np.clip(box_y + box_h + margin_y, 0.0, frame_h))
+                margin_x = self.search_margin_x
+                margin_top = self.search_margin_top
+                margin_bottom = self.search_margin_bottom
+                x1 = int(np.clip(box_x - margin_x, 0.0, frame_w))
+                y1 = int(np.clip(box_y - margin_top, 0.0, frame_h))
+                x2 = int(np.clip(box_x + box_w + margin_x, 0.0, frame_w))
+                y2 = int(np.clip(box_y + box_h + margin_bottom, 0.0, frame_h))
                 if x2 - x1 > 10 and y2 - y1 > 10:
                     roi_gray = frame_gray[y1:y2, x1:x2]
                     origin_x, origin_y = x1, y1
@@ -221,3 +242,11 @@ class NicknameDetector:
         if self._last_search_mode:
             region['mode'] = self._last_search_mode
         return region
+
+    @staticmethod
+    def _sanitize_margin(value: Optional[float], default: float) -> float:
+        try:
+            margin = float(value)
+        except (TypeError, ValueError):
+            margin = default
+        return max(0.0, margin)

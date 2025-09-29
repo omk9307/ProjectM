@@ -1901,6 +1901,9 @@ class DataManager:
             "match_threshold": 0.72,
             "char_offset_x": 0,
             "char_offset_y": 46,
+            "search_margin_x": 210,
+            "search_margin_top": 100,
+            "search_margin_bottom": 100,
             "show_overlay": True,
             "templates": [],
         }
@@ -2891,6 +2894,10 @@ class DataManager:
             if 'templates' not in config or not isinstance(config['templates'], list):
                 config['templates'] = []
                 changed = True
+            for legacy in ('search_scale_x', 'search_scale_top', 'search_scale_bottom', 'search_scale_y'):
+                if legacy in config:
+                    config.pop(legacy, None)
+                    changed = True
             if changed:
                 self._write_nickname_config(config)
         return config
@@ -2904,6 +2911,8 @@ class DataManager:
             if key in forbidden_keys:
                 continue
             config[key] = value
+        for legacy in ('search_scale_x', 'search_scale_top', 'search_scale_bottom', 'search_scale_y'):
+            config.pop(legacy, None)
         self._write_nickname_config(config)
         self._notify_overlay_listeners({
             'target': 'nickname',
@@ -3621,6 +3630,24 @@ class LearningTab(QWidget):
         self.nickname_offset_y_spin = QSpinBox()
         self.nickname_offset_y_spin.setRange(-400, 400)
         nickname_threshold_layout.addWidget(self.nickname_offset_y_spin)
+        nickname_threshold_layout.addSpacing(8)
+        nickname_threshold_layout.addWidget(QLabel("좌우 여백(px):"))
+        self.nickname_margin_x_spin = QSpinBox()
+        self.nickname_margin_x_spin.setRange(0, 600)
+        self.nickname_margin_x_spin.setSingleStep(10)
+        nickname_threshold_layout.addWidget(self.nickname_margin_x_spin)
+        nickname_threshold_layout.addSpacing(8)
+        nickname_threshold_layout.addWidget(QLabel("위 여백(px):"))
+        self.nickname_margin_top_spin = QSpinBox()
+        self.nickname_margin_top_spin.setRange(0, 400)
+        self.nickname_margin_top_spin.setSingleStep(5)
+        nickname_threshold_layout.addWidget(self.nickname_margin_top_spin)
+        nickname_threshold_layout.addSpacing(8)
+        nickname_threshold_layout.addWidget(QLabel("아래 여백(px):"))
+        self.nickname_margin_bottom_spin = QSpinBox()
+        self.nickname_margin_bottom_spin.setRange(0, 400)
+        self.nickname_margin_bottom_spin.setSingleStep(5)
+        nickname_threshold_layout.addWidget(self.nickname_margin_bottom_spin)
         nickname_layout.addLayout(nickname_threshold_layout)
 
         self.nickname_template_list = QListWidget()
@@ -3761,6 +3788,9 @@ class LearningTab(QWidget):
         self.nickname_threshold_spin.valueChanged.connect(self.on_nickname_threshold_changed)
         self.nickname_offset_x_spin.valueChanged.connect(self.on_nickname_offset_changed)
         self.nickname_offset_y_spin.valueChanged.connect(self.on_nickname_offset_changed)
+        self.nickname_margin_x_spin.valueChanged.connect(self.on_nickname_roi_margin_changed)
+        self.nickname_margin_top_spin.valueChanged.connect(self.on_nickname_roi_margin_changed)
+        self.nickname_margin_bottom_spin.valueChanged.connect(self.on_nickname_roi_margin_changed)
         self.nickname_overlay_checkbox.toggled.connect(self.on_nickname_overlay_toggled)
         self.direction_threshold_spin.valueChanged.connect(self.on_direction_threshold_changed)
         self.direction_offset_spin.valueChanged.connect(self.on_direction_offset_changed)
@@ -3846,6 +3876,18 @@ class LearningTab(QWidget):
         self.nickname_threshold_spin.setValue(max(self.nickname_threshold_spin.minimum(), min(self.nickname_threshold_spin.maximum(), threshold)))
         self.nickname_offset_x_spin.setValue(int(config.get('char_offset_x', 0)))
         self.nickname_offset_y_spin.setValue(int(config.get('char_offset_y', 0)))
+        margin_x = int(config.get('search_margin_x', config.get('search_margin', 210)))
+        margin_top = int(config.get('search_margin_top', config.get('search_margin_vertical', 100)))
+        margin_bottom = int(config.get('search_margin_bottom', config.get('search_margin_vertical', 100)))
+        self.nickname_margin_x_spin.setValue(
+            max(self.nickname_margin_x_spin.minimum(), min(self.nickname_margin_x_spin.maximum(), margin_x))
+        )
+        self.nickname_margin_top_spin.setValue(
+            max(self.nickname_margin_top_spin.minimum(), min(self.nickname_margin_top_spin.maximum(), margin_top))
+        )
+        self.nickname_margin_bottom_spin.setValue(
+            max(self.nickname_margin_bottom_spin.minimum(), min(self.nickname_margin_bottom_spin.maximum(), margin_bottom))
+        )
         self.nickname_overlay_checkbox.setChecked(bool(config.get('show_overlay', True)))
         self._nickname_ui_updating = False
 
@@ -4510,6 +4552,16 @@ class LearningTab(QWidget):
         updates = {
             'char_offset_x': int(self.nickname_offset_x_spin.value()),
             'char_offset_y': int(self.nickname_offset_y_spin.value()),
+        }
+        self.nickname_config = self.data_manager.update_nickname_config(updates)
+
+    def on_nickname_roi_margin_changed(self, _value: int):
+        if self._nickname_ui_updating:
+            return
+        updates = {
+            'search_margin_x': int(self.nickname_margin_x_spin.value()),
+            'search_margin_top': int(self.nickname_margin_top_spin.value()),
+            'search_margin_bottom': int(self.nickname_margin_bottom_spin.value()),
         }
         self.nickname_config = self.data_manager.update_nickname_config(updates)
 
