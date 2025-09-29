@@ -556,10 +556,7 @@ class HuntTab(QWidget):
         self._latest_nameplate_rois: list[dict] = []
         self._active_nameplate_track_ids: set[int] = set()
         self._nameplate_enabled = False
-        if any(entry.get('matched') for entry in filtered_nameplate_details):
-            self._nameplate_hold_until = now
-        else:
-            self._nameplate_hold_until = 0.0
+        self._nameplate_hold_until = 0.0
         self._nameplate_dead_zones: list[dict] = []
         self._nameplate_dead_zone_duration_sec = 0.2
         self._nameplate_track_missing_grace_sec = 0.12
@@ -2277,6 +2274,23 @@ class HuntTab(QWidget):
                 f"Nickname {nickname_ms:.1f} ms / Nameplate {nameplate_ms:.1f} ms",
             ]
 
+            nameplate_details = self.latest_detection_details.get('nameplates') if hasattr(self, 'latest_detection_details') else []
+            if nameplate_details:
+                total_detected = len(nameplate_details)
+                matched_entries = [entry for entry in nameplate_details if entry.get('matched')]
+                best_entry = max(
+                    nameplate_details,
+                    key=lambda entry: float(entry.get('score', 0.0) or 0.0),
+                )
+                best_name = str(best_entry.get('class_name') or '이름표')
+                best_score = float(best_entry.get('score', 0.0) or 0.0)
+                match_text = f"확정 {len(matched_entries)}건" if matched_entries else "확정 없음"
+                frame_lines.append(
+                    f"Nameplate {total_detected}건 / {match_text} / 최고 {best_name} {best_score:.2f}"
+                )
+            else:
+                frame_lines.append("Nameplate 탐지 없음")
+
             if show_frame_detail:
                 preprocess_ms = float(perf.get('preprocess_ms', 0.0))
                 direction_ms = float(perf.get('direction_ms', 0.0))
@@ -2530,7 +2544,7 @@ class HuntTab(QWidget):
         confidence_header.addStretch(1)
         self.confidence_summary_view = QTextEdit()
         self.confidence_summary_view.setReadOnly(True)
-        self.confidence_summary_view.setMinimumHeight(120)
+        self.confidence_summary_view.setMinimumHeight(90)
         self.confidence_summary_view.setStyleSheet("font-family: Consolas, monospace;")
         confidence_layout.addLayout(confidence_header)
         confidence_layout.addWidget(self.confidence_summary_view)
@@ -2554,7 +2568,7 @@ class HuntTab(QWidget):
         frame_header.addStretch(1)
         self.frame_summary_view = QTextEdit()
         self.frame_summary_view.setReadOnly(True)
-        self.frame_summary_view.setMinimumHeight(100)
+        self.frame_summary_view.setMinimumHeight(140)
         self.frame_summary_view.setStyleSheet("font-family: Consolas, monospace;")
         frame_layout.addLayout(frame_header)
         frame_layout.addWidget(self.frame_summary_view)
@@ -2883,6 +2897,7 @@ class HuntTab(QWidget):
         if not state:
             self._visual_tracked_monsters = []
             self._visual_dead_zones = []
+        self._update_detection_thread_overlay_flags()
         self._save_settings()
 
     def _update_detection_thread_overlay_flags(self) -> None:
@@ -2893,12 +2908,12 @@ class HuntTab(QWidget):
             self.detection_thread.show_nickname_range_overlay = bool(self._is_nickname_range_overlay_active())
         self.detection_thread.show_direction_overlay = bool(self._is_direction_range_overlay_active())
         if hasattr(self.detection_thread, 'show_nameplate_overlay'):
-            active = self._is_nameplate_overlay_active() and self.overlay_preferences.get('nameplate_area', True)
+            overlay_active = self._is_nameplate_overlay_active() and self.overlay_preferences.get('nameplate_area', True)
             if hasattr(self, 'show_nameplate_checkbox') and not self.show_nameplate_checkbox.isEnabled():
-                active = False
-            elif hasattr(self, 'show_nameplate_checkbox') and not self.show_nameplate_checkbox.isChecked():
-                active = False
-            self.detection_thread.show_nameplate_overlay = bool(active)
+                overlay_active = False
+            debug_active = bool(self._nameplate_visual_debug_enabled and getattr(self, '_nameplate_enabled', False))
+            detection_active = overlay_active or debug_active
+            self.detection_thread.show_nameplate_overlay = bool(detection_active)
 
     def _sync_detection_thread_status(self) -> None:
         if not self.detection_thread:
@@ -4620,6 +4635,14 @@ class HuntTab(QWidget):
                 )
             )
             show_nameplate = bool(display.get('show_nameplate_area', self.show_nameplate_checkbox.isChecked()))
+            show_nameplate_tracking = bool(
+                display.get(
+                    'show_nameplate_tracking',
+                    self.show_nameplate_tracking_checkbox.isChecked()
+                    if hasattr(self, 'show_nameplate_tracking_checkbox')
+                    else self.overlay_preferences.get('nameplate_tracking', False),
+                )
+            )
             auto_target = bool(display.get('auto_target', self.auto_target_radio.isChecked()))
             screen_output_enabled = bool(
                 display.get(
@@ -4645,6 +4668,8 @@ class HuntTab(QWidget):
             self.show_direction_checkbox.setChecked(show_direction)
             self.show_nickname_range_checkbox.setChecked(show_nickname_range)
             self.show_nameplate_checkbox.setChecked(show_nameplate)
+            if hasattr(self, 'show_nameplate_tracking_checkbox'):
+                self.show_nameplate_tracking_checkbox.setChecked(show_nameplate_tracking)
             self.auto_target_radio.setChecked(auto_target)
             self.manual_target_radio.setChecked(not auto_target)
             self.screen_output_checkbox.setChecked(screen_output_enabled)
@@ -4727,6 +4752,14 @@ class HuntTab(QWidget):
         self.overlay_preferences['primary_area'] = self.show_primary_skill_checkbox.isChecked()
         self.overlay_preferences['direction_area'] = self.show_direction_checkbox.isChecked()
         self._direction_area_user_pref = self.overlay_preferences['direction_area']
+        self.overlay_preferences['nameplate_area'] = self.show_nameplate_checkbox.isChecked()
+        self._nameplate_area_user_pref = self.overlay_preferences['nameplate_area']
+        if hasattr(self, 'show_nameplate_tracking_checkbox'):
+            tracking_state = self.show_nameplate_tracking_checkbox.isChecked()
+        else:
+            tracking_state = self.overlay_preferences.get('nameplate_tracking', False)
+        self.overlay_preferences['nameplate_tracking'] = tracking_state
+        self._nameplate_tracking_user_pref = tracking_state
 
         misc = data.get('misc', {})
         if misc:
@@ -4880,6 +4913,11 @@ class HuntTab(QWidget):
                 'show_direction_area': self.show_direction_checkbox.isChecked(),
                 'show_nickname_range_area': self.show_nickname_range_checkbox.isChecked(),
                 'show_nameplate_area': self.show_nameplate_checkbox.isChecked(),
+                'show_nameplate_tracking': bool(
+                    self.show_nameplate_tracking_checkbox.isChecked()
+                ) if hasattr(self, 'show_nameplate_tracking_checkbox') else bool(
+                    self.overlay_preferences.get('nameplate_tracking', False)
+                ),
                 'auto_target': self.auto_target_radio.isChecked(),
                 'screen_output': self.screen_output_checkbox.isChecked(),
                 'summary_confidence': self.show_confidence_summary_checkbox.isChecked(),
