@@ -547,6 +547,8 @@ class HuntTab(QWidget):
         self._latest_nameplate_rois: list[dict] = []
         self._nameplate_enabled = False
         self._nameplate_hold_until = 0.0
+        self._last_nameplate_log_message: Optional[str] = None
+        self._last_nameplate_notify_ts: float = 0.0
 
         self.attack_interval_sec = 0.35
         self.last_attack_ts = 0.0
@@ -3468,6 +3470,10 @@ class HuntTab(QWidget):
                 else:
                     self._reset_character_cache()
 
+        last_nameplate_message: Optional[str] = None
+        rely_message: Optional[str] = None
+        best_nameplate_entry: Optional[dict] = None
+
         if isinstance(nameplate_data, list) and nameplate_data:
             reference_character: Optional[DetectionBox] = None
             if characters:
@@ -3529,6 +3535,11 @@ class HuntTab(QWidget):
                     filtered_nameplate_details.append(filtered_entry)
                     if matched:
                         nameplate_confirmed = True
+                        if (
+                            best_nameplate_entry is None
+                            or float(filtered_entry.get('score', 0.0)) > float(best_nameplate_entry.get('score', 0.0))
+                        ):
+                            best_nameplate_entry = filtered_entry
                     if self._is_nameplate_overlay_active():
                         overlay_nameplates.append(overlay_entry)
         else:
@@ -3559,6 +3570,15 @@ class HuntTab(QWidget):
             self._nameplate_hold_until = max(self._nameplate_hold_until, now + NAMEPLATE_PERSISTENCE_SEC)
         elif now > self._nameplate_hold_until:
             self._nameplate_hold_until = 0.0
+
+        if best_nameplate_entry is not None:
+            class_name = str(best_nameplate_entry.get('class_name') or '이름표')
+            score_val = float(best_nameplate_entry.get('score', 0.0))
+            template_id = best_nameplate_entry.get('template_id') or '-'
+            last_nameplate_message = f"이름표 감지: {class_name} (점수 {score_val:.2f}, 템플릿 {template_id})"
+            if not (self.latest_snapshot and self.latest_snapshot.monster_boxes):
+                rely_message = f"이름표 기반 몬스터 유지: {class_name} (점수 {score_val:.2f})"
+
         if fallback_used and not characters_data and self._last_character_details:
             self.latest_detection_details['characters'] = [dict(item) for item in self._last_character_details]
         if nickname_used:
@@ -3596,6 +3616,13 @@ class HuntTab(QWidget):
         self._evaluate_direction_timeout()
 
         self.update_detection_snapshot(snapshot)
+
+        if last_nameplate_message and last_nameplate_message != self._last_nameplate_log_message:
+            self.append_log(last_nameplate_message, 'info')
+            self._last_nameplate_log_message = last_nameplate_message
+        if rely_message and (now - self._last_nameplate_notify_ts) > 0.5:
+            self.append_log(rely_message, 'info')
+            self._last_nameplate_notify_ts = now
 
         handler_elapsed_ms = (time.perf_counter() - handler_start) * 1000.0
         if collect_detail_stats:

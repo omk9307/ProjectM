@@ -7,9 +7,10 @@ from dataclasses import dataclass, field
 from typing import Dict, Optional, Tuple
 
 import cv2
-import mss
 import numpy as np
 from PyQt6.QtCore import QMutex, QMutexLocker, QObject, QThread, pyqtSignal
+
+from capture_manager import get_capture_manager
 
 try:
     import pytesseract  # type: ignore
@@ -207,6 +208,10 @@ class StatusMonitorThread(QThread):
         self._exp_capture_warned = False
         self._exp_failure_cache: Optional[str] = None
         self._exp_last_log_signature: Optional[Tuple[str, str]] = None
+        self._manager = get_capture_manager()
+        self._consumer_prefix = f"status:{id(self)}"
+        self._resource_consumers: Dict[str, str] = {}
+        self._resource_regions: Dict[str, Dict[str, int]] = {}
 
     # -------------------- public API --------------------
     def update_config(self, config: StatusMonitorConfig) -> None:
@@ -249,17 +254,18 @@ class StatusMonitorThread(QThread):
     # -------------------- QThread API --------------------
     def run(self) -> None:  # noqa: D401
         try:
-            with mss.mss() as sct:
-                while self._running:
-                    snapshot = self._evaluate_once(sct)
-                    if snapshot:
-                        self.status_captured.emit(snapshot)
-                    time.sleep(0.05)
+            while self._running:
+                snapshot = self._evaluate_once()
+                if snapshot:
+                    self.status_captured.emit(snapshot)
+                time.sleep(0.05)
         except Exception as exc:  # pragma: no cover - 안전 로그용
             print(f"[StatusMonitorThread] 스레드 오류: {exc}")
+        finally:
+            self._unregister_all_resources()
 
     # -------------------- 내부 로직 --------------------
-    def _evaluate_once(self, sct: "mss.mss") -> Dict[str, object]:
+    def _evaluate_once(self) -> Dict[str, object]:
         now = time.time()
         tasks: Tuple[str, ...] = ("hp", "mp", "exp")
         snapshot: Dict[str, object] = {}
@@ -272,10 +278,13 @@ class StatusMonitorThread(QThread):
         for resource in tasks:
             cfg = getattr(config, resource)
             if not getattr(cfg, 'enabled', True):
+                self._unregister_resource(resource)
                 continue
             if resource in {"hp", "mp"} and not (active_hunt or active_map):
+                self._unregister_resource(resource)
                 continue
             if resource == "exp" and not active_hunt:
+                self._unregister_resource(resource)
                 continue
 
             interval = getattr(config, resource).interval_sec
@@ -292,29 +301,27 @@ class StatusMonitorThread(QThread):
                     self._emit_exp_log("warn", "[EXP] ROI가 설정되지 않아 감지를 건너뜁니다.")
                     self._exp_roi_warned = True
                 self._last_capture[resource] = now
+                self._unregister_resource(resource)
                 continue
             elif resource == "exp" and self._exp_roi_warned:
                 self._exp_roi_warned = False
                 self._exp_last_log_signature = None
 
             monitor_dict = roi.to_monitor_dict()
-            try:
-                raw = np.array(sct.grab(monitor_dict))
-            except Exception:
+            consumer_name = self._ensure_resource_consumer(resource, monitor_dict)
+            if consumer_name is None:
+                self._last_capture[resource] = now
+                continue
+
+            frame_bgr = self._manager.get_frame(consumer_name, timeout=0.5)
+            if frame_bgr is None or frame_bgr.size == 0:
                 if resource == "exp" and not self._exp_capture_warned:
-                    self._emit_exp_log("warn", "[EXP] 화면 캡처에 실패했습니다.")
+                    self._emit_exp_log("warn", "[EXP] 캡처에 실패했습니다.")
                     self._exp_capture_warned = True
                 self._last_capture[resource] = now
                 continue
 
-            if raw.size == 0:
-                if resource == "exp" and not self._exp_capture_warned:
-                    self._emit_exp_log("warn", "[EXP] 캡처 영역이 비어 있습니다.")
-                    self._exp_capture_warned = True
-                self._last_capture[resource] = now
-                continue
-
-            bgr = cv2.cvtColor(raw, cv2.COLOR_BGRA2BGR)
+            bgr = frame_bgr
             if resource in {"hp", "mp"}:
                 percentage = self._analyze_bar(bgr)
                 if percentage is not None:
@@ -336,6 +343,44 @@ class StatusMonitorThread(QThread):
             with QMutexLocker(self._lock):
                 self._latest_status.update({k: v for k, v in snapshot.items() if k in tasks})
         return snapshot
+
+    def _ensure_resource_consumer(self, resource: str, region: Dict[str, int]) -> Optional[str]:
+        if not region:
+            self._unregister_resource(resource)
+            return None
+        name = self._resource_consumers.get(resource)
+        region_norm = {
+            "left": int(region.get("left", 0)),
+            "top": int(region.get("top", 0)),
+            "width": max(1, int(region.get("width", 0))),
+            "height": max(1, int(region.get("height", 0))),
+        }
+        if name is None:
+            name = f"{self._consumer_prefix}:{resource}"
+            self._resource_consumers[resource] = name
+            self._manager.register_region(name, region_norm)
+        else:
+            prev = self._resource_regions.get(resource)
+            if prev != region_norm:
+                try:
+                    self._manager.update_region(name, region_norm)
+                except KeyError:
+                    self._manager.register_region(name, region_norm)
+        self._resource_regions[resource] = region_norm
+        return name
+
+    def _unregister_resource(self, resource: str) -> None:
+        name = self._resource_consumers.pop(resource, None)
+        self._resource_regions.pop(resource, None)
+        if name is not None:
+            try:
+                self._manager.unregister_region(name)
+            except KeyError:
+                pass
+
+    def _unregister_all_resources(self) -> None:
+        for resource in list(self._resource_consumers.keys()):
+            self._unregister_resource(resource)
 
     def _emit_exp_log(self, level: str, message: str, *, dedupe: bool = True) -> None:
         if not message:

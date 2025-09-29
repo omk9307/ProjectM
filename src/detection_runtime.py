@@ -26,6 +26,7 @@ from ultralytics import YOLO
 
 from nickname_detection import NicknameDetector
 from direction_detection import DirectionDetector
+from capture_manager import get_capture_manager
 
 
 MIN_MONSTER_BOX_SIZE = 30  # 탐지된 몬스터로 인정할 최소 크기(px)
@@ -373,9 +374,11 @@ class DetectionThread(QThread):
             self.current_facing = None
 
     def run(self) -> None:  # noqa: D401
+        consumer_name = f"detection:{id(self)}"
+        manager = get_capture_manager()
+        manager.register_region(consumer_name, self.capture_region)
         try:
             model = YOLO(self.model_path)
-            sct = mss.mss()
             use_char_class = self.char_class_index >= 0
             monster_base_conf = self._minimum_monster_confidence()
             low_conf = (
@@ -398,11 +401,10 @@ class DetectionThread(QThread):
                     self.start_time = current_time
 
                 capture_start = time.perf_counter()
-                grabbed = sct.grab(self.capture_region)
+                frame = manager.get_frame(consumer_name, timeout=1.0)
                 capture_end = time.perf_counter()
-
-                frame_np = np.array(grabbed)
-                frame = cv2.cvtColor(frame_np, cv2.COLOR_BGRA2BGR)
+                if frame is None:
+                    continue
                 if self._region_mask is not None:
                     if (
                         self._region_mask.shape[0] == frame.shape[0]
@@ -740,6 +742,8 @@ class DetectionThread(QThread):
                 self.msleep(15)
         except Exception as exc:
             print(f"탐지 스레드 오류: {exc}")
+        finally:
+            manager.unregister_region(consumer_name)
 
     def stop(self) -> None:
         self.is_running = False

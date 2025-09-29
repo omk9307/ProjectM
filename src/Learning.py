@@ -50,6 +50,8 @@ from PyQt6.QtGui import (
 )
 from PyQt6.QtCore import Qt, QThread, pyqtSignal, QSize, QRect, QPoint, QObject, QMimeData
 
+from capture_manager import get_capture_manager
+
 # AI 어시스트 기능(SAM)과 훈련(YOLO)에 필요한 라이브러리를 import 합니다.
 # 만약 라이브러리가 설치되지 않았더라도 프로그램이 실행은 되도록 try-except 구문을 사용합니다.
 try:
@@ -644,6 +646,9 @@ class ClassTreeWidget(QTreeWidget):
 class MonsterSettingsDialog(QDialog):
     """특정 몬스터 클래스에 대한 추후 확장 가능한 설정 다이얼로그."""
 
+    _LAST_TEMPLATE_DIR = str(Path.home())
+    _LAST_TEST_DIR = str(Path.home())
+
     def __init__(
         self,
         parent: Optional[QWidget],
@@ -858,7 +863,13 @@ class MonsterSettingsDialog(QDialog):
         if not self.data_manager:
             QMessageBox.warning(self, "오류", "데이터 매니저를 찾을 수 없습니다.")
             return
-        files, _ = QFileDialog.getOpenFileNames(self, "이름표 이미지 선택", str(Path.home()), "이미지 파일 (*.png *.jpg *.jpeg *.bmp)")
+        start_dir = self.__class__._LAST_TEMPLATE_DIR
+        files, _ = QFileDialog.getOpenFileNames(
+            self,
+            "이름표 이미지 선택",
+            start_dir,
+            "이미지 파일 (*.png *.jpg *.jpeg *.bmp)"
+        )
         if not files:
             return
         added = 0
@@ -872,6 +883,9 @@ class MonsterSettingsDialog(QDialog):
                 added += 1
         if added:
             QMessageBox.information(self, "완료", f"이름표 템플릿 {added}개를 추가했습니다.")
+            first_dir = os.path.dirname(files[0])
+            if first_dir:
+                self.__class__._LAST_TEMPLATE_DIR = first_dir
         self._populate_nameplate_templates()
 
     def _delete_selected_nameplate_templates(self) -> None:
@@ -904,7 +918,13 @@ class MonsterSettingsDialog(QDialog):
         self.run_test_btn.setEnabled(has_samples and has_templates)
 
     def _add_test_samples(self) -> None:
-        files, _ = QFileDialog.getOpenFileNames(self, "테스트용 이름표 이미지 선택", str(Path.home()), "이미지 파일 (*.png *.jpg *.jpeg *.bmp)")
+        start_dir = self.__class__._LAST_TEST_DIR
+        files, _ = QFileDialog.getOpenFileNames(
+            self,
+            "테스트용 이름표 이미지 선택",
+            start_dir,
+            "이미지 파일 (*.png *.jpg *.jpeg *.bmp)"
+        )
         if not files:
             return
         added = 0
@@ -924,6 +944,9 @@ class MonsterSettingsDialog(QDialog):
             added += 1
         if added:
             self.test_result_label.setText(f"테스트 이미지 {added}개를 추가했습니다.")
+            first_dir = os.path.dirname(files[0])
+            if first_dir:
+                self.__class__._LAST_TEST_DIR = first_dir
         self._update_test_buttons()
 
     def _remove_selected_test_samples(self) -> None:
@@ -4229,30 +4252,45 @@ class LearningTab(QWidget):
             QMessageBox.information(self, 'EXP 인식 확인', '탐지 범위가 설정되지 않아 확인할 수 없습니다. 먼저 ROI를 지정해주세요.')
             return
 
+        monitor_dict = roi.to_monitor_dict()
+        manager = get_capture_manager()
+        consumer_name = f"learning:exp_preview:{id(self)}:{int(time.time()*1000)}"
+        frame_bgr: Optional[np.ndarray] = None
         try:
-            with mss.mss() as sct:
-                monitor_dict = roi.to_monitor_dict()
-                raw = np.array(sct.grab(monitor_dict))
-        except Exception as exc:  # pragma: no cover - 시스템 환경에 따라 다름
-            QMessageBox.warning(self, 'EXP 인식 확인', f'화면 캡처에 실패했습니다.\n{exc}')
-            return
+            manager.register_region(consumer_name, monitor_dict)
+            frame_bgr = manager.get_frame(consumer_name, timeout=1.0)
+        except Exception:
+            frame_bgr = None
+        finally:
+            try:
+                manager.unregister_region(consumer_name)
+            except KeyError:
+                pass
 
-        if raw.size == 0:
-            QMessageBox.warning(self, 'EXP 인식 확인', '캡처 결과가 비어 있습니다. ROI 범위를 다시 확인해주세요.')
-            return
+        if frame_bgr is None or frame_bgr.size == 0:
+            try:
+                with mss.mss() as sct:
+                    raw = np.array(sct.grab(monitor_dict))
+            except Exception as exc:  # pragma: no cover - 시스템 환경에 따라 다름
+                QMessageBox.warning(self, 'EXP 인식 확인', f'화면 캡처에 실패했습니다.\n{exc}')
+                return
 
-        try:
-            bgr_image = cv2.cvtColor(raw, cv2.COLOR_BGRA2BGR)
-        except cv2.error as exc:  # pragma: no cover - OpenCV 내부 오류 대비
-            QMessageBox.warning(self, 'EXP 인식 확인', f'이미지 변환 중 오류가 발생했습니다.\n{exc}')
-            return
+            if raw.size == 0:
+                QMessageBox.warning(self, 'EXP 인식 확인', '캡처 결과가 비어 있습니다. ROI 범위를 다시 확인해주세요.')
+                return
 
-        preview = self._prepare_exp_preview(bgr_image)
+            try:
+                frame_bgr = cv2.cvtColor(raw, cv2.COLOR_BGRA2BGR)
+            except cv2.error as exc:  # pragma: no cover - OpenCV 내부 오류 대비
+                QMessageBox.warning(self, 'EXP 인식 확인', f'이미지 변환 중 오류가 발생했습니다.\n{exc}')
+                return
+
+        preview = self._prepare_exp_preview(frame_bgr)
         roi_text = self._format_status_roi(roi)
         dialog = ExpRecognitionPreviewDialog(
             self,
             f'탐지 범위: {roi_text}',
-            bgr_image,
+            frame_bgr,
             preview.get('processed'),
             preview.get('summary_lines', []),
         )

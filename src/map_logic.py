@@ -10,9 +10,10 @@ import time
 import traceback
 
 import cv2
-import mss
 import numpy as np
 from PyQt6.QtCore import QPointF, QSize, QThread, pyqtSignal
+
+from capture_manager import get_capture_manager
 
 try:
     from .map import MapConfig
@@ -41,16 +42,23 @@ class MinimapCaptureThread(QThread):
         self.is_running = False
         self.latest_frame = None
         self._lock = threading.Lock()
+        self._manager = get_capture_manager()
+        self._consumer_name = f"minimap:{id(self)}"
 
     def run(self):
+        if not self.minimap_region:
+            return
+
         self.is_running = True
-        with mss.mss() as sct:
-            interval = 1.0 / max(1, self.target_fps)
+        interval = 1.0 / max(1, self.target_fps)
+        self._manager.register_region(self._consumer_name, self.minimap_region)
+        try:
             while self.is_running:
                 start_t = time.time()
                 try:
-                    sct_img = sct.grab(self.minimap_region)
-                    frame_bgr = cv2.cvtColor(np.array(sct_img), cv2.COLOR_BGRA2BGR)
+                    frame_bgr = self._manager.get_frame(self._consumer_name, timeout=1.0)
+                    if frame_bgr is None:
+                        continue
 
                     with self._lock:
                         self.latest_frame = frame_bgr
@@ -68,6 +76,8 @@ class MinimapCaptureThread(QThread):
                 sleep_time = interval - elapsed
                 if sleep_time > 0:
                     time.sleep(sleep_time)
+        finally:
+            self._manager.unregister_region(self._consumer_name)
 
     def stop(self):
         self.is_running = False
@@ -76,6 +86,17 @@ class MinimapCaptureThread(QThread):
             self.wait(2000)
         except Exception as e:
             print(f"[MinimapCaptureThread] 정지 대기 실패: {e}")
+
+    def update_region(self, region: dict) -> None:
+        if not isinstance(region, dict):
+            return
+        self.minimap_region = region
+        if self.isRunning():
+            try:
+                self._manager.update_region(self._consumer_name, region)
+            except KeyError:
+                # 등록이 아직 안 된 상태라면 다음 run 루프에서 등록됨
+                pass
 
 
 def safe_read_latest_frame(capture_thread):
