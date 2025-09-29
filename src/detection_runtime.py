@@ -944,6 +944,13 @@ class DetectionThread(QThread):
                 continue
             if not self._box_intersects_allowed_regions(item):
                 continue
+            try:
+                box_x = float(item.get('x', 0.0))
+                box_y = float(item.get('y', 0.0))
+                box_w = float(item.get('width', 0.0))
+                box_h = float(item.get('height', 0.0))
+            except (TypeError, ValueError):
+                continue
             roi_coords = self._compute_nameplate_roi(item, frame_width, frame_height)
             if roi_coords is None:
                 continue
@@ -978,6 +985,12 @@ class DetectionThread(QThread):
                 'width': float(right - left),
                 'height': float(bottom - top),
             }
+            box_dict = {
+                'x': float(box_x),
+                'y': float(box_y),
+                'width': float(box_w),
+                'height': float(box_h),
+            }
             match_entry = {
                 'class_id': class_id,
                 'class_name': item.get('class_name'),
@@ -986,6 +999,7 @@ class DetectionThread(QThread):
                 'matched': bool(matched),
                 'roi': roi_dict,
                 'template_id': best_template_id,
+                'source_box': box_dict,
             }
             if matched:
                 item['nameplate_confirmed'] = True

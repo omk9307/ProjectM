@@ -3594,20 +3594,39 @@ class HuntTab(QWidget):
                     continue
                 if width <= 0 or height <= 0:
                     continue
-                center_x = left + width / 2.0
-                center_y = top + height / 2.0
+
+                source_box = entry.get('source_box')
+                box_center_x: Optional[float] = None
+                box_center_y: Optional[float] = None
+                if isinstance(source_box, dict):
+                    try:
+                        box_x = float(source_box.get('x', 0.0))
+                        box_y = float(source_box.get('y', 0.0))
+                        box_w = float(source_box.get('width', 0.0))
+                        box_h = float(source_box.get('height', 0.0))
+                    except (TypeError, ValueError):
+                        box_w = box_h = 0.0
+                    else:
+                        if box_w > 0 and box_h > 0:
+                            box_center_x = box_x + box_w / 2.0
+                            box_center_y = box_y + box_h / 2.0
+
+                if box_center_x is None or box_center_y is None:
+                    box_center_x = left + width / 2.0
+                    box_center_y = top + height / 2.0
+
                 passes_area = True
                 if primary_area is not None:
                     if not (
-                        primary_area.x <= center_x <= primary_area.right
-                        and primary_area.y <= center_y <= primary_area.bottom
+                        primary_area.x <= box_center_x <= primary_area.right
+                        and primary_area.y <= box_center_y <= primary_area.bottom
                     ):
                         passes_area = False
                 passes_direction = True
                 if facing and char_center_x is not None:
-                    if facing == 'left' and center_x > char_center_x:
+                    if facing == 'left' and box_center_x > char_center_x:
                         passes_direction = False
-                    elif facing == 'right' and center_x < char_center_x:
+                    elif facing == 'right' and box_center_x < char_center_x:
                         passes_direction = False
                 matched = bool(entry.get('matched'))
                 overlay_entry = {
