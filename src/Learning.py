@@ -810,6 +810,8 @@ class MonsterSettingsDialog(QDialog):
         test_layout.addLayout(test_button_row)
 
         self.test_result_label = QLabel("테스트 준비됨")
+        self.test_result_label.setWordWrap(True)
+        self.test_result_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         test_layout.addWidget(self.test_result_label)
 
         nameplate_layout.addWidget(test_group)
@@ -998,7 +1000,8 @@ class MonsterSettingsDialog(QDialog):
                 image = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
             elif image.ndim == 3 and image.shape[2] == 4:
                 image = cv2.cvtColor(image, cv2.COLOR_BGRA2GRAY)
-            template_images.append((entry.get('id', ''), image))
+            display_name = entry.get('original_name') or os.path.basename(path) or entry.get('id', '템플릿')
+            template_images.append((display_name, image))
         if not template_images:
             QMessageBox.warning(self, "오류", "템플릿 이미지를 불러오지 못했습니다.")
             return
@@ -1009,42 +1012,56 @@ class MonsterSettingsDialog(QDialog):
             fallback = getattr(self.learning_tab, 'nameplate_config', {}) or {}
             threshold = float(fallback.get('match_threshold', 0.60))
 
-        results = []
+        summary_lines: list[str] = []
+        success_count = 0
         for sample in self.test_samples:
             sample_id = sample['id']
             item = self._test_item_map.get(sample_id)
+            base_label = os.path.basename(sample['path'])
             best_score = -1.0
-            best_template = None
+            best_template_name = None
+            template_details: list[str] = []
+            sample_success = False
             roi = self._preprocess_test_roi(sample['image'])
             if roi is None or roi.size == 0:
-                results.append((sample_id, False, best_score))
                 if item:
-                    item.setText(f"{item.text()} - 오류")
+                    item.setBackground(QBrush())
+                    item.setText(f"{base_label} - 오류 (이미지를 처리하지 못했습니다)")
+                    item.setBackground(QColor(200, 40, 40, 80))
+                summary_lines.append(f"{base_label} → 전처리 실패")
                 continue
-            for tpl_id, tpl_img in template_images:
+            for tpl_name, tpl_img in template_images:
                 if roi.shape[0] < tpl_img.shape[0] or roi.shape[1] < tpl_img.shape[1]:
+                    template_details.append(f"{tpl_name}: 비교 불가(크기)")
                     continue
                 result = cv2.matchTemplate(roi, tpl_img, cv2.TM_CCOEFF_NORMED)
                 _, max_val, _, _ = cv2.minMaxLoc(result)
-                if max_val > best_score:
-                    best_score = float(max_val)
-                    best_template = tpl_id
-            matched = best_score >= threshold if best_score >= 0 else False
-            results.append((sample_id, matched, best_score))
+                score = float(max_val)
+                is_match = score >= threshold
+                template_details.append(f"{tpl_name}: {score:.2f} ({'성공' if is_match else '실패'})")
+                if score > best_score:
+                    best_score = score
+                    best_template_name = tpl_name
+                if is_match:
+                    sample_success = True
             if item:
-                base_label = os.path.basename(sample['path'])
                 item.setBackground(QBrush())
-                status = "성공" if matched else "실패"
-                item.setText(f"{base_label} - {status} ({best_score:.2f})")
-                if matched:
+                status = "성공" if sample_success else "실패"
+                if best_score >= 0 and best_template_name:
+                    item.setText(f"{base_label} - {status} (최고 {best_template_name} {best_score:.2f})")
+                else:
+                    item.setText(f"{base_label} - {status} (유효한 템플릿 없음)")
+                if sample_success:
                     item.setBackground(QColor(20, 120, 60, 80))
                 else:
                     item.setBackground(QColor(200, 40, 40, 80))
-        success_count = sum(1 for _, matched, _ in results if matched)
-        if results:
-            self.test_result_label.setText(
-                f"총 {len(results)}개 테스트 중 {success_count}개 성공 (임계값 {threshold:.2f})"
-            )
+            detail_text = ', '.join(template_details) if template_details else '유효한 템플릿 결과 없음'
+            summary_lines.append(f"{base_label} → {detail_text}")
+            if sample_success:
+                success_count += 1
+        if summary_lines:
+            header = f"임계값 {threshold:.2f} | 총 {len(summary_lines)}개 테스트 중 {success_count}개 성공"
+            self.test_result_label.setText(header + "\n" + "\n".join(summary_lines))
         else:
             self.test_result_label.setText("테스트할 이미지가 없습니다.")
         self._update_test_buttons()
