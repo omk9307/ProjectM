@@ -33,6 +33,8 @@ from capture_manager import get_capture_manager
 
 MIN_MONSTER_BOX_SIZE = 30  # 탐지된 몬스터로 인정할 최소 크기(px)
 NAMEPLATE_TRACK_MATCH_RADIUS = 120.0  # 이름표 트래킹과 YOLO 박스를 연결할 최대 거리(px)
+NAMEPLATE_NICKNAME_OVERLAP_THRESHOLD = 0.5  # 닉네임 영역과 겹치는 비율이 이 이상이면 이름표 후보 제외
+NAMEPLATE_NICKNAME_MARGIN = 6.0  # 닉네임 박스에 적용할 여유 마진(px)
 
 
 __all__ = ["ScreenSnipper", "DetectionPopup", "DetectionThread"]
@@ -677,13 +679,19 @@ class DetectionThread(QThread):
                     track['probe_requested'] = True
                     track_probe_items.append(self._prepare_track_probe_item(track))
 
+                nick_box_data = nickname_info.get('nickname_box') if isinstance(nickname_info, dict) else None
+
                 nameplate_input_items: List[Dict[str, float]] = []
                 nameplate_input_items.extend(boxes_for_payload)
                 nameplate_input_items.extend(track_probe_items)
 
                 if nameplate_input_items:
                     nameplate_start = time.perf_counter()
-                    nameplate_matches = self._detect_nameplates(frame, nameplate_input_items)
+                    nameplate_matches = self._detect_nameplates(
+                        frame,
+                        nameplate_input_items,
+                        nickname_box=nick_box_data,
+                    )
                     nameplate_end = time.perf_counter()
                     self.perf_stats["nameplate_ms"] = (nameplate_end - nameplate_start) * 1000
                 else:
@@ -726,9 +734,6 @@ class DetectionThread(QThread):
                     else:
                         log_messages.append(f"[{timestamp}] 탐색 완료. 객체 없음.")
                     self.detection_logged.emit(log_messages)
-                
-                nick_box_data = nickname_info.get('nickname_box') if isinstance(nickname_info, dict) else None
-
                 if self.show_nickname_overlay and nick_box_data:
                     x1, y1 = int(nick_box_data.get('x', 0)), int(nick_box_data.get('y', 0))
                     x2 = int(x1 + nick_box_data.get('width', 0))
@@ -1146,6 +1151,54 @@ class DetectionThread(QThread):
 
         return synthetic_entries
 
+    @staticmethod
+    def _normalize_box_rect(
+        box: Optional[dict],
+        frame_width: int,
+        frame_height: int,
+        margin: float = 0.0,
+    ) -> Optional[Tuple[float, float, float, float]]:
+        if not isinstance(box, dict):
+            return None
+        try:
+            x = float(box.get('x', 0.0))
+            y = float(box.get('y', 0.0))
+            width = float(box.get('width', 0.0))
+            height = float(box.get('height', 0.0))
+        except (TypeError, ValueError):
+            return None
+        if width <= 0 or height <= 0:
+            return None
+        left = x - margin
+        top = y - margin
+        right = x + width + margin
+        bottom = y + height + margin
+        left = max(0.0, left)
+        top = max(0.0, top)
+        right = min(float(frame_width), right)
+        bottom = min(float(frame_height), bottom)
+        if right <= left or bottom <= top:
+            return None
+        return left, top, right, bottom
+
+    @staticmethod
+    def _rect_overlap_ratios(
+        rect_a: Tuple[float, float, float, float],
+        rect_b: Tuple[float, float, float, float],
+    ) -> Tuple[float, float]:
+        left = max(rect_a[0], rect_b[0])
+        top = max(rect_a[1], rect_b[1])
+        right = min(rect_a[2], rect_b[2])
+        bottom = min(rect_a[3], rect_b[3])
+        if right <= left or bottom <= top:
+            return 0.0, 0.0
+        intersection_area = (right - left) * (bottom - top)
+        area_a = max((rect_a[2] - rect_a[0]) * (rect_a[3] - rect_a[1]), 0.0)
+        area_b = max((rect_b[2] - rect_b[0]) * (rect_b[3] - rect_b[1]), 0.0)
+        if area_a <= 0.0 or area_b <= 0.0:
+            return 0.0, 0.0
+        return intersection_area / area_a, intersection_area / area_b
+
     def _box_intersects_allowed_regions(self, item: Dict[str, float]) -> bool:
         if not self.allowed_subregions:
             return True
@@ -1194,12 +1247,23 @@ class DetectionThread(QThread):
             return None
         return left, top, right, bottom
 
-    def _detect_nameplates(self, frame: np.ndarray, boxes: List[Dict[str, float]]) -> List[dict]:
+    def _detect_nameplates(
+        self,
+        frame: np.ndarray,
+        boxes: List[Dict[str, float]],
+        nickname_box: Optional[dict] = None,
+    ) -> List[dict]:
         if not self.nameplate_enabled or not boxes or not self._nameplate_template_images:
             return []
         frame_height, frame_width = frame.shape[:2]
         frame_gray = None
         matches: List[dict] = []
+        nickname_rect = self._normalize_box_rect(
+            nickname_box,
+            frame_width,
+            frame_height,
+            margin=NAMEPLATE_NICKNAME_MARGIN,
+        )
         for item in boxes:
             try:
                 class_id = int(item.get('class_id', -1))
@@ -1221,6 +1285,14 @@ class DetectionThread(QThread):
             if roi_coords is None:
                 continue
             left, top, right, bottom = roi_coords
+            if nickname_rect is not None:
+                roi_rect = (float(left), float(top), float(right), float(bottom))
+                roi_ratio, nickname_ratio = self._rect_overlap_ratios(roi_rect, nickname_rect)
+                if (
+                    roi_ratio >= NAMEPLATE_NICKNAME_OVERLAP_THRESHOLD
+                    or nickname_ratio >= NAMEPLATE_NICKNAME_OVERLAP_THRESHOLD
+                ):
+                    continue
             if frame_gray is None:
                 frame_gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
             roi_gray = frame_gray[top:bottom, left:right]
