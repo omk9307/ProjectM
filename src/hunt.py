@@ -28,7 +28,6 @@ from PyQt6.QtWidgets import (
     QDoubleSpinBox,
     QMessageBox,
     QPushButton,
-    QRadioButton,
     QSpinBox,
     QTextEdit,
     QTreeWidget,
@@ -1340,29 +1339,20 @@ class HuntTab(QWidget):
         control_layout.setContentsMargins(0, 0, 0, 0)
         control_layout.setSpacing(8)
 
-        target_layout = QHBoxLayout()
-        self.auto_target_radio = QRadioButton("자동 (Maple 창)")
-        self.auto_target_radio.setChecked(True)
-        self.manual_target_radio = QRadioButton("수동 (영역 지정)")
-        target_layout.addWidget(self.auto_target_radio)
-        target_layout.addWidget(self.manual_target_radio)
-
         self.set_area_btn = QPushButton("영역 지정")
-        self.set_area_btn.setEnabled(False)
+        self.set_area_btn.setEnabled(True)
         self.set_area_btn.clicked.connect(self._set_manual_area)
-        self.add_area_btn = QPushButton("+")
-        self.add_area_btn.setEnabled(False)
-        self.add_area_btn.setFixedWidth(28)
-        self.add_area_btn.clicked.connect(self._add_manual_area)
-        self.manual_target_radio.toggled.connect(self._handle_capture_mode_toggle)
-        self.auto_target_radio.toggled.connect(self._handle_setting_changed)
-        target_layout.addWidget(self.set_area_btn)
-        target_layout.addWidget(self.add_area_btn)
 
         control_row = QHBoxLayout()
         control_row.setSpacing(12)
 
-        control_row.addLayout(target_layout)
+        self.detect_btn = QPushButton("사냥시작")
+        self.detect_btn.setCheckable(True)
+        self.detect_btn.setToolTip("단축키: F10")
+        self.detect_btn.clicked.connect(self._toggle_detection)
+        control_row.addWidget(self.detect_btn)
+
+        control_row.addWidget(self.set_area_btn)
 
         control_row.addWidget(QLabel(f"{CHARACTER_CLASS_NAME} 신뢰도:"))
         self.conf_char_spinbox = QDoubleSpinBox()
@@ -1383,30 +1373,30 @@ class HuntTab(QWidget):
         control_row.addStretch(1)
         control_layout.addLayout(control_row)
 
-        self.screen_output_checkbox = QCheckBox("화면 출력")
+        self.screen_output_checkbox = QCheckBox("화면출력")
         self.screen_output_checkbox.setChecked(False)
         self.screen_output_checkbox.toggled.connect(self._on_screen_output_toggled)
 
-        self.show_hunt_area_checkbox = QCheckBox("사냥범위")
+        self.show_hunt_area_checkbox = QCheckBox("사냥 범위")
         self.show_hunt_area_checkbox.setChecked(True)
         self.show_hunt_area_checkbox.toggled.connect(self._on_overlay_toggle_changed)
 
-        self.show_primary_skill_checkbox = QCheckBox("스킬범위")
+        self.show_primary_skill_checkbox = QCheckBox("주스킬 범위")
         self.show_primary_skill_checkbox.setChecked(True)
         self.show_primary_skill_checkbox.toggled.connect(self._on_overlay_toggle_changed)
 
-        self.show_direction_checkbox = QCheckBox("방향범위")
+        self.show_direction_checkbox = QCheckBox("캐릭터방향 범위")
         self.show_direction_checkbox.setChecked(True)
         self.show_direction_checkbox.toggled.connect(self._on_overlay_toggle_changed)
 
-        self.show_nickname_range_checkbox = QCheckBox("닉네임범위")
+        self.show_nickname_range_checkbox = QCheckBox("닉네임 범위")
         self.show_nickname_range_checkbox.setChecked(True)
         self.show_nickname_range_checkbox.toggled.connect(self._on_overlay_toggle_changed)
 
-        self.show_nameplate_checkbox = QCheckBox("이름표범위")
+        self.show_nameplate_checkbox = QCheckBox("몬스터 이름표 범위")
         self.show_nameplate_checkbox.setChecked(True)
         self.show_nameplate_checkbox.toggled.connect(self._on_overlay_toggle_changed)
-        self.show_nameplate_tracking_checkbox = QCheckBox("이름표시각화")
+        self.show_nameplate_tracking_checkbox = QCheckBox("몬스터 이름표 시각")
         self.show_nameplate_tracking_checkbox.setChecked(self.overlay_preferences.get('nameplate_tracking', False))
         self.show_nameplate_tracking_checkbox.toggled.connect(self._on_nameplate_tracking_toggle_changed)
 
@@ -1420,6 +1410,7 @@ class HuntTab(QWidget):
             self.show_direction_checkbox,
             self.show_nickname_range_checkbox,
             self.show_nameplate_checkbox,
+            self.show_nameplate_tracking_checkbox,
             self.auto_request_checkbox,
         ):
             checkbox.setSizePolicy(
@@ -1427,19 +1418,7 @@ class HuntTab(QWidget):
             )
 
         button_row = QHBoxLayout()
-        self.detect_btn = QPushButton("실시간 탐지 시작")
-        self.detect_btn.setCheckable(True)
-        self.detect_btn.setToolTip("단축키: F10")
-        self.detect_btn.clicked.connect(self._toggle_detection)
-        button_row.addWidget(self.detect_btn)
-
-        self.popup_btn = QPushButton("↗")
-        self.popup_btn.setFixedSize(24, 24)
-        self.popup_btn.setToolTip("탐지 화면을 팝업으로 열기")
-        self.popup_btn.clicked.connect(self._toggle_detection_popup)
-        button_row.addWidget(self.popup_btn)
-
-        button_row.addSpacing(12)
+        button_row.setSpacing(12)
         button_row.addWidget(self.screen_output_checkbox)
         button_row.addWidget(self.show_hunt_area_checkbox)
         button_row.addWidget(self.show_primary_skill_checkbox)
@@ -1597,8 +1576,6 @@ class HuntTab(QWidget):
                 return
             self.manual_capture_region = dict(new_region)
             self.manual_capture_regions = [dict(new_region)]
-            if hasattr(self, 'add_area_btn'):
-                self.add_area_btn.setEnabled(True)
             self.append_log(f"수동 탐지 영역 초기화: {self.manual_capture_region}")
             self._update_manual_area_summary()
             self._save_settings()
@@ -1624,8 +1601,6 @@ class HuntTab(QWidget):
                 return
             self.manual_capture_regions.append(dict(new_region))
             self.manual_capture_region = self._merge_manual_capture_regions()
-            if hasattr(self, 'add_area_btn') and not self.add_area_btn.isEnabled():
-                self.add_area_btn.setEnabled(True)
             self.append_log(f"영역 추가 완료. 합성 영역: {self.manual_capture_region}")
             self._update_manual_area_summary()
             self._save_settings()
@@ -1791,19 +1766,11 @@ class HuntTab(QWidget):
                 self.detect_btn.setChecked(False)
                 return
 
-            if self.auto_target_radio.isChecked():
-                capture_region = {
-                    'top': maple_window.top,
-                    'left': maple_window.left,
-                    'width': maple_window.width,
-                    'height': maple_window.height,
-                }
-            else:
-                if not self.manual_capture_region:
-                    QMessageBox.warning(self, '오류', "'영역 지정'으로 탐지 영역을 설정해주세요.")
-                    self.detect_btn.setChecked(False)
-                    return
-                capture_region = self.manual_capture_region
+            if not self.manual_capture_region:
+                QMessageBox.warning(self, '오류', "'영역 지정'으로 탐지 영역을 설정해주세요.")
+                self.detect_btn.setChecked(False)
+                return
+            capture_region = dict(self.manual_capture_region)
 
             if capture_region['width'] <= 0 or capture_region['height'] <= 0:
                 QMessageBox.warning(self, '오류', '탐지 영역 크기가 유효하지 않습니다.')
@@ -1811,8 +1778,7 @@ class HuntTab(QWidget):
                 return
 
             capture_subregions = None
-            if not self.auto_target_radio.isChecked():
-                capture_subregions = self._resolve_manual_subregions(capture_region)
+            capture_subregions = self._resolve_manual_subregions(capture_region)
 
             self._load_nickname_configuration()
             nickname_detector_instance = self._build_thread_nickname_detector()
@@ -1890,7 +1856,7 @@ class HuntTab(QWidget):
                 try:
                     runtime_settings = self.data_manager.get_detection_runtime_settings() or {}
                 except Exception as exc:
-                    self.append_log(f"실시간 탐지 설정을 불러오지 못했습니다: {exc}", "warn")
+                    self.append_log(f"사냥 탐지 설정을 불러오지 못했습니다: {exc}", "warn")
                     runtime_settings = {}
             nms_iou = runtime_settings.get('yolo_nms_iou', self.yolo_nms_iou)
             max_det_value = runtime_settings.get('yolo_max_det', self.yolo_max_det)
@@ -1985,7 +1951,7 @@ class HuntTab(QWidget):
             if self.detection_view:
                 self.detection_view.setText("탐지 준비 중...")
                 self.detection_view.setPixmap(QPixmap())
-            self.detect_btn.setText("실시간 탐지 중단")
+            self.detect_btn.setText("사냥중지")
             if self.status_monitor:
                 self.status_monitor.set_tab_active(hunt=True)
             self._status_detection_start_ts = time.time()
@@ -2015,14 +1981,14 @@ class HuntTab(QWidget):
             self._stop_perf_logging()
             self._stop_detection_thread()
             self._set_detection_status(False)
-            self.detect_btn.setText("실시간 탐지 시작")
+            self.detect_btn.setText("사냥시작")
             if self.detection_view:
                 self.detection_view.setText("탐지 중단됨")
                 self.detection_view.setPixmap(QPixmap())
             self.clear_detection_snapshot()
             self._cancel_facing_reset_timer()
             if not thread_active:
-                self._issue_all_keys_release("실시간 탐지 중단")
+                self._issue_all_keys_release("사냥중지")
 
     def _on_conf_char_changed(self, value: float) -> None:
         self._sync_nickname_threshold_from_spinbox(float(value))
@@ -2112,7 +2078,7 @@ class HuntTab(QWidget):
 
     def _on_detection_thread_finished(self) -> None:
         self.detect_btn.setChecked(False)
-        self.detect_btn.setText("실시간 탐지 시작")
+        self.detect_btn.setText("사냥시작")
         if not self.is_popup_active and self.detection_view:
             self.detection_view.setText("탐지 중단됨")
             self.detection_view.setPixmap(QPixmap())
@@ -2517,8 +2483,10 @@ class HuntTab(QWidget):
             return
 
         self.is_popup_active = True
-        self.popup_btn.setText("↙")
-        self.popup_btn.setToolTip("탐지 화면을 메인 창으로 복귀")
+        popup_button = getattr(self, 'popup_btn', None)
+        if popup_button is not None:
+            popup_button.setText("↙")
+            popup_button.setToolTip("탐지 화면을 메인 창으로 복귀")
 
         if not self.detection_popup:
             self.detection_popup = DetectionPopup(self.last_popup_scale, self)
@@ -2541,8 +2509,10 @@ class HuntTab(QWidget):
             self.last_popup_position = (self.detection_popup.x(), self.detection_popup.y())
             self._save_settings()
         self.is_popup_active = False
-        self.popup_btn.setText("↗")
-        self.popup_btn.setToolTip("탐지 화면을 팝업으로 열기")
+        popup_button = getattr(self, 'popup_btn', None)
+        if popup_button is not None:
+            popup_button.setText("↗")
+            popup_button.setToolTip("탐지 화면을 팝업으로 열기")
         if self.detection_view:
             if self.detect_btn.isChecked():
                 self.detection_view.setText("탐지 준비 중...")
@@ -3086,13 +3056,6 @@ class HuntTab(QWidget):
         self.append_log("사냥 권한 요청", "info")
         for line in detail_parts:
             self._append_log_detail(line)
-
-    def _handle_capture_mode_toggle(self, checked: bool) -> None:
-        if hasattr(self, 'set_area_btn'):
-            self.set_area_btn.setEnabled(bool(checked))
-        if hasattr(self, 'add_area_btn'):
-            self.add_area_btn.setEnabled(bool(checked) and bool(self.manual_capture_region))
-        self._save_settings()
 
     def _handle_setting_changed(self, *args, **kwargs) -> None:
         self._save_settings()
@@ -4725,7 +4688,6 @@ class HuntTab(QWidget):
                     else self.overlay_preferences.get('nameplate_tracking', False),
                 )
             )
-            auto_target = bool(display.get('auto_target', self.auto_target_radio.isChecked()))
             screen_output_enabled = bool(
                 display.get(
                     'screen_output',
@@ -4752,8 +4714,6 @@ class HuntTab(QWidget):
             self.show_nameplate_checkbox.setChecked(show_nameplate)
             if hasattr(self, 'show_nameplate_tracking_checkbox'):
                 self.show_nameplate_tracking_checkbox.setChecked(show_nameplate_tracking)
-            self.auto_target_radio.setChecked(auto_target)
-            self.manual_target_radio.setChecked(not auto_target)
             self.screen_output_checkbox.setChecked(screen_output_enabled)
             self.show_confidence_summary_checkbox.setChecked(summary_confidence)
             self.show_frame_summary_checkbox.setChecked(summary_frame)
@@ -4825,10 +4785,7 @@ class HuntTab(QWidget):
         else:
             self.manual_capture_region = None
 
-        manual_enabled = self.manual_target_radio.isChecked()
-        self.set_area_btn.setEnabled(manual_enabled)
-        if hasattr(self, 'add_area_btn'):
-            self.add_area_btn.setEnabled(manual_enabled and bool(self.manual_capture_region))
+        self.set_area_btn.setEnabled(True)
 
         self.overlay_preferences['hunt_area'] = self.show_hunt_area_checkbox.isChecked()
         self.overlay_preferences['primary_area'] = self.show_primary_skill_checkbox.isChecked()
@@ -5007,7 +4964,6 @@ class HuntTab(QWidget):
                 ) if hasattr(self, 'show_nameplate_tracking_checkbox') else bool(
                     self.overlay_preferences.get('nameplate_tracking', False)
                 ),
-                'auto_target': self.auto_target_radio.isChecked(),
                 'screen_output': self.screen_output_checkbox.isChecked(),
                 'summary_confidence': self.show_confidence_summary_checkbox.isChecked(),
                 'summary_frame': self.show_frame_summary_checkbox.isChecked(),
@@ -6048,7 +6004,7 @@ class HuntTab(QWidget):
             self.hotkey_manager = None
         if hasattr(self, 'detect_btn'):
             self.detect_btn.setChecked(False)
-            self.detect_btn.setText("실시간 탐지 시작")
+            self.detect_btn.setText("사냥시작")
         self._authority_request_connected = False
         self._authority_release_connected = False
         self._save_settings()
