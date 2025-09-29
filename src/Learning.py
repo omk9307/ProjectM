@@ -1991,6 +1991,7 @@ class DataManager:
             },
             'dead_zone_sec': 0.20,
             'track_missing_grace_sec': 0.12,
+            'track_max_hold_sec': 2.0,
             'per_class': {},
         }
 
@@ -2019,6 +2020,20 @@ class DataManager:
         if 'track_missing_grace_sec' not in merged:
             merged['track_missing_grace_sec'] = default_config['track_missing_grace_sec']
             changed = True
+        if 'track_max_hold_sec' not in merged:
+            merged['track_max_hold_sec'] = default_config['track_max_hold_sec']
+            changed = True
+        else:
+            try:
+                hold_value = float(merged['track_max_hold_sec'])
+            except (TypeError, ValueError):
+                merged['track_max_hold_sec'] = default_config['track_max_hold_sec']
+                changed = True
+            else:
+                clamped = max(0.0, min(5.0, hold_value))
+                if abs(clamped - hold_value) > 1e-6:
+                    merged['track_max_hold_sec'] = clamped
+                    changed = True
         roi = merged.get('roi') if isinstance(merged.get('roi'), dict) else None
         if roi is None:
             merged['roi'] = dict(default_config['roi'])
@@ -2165,6 +2180,18 @@ class DataManager:
                 config['track_missing_grace_sec'] = grace_value
                 changed = True
 
+        if 'track_max_hold_sec' in updates:
+            try:
+                hold_value = float(updates['track_max_hold_sec'])
+            except (TypeError, ValueError):
+                hold_value = config.get(
+                    'track_max_hold_sec', self._default_nameplate_config()['track_max_hold_sec']
+                )
+            hold_value = max(0.0, min(5.0, hold_value))
+            if abs(config.get('track_max_hold_sec', 0.0) - hold_value) > 1e-6:
+                config['track_max_hold_sec'] = hold_value
+                changed = True
+
         if 'roi' in updates and isinstance(updates['roi'], dict):
             roi = dict(config.get('roi', {}))
             roi_updates = updates['roi']
@@ -2195,6 +2222,7 @@ class DataManager:
             'match_threshold': float(config.get('match_threshold', 0.60)),
             'dead_zone_sec': float(config.get('dead_zone_sec', 0.20)),
             'track_missing_grace_sec': float(config.get('track_missing_grace_sec', 0.12)),
+            'track_max_hold_sec': float(config.get('track_max_hold_sec', 2.0)),
         })
         return config
 
@@ -3622,6 +3650,14 @@ class LearningTab(QWidget):
         detection_row.addSpacing(12)
         detection_row.addWidget(QLabel("유예"))
         detection_row.addWidget(self.nameplate_grace_spin)
+        self.nameplate_hold_spin = QDoubleSpinBox()
+        self.nameplate_hold_spin.setRange(0.0, 5.0)
+        self.nameplate_hold_spin.setSingleStep(0.1)
+        self.nameplate_hold_spin.setDecimals(2)
+        self.nameplate_hold_spin.setMaximumWidth(90)
+        detection_row.addSpacing(12)
+        detection_row.addWidget(QLabel("최대 유지"))
+        detection_row.addWidget(self.nameplate_hold_spin)
         detection_row.addStretch(1)
         detection_widget = QWidget()
         detection_widget.setLayout(detection_row)
@@ -3643,6 +3679,7 @@ class LearningTab(QWidget):
         self.nameplate_threshold_spin.valueChanged.connect(self._handle_nameplate_threshold_changed)
         self.nameplate_dead_zone_spin.valueChanged.connect(self._handle_nameplate_dead_zone_changed)
         self.nameplate_grace_spin.valueChanged.connect(self._handle_nameplate_grace_changed)
+        self.nameplate_hold_spin.valueChanged.connect(self._handle_nameplate_hold_changed)
 
         center_layout.addLayout(image_list_header_layout)
         center_layout.addWidget(self.image_list_widget)
@@ -4138,6 +4175,7 @@ class LearningTab(QWidget):
             self.nameplate_group.blockSignals(False)
             self.nameplate_dead_zone_spin.setEnabled(enabled)
             self.nameplate_grace_spin.setEnabled(enabled)
+            self.nameplate_hold_spin.setEnabled(enabled)
 
             width_val = int(roi.get('width', 135) or 135)
             height_val = int(roi.get('height', 65) or 65)
@@ -4173,6 +4211,11 @@ class LearningTab(QWidget):
             self.nameplate_grace_spin.blockSignals(True)
             self.nameplate_grace_spin.setValue(grace_value)
             self.nameplate_grace_spin.blockSignals(False)
+
+            hold_value = float(config.get('track_max_hold_sec', 2.0) or 0.0)
+            self.nameplate_hold_spin.blockSignals(True)
+            self.nameplate_hold_spin.setValue(hold_value)
+            self.nameplate_hold_spin.blockSignals(False)
         finally:
             self._nameplate_ui_updating = False
 
@@ -4226,6 +4269,14 @@ class LearningTab(QWidget):
             return
         value = float(value)
         updated = self.data_manager.update_monster_nameplate_config({'track_missing_grace_sec': value})
+        self.nameplate_config = updated
+        self._apply_nameplate_config_to_ui()
+
+    def _handle_nameplate_hold_changed(self, value: float) -> None:
+        if self._nameplate_ui_updating:
+            return
+        value = float(value)
+        updated = self.data_manager.update_monster_nameplate_config({'track_max_hold_sec': value})
         self.nameplate_config = updated
         self._apply_nameplate_config_to_ui()
 

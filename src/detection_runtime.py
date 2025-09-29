@@ -325,6 +325,11 @@ class DetectionThread(QThread):
         except (TypeError, ValueError):
             track_grace_raw = 0.12
         self.nameplate_track_missing_grace = max(0.0, min(2.0, track_grace_raw))
+        try:
+            track_hold_raw = float(self.nameplate_config.get('track_max_hold_sec', 2.0))
+        except (TypeError, ValueError):
+            track_hold_raw = 2.0
+        self.nameplate_track_max_hold = max(0.0, min(5.0, track_hold_raw))
         self.nameplate_thresholds: Dict[int, float] = {}
         if nameplate_thresholds:
             for key, value in nameplate_thresholds.items():
@@ -1021,6 +1026,7 @@ class DetectionThread(QThread):
             'active': True,
             'matched_this_frame': source != 'track',
             'nameplate_confirmed_this_frame': True,
+            'created_ts': now,
         }
         self._nameplate_tracks[track_id] = track
         return track
@@ -1100,11 +1106,23 @@ class DetectionThread(QThread):
                     track['missing_since'] = frame_now
 
         grace_limit = self.nameplate_track_missing_grace
+        hold_limit = self.nameplate_track_max_hold
         for track_id, track in list(self._nameplate_tracks.items()):
             if not track.get('active', True):
                 continue
             if track.get('matched_this_frame'):
                 continue
+            if hold_limit > 0.0:
+                reference_ts = track.get('last_yolo_ts')
+                if reference_ts is None:
+                    reference_ts = track.get('created_ts', track.get('last_nameplate_ts', frame_now))
+                if reference_ts is None:
+                    reference_ts = frame_now
+                if frame_now - reference_ts > hold_limit:
+                    track['active'] = False
+                    track_events.append(self._build_track_event(track, 'ended', frame_now))
+                    del self._nameplate_tracks[track_id]
+                    continue
             last_nameplate_ts = track.get('last_nameplate_ts')
             missing_since = track.get('missing_since')
             should_emit = False

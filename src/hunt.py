@@ -559,6 +559,7 @@ class HuntTab(QWidget):
         self._nameplate_dead_zones: list[dict] = []
         self._nameplate_dead_zone_duration_sec = 0.2
         self._nameplate_track_missing_grace_sec = 0.12
+        self._nameplate_track_max_hold_sec = 2.0
         self._nameplate_visual_debug_enabled = False
         self._visual_tracked_monsters: list[dict] = []
         self._visual_dead_zones: list[dict] = []
@@ -4422,8 +4423,13 @@ class HuntTab(QWidget):
             track_grace_value = float(self._nameplate_config.get('track_missing_grace_sec', 0.12))
         except (TypeError, ValueError):
             track_grace_value = 0.12
+        try:
+            track_hold_value = float(self._nameplate_config.get('track_max_hold_sec', 2.0))
+        except (TypeError, ValueError):
+            track_hold_value = 2.0
         self._nameplate_dead_zone_duration_sec = max(0.0, min(2.0, dead_zone_value))
         self._nameplate_track_missing_grace_sec = max(0.0, min(2.0, track_grace_value))
+        self._nameplate_track_max_hold_sec = max(0.0, min(5.0, track_hold_value))
         if not self._nameplate_enabled:
             self._nameplate_dead_zones = []
             self._visual_dead_zones = []
@@ -4481,6 +4487,12 @@ class HuntTab(QWidget):
             except (TypeError, ValueError):
                 grace_value = self._nameplate_track_missing_grace_sec
             self._nameplate_track_missing_grace_sec = max(0.0, min(2.0, grace_value))
+        if 'track_max_hold_sec' in payload:
+            try:
+                hold_value = float(payload.get('track_max_hold_sec', self._nameplate_track_max_hold_sec))
+            except (TypeError, ValueError):
+                hold_value = self._nameplate_track_max_hold_sec
+            self._nameplate_track_max_hold_sec = max(0.0, min(5.0, hold_value))
         if target == 'nickname':
             self._show_nickname_overlay_config = show_overlay
             if not show_overlay:
