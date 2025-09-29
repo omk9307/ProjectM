@@ -1354,6 +1354,12 @@ class HuntTab(QWidget):
 
         control_row.addWidget(self.set_area_btn)
 
+        self.add_area_btn = QPushButton("+")
+        self.add_area_btn.setEnabled(False)
+        self.add_area_btn.setFixedWidth(28)
+        self.add_area_btn.clicked.connect(self._add_manual_area)
+        control_row.addWidget(self.add_area_btn)
+
         control_row.addWidget(QLabel(f"{CHARACTER_CLASS_NAME} 신뢰도:"))
         self.conf_char_spinbox = QDoubleSpinBox()
         self.conf_char_spinbox.setRange(0.05, 0.95)
@@ -1576,6 +1582,8 @@ class HuntTab(QWidget):
                 return
             self.manual_capture_region = dict(new_region)
             self.manual_capture_regions = [dict(new_region)]
+            if hasattr(self, 'add_area_btn'):
+                self.add_area_btn.setEnabled(True)
             self.append_log(f"수동 탐지 영역 초기화: {self.manual_capture_region}")
             self._update_manual_area_summary()
             self._save_settings()
@@ -1601,6 +1609,8 @@ class HuntTab(QWidget):
                 return
             self.manual_capture_regions.append(dict(new_region))
             self.manual_capture_region = self._merge_manual_capture_regions()
+            if hasattr(self, 'add_area_btn') and not self.add_area_btn.isEnabled():
+                self.add_area_btn.setEnabled(True)
             self.append_log(f"영역 추가 완료. 합성 영역: {self.manual_capture_region}")
             self._update_manual_area_summary()
             self._save_settings()
@@ -4786,6 +4796,8 @@ class HuntTab(QWidget):
             self.manual_capture_region = None
 
         self.set_area_btn.setEnabled(True)
+        if hasattr(self, 'add_area_btn'):
+            self.add_area_btn.setEnabled(bool(self.manual_capture_region))
 
         self.overlay_preferences['hunt_area'] = self.show_hunt_area_checkbox.isChecked()
         self.overlay_preferences['primary_area'] = self.show_primary_skill_checkbox.isChecked()
