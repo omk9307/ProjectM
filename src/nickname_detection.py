@@ -42,6 +42,8 @@ class NicknameDetector:
         self.search_margin_y = 100.0  # 세로(점프) 검색 여백
         self._last_successful_template: Optional[NicknameTemplate] = None # 마지막으로 성공한 템플릿을 기억하기 위한 변수
         self._full_scan_template_index: int = 0 #  전체 화면 스캔 시 순환할 템플릿 인덱스
+        self._last_search_region: Optional[dict] = None  # 마지막 템플릿 탐색 영역
+        self._last_search_mode: Optional[str] = None
         
     def configure(
         self,
@@ -81,18 +83,24 @@ class NicknameDetector:
         self._lost_frames = 0
         self._last_successful_template = None # 선호 템플릿 초기화
         self._full_scan_template_index = 0
-        
+        self._last_search_region = None
+        self._last_search_mode = None
+
     def detect(self, frame_bgr: np.ndarray) -> Optional[dict]:
         if not self.templates:
+            self._last_search_region = None
+            self._last_search_mode = None
             return None
         if frame_bgr is None or frame_bgr.size == 0:
+            self._last_search_region = None
+            self._last_search_mode = None
             return None
 
         frame_gray = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2GRAY)
         frame_h, frame_w = frame_gray.shape
         origin_x = 0
         origin_y = 0
-        
+
         # is_full_scan 플래그로 현재 탐색 모드 구분
         is_full_scan = True
         roi_gray = frame_gray
@@ -114,6 +122,15 @@ class NicknameDetector:
                     is_full_scan = True
                     roi_gray = frame_gray
         
+        roi_h, roi_w = roi_gray.shape
+        self._last_search_region = {
+            'x': float(origin_x),
+            'y': float(origin_y),
+            'width': float(roi_w),
+            'height': float(roi_h),
+        }
+        self._last_search_mode = 'full' if is_full_scan else 'roi'
+
         best_score = 0.0
         best_template: Optional[NicknameTemplate] = None
         best_location = (0, 0)
@@ -185,6 +202,8 @@ class NicknameDetector:
 
     def notify_missed(self) -> None:
         if self._last_result is None:
+            self._last_search_region = None
+            self._last_search_mode = None
             return
         self._lost_frames += 1
         if self._lost_frames >= self.max_roi_lost_frames:
@@ -192,3 +211,13 @@ class NicknameDetector:
             self._lost_frames = 0
             #  캐릭터를 완전히 놓쳤으므로 선호 템플릿도 초기화
             self._last_successful_template = None
+            self._last_search_region = None
+            self._last_search_mode = None
+
+    def get_last_search_region(self) -> Optional[dict]:
+        if not self._last_search_region:
+            return None
+        region = dict(self._last_search_region)
+        if self._last_search_mode:
+            region['mode'] = self._last_search_mode
+        return region

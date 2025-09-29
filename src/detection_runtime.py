@@ -212,6 +212,7 @@ class DetectionThread(QThread):
         direction_detector: Optional[DirectionDetector] = None,
         show_nickname_overlay: bool = True,
         show_direction_overlay: bool = True,
+        show_nickname_range_overlay: bool = False,
         nameplate_config: Optional[dict] = None,
         nameplate_templates: Optional[Dict[int, List[dict]]] = None,
         nameplate_thresholds: Optional[Dict[int, float]] = None,
@@ -237,6 +238,7 @@ class DetectionThread(QThread):
         self.direction_detector = direction_detector
         self.show_nickname_overlay = bool(show_nickname_overlay)
         self.show_direction_overlay = bool(show_direction_overlay)
+        self.show_nickname_range_overlay = bool(show_nickname_range_overlay)
         self.show_nameplate_overlay = bool(show_nameplate_overlay)
         self.is_running = True
         self.min_monster_box_size = MIN_MONSTER_BOX_SIZE
@@ -452,9 +454,12 @@ class DetectionThread(QThread):
 
                 nick_start = time.perf_counter()
                 nickname_info = None
+                nickname_search_region = None
                 if self.nickname_detector is not None:
                     try:
                         nickname_info = self.nickname_detector.detect(frame)
+                        if self.show_nickname_range_overlay:
+                            nickname_search_region = self.nickname_detector.get_last_search_region()
                     except Exception as exc:
                         if self.is_debug_mode:
                             print(f"[DetectionThread] 닉네임 탐지 오류: {exc}")
@@ -463,6 +468,11 @@ class DetectionThread(QThread):
                             self.nickname_detector.notify_missed()
                         except Exception:
                             pass
+                        if self.show_nickname_range_overlay:
+                            try:
+                                nickname_search_region = self.nickname_detector.get_last_search_region()
+                            except Exception:
+                                nickname_search_region = None
                 nick_end = time.perf_counter()
                 self.perf_stats["nickname_ms"] = (nick_end - nick_start) * 1000
 
@@ -557,6 +567,8 @@ class DetectionThread(QThread):
                     "monsters": [],
                 }
                 payload["nickname"] = nickname_info
+                if self.show_nickname_range_overlay and nickname_search_region:
+                    payload["nickname_search"] = nickname_search_region
                 payload["direction"] = direction_info
 
                 annotated_frame = frame
@@ -649,6 +661,17 @@ class DetectionThread(QThread):
                     x2 = int(x1 + nick_box_data.get('width', 0))
                     y2 = int(y1 + nick_box_data.get('height', 0))
                     cv2.rectangle(annotated_frame, (x1, y1), (x2, y2), (0, 255, 255), 2)
+
+                if self.show_nickname_range_overlay and nickname_search_region:
+                    try:
+                        rx = int(nickname_search_region.get('x', 0))
+                        ry = int(nickname_search_region.get('y', 0))
+                        rw = int(nickname_search_region.get('width', 0))
+                        rh = int(nickname_search_region.get('height', 0))
+                    except (AttributeError, ValueError, TypeError):
+                        rx = ry = rw = rh = 0
+                    if rw > 0 and rh > 0:
+                        cv2.rectangle(annotated_frame, (rx, ry), (rx + rw, ry + rh), (80, 200, 255), 1)
 
                 if self.show_direction_overlay and direction_info and isinstance(direction_info, dict):
                     roi_rect = direction_info.get('roi_rect')

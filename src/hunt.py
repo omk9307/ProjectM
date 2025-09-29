@@ -129,6 +129,7 @@ PRIMARY_AREA_BRUSH = QBrush(PRIMARY_AREA_COLOR)
 FALLBACK_CHARACTER_EDGE = QPen(QColor(0, 255, 120, 220), 2, Qt.PenStyle.SolidLine)
 FALLBACK_CHARACTER_BRUSH = QBrush(QColor(0, 255, 120, 60))
 NICKNAME_EDGE = QPen(QColor(255, 255, 0, 220), 2, Qt.PenStyle.DotLine)
+NICKNAME_RANGE_EDGE = QPen(QColor(120, 220, 255, 200), 1, Qt.PenStyle.DashLine)
 DIRECTION_ROI_EDGE = QPen(QColor(170, 80, 255, 200), 1, Qt.PenStyle.DashLine)
 DIRECTION_MATCH_EDGE_LEFT = QPen(QColor(0, 200, 255, 220), 2, Qt.PenStyle.SolidLine)
 DIRECTION_MATCH_EDGE_RIGHT = QPen(QColor(255, 200, 0, 220), 2, Qt.PenStyle.SolidLine)
@@ -529,9 +530,11 @@ class HuntTab(QWidget):
             'hunt_area': True,
             'primary_area': True,
             'direction_area': True,
+            'nickname_range': True,
             'nameplate_area': True,
         }
         self._direction_area_user_pref = True
+        self._nickname_range_user_pref = True
         self._nameplate_area_user_pref = True
         self._last_character_boxes: List[DetectionBox] = []
         self._last_character_details: List[dict] = []
@@ -541,6 +544,7 @@ class HuntTab(QWidget):
         self._nickname_templates: list[dict] = []
         self._latest_nickname_box: Optional[dict] = None
         self._last_nickname_match: Optional[dict] = None
+        self._latest_nickname_search_region: Optional[dict] = None
         self._nameplate_config: dict = {}
         self._nameplate_templates: dict[int, list] = {}
         self._show_nameplate_overlay_config = True
@@ -587,6 +591,7 @@ class HuntTab(QWidget):
             'characters': [],
             'monsters': [],
             'nickname': None,
+            'nickname_search': None,
             'direction': None,
             'nameplates': [],
         }
@@ -1299,6 +1304,10 @@ class HuntTab(QWidget):
         self.show_direction_checkbox.setChecked(True)
         self.show_direction_checkbox.toggled.connect(self._on_overlay_toggle_changed)
 
+        self.show_nickname_range_checkbox = QCheckBox("닉네임범위")
+        self.show_nickname_range_checkbox.setChecked(True)
+        self.show_nickname_range_checkbox.toggled.connect(self._on_overlay_toggle_changed)
+
         self.show_nameplate_checkbox = QCheckBox("이름표범위")
         self.show_nameplate_checkbox.setChecked(True)
         self.show_nameplate_checkbox.toggled.connect(self._on_overlay_toggle_changed)
@@ -1311,6 +1320,7 @@ class HuntTab(QWidget):
             self.show_hunt_area_checkbox,
             self.show_primary_skill_checkbox,
             self.show_direction_checkbox,
+            self.show_nickname_range_checkbox,
             self.show_nameplate_checkbox,
             self.auto_request_checkbox,
         ):
@@ -1336,6 +1346,7 @@ class HuntTab(QWidget):
         button_row.addWidget(self.show_hunt_area_checkbox)
         button_row.addWidget(self.show_primary_skill_checkbox)
         button_row.addWidget(self.show_direction_checkbox)
+        button_row.addWidget(self.show_nickname_range_checkbox)
         button_row.addWidget(self.show_nameplate_checkbox)
         button_row.addWidget(self.auto_request_checkbox)
 
@@ -1818,6 +1829,7 @@ class HuntTab(QWidget):
                     nickname_detector=nickname_detector_instance,
                     direction_detector=direction_detector_instance,
                     show_nickname_overlay=self._is_nickname_overlay_active(),
+                    show_nickname_range_overlay=self._is_nickname_range_overlay_active(),
                     show_direction_overlay=self._is_direction_range_overlay_active(),
                     nameplate_config=nameplate_config_payload,
                     nameplate_templates=nameplate_templates_payload,
@@ -1841,6 +1853,7 @@ class HuntTab(QWidget):
                     is_debug_mode=False,
                     nickname_detector=nickname_detector_instance,
                     show_nickname_overlay=self._is_nickname_overlay_active(),
+                    show_nickname_range_overlay=self._is_nickname_range_overlay_active(),
                     nameplate_config=nameplate_config_payload,
                     nameplate_templates=nameplate_templates_payload,
                     nameplate_thresholds=nameplate_thresholds_payload,
@@ -2058,6 +2071,19 @@ class HuntTab(QWidget):
                     painter.setPen(NICKNAME_EDGE)
                     painter.setBrush(QBrush(Qt.BrushStyle.NoBrush))
                     painter.drawRect(nick_rect)
+            if (
+                self._is_nickname_range_overlay_active()
+                and self._latest_nickname_search_region
+            ):
+                range_rect = self._dict_to_rect(
+                    self._latest_nickname_search_region,
+                    image.width(),
+                    image.height(),
+                )
+                if not range_rect.isNull():
+                    painter.setPen(NICKNAME_RANGE_EDGE)
+                    painter.setBrush(QBrush(Qt.BrushStyle.NoBrush))
+                    painter.drawRect(range_rect)
             if self._using_character_fallback and self._last_character_boxes:
                 painter.setPen(FALLBACK_CHARACTER_EDGE)
                 painter.setBrush(FALLBACK_CHARACTER_BRUSH)
@@ -2315,6 +2341,17 @@ class HuntTab(QWidget):
 
     def _is_nickname_overlay_active(self) -> bool:
         return bool(self._show_nickname_overlay_config)
+
+    def _is_nickname_range_overlay_active(self) -> bool:
+        if not self._show_nickname_overlay_config:
+            return False
+        if not self.overlay_preferences.get('nickname_range', True):
+            return False
+        checkbox = getattr(self, 'show_nickname_range_checkbox', None)
+        if checkbox is not None:
+            if not checkbox.isEnabled() or not checkbox.isChecked():
+                return False
+        return True
 
     def _is_direction_range_overlay_active(self) -> bool:
         if not self._show_direction_overlay_config:
@@ -2775,6 +2812,9 @@ class HuntTab(QWidget):
         direction_state = self.show_direction_checkbox.isChecked()
         self.overlay_preferences['direction_area'] = direction_state
         self._direction_area_user_pref = direction_state
+        nickname_range_state = self.show_nickname_range_checkbox.isChecked()
+        self.overlay_preferences['nickname_range'] = nickname_range_state
+        self._nickname_range_user_pref = nickname_range_state
         nameplate_state = self.show_nameplate_checkbox.isChecked()
         self.overlay_preferences['nameplate_area'] = nameplate_state
         self._nameplate_area_user_pref = nameplate_state
@@ -2786,6 +2826,8 @@ class HuntTab(QWidget):
         if not self.detection_thread:
             return
         self.detection_thread.show_nickname_overlay = bool(self._is_nickname_overlay_active())
+        if hasattr(self.detection_thread, 'show_nickname_range_overlay'):
+            self.detection_thread.show_nickname_range_overlay = bool(self._is_nickname_range_overlay_active())
         self.detection_thread.show_direction_overlay = bool(self._is_direction_range_overlay_active())
         if hasattr(self.detection_thread, 'show_nameplate_overlay'):
             active = self._is_nameplate_overlay_active() and self.overlay_preferences.get('nameplate_area', True)
@@ -2833,6 +2875,14 @@ class HuntTab(QWidget):
                 self.show_direction_checkbox.blockSignals(True)
                 self.show_direction_checkbox.setChecked(direction_value)
                 self.show_direction_checkbox.blockSignals(False)
+        if 'nickname_range' in options:
+            nickname_range_value = bool(options['nickname_range'])
+            self.overlay_preferences['nickname_range'] = nickname_range_value
+            self._nickname_range_user_pref = nickname_range_value
+            if hasattr(self, 'show_nickname_range_checkbox') and self.show_nickname_range_checkbox.isChecked() != nickname_range_value:
+                self.show_nickname_range_checkbox.blockSignals(True)
+                self.show_nickname_range_checkbox.setChecked(nickname_range_value)
+                self.show_nickname_range_checkbox.blockSignals(False)
         self._emit_area_overlays()
         self._update_detection_thread_overlay_flags()
         self._save_settings()
@@ -3358,6 +3408,7 @@ class HuntTab(QWidget):
         characters_data = payload.get('characters') or []
         monsters_data = payload.get('monsters') or []
         nickname_data = payload.get('nickname')
+        raw_nickname_search = payload.get('nickname_search')
         nameplate_data = payload.get('nameplates') or []
         perf_data = payload.get('perf') or {}
 
@@ -3441,6 +3492,22 @@ class HuntTab(QWidget):
         fallback_used = False
         nickname_used = False
         nickname_record = None
+        nickname_search_region: Optional[dict] = None
+
+        if isinstance(raw_nickname_search, dict):
+            try:
+                nickname_search_region = {
+                    'x': float(raw_nickname_search.get('x', 0.0)),
+                    'y': float(raw_nickname_search.get('y', 0.0)),
+                    'width': float(raw_nickname_search.get('width', 0.0)),
+                    'height': float(raw_nickname_search.get('height', 0.0)),
+                }
+            except (TypeError, ValueError):
+                nickname_search_region = None
+            else:
+                mode = raw_nickname_search.get('mode')
+                if isinstance(mode, str):
+                    nickname_search_region['mode'] = mode
 
         if isinstance(nickname_data, dict):
             char_box_info = nickname_data.get('character_box') or {}
@@ -3477,6 +3544,8 @@ class HuntTab(QWidget):
                 self._latest_nickname_box = None
         else:
             self._latest_nickname_box = None
+
+        self._latest_nickname_search_region = nickname_search_region
 
         if not nickname_used:
             if characters:
@@ -3582,6 +3651,7 @@ class HuntTab(QWidget):
             'characters': characters_data if characters_data else [],
             'monsters': monsters_data,
             'nickname': nickname_record,
+            'nickname_search': nickname_search_region,
             'direction': direction_record,
             'nameplates': filtered_nameplate_details,
         }
@@ -3988,7 +4058,24 @@ class HuntTab(QWidget):
         if target == 'nickname':
             self._show_nickname_overlay_config = show_overlay
             if not show_overlay:
+                self._nickname_range_user_pref = self.overlay_preferences.get('nickname_range', True)
+                self.overlay_preferences['nickname_range'] = False
+            else:
+                restored_range = self._nickname_range_user_pref if isinstance(self._nickname_range_user_pref, bool) else True
+                self.overlay_preferences['nickname_range'] = restored_range
+            checkbox = getattr(self, 'show_nickname_range_checkbox', None)
+            if checkbox is not None:
+                previous = checkbox.blockSignals(True)
+                if show_overlay:
+                    checkbox.setChecked(self.overlay_preferences.get('nickname_range', True))
+                    checkbox.setEnabled(True)
+                else:
+                    checkbox.setChecked(False)
+                    checkbox.setEnabled(False)
+                checkbox.blockSignals(previous)
+            if not show_overlay:
                 self._latest_nickname_box = None
+                self._latest_nickname_search_region = None
         elif target == 'direction':
             if not show_overlay:
                 self._direction_area_user_pref = self.overlay_preferences.get('direction_area', True)
@@ -4166,6 +4253,12 @@ class HuntTab(QWidget):
                 show_direction = bool(display.get('show_nickname_area'))
             else:
                 show_direction = self.show_direction_checkbox.isChecked()
+            show_nickname_range = bool(
+                display.get(
+                    'show_nickname_range_area',
+                    self.show_nickname_range_checkbox.isChecked(),
+                )
+            )
             show_nameplate = bool(display.get('show_nameplate_area', self.show_nameplate_checkbox.isChecked()))
             auto_target = bool(display.get('auto_target', self.auto_target_radio.isChecked()))
             screen_output_enabled = bool(
@@ -4190,6 +4283,7 @@ class HuntTab(QWidget):
             self.show_hunt_area_checkbox.setChecked(show_hunt)
             self.show_primary_skill_checkbox.setChecked(show_primary)
             self.show_direction_checkbox.setChecked(show_direction)
+            self.show_nickname_range_checkbox.setChecked(show_nickname_range)
             self.show_nameplate_checkbox.setChecked(show_nameplate)
             self.auto_target_radio.setChecked(auto_target)
             self.manual_target_radio.setChecked(not auto_target)
@@ -4424,6 +4518,7 @@ class HuntTab(QWidget):
                 'show_hunt_area': self.show_hunt_area_checkbox.isChecked(),
                 'show_primary_area': self.show_primary_skill_checkbox.isChecked(),
                 'show_direction_area': self.show_direction_checkbox.isChecked(),
+                'show_nickname_range_area': self.show_nickname_range_checkbox.isChecked(),
                 'show_nameplate_area': self.show_nameplate_checkbox.isChecked(),
                 'auto_target': self.auto_target_radio.isChecked(),
                 'screen_output': self.screen_output_checkbox.isChecked(),
