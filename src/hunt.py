@@ -904,6 +904,15 @@ class HuntTab(QWidget):
             'handler_ms',
             'monster_count',
             'primary_monster_count',
+            'nameplate_detected_count',
+            'nameplate_confirmed_count',
+            'nameplate_best_score',
+            'nameplate_best_class',
+            'nameplate_best_template',
+            'nameplate_best_track_id',
+            'nameplate_best_roi',
+            'nameplate_best_match_rect',
+            'nameplate_source_breakdown',
             'warning',
         ]
         writer.writerow(header)
@@ -933,6 +942,78 @@ class HuntTab(QWidget):
         if path and self._perf_logging_enabled:
             self.append_log(f"성능 로그 기록 종료: {path}", "info")
 
+    @staticmethod
+    def _format_rect_for_log(rect: Optional[dict]) -> str:
+        if not isinstance(rect, dict):
+            return ""
+        try:
+            x = float(rect.get('x', 0.0))
+            y = float(rect.get('y', 0.0))
+            width = float(rect.get('width', 0.0))
+            height = float(rect.get('height', 0.0))
+        except (TypeError, ValueError):
+            return ""
+        return f"x={x:.1f},y={y:.1f},w={width:.1f},h={height:.1f}"
+
+    def _collect_nameplate_log_fields(self) -> list:
+        details_raw = {}
+        try:
+            details_raw = self.latest_detection_details
+        except AttributeError:
+            details_raw = {}
+        nameplate_entries = []
+        if isinstance(details_raw, dict):
+            raw_entries = details_raw.get('nameplates')
+            if isinstance(raw_entries, list):
+                nameplate_entries = [entry for entry in raw_entries if isinstance(entry, dict)]
+
+        detected_count = len(nameplate_entries)
+        matched_entries = [entry for entry in nameplate_entries if entry.get('matched')]
+        confirmed_count = len(matched_entries)
+
+        best_entry: Optional[dict] = None
+        best_score = float('-inf')
+        for entry in nameplate_entries:
+            try:
+                score_val = float(entry.get('score', 0.0))
+            except (TypeError, ValueError):
+                score_val = 0.0
+            if best_entry is None or score_val > best_score:
+                best_entry = entry
+                best_score = score_val
+
+        if best_entry is None:
+            best_score = 0.0
+        best_class = str(best_entry.get('class_name') or '') if best_entry else ''
+        best_template = str(best_entry.get('template_id') or '') if best_entry else ''
+        best_track_id = ''
+        if best_entry and best_entry.get('track_id') not in (None, ''):
+            best_track_id = str(best_entry.get('track_id'))
+        best_roi_text = self._format_rect_for_log(best_entry.get('roi')) if best_entry else ''
+        best_match_rect_text = self._format_rect_for_log(best_entry.get('match_rect')) if best_entry else ''
+
+        source_counts: dict[str, int] = {}
+        for entry in nameplate_entries:
+            source_raw = entry.get('source')
+            source = source_raw if isinstance(source_raw, str) and source_raw else 'unknown'
+            source_counts[source] = source_counts.get(source, 0) + 1
+        source_breakdown = ''
+        if source_counts:
+            ordered = sorted(source_counts.items())
+            source_breakdown = '|'.join(f"{key}:{value}" for key, value in ordered)
+
+        return [
+            detected_count,
+            confirmed_count,
+            float(max(0.0, best_score)),
+            best_class,
+            best_template,
+            best_track_id,
+            best_roi_text,
+            best_match_rect_text,
+            source_breakdown,
+        ]
+
     def _append_perf_log(self, warning_text: str = "") -> None:
         if (
             not self._perf_logging_enabled
@@ -961,8 +1042,10 @@ class HuntTab(QWidget):
                 float(perf.get('handler_ms', 0.0)),
                 int(getattr(self, 'latest_monster_count', 0)),
                 int(getattr(self, 'latest_primary_monster_count', 0)),
-                warning_text or "",
             ]
+            nameplate_fields = self._collect_nameplate_log_fields()
+            row.extend(nameplate_fields)
+            row.append(warning_text or "")
         except Exception as exc:
             self.append_log(f"성능 로그 행 구성 실패: {exc}", "warn")
             return
