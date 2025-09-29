@@ -38,7 +38,7 @@ from PyQt6.QtWidgets import (
     QSizePolicy,
 )
 
-from PyQt6.QtGui import QPixmap, QPainter, QPen, QColor, QBrush, QTextCursor
+from PyQt6.QtGui import QPixmap, QPainter, QPen, QColor, QBrush, QTextCursor, QGuiApplication
 
 from detection_runtime import DetectionPopup, DetectionThread, ScreenSnipper
 from direction_detection import DirectionDetector
@@ -586,6 +586,7 @@ class HuntTab(QWidget):
         self.detection_popup: Optional[DetectionPopup] = None
         self.is_popup_active = False
         self.last_popup_scale = 50
+        self.last_popup_position: Optional[tuple[int, int]] = None
         self.manual_capture_region: Optional[dict] = None
         self.manual_capture_regions: list[dict] = []
         self.last_used_model: Optional[str] = None
@@ -2524,6 +2525,7 @@ class HuntTab(QWidget):
             self.detection_popup.closed.connect(self._handle_popup_closed)
             self.detection_popup.scale_changed.connect(self._on_popup_scale_changed)
 
+        self._restore_popup_position()
         self.detection_popup.set_waiting_message()
         if self.detection_view:
             self.detection_view.setText("탐지 화면이 팝업으로 표시 중입니다.")
@@ -2535,6 +2537,9 @@ class HuntTab(QWidget):
         self._save_settings()
 
     def _handle_popup_closed(self) -> None:
+        if self.detection_popup:
+            self.last_popup_position = (self.detection_popup.x(), self.detection_popup.y())
+            self._save_settings()
         self.is_popup_active = False
         self.popup_btn.setText("↗")
         self.popup_btn.setToolTip("탐지 화면을 팝업으로 열기")
@@ -2547,6 +2552,25 @@ class HuntTab(QWidget):
                 self.detection_view.setPixmap(QPixmap())
 
         self.detection_popup = None
+
+    def _restore_popup_position(self) -> None:
+        if not self.detection_popup or not self.last_popup_position:
+            return
+        x, y = self.last_popup_position
+        target_rect = QRect(
+            x,
+            y,
+            max(self.detection_popup.width(), 1),
+            max(self.detection_popup.height(), 1),
+        )
+        app = QGuiApplication.instance()
+        if app is not None:
+            screens = QGuiApplication.screens()
+            if screens:
+                # 화면 안에 일부라도 들어오는지 확인
+                if not any(screen.geometry().intersects(target_rect) for screen in screens):
+                    return
+        self.detection_popup.move(x, y)
 
     def _create_skill_group(self) -> QGroupBox:
         group = QGroupBox("스킬 관리")
@@ -4930,6 +4954,13 @@ class HuntTab(QWidget):
 
         self.last_popup_scale = int(data.get('last_popup_scale', self.last_popup_scale))
 
+        popup_pos = data.get('last_popup_position')
+        if isinstance(popup_pos, (list, tuple)) and len(popup_pos) == 2:
+            try:
+                self.last_popup_position = (int(popup_pos[0]), int(popup_pos[1]))
+            except (TypeError, ValueError):
+                self.last_popup_position = None
+
         self._suppress_settings_save = False
         self._emit_area_overlays()
         self._save_settings()
@@ -5049,6 +5080,7 @@ class HuntTab(QWidget):
             'attack_interval_sec': self.attack_interval_sec,
             'last_popup_scale': self.last_popup_scale,
             'last_facing': self.last_facing,
+            'last_popup_position': list(self.last_popup_position) if self.last_popup_position else None,
         }
 
         try:
