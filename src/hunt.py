@@ -556,7 +556,10 @@ class HuntTab(QWidget):
         self._latest_nameplate_rois: list[dict] = []
         self._active_nameplate_track_ids: set[int] = set()
         self._nameplate_enabled = False
-        self._nameplate_hold_until = 0.0
+        if any(entry.get('matched') for entry in filtered_nameplate_details):
+            self._nameplate_hold_until = now
+        else:
+            self._nameplate_hold_until = 0.0
         self._nameplate_dead_zones: list[dict] = []
         self._nameplate_dead_zone_duration_sec = 0.2
         self._nameplate_track_missing_grace_sec = 0.12
