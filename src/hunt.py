@@ -2186,7 +2186,7 @@ class HuntTab(QWidget):
                 lines.append("이름표 탐지 없음")
 
             self.confidence_summary_view.setPlainText('\n'.join(lines))
-        else:
+        elif self.confidence_summary_view.toPlainText():
             self.confidence_summary_view.clear()
 
         if show_frame:
@@ -2225,7 +2225,7 @@ class HuntTab(QWidget):
                 )
 
             self.frame_summary_view.setPlainText('\n'.join(frame_lines))
-        else:
+        elif self.frame_summary_view.toPlainText():
             self.frame_summary_view.clear()
 
         if show_info:
@@ -2266,7 +2266,7 @@ class HuntTab(QWidget):
             ]
 
             self.info_summary_view.setPlainText('\n'.join(info_lines))
-        else:
+        elif self.info_summary_view.toPlainText():
             self.info_summary_view.clear()
 
     def _on_summary_checkbox_changed(self, _checked: bool) -> None:
@@ -2279,6 +2279,15 @@ class HuntTab(QWidget):
 
     def _on_frame_detail_toggled(self, _checked: bool) -> None:
         self._update_detection_summary()
+        self._save_settings()
+
+    def _on_perf_logging_toggled(self, checked: bool) -> None:
+        self._perf_logging_enabled = bool(checked)
+        if not self._perf_logging_enabled:
+            self._stop_perf_logging()
+        else:
+            if self._is_detection_active():
+                self._start_perf_logging()
         self._save_settings()
 
     def _sync_frame_detail_checkbox_state(self) -> None:
@@ -2391,10 +2400,23 @@ class HuntTab(QWidget):
         return group
 
     def _create_detection_summary_group(self) -> QGroupBox:
-        group = QGroupBox("탐지 요약")
+        group = QGroupBox()
         layout = QVBoxLayout(group)
         layout.setContentsMargins(8, 8, 8, 8)
         layout.setSpacing(8)
+
+        header_layout = QHBoxLayout()
+        header_layout.setContentsMargins(0, 0, 0, 0)
+        header_label = QLabel("탐지 요약")
+        header_label.setStyleSheet("font-weight: bold;")
+        self.perf_logging_checkbox = QCheckBox("CSV 기록")
+        self.perf_logging_checkbox.setChecked(self._perf_logging_enabled)
+        self.perf_logging_checkbox.toggled.connect(self._on_perf_logging_toggled)
+        header_layout.addWidget(header_label)
+        header_layout.addSpacing(6)
+        header_layout.addWidget(self.perf_logging_checkbox)
+        header_layout.addStretch(1)
+        layout.addLayout(header_layout)
 
         content_layout = QHBoxLayout()
         content_layout.setSpacing(12)
@@ -2433,6 +2455,7 @@ class HuntTab(QWidget):
         self.show_frame_summary_checkbox.setChecked(True)
         self.show_frame_summary_checkbox.toggled.connect(self._on_summary_checkbox_changed)
         self.show_frame_detail_checkbox = QCheckBox("상세")
+        self.show_frame_detail_checkbox.setLayoutDirection(Qt.LayoutDirection.RightToLeft)
         self.show_frame_detail_checkbox.setChecked(False)
         self.show_frame_detail_checkbox.toggled.connect(self._on_frame_detail_toggled)
         frame_header.addWidget(frame_label)
@@ -4183,10 +4206,14 @@ class HuntTab(QWidget):
 
         perf_settings = data.get('perf', {})
         if isinstance(perf_settings, dict):
-            self._perf_logging_enabled = bool(perf_settings.get('logging_enabled', self._perf_logging_enabled))
+            self._perf_logging_enabled = bool(perf_settings.get('logging_enabled', False))
+        else:
+            self._perf_logging_enabled = False
 
-        # 분석 완료 후 기본적으로 성능 로그는 비활성화 상태를 유지한다.
-        self._perf_logging_enabled = False
+        if hasattr(self, 'perf_logging_checkbox'):
+            block_state = self.perf_logging_checkbox.blockSignals(True)
+            self.perf_logging_checkbox.setChecked(self._perf_logging_enabled)
+            self.perf_logging_checkbox.blockSignals(block_state)
 
         detection_cfg = data.get('detection', {})
         if isinstance(detection_cfg, dict):

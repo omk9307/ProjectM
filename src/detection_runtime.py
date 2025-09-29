@@ -7,6 +7,7 @@ Learning 탭과 Hunt 탭에서 공유할 화면 영역 지정, 탐지 팝업,
 from __future__ import annotations
 
 import os
+import threading
 import time
 from typing import Dict, Iterable, List, Optional
 
@@ -354,6 +355,15 @@ class DetectionThread(QThread):
             "emit_ms": 0.0,
         }
 
+        # 캡처-추론 병렬화를 위한 공유 상태
+        self._frame_lock = threading.Lock()
+        self._frame_condition = threading.Condition(self._frame_lock)
+        self._latest_frame: Optional[np.ndarray] = None
+        self._latest_capture_ms: float = 0.0
+        self._frame_version: int = 0
+        self._capture_thread_obj: Optional[threading.Thread] = None
+        self._capture_stop_event = threading.Event()
+
     def _monster_threshold_for_class(self, class_id: int) -> float:
         return self.monster_confidence_overrides.get(class_id, self.conf_monster)
 
@@ -378,6 +388,8 @@ class DetectionThread(QThread):
         manager = get_capture_manager()
         manager.register_region(consumer_name, self.capture_region)
         try:
+            self._start_capture_worker(manager, consumer_name)
+            last_processed_version = -1
             model = YOLO(self.model_path)
             use_char_class = self.char_class_index >= 0
             monster_base_conf = self._minimum_monster_confidence()
@@ -400,11 +412,27 @@ class DetectionThread(QThread):
                     self.frame_count = 0
                     self.start_time = current_time
 
-                capture_start = time.perf_counter()
-                frame = manager.get_frame(consumer_name, timeout=1.0)
-                capture_end = time.perf_counter()
+                frame: Optional[np.ndarray] = None
+                capture_ms = 0.0
+                with self._frame_condition:
+                    has_frame = self._frame_condition.wait_for(
+                        lambda: self._frame_version != last_processed_version or not self.is_running,
+                        timeout=1.0,
+                    )
+                    if has_frame and self._frame_version != last_processed_version and self._latest_frame is not None:
+                        frame = self._latest_frame
+                        capture_ms = self._latest_capture_ms
+                        last_processed_version = self._frame_version
+
                 if frame is None:
-                    continue
+                    fallback_start = time.perf_counter()
+                    frame = manager.get_frame(consumer_name, timeout=1.0)
+                    fallback_end = time.perf_counter()
+                    if frame is None:
+                        continue
+                    capture_ms = (fallback_end - fallback_start) * 1000
+
+                preprocess_start = time.perf_counter()
                 if self._region_mask is not None:
                     if (
                         self._region_mask.shape[0] == frame.shape[0]
@@ -414,8 +442,13 @@ class DetectionThread(QThread):
                         frame[~self._region_mask] = 0
                 preprocess_end = time.perf_counter()
 
-                self.perf_stats["capture_ms"] = (capture_end - capture_start) * 1000
-                self.perf_stats["preprocess_ms"] = (preprocess_end - capture_end) * 1000
+                now = time.perf_counter()
+                effective_capture_ms = (now - loop_start_time) * 1000 - (preprocess_end - preprocess_start) * 1000
+                if effective_capture_ms < 0:
+                    effective_capture_ms = capture_ms
+
+                self.perf_stats["capture_ms"] = float(effective_capture_ms)
+                self.perf_stats["preprocess_ms"] = (preprocess_end - preprocess_start) * 1000
 
                 nick_start = time.perf_counter()
                 nickname_info = None
@@ -743,10 +776,50 @@ class DetectionThread(QThread):
         except Exception as exc:
             print(f"탐지 스레드 오류: {exc}")
         finally:
+            self._stop_capture_worker()
             manager.unregister_region(consumer_name)
 
     def stop(self) -> None:
         self.is_running = False
+        self._capture_stop_event.set()
+        with self._frame_condition:
+            self._frame_condition.notify_all()
+
+    def _start_capture_worker(self, manager, consumer_name: str) -> None:
+        if self._capture_thread_obj and self._capture_thread_obj.is_alive():
+            return
+        self._capture_stop_event.clear()
+
+        def _worker() -> None:
+            while self.is_running and not self._capture_stop_event.is_set():
+                start = time.perf_counter()
+                frame = manager.get_frame(consumer_name, timeout=1.0)
+                end = time.perf_counter()
+                if frame is None:
+                    continue
+                with self._frame_condition:
+                    self._latest_frame = frame
+                    self._latest_capture_ms = (end - start) * 1000
+                    self._frame_version += 1
+                    self._frame_condition.notify_all()
+            with self._frame_condition:
+                self._frame_condition.notify_all()
+
+        thread = threading.Thread(
+            target=_worker,
+            name=f"DetectionCaptureWorker-{id(self)}",
+            daemon=True,
+        )
+        self._capture_thread_obj = thread
+        thread.start()
+
+    def _stop_capture_worker(self) -> None:
+        self._capture_stop_event.set()
+        with self._frame_condition:
+            self._frame_condition.notify_all()
+        if self._capture_thread_obj and self._capture_thread_obj.is_alive():
+            self._capture_thread_obj.join(timeout=1.0)
+        self._capture_thread_obj = None
 
     def _prepare_nameplate_templates(self, templates: Dict[int, List[dict]]) -> Dict[int, List[dict]]:
         prepared: Dict[int, List[dict]] = {}
