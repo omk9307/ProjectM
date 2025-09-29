@@ -7,9 +7,10 @@ Learning 탭과 Hunt 탭에서 공유할 화면 영역 지정, 탐지 팝업,
 from __future__ import annotations
 
 import os
+import math
 import threading
 import time
-from typing import Dict, Iterable, List, Optional
+from typing import Dict, Iterable, List, Optional, Tuple
 
 import cv2
 import mss
@@ -31,6 +32,7 @@ from capture_manager import get_capture_manager
 
 
 MIN_MONSTER_BOX_SIZE = 30  # 탐지된 몬스터로 인정할 최소 크기(px)
+NAMEPLATE_TRACK_MATCH_RADIUS = 120.0  # 이름표 트래킹과 YOLO 박스를 연결할 최대 거리(px)
 
 
 __all__ = ["ScreenSnipper", "DetectionPopup", "DetectionThread"]
@@ -316,6 +318,11 @@ class DetectionThread(QThread):
             self.nameplate_match_threshold = float(self.nameplate_config.get('match_threshold', 0.60) or 0.60)
         except (TypeError, ValueError):
             self.nameplate_match_threshold = 0.60
+        try:
+            track_grace_raw = float(self.nameplate_config.get('track_missing_grace_sec', 0.12))
+        except (TypeError, ValueError):
+            track_grace_raw = 0.12
+        self.nameplate_track_missing_grace = max(0.0, min(2.0, track_grace_raw))
         self.nameplate_thresholds: Dict[int, float] = {}
         if nameplate_thresholds:
             for key, value in nameplate_thresholds.items():
@@ -334,6 +341,9 @@ class DetectionThread(QThread):
             self.nameplate_config.get('enabled', False)
             and self._nameplate_template_images
         )
+        self._nameplate_tracks: Dict[int, dict] = {}
+        self._next_nameplate_track_id = 1
+        self._box_uid_counter = 1
 
         # FPS 계산 변수
         self.fps = 0.0
@@ -575,8 +585,17 @@ class DetectionThread(QThread):
                 if not annotated_frame.flags.writeable:
                     annotated_frame = annotated_frame.copy()
 
+                frame_now = float(payload["timestamp"])
+                track_events: List[dict] = []
+                if not self.nameplate_enabled and self._nameplate_tracks:
+                    self._nameplate_tracks.clear()
+                for track in self._nameplate_tracks.values():
+                    track['matched_this_frame'] = False
+                    track['nameplate_confirmed_this_frame'] = False
+                    track['probe_requested'] = False
+
+                boxes_for_payload: List[Dict[str, float]] = []
                 if len(result.boxes) > 0:
-                    boxes_for_payload: List[Dict[str, float]] = []
                     for box in result.boxes:
                         x1, y1, x2, y2 = [int(coord) for coord in box.xyxy[0].tolist()]
                         class_id = int(box.cls)
@@ -598,19 +617,19 @@ class DetectionThread(QThread):
                             "score": float(box.conf.item()),
                             "class_id": class_id,
                             "class_name": model.names[class_id],
+                            "source": "yolo",
+                            "box_uid": self._allocate_box_uid(),
+                            "track_id": None,
                         }
-                        boxes_for_payload.append(item)
 
-                        # 몬스터별 색상 및 텍스트 그리기
                         if class_id not in class_color_map:
                             class_color_map[class_id] = np.random.randint(0, 256, size=3).tolist()
                         color = class_color_map[class_id]
-                        
+
                         cv2.rectangle(annotated_frame, (x1, y1), (x2, y2), color, 2)
-                        
-                        # [핵심 수정] 표시할 텍스트에서 한글 클래스 이름을 제외
+
                         label = f"{item['score']:.2f}"
-                        
+
                         (w, h), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 2)
                         text_bg_y2 = y1 - 5
                         text_bg_y1 = text_bg_y2 - h - 5
@@ -619,23 +638,77 @@ class DetectionThread(QThread):
                             text_bg_y2 = text_bg_y1 + h + 5
 
                         cv2.rectangle(annotated_frame, (x1, text_bg_y1), (x1 + w, text_bg_y2), color, -1)
-                        
+
                         text_y = y1 - 10 if text_bg_y1 < y1 else y1 + h + 5
-                        cv2.putText(annotated_frame, label, (x1 + 2, text_y), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 2)
+                        cv2.putText(
+                            annotated_frame,
+                            label,
+                            (x1 + 2, text_y),
+                            cv2.FONT_HERSHEY_SIMPLEX,
+                            0.5,
+                            (255, 255, 255),
+                            2,
+                        )
 
-                    for item in boxes_for_payload:
-                        if item["class_id"] == self.char_class_index:
-                            payload["characters"].append(item)
-                        else:
-                            payload["monsters"].append(item)
+                        if class_id != self.char_class_index and self._nameplate_tracks:
+                            center_x, center_y = self._box_center(item)
+                            matched_track = self._find_nameplate_track(class_id, center_x, center_y)
+                            if matched_track is not None:
+                                item['track_id'] = matched_track['id']
+                                matched_track['matched_this_frame'] = True
+                                matched_track['active'] = True
+                                matched_track['last_yolo_ts'] = frame_now
+                                matched_track['box'] = {
+                                    'x': item['x'],
+                                    'y': item['y'],
+                                    'width': item['width'],
+                                    'height': item['height'],
+                                }
+                                self._update_track_center(matched_track, item)
 
+                        boxes_for_payload.append(item)
+
+                track_probe_items: List[Dict[str, float]] = []
+                for track in self._nameplate_tracks.values():
+                    if not track.get('active', True):
+                        continue
+                    if track.get('matched_this_frame'):
+                        continue
+                    track['probe_requested'] = True
+                    track_probe_items.append(self._prepare_track_probe_item(track))
+
+                nameplate_input_items: List[Dict[str, float]] = []
+                nameplate_input_items.extend(boxes_for_payload)
+                nameplate_input_items.extend(track_probe_items)
+
+                if nameplate_input_items:
                     nameplate_start = time.perf_counter()
-                    nameplate_matches = self._detect_nameplates(frame, boxes_for_payload)
+                    nameplate_matches = self._detect_nameplates(frame, nameplate_input_items)
                     nameplate_end = time.perf_counter()
                     self.perf_stats["nameplate_ms"] = (nameplate_end - nameplate_start) * 1000
                 else:
                     nameplate_matches = []
                     self.perf_stats["nameplate_ms"] = 0.0
+
+                synthetic_monsters = self._process_nameplate_tracking(
+                    frame_now,
+                    boxes_for_payload,
+                    track_probe_items,
+                    track_events,
+                )
+
+                for item in boxes_for_payload:
+                    if item["class_id"] == self.char_class_index:
+                        payload["characters"].append(item)
+                    else:
+                        payload["monsters"].append(item)
+
+                if synthetic_monsters:
+                    payload.setdefault("monsters", []).extend(synthetic_monsters)
+
+                if track_events:
+                    payload["nameplate_track_events"] = track_events
+
                 payload["nameplates"] = nameplate_matches
 
                 if self.is_debug_mode:
@@ -880,6 +953,199 @@ class DetectionThread(QThread):
                 prepared[class_id] = loaded_entries
         return prepared
 
+    def _allocate_box_uid(self) -> int:
+        uid = self._box_uid_counter
+        self._box_uid_counter += 1
+        return uid
+
+    @staticmethod
+    def _box_center(item: Dict[str, float]) -> Tuple[float, float]:
+        x = float(item.get('x', 0.0))
+        y = float(item.get('y', 0.0))
+        width = float(item.get('width', 0.0))
+        height = float(item.get('height', 0.0))
+        return (x + width / 2.0, y + height / 2.0)
+
+    def _find_nameplate_track(
+        self,
+        class_id: int,
+        center_x: float,
+        center_y: float,
+    ) -> Optional[dict]:
+        best_track: Optional[dict] = None
+        best_distance = float('inf')
+        for track in self._nameplate_tracks.values():
+            if not track.get('active', True):
+                continue
+            if track.get('class_id') != class_id:
+                continue
+            track_center = track.get('center')
+            if not track_center:
+                continue
+            distance = math.hypot(track_center[0] - center_x, track_center[1] - center_y)
+            if distance < best_distance:
+                best_distance = distance
+                best_track = track
+        if best_track and best_distance <= NAMEPLATE_TRACK_MATCH_RADIUS:
+            return best_track
+        return None
+
+    @staticmethod
+    def _update_track_center(track: dict, box: Dict[str, float]) -> None:
+        center = DetectionThread._box_center(box)
+        track['center'] = center
+
+    def _create_nameplate_track(self, item: Dict[str, float], now: float) -> dict:
+        track_id = self._next_nameplate_track_id
+        self._next_nameplate_track_id += 1
+        source = item.get('source')
+        track = {
+            'id': track_id,
+            'class_id': int(item.get('class_id', -1)),
+            'class_name': item.get('class_name'),
+            'box': {
+                'x': float(item.get('x', 0.0)),
+                'y': float(item.get('y', 0.0)),
+                'width': float(item.get('width', 0.0)),
+                'height': float(item.get('height', 0.0)),
+            },
+            'center': self._box_center(item),
+            'last_yolo_ts': now,
+            'last_nameplate_ts': now,
+            'missing_since': None,
+            'active': True,
+            'matched_this_frame': source != 'track',
+            'nameplate_confirmed_this_frame': True,
+        }
+        self._nameplate_tracks[track_id] = track
+        return track
+
+    def _prepare_track_probe_item(self, track: dict) -> Dict[str, float]:
+        box = dict(track.get('box', {}))
+        box['class_id'] = track.get('class_id')
+        box['class_name'] = track.get('class_name')
+        box['track_id'] = track.get('id')
+        box['source'] = 'track'
+        box['box_uid'] = self._allocate_box_uid()
+        return box
+
+    def _build_track_event(self, track: dict, event_type: str, frame_now: float) -> dict:
+        box = track.get('box', {}) or {}
+        center = track.get('center')
+        if not center:
+            center = self._box_center(box) if box else (0.0, 0.0)
+        return {
+            'event': event_type,
+            'track_id': track.get('id'),
+            'class_id': track.get('class_id'),
+            'class_name': track.get('class_name'),
+            'center': {'x': float(center[0]), 'y': float(center[1])},
+            'box': {
+                'x': float(box.get('x', 0.0)),
+                'y': float(box.get('y', 0.0)),
+                'width': float(box.get('width', 0.0)),
+                'height': float(box.get('height', 0.0)),
+            },
+            'timestamp': float(frame_now),
+        }
+
+    def _process_nameplate_tracking(
+        self,
+        frame_now: float,
+        yolo_items: List[Dict[str, float]],
+        track_probe_items: List[Dict[str, float]],
+        track_events: List[dict],
+    ) -> List[Dict[str, float]]:
+        synthetic_entries: List[Dict[str, float]] = []
+        items_to_handle: List[Dict[str, float]] = []
+        items_to_handle.extend(yolo_items)
+        items_to_handle.extend(track_probe_items)
+
+        for item in items_to_handle:
+            try:
+                class_id = int(item.get('class_id', -1))
+            except (TypeError, ValueError):
+                continue
+            if class_id == self.char_class_index:
+                continue
+            track_id = item.get('track_id')
+            track = self._nameplate_tracks.get(track_id) if track_id else None
+            if track is not None:
+                current_box = track.get('box') or {}
+                # 업데이트된 박스 좌표를 반영
+                track['box'] = {
+                    'x': float(item.get('x', current_box.get('x', 0.0))),
+                    'y': float(item.get('y', current_box.get('y', 0.0))),
+                    'width': float(item.get('width', current_box.get('width', 0.0))),
+                    'height': float(item.get('height', current_box.get('height', 0.0))),
+                }
+                self._update_track_center(track, item)
+            if item.get('nameplate_confirmed'):
+                if track is None:
+                    track = self._create_nameplate_track(item, frame_now)
+                    item['track_id'] = track['id']
+                    track_events.append(self._build_track_event(track, 'started', frame_now))
+                track['last_nameplate_ts'] = frame_now
+                track['missing_since'] = None
+                track['nameplate_confirmed_this_frame'] = True
+                track['active'] = True
+                track['last_score'] = float(item.get('nameplate_score', item.get('score', 0.0)))
+            else:
+                if track is not None and track.get('missing_since') is None and track.get('last_nameplate_ts') is not None:
+                    track['missing_since'] = frame_now
+
+        grace_limit = self.nameplate_track_missing_grace
+        for track_id, track in list(self._nameplate_tracks.items()):
+            if not track.get('active', True):
+                continue
+            if track.get('matched_this_frame'):
+                continue
+            last_nameplate_ts = track.get('last_nameplate_ts')
+            missing_since = track.get('missing_since')
+            should_emit = False
+            grace_active = False
+            if track.get('nameplate_confirmed_this_frame'):
+                should_emit = True
+            elif missing_since is not None:
+                elapsed = frame_now - missing_since
+                if elapsed <= grace_limit:
+                    should_emit = True
+                    grace_active = True
+            elif last_nameplate_ts is not None:
+                elapsed = frame_now - last_nameplate_ts
+                if elapsed <= grace_limit:
+                    should_emit = True
+            if should_emit:
+                box = track.get('box', {}) or {}
+                synthetic_entry = {
+                    'x': float(box.get('x', 0.0)),
+                    'y': float(box.get('y', 0.0)),
+                    'width': float(box.get('width', 0.0)),
+                    'height': float(box.get('height', 0.0)),
+                    'score': float(track.get('last_score', 0.99)),
+                    'class_id': track.get('class_id'),
+                    'class_name': track.get('class_name'),
+                    'track_id': track_id,
+                    'source': 'nameplate_track',
+                    'nameplate_confirmed': bool(track.get('nameplate_confirmed_this_frame', False)),
+                    'grace_active': grace_active,
+                    'nameplate_detected': bool(track.get('nameplate_confirmed_this_frame', False)),
+                    'yolo_missing': True,
+                }
+                synthetic_entries.append(synthetic_entry)
+            else:
+                if missing_since is not None:
+                    elapsed = frame_now - missing_since
+                    if elapsed > grace_limit:
+                        track['active'] = False
+                        track_events.append(self._build_track_event(track, 'ended', frame_now))
+                        del self._nameplate_tracks[track_id]
+
+        for track in self._nameplate_tracks.values():
+            track['probe_requested'] = False
+
+        return synthetic_entries
+
     def _box_intersects_allowed_regions(self, item: Dict[str, float]) -> bool:
         if not self.allowed_subregions:
             return True
@@ -965,6 +1231,8 @@ class DetectionThread(QThread):
                 continue
             best_score = -1.0
             best_template_id = None
+            best_loc: Optional[Tuple[int, int]] = None
+            best_shape: Optional[Tuple[int, int]] = None
             for template in templates:
                 tpl_img = template.get('image')
                 if tpl_img is None:
@@ -973,12 +1241,25 @@ class DetectionThread(QThread):
                 if roi_bin.shape[0] < th or roi_bin.shape[1] < tw:
                     continue
                 result = cv2.matchTemplate(roi_bin, tpl_img, cv2.TM_CCOEFF_NORMED)
-                _, max_val, _, _ = cv2.minMaxLoc(result)
+                _, max_val, _, max_loc = cv2.minMaxLoc(result)
                 if max_val > best_score:
                     best_score = float(max_val)
                     best_template_id = template.get('id')
+                    best_loc = (int(max_loc[0]), int(max_loc[1]))
+                    best_shape = (int(tw), int(th))
             threshold = self.nameplate_thresholds.get(class_id, self.nameplate_match_threshold)
             matched = best_score >= threshold if best_score >= 0 else False
+            match_rect: Optional[Dict[str, float]] = None
+            if matched and best_loc is not None and best_shape is not None:
+                match_x = left + best_loc[0]
+                match_y = top + best_loc[1]
+                match_w, match_h = best_shape
+                match_rect = {
+                    'x': float(match_x),
+                    'y': float(match_y),
+                    'width': float(match_w),
+                    'height': float(match_h),
+                }
             roi_dict = {
                 'x': float(left),
                 'y': float(top),
@@ -1000,11 +1281,17 @@ class DetectionThread(QThread):
                 'roi': roi_dict,
                 'template_id': best_template_id,
                 'source_box': box_dict,
+                'track_id': item.get('track_id'),
+                'source': item.get('source', 'yolo'),
+                'box_uid': item.get('box_uid'),
+                'match_rect': match_rect,
             }
             if matched:
                 item['nameplate_confirmed'] = True
                 item['nameplate_score'] = float(best_score)
                 item['nameplate_roi'] = roi_dict
+                if match_rect is not None:
+                    item['nameplate_match_rect'] = match_rect
             if matched or self.show_nameplate_overlay:
                 matches.append(match_entry)
         return matches

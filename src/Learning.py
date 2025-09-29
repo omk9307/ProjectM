@@ -1954,6 +1954,8 @@ class DataManager:
                 'offset_x': 0,
                 'offset_y': 0,
             },
+            'dead_zone_sec': 0.20,
+            'track_missing_grace_sec': 0.12,
             'per_class': {},
         }
 
@@ -1975,6 +1977,12 @@ class DataManager:
             changed = True
         if 'match_threshold' not in merged:
             merged['match_threshold'] = default_config['match_threshold']
+            changed = True
+        if 'dead_zone_sec' not in merged:
+            merged['dead_zone_sec'] = default_config['dead_zone_sec']
+            changed = True
+        if 'track_missing_grace_sec' not in merged:
+            merged['track_missing_grace_sec'] = default_config['track_missing_grace_sec']
             changed = True
         roi = merged.get('roi') if isinstance(merged.get('roi'), dict) else None
         if roi is None:
@@ -2100,6 +2108,28 @@ class DataManager:
                 config['match_threshold'] = threshold
                 changed = True
 
+        if 'dead_zone_sec' in updates:
+            try:
+                dz_value = float(updates['dead_zone_sec'])
+            except (TypeError, ValueError):
+                dz_value = config.get('dead_zone_sec', self._default_nameplate_config()['dead_zone_sec'])
+            dz_value = max(0.0, min(2.0, dz_value))
+            if abs(config.get('dead_zone_sec', 0.0) - dz_value) > 1e-6:
+                config['dead_zone_sec'] = dz_value
+                changed = True
+
+        if 'track_missing_grace_sec' in updates:
+            try:
+                grace_value = float(updates['track_missing_grace_sec'])
+            except (TypeError, ValueError):
+                grace_value = config.get(
+                    'track_missing_grace_sec', self._default_nameplate_config()['track_missing_grace_sec']
+                )
+            grace_value = max(0.0, min(2.0, grace_value))
+            if abs(config.get('track_missing_grace_sec', 0.0) - grace_value) > 1e-6:
+                config['track_missing_grace_sec'] = grace_value
+                changed = True
+
         if 'roi' in updates and isinstance(updates['roi'], dict):
             roi = dict(config.get('roi', {}))
             roi_updates = updates['roi']
@@ -2128,6 +2158,8 @@ class DataManager:
             'enabled': bool(config.get('enabled', False)),
             'roi': dict(config.get('roi', {})),
             'match_threshold': float(config.get('match_threshold', 0.60)),
+            'dead_zone_sec': float(config.get('dead_zone_sec', 0.20)),
+            'track_missing_grace_sec': float(config.get('track_missing_grace_sec', 0.12)),
         })
         return config
 
@@ -3509,6 +3541,23 @@ class LearningTab(QWidget):
         threshold_layout.addStretch(1)
         nameplate_layout.addLayout(threshold_layout)
 
+        suppression_layout = QHBoxLayout()
+        suppression_layout.addWidget(QLabel("사망 모션 무시(초):"))
+        self.nameplate_dead_zone_spin = QDoubleSpinBox()
+        self.nameplate_dead_zone_spin.setRange(0.0, 2.0)
+        self.nameplate_dead_zone_spin.setSingleStep(0.01)
+        self.nameplate_dead_zone_spin.setDecimals(2)
+        suppression_layout.addWidget(self.nameplate_dead_zone_spin)
+        suppression_layout.addSpacing(12)
+        suppression_layout.addWidget(QLabel("이름표 유예(초):"))
+        self.nameplate_grace_spin = QDoubleSpinBox()
+        self.nameplate_grace_spin.setRange(0.0, 2.0)
+        self.nameplate_grace_spin.setSingleStep(0.01)
+        self.nameplate_grace_spin.setDecimals(2)
+        suppression_layout.addWidget(self.nameplate_grace_spin)
+        suppression_layout.addStretch(1)
+        nameplate_layout.addLayout(suppression_layout)
+
         nameplate_group.setLayout(nameplate_layout)
         nameplate_group.toggled.connect(self._handle_nameplate_enabled_toggled)
         self.nameplate_width_spin.valueChanged.connect(self._handle_nameplate_roi_changed)
@@ -3517,6 +3566,8 @@ class LearningTab(QWidget):
         self.nameplate_offset_y_spin.valueChanged.connect(self._handle_nameplate_roi_changed)
         self.nameplate_overlay_checkbox.toggled.connect(self._handle_nameplate_overlay_toggled)
         self.nameplate_threshold_spin.valueChanged.connect(self._handle_nameplate_threshold_changed)
+        self.nameplate_dead_zone_spin.valueChanged.connect(self._handle_nameplate_dead_zone_changed)
+        self.nameplate_grace_spin.valueChanged.connect(self._handle_nameplate_grace_changed)
 
         center_layout.addLayout(image_list_header_layout)
         center_layout.addWidget(self.image_list_widget)
@@ -3992,6 +4043,8 @@ class LearningTab(QWidget):
             self.nameplate_group.blockSignals(True)
             self.nameplate_group.setChecked(enabled)
             self.nameplate_group.blockSignals(False)
+            self.nameplate_dead_zone_spin.setEnabled(enabled)
+            self.nameplate_grace_spin.setEnabled(enabled)
 
             width_val = int(roi.get('width', 135) or 135)
             height_val = int(roi.get('height', 65) or 65)
@@ -4017,6 +4070,16 @@ class LearningTab(QWidget):
             self.nameplate_threshold_spin.blockSignals(True)
             self.nameplate_threshold_spin.setValue(threshold_value)
             self.nameplate_threshold_spin.blockSignals(False)
+
+            dead_zone_value = float(config.get('dead_zone_sec', 0.20) or 0.0)
+            self.nameplate_dead_zone_spin.blockSignals(True)
+            self.nameplate_dead_zone_spin.setValue(dead_zone_value)
+            self.nameplate_dead_zone_spin.blockSignals(False)
+
+            grace_value = float(config.get('track_missing_grace_sec', 0.12) or 0.0)
+            self.nameplate_grace_spin.blockSignals(True)
+            self.nameplate_grace_spin.setValue(grace_value)
+            self.nameplate_grace_spin.blockSignals(False)
         finally:
             self._nameplate_ui_updating = False
 
@@ -4054,6 +4117,22 @@ class LearningTab(QWidget):
         if self._nameplate_ui_updating:
             return
         updated = self.data_manager.update_monster_nameplate_config({'match_threshold': float(value)})
+        self.nameplate_config = updated
+        self._apply_nameplate_config_to_ui()
+
+    def _handle_nameplate_dead_zone_changed(self, value: float) -> None:
+        if self._nameplate_ui_updating:
+            return
+        value = float(value)
+        updated = self.data_manager.update_monster_nameplate_config({'dead_zone_sec': value})
+        self.nameplate_config = updated
+        self._apply_nameplate_config_to_ui()
+
+    def _handle_nameplate_grace_changed(self, value: float) -> None:
+        if self._nameplate_ui_updating:
+            return
+        value = float(value)
+        updated = self.data_manager.update_monster_nameplate_config({'track_missing_grace_sec': value})
         self.nameplate_config = updated
         self._apply_nameplate_config_to_ui()
 
