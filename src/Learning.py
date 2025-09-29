@@ -1904,6 +1904,7 @@ class DataManager:
             "search_margin_x": 210,
             "search_margin_top": 100,
             "search_margin_bottom": 100,
+            "full_scan_delay_sec": 1.0,
             "show_overlay": True,
             "templates": [],
         }
@@ -2945,6 +2946,11 @@ class DataManager:
             config[key] = value
         for legacy in ('search_scale_x', 'search_scale_top', 'search_scale_bottom', 'search_scale_y'):
             config.pop(legacy, None)
+        if 'full_scan_delay_sec' in config:
+            try:
+                config['full_scan_delay_sec'] = max(0.0, float(config['full_scan_delay_sec']))
+            except (TypeError, ValueError):
+                config['full_scan_delay_sec'] = self._default_nickname_config()['full_scan_delay_sec']
         self._write_nickname_config(config)
         self._notify_overlay_listeners({
             'target': 'nickname',
@@ -3659,10 +3665,19 @@ class LearningTab(QWidget):
         nickname_text_layout.addWidget(QLabel("대상 닉네임:"))
         self.nickname_text_input = QLineEdit()
         self.nickname_text_input.setPlaceholderText("예: 버프몬")
-        nickname_text_layout.addWidget(self.nickname_text_input, 1)
+        self.nickname_text_input.setMaximumWidth(200)
+        nickname_text_layout.addWidget(self.nickname_text_input)
         self.nickname_overlay_checkbox = QCheckBox("실시간 표기")
         nickname_text_layout.addSpacing(8)
         nickname_text_layout.addWidget(self.nickname_overlay_checkbox)
+        nickname_text_layout.addSpacing(8)
+        nickname_text_layout.addWidget(QLabel("전체 탐색 딜레이(초):"))
+        self.nickname_full_scan_delay_spin = QDoubleSpinBox()
+        self.nickname_full_scan_delay_spin.setRange(0.0, 5.0)
+        self.nickname_full_scan_delay_spin.setSingleStep(0.1)
+        self.nickname_full_scan_delay_spin.setDecimals(2)
+        self.nickname_full_scan_delay_spin.setToolTip("전체 화면 재탐색 간 최소 지연 시간(초). 0이면 프레임마다 탐색합니다.")
+        nickname_text_layout.addWidget(self.nickname_full_scan_delay_spin)
         nickname_layout.addLayout(nickname_text_layout)
 
         nickname_threshold_layout = QHBoxLayout()
@@ -3843,6 +3858,7 @@ class LearningTab(QWidget):
             self.nickname_margin_x_spin,
             self.nickname_margin_top_spin,
             self.nickname_margin_bottom_spin,
+            self.nickname_full_scan_delay_spin,
         ):
             spin.setKeyboardTracking(False)
 
@@ -3852,6 +3868,7 @@ class LearningTab(QWidget):
         self.nickname_margin_x_spin.editingFinished.connect(self.on_nickname_margin_committed)
         self.nickname_margin_top_spin.editingFinished.connect(self.on_nickname_margin_committed)
         self.nickname_margin_bottom_spin.editingFinished.connect(self.on_nickname_margin_committed)
+        self.nickname_full_scan_delay_spin.editingFinished.connect(self.on_nickname_full_scan_delay_committed)
         self.nickname_overlay_checkbox.toggled.connect(self.on_nickname_overlay_toggled)
         self.direction_threshold_spin.valueChanged.connect(self.on_direction_threshold_changed)
         self.direction_offset_spin.valueChanged.connect(self.on_direction_offset_changed)
@@ -3948,6 +3965,13 @@ class LearningTab(QWidget):
         )
         self.nickname_margin_bottom_spin.setValue(
             max(self.nickname_margin_bottom_spin.minimum(), min(self.nickname_margin_bottom_spin.maximum(), margin_bottom))
+        )
+        try:
+            delay_value = float(config.get('full_scan_delay_sec', 0.0))
+        except (TypeError, ValueError):
+            delay_value = self._default_nickname_config()['full_scan_delay_sec']
+        self.nickname_full_scan_delay_spin.setValue(
+            max(self.nickname_full_scan_delay_spin.minimum(), min(self.nickname_full_scan_delay_spin.maximum(), delay_value))
         )
         self.nickname_overlay_checkbox.setChecked(bool(config.get('show_overlay', True)))
         self._nickname_ui_updating = False
@@ -4654,6 +4678,13 @@ class LearningTab(QWidget):
             'search_margin_bottom': int(self.nickname_margin_bottom_spin.value()),
         }
         self.nickname_config = self.data_manager.update_nickname_config(updates)
+
+    def on_nickname_full_scan_delay_committed(self):
+        if self._nickname_ui_updating:
+            return
+        value = float(self.nickname_full_scan_delay_spin.value())
+        self.nickname_config = self.data_manager.update_nickname_config({'full_scan_delay_sec': value})
+        self.log_viewer.append(f"전체화면 탐색 딜레이를 {value:.2f}초로 설정했습니다.")
 
     def on_direction_threshold_changed(self, value: float):
         if self._direction_ui_updating:

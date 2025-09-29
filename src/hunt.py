@@ -4508,6 +4508,7 @@ class HuntTab(QWidget):
                 search_margin_x=float(config.get('search_margin_x', config.get('search_margin', NicknameDetector.DEFAULT_MARGIN_X))),
                 search_margin_top=float(config.get('search_margin_top', config.get('search_margin_vertical', NicknameDetector.DEFAULT_MARGIN_TOP))),
                 search_margin_bottom=float(config.get('search_margin_bottom', config.get('search_margin_vertical', NicknameDetector.DEFAULT_MARGIN_BOTTOM))),
+                full_scan_delay_sec=float(config.get('full_scan_delay_sec', 0.0)),
             )
             detector.load_templates(self._nickname_templates)
             return detector

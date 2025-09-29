@@ -7,6 +7,7 @@ from typing import Iterable, Optional
 
 import cv2
 import numpy as np
+import time
 
 
 @dataclass
@@ -36,6 +37,7 @@ class NicknameDetector:
         search_margin_x: float = DEFAULT_MARGIN_X,
         search_margin_top: float = DEFAULT_MARGIN_TOP,
         search_margin_bottom: float = DEFAULT_MARGIN_BOTTOM,
+        full_scan_delay_sec: float = 0.0,
     ) -> None:
         self.target_text = target_text
         self.match_threshold = max(0.1, min(0.99, float(match_threshold)))
@@ -52,6 +54,11 @@ class NicknameDetector:
         self._full_scan_template_index: int = 0 #  전체 화면 스캔 시 순환할 템플릿 인덱스
         self._last_search_region: Optional[dict] = None  # 마지막 템플릿 탐색 영역
         self._last_search_mode: Optional[str] = None
+        try:
+            self.full_scan_delay_sec = max(0.0, float(full_scan_delay_sec))
+        except (TypeError, ValueError):
+            self.full_scan_delay_sec = 0.0
+        self._last_full_scan_time: float = 0.0
         
     def configure(
         self,
@@ -63,6 +70,7 @@ class NicknameDetector:
         search_margin_x: Optional[float] = None,
         search_margin_top: Optional[float] = None,
         search_margin_bottom: Optional[float] = None,
+        full_scan_delay_sec: Optional[float] = None,
     ) -> None:
         if target_text is not None:
             self.target_text = target_text
@@ -78,6 +86,11 @@ class NicknameDetector:
             self.search_margin_top = self._sanitize_margin(search_margin_top, self.DEFAULT_MARGIN_TOP)
         if search_margin_bottom is not None:
             self.search_margin_bottom = self._sanitize_margin(search_margin_bottom, self.DEFAULT_MARGIN_BOTTOM)
+        if full_scan_delay_sec is not None:
+            try:
+                self.full_scan_delay_sec = max(0.0, float(full_scan_delay_sec))
+            except (TypeError, ValueError):
+                pass
 
     def load_templates(self, templates: Iterable[dict]) -> None:
         self.templates = []
@@ -102,6 +115,7 @@ class NicknameDetector:
         self._full_scan_template_index = 0
         self._last_search_region = None
         self._last_search_mode = None
+        self._last_full_scan_time = 0.0
 
     def detect(self, frame_bgr: np.ndarray) -> Optional[dict]:
         if not self.templates:
@@ -167,9 +181,23 @@ class NicknameDetector:
                     best_score, best_template, best_location = float(max_val), template, max_loc
 
         # 2. 느린 경로: 빠른 경로에서 못 찾았거나, 전체 스캔 모드일 때
+        now_monotonic = time.monotonic()
+        should_skip_full_scan = False
+        if is_full_scan:
+            if self.full_scan_delay_sec > 0.0:
+                if self._last_full_scan_time <= 0.0 or (now_monotonic - self._last_full_scan_time) >= self.full_scan_delay_sec:
+                    self._last_full_scan_time = now_monotonic
+                else:
+                    should_skip_full_scan = True
+            else:
+                self._last_full_scan_time = now_monotonic
+
         if best_template is None:
             # 분할 탐색 로직
             if is_full_scan:
+                if should_skip_full_scan:
+                    self.notify_missed()
+                    return None
                 # 전체 화면 스캔: 한 프레임에 하나씩 순환하며 검사
                 if self._full_scan_template_index < len(self.templates):
                     template = self.templates[self._full_scan_template_index]
@@ -219,6 +247,7 @@ class NicknameDetector:
         }
         self._last_result = detection
         self._lost_frames = 0
+        self._last_full_scan_time = 0.0
         return detection
 
     def notify_missed(self) -> None:
