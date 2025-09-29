@@ -42,7 +42,7 @@ from PyQt6.QtWidgets import (
     QListWidgetItem, QInputDialog, QTextEdit, QDialogButtonBox, QCheckBox,
     QComboBox, QDoubleSpinBox, QGroupBox, QScrollArea, QSpinBox,
     QProgressBar, QStatusBar, QAbstractItemView, QTreeWidget, QTreeWidgetItem,
-    QHeaderView, QLineEdit, QFormLayout, QSizePolicy
+    QHeaderView, QLineEdit, QFormLayout, QGridLayout, QSizePolicy
 )
 from PyQt6.QtGui import (
     QPixmap, QImage, QIcon, QPainter, QPen, QColor, QBrush, QCursor, QPolygon,
@@ -3503,66 +3503,72 @@ class LearningTab(QWidget):
         nameplate_group.setChecked(False)
         self.nameplate_group = nameplate_group
         nameplate_layout = QVBoxLayout()
+        nameplate_layout.setContentsMargins(0, 0, 0, 0)
+        nameplate_layout.setSpacing(8)
 
-        roi_size_layout = QHBoxLayout()
-        roi_size_layout.addWidget(QLabel("가로:"))
+        nameplate_grid = QGridLayout()
+        nameplate_grid.setContentsMargins(0, 0, 0, 0)
+        nameplate_grid.setHorizontalSpacing(12)
+        nameplate_grid.setVerticalSpacing(8)
+
+        nameplate_grid.addWidget(QLabel("가로:"), 0, 0, Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
         self.nameplate_width_spin = QSpinBox()
         self.nameplate_width_spin.setRange(10, 600)
         self.nameplate_width_spin.setSingleStep(5)
-        roi_size_layout.addWidget(self.nameplate_width_spin)
-        roi_size_layout.addSpacing(8)
-        roi_size_layout.addWidget(QLabel("세로:"))
+        self.nameplate_width_spin.setMaximumWidth(80)
+        nameplate_grid.addWidget(self.nameplate_width_spin, 0, 1)
+
+        nameplate_grid.addWidget(QLabel("세로:"), 0, 2, Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
         self.nameplate_height_spin = QSpinBox()
         self.nameplate_height_spin.setRange(10, 400)
         self.nameplate_height_spin.setSingleStep(5)
-        roi_size_layout.addWidget(self.nameplate_height_spin)
-        roi_size_layout.addStretch(1)
-        nameplate_layout.addLayout(roi_size_layout)
+        self.nameplate_height_spin.setMaximumWidth(80)
+        nameplate_grid.addWidget(self.nameplate_height_spin, 0, 3)
 
-        roi_offset_layout = QHBoxLayout()
-        roi_offset_layout.addWidget(QLabel("X 오프셋:"))
+        nameplate_grid.addWidget(QLabel("X 오프셋:"), 1, 0, Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
         self.nameplate_offset_x_spin = QSpinBox()
         self.nameplate_offset_x_spin.setRange(-300, 300)
         self.nameplate_offset_x_spin.setSingleStep(5)
-        roi_offset_layout.addWidget(self.nameplate_offset_x_spin)
-        roi_offset_layout.addSpacing(8)
-        roi_offset_layout.addWidget(QLabel("Y 오프셋:"))
+        self.nameplate_offset_x_spin.setMaximumWidth(80)
+        nameplate_grid.addWidget(self.nameplate_offset_x_spin, 1, 1)
+
+        nameplate_grid.addWidget(QLabel("Y 오프셋:"), 1, 2, Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
         self.nameplate_offset_y_spin = QSpinBox()
         self.nameplate_offset_y_spin.setRange(-300, 300)
         self.nameplate_offset_y_spin.setSingleStep(5)
-        roi_offset_layout.addWidget(self.nameplate_offset_y_spin)
-        roi_offset_layout.addStretch(1)
+        self.nameplate_offset_y_spin.setMaximumWidth(80)
+        nameplate_grid.addWidget(self.nameplate_offset_y_spin, 1, 3)
 
         self.nameplate_overlay_checkbox = QCheckBox("범위 표시")
-        roi_offset_layout.addWidget(self.nameplate_overlay_checkbox)
-        nameplate_layout.addLayout(roi_offset_layout)
+        nameplate_grid.addWidget(self.nameplate_overlay_checkbox, 1, 4, Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
 
-        threshold_layout = QHBoxLayout()
-        threshold_layout.addWidget(QLabel("전역 임계값:"))
+        nameplate_grid.addWidget(QLabel("전역 임계값:"), 2, 0, Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
         self.nameplate_threshold_spin = QDoubleSpinBox()
         self.nameplate_threshold_spin.setRange(0.10, 0.99)
         self.nameplate_threshold_spin.setSingleStep(0.01)
         self.nameplate_threshold_spin.setDecimals(2)
-        threshold_layout.addWidget(self.nameplate_threshold_spin)
-        threshold_layout.addStretch(1)
-        nameplate_layout.addLayout(threshold_layout)
+        self.nameplate_threshold_spin.setMaximumWidth(90)
+        nameplate_grid.addWidget(self.nameplate_threshold_spin, 2, 1)
 
-        suppression_layout = QHBoxLayout()
-        suppression_layout.addWidget(QLabel("사망 모션 무시(초):"))
+        nameplate_grid.addWidget(QLabel("사망 모션 무시(초):"), 3, 0, Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
         self.nameplate_dead_zone_spin = QDoubleSpinBox()
         self.nameplate_dead_zone_spin.setRange(0.0, 2.0)
         self.nameplate_dead_zone_spin.setSingleStep(0.01)
         self.nameplate_dead_zone_spin.setDecimals(2)
-        suppression_layout.addWidget(self.nameplate_dead_zone_spin)
-        suppression_layout.addSpacing(12)
-        suppression_layout.addWidget(QLabel("이름표 유예(초):"))
+        self.nameplate_dead_zone_spin.setMaximumWidth(90)
+        nameplate_grid.addWidget(self.nameplate_dead_zone_spin, 3, 1)
+
+        nameplate_grid.addWidget(QLabel("이름표 유예(초):"), 3, 2, Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
         self.nameplate_grace_spin = QDoubleSpinBox()
         self.nameplate_grace_spin.setRange(0.0, 2.0)
         self.nameplate_grace_spin.setSingleStep(0.01)
         self.nameplate_grace_spin.setDecimals(2)
-        suppression_layout.addWidget(self.nameplate_grace_spin)
-        suppression_layout.addStretch(1)
-        nameplate_layout.addLayout(suppression_layout)
+        self.nameplate_grace_spin.setMaximumWidth(90)
+        nameplate_grid.addWidget(self.nameplate_grace_spin, 3, 3)
+
+        nameplate_grid.setColumnStretch(4, 1)
+
+        nameplate_layout.addLayout(nameplate_grid)
 
         nameplate_group.setLayout(nameplate_layout)
         nameplate_group.toggled.connect(self._handle_nameplate_enabled_toggled)
