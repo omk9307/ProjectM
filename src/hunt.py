@@ -563,7 +563,6 @@ class HuntTab(QWidget):
         self._nameplate_visual_debug_enabled = False
         self._visual_tracked_monsters: list[dict] = []
         self._visual_dead_zones: list[dict] = []
-        self._last_nameplate_log_message: Optional[str] = None
         self._last_nameplate_notify_ts: float = 0.0
 
         self.attack_interval_sec = 0.35
@@ -2326,16 +2325,14 @@ class HuntTab(QWidget):
                 lines.append("몬스터 없음")
 
             if nameplates:
-                matched = [entry for entry in nameplates if entry.get('matched')]
-                best_score = max((float(entry.get('score', 0.0)) for entry in nameplates), default=0.0)
-                lines.append(
-                    f"이름표 탐지: {len(nameplates)}건 / 신뢰도 최고 {best_score:.2f}"
-                )
-                if matched:
-                    avg_score = sum(float(entry.get('score', 0.0)) for entry in matched) / len(matched)
-                    lines.append(f"  └ 확정 {len(matched)}건 (평균 {avg_score:.2f})")
+                nameplate_summaries = []
+                for entry in nameplates:
+                    monster_name = str(entry.get('class_name') or '이름표')
+                    score = float(entry.get('score', 0.0))
+                    nameplate_summaries.append(f"{monster_name}({score:.2f})")
+                lines.append("이름표: " + ", ".join(nameplate_summaries))
             else:
-                lines.append("이름표 탐지 없음")
+                lines.append("이름표 없음")
 
             self.confidence_summary_view.setPlainText('\n'.join(lines))
         elif self.confidence_summary_view.toPlainText():
@@ -2356,23 +2353,6 @@ class HuntTab(QWidget):
                 f"Capture {capture_ms:.1f} ms / YOLO {yolo_ms:.1f} ms",
                 f"Nickname {nickname_ms:.1f} ms / Nameplate {nameplate_ms:.1f} ms",
             ]
-
-            nameplate_details = self.latest_detection_details.get('nameplates') if hasattr(self, 'latest_detection_details') else []
-            if nameplate_details:
-                total_detected = len(nameplate_details)
-                matched_entries = [entry for entry in nameplate_details if entry.get('matched')]
-                best_entry = max(
-                    nameplate_details,
-                    key=lambda entry: float(entry.get('score', 0.0) or 0.0),
-                )
-                best_name = str(best_entry.get('class_name') or '이름표')
-                best_score = float(best_entry.get('score', 0.0) or 0.0)
-                match_text = f"확정 {len(matched_entries)}건" if matched_entries else "확정 없음"
-                frame_lines.append(
-                    f"Nameplate {total_detected}건 / {match_text} / 최고 {best_name} {best_score:.2f}"
-                )
-            else:
-                frame_lines.append("Nameplate 탐지 없음")
 
             if show_frame_detail:
                 preprocess_ms = float(perf.get('preprocess_ms', 0.0))
@@ -3801,7 +3781,6 @@ class HuntTab(QWidget):
                 else:
                     self._reset_character_cache()
 
-        last_nameplate_message: Optional[str] = None
         rely_message: Optional[str] = None
         best_nameplate_entry: Optional[dict] = None
 
@@ -3939,8 +3918,6 @@ class HuntTab(QWidget):
         if best_nameplate_entry is not None:
             class_name = str(best_nameplate_entry.get('class_name') or '이름표')
             score_val = float(best_nameplate_entry.get('score', 0.0))
-            template_id = best_nameplate_entry.get('template_id') or '-'
-            last_nameplate_message = f"이름표 감지: {class_name} (점수 {score_val:.2f}, 템플릿 {template_id})"
             if not (self.latest_snapshot and self.latest_snapshot.monster_boxes):
                 rely_message = f"이름표 기반 몬스터 유지: {class_name} (점수 {score_val:.2f})"
 
@@ -3982,9 +3959,6 @@ class HuntTab(QWidget):
 
         self.update_detection_snapshot(snapshot)
 
-        if last_nameplate_message and last_nameplate_message != self._last_nameplate_log_message:
-            self.append_log(last_nameplate_message, 'info')
-            self._last_nameplate_log_message = last_nameplate_message
         if rely_message and (now - self._last_nameplate_notify_ts) > 0.5:
             self.append_log(rely_message, 'info')
             self._last_nameplate_notify_ts = now
