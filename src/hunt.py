@@ -1377,12 +1377,22 @@ class HuntTab(QWidget):
         self.conf_monster_spinbox.valueChanged.connect(self._handle_setting_changed)
         control_row.addWidget(self.conf_monster_spinbox)
 
-        control_row.addStretch(1)
-        control_layout.addLayout(control_row)
-
         self.screen_output_checkbox = QCheckBox("화면출력")
         self.screen_output_checkbox.setChecked(False)
         self.screen_output_checkbox.toggled.connect(self._on_screen_output_toggled)
+
+        self.auto_request_checkbox = QCheckBox("자동사냥")
+        self.auto_request_checkbox.toggled.connect(self._handle_setting_changed)
+        for checkbox in (self.screen_output_checkbox, self.auto_request_checkbox):
+            checkbox.setSizePolicy(
+                QSizePolicy(QSizePolicy.Policy.Maximum, QSizePolicy.Policy.Fixed)
+            )
+
+        control_row.addWidget(self.screen_output_checkbox)
+        control_row.addWidget(self.auto_request_checkbox)
+
+        control_row.addStretch(1)
+        control_layout.addLayout(control_row)
 
         self.show_hunt_area_checkbox = QCheckBox("사냥 범위")
         self.show_hunt_area_checkbox.setChecked(True)
@@ -1403,22 +1413,17 @@ class HuntTab(QWidget):
         self.show_nameplate_checkbox = QCheckBox("몬스터 이름표 범위")
         self.show_nameplate_checkbox.setChecked(True)
         self.show_nameplate_checkbox.toggled.connect(self._on_overlay_toggle_changed)
-        self.show_nameplate_tracking_checkbox = QCheckBox("몬스터 이름표 시각")
+        self.show_nameplate_tracking_checkbox = QCheckBox("몬스터 이름 시각화")
         self.show_nameplate_tracking_checkbox.setChecked(self.overlay_preferences.get('nameplate_tracking', False))
         self.show_nameplate_tracking_checkbox.toggled.connect(self._on_nameplate_tracking_toggle_changed)
 
-        self.auto_request_checkbox = QCheckBox("자동사냥")
-        self.auto_request_checkbox.toggled.connect(self._handle_setting_changed)
-
         for checkbox in (
-            self.screen_output_checkbox,
             self.show_hunt_area_checkbox,
             self.show_primary_skill_checkbox,
             self.show_direction_checkbox,
             self.show_nickname_range_checkbox,
             self.show_nameplate_checkbox,
             self.show_nameplate_tracking_checkbox,
-            self.auto_request_checkbox,
         ):
             checkbox.setSizePolicy(
                 QSizePolicy(QSizePolicy.Policy.Maximum, QSizePolicy.Policy.Fixed)
@@ -1426,14 +1431,12 @@ class HuntTab(QWidget):
 
         button_row = QHBoxLayout()
         button_row.setSpacing(12)
-        button_row.addWidget(self.screen_output_checkbox)
         button_row.addWidget(self.show_hunt_area_checkbox)
         button_row.addWidget(self.show_primary_skill_checkbox)
         button_row.addWidget(self.show_direction_checkbox)
         button_row.addWidget(self.show_nickname_range_checkbox)
         button_row.addWidget(self.show_nameplate_checkbox)
         button_row.addWidget(self.show_nameplate_tracking_checkbox)
-        button_row.addWidget(self.auto_request_checkbox)
 
         button_row.addStretch(1)
         control_layout.addLayout(button_row)
