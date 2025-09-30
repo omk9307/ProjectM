@@ -5,6 +5,7 @@ from __future__ import annotations
 import sys
 import os
 import json
+import csv
 import cv2
 import numpy as np
 import mss
@@ -26,7 +27,7 @@ import pygetwindow as gw
 import ctypes
 from ctypes import wintypes
 from pathlib import Path
-from typing import Dict, Optional
+from typing import Dict, Optional, TextIO
 
 from status_monitor import StatusMonitorThread, StatusMonitorConfig
 
@@ -308,6 +309,45 @@ class MapTab(QWidget):
     jump_profile_progress_signal = pyqtSignal(int)
 
     EVENT_WAYPOINT_THRESHOLD = 8.0
+    MAP_PERF_HEADERS = [
+        "timestamp",
+        "frame_index",
+        "frame_status",
+        "fps",
+        "loop_total_ms",
+        "capture_ms",
+        "preprocess_ms",
+        "feature_match_ms",
+        "player_icon_ms",
+        "other_player_icon_ms",
+        "emit_ms",
+        "map_processing_ms",
+        "queue_delay_ms",
+        "sleep_ms",
+        "features_detected",
+        "template_count",
+        "player_icon_count",
+        "other_player_icon_count",
+        "feature_candidates",
+        "player_icon_input_count",
+        "other_player_icon_input_count",
+        "frame_width",
+        "frame_height",
+        "downscale",
+        "downscale_adjusted",
+        "map_status",
+        "map_warning",
+        "player_state",
+        "navigation_action",
+        "event_in_progress_flag",
+        "current_floor",
+        "active_profile",
+        "active_route_profile",
+        "target_waypoint",
+        "global_x",
+        "global_y",
+        "error",
+    ]
     
     def __init__(self):
             super().__init__()
@@ -340,6 +380,18 @@ class MapTab(QWidget):
             self._status_saved_command: Optional[tuple[str, object]] = None
             self._last_regular_command: Optional[tuple[str, object]] = None
             self._status_data_manager = None
+
+            self.latest_perf_stats: dict[str, object] = {}
+            self._latest_thread_perf: dict[str, object] = {}
+            self._map_perf_queue: deque[dict] = deque()
+            self._perf_logs_dir = os.path.join(WORKSPACE_ROOT, 'perf_logs')
+            self._perf_logging_enabled = False
+            self._perf_log_path: Optional[str] = None
+            self._perf_log_handle: Optional[TextIO] = None
+            self._perf_log_writer: Optional[csv.writer] = None
+            self._perf_log_headers = list(self.MAP_PERF_HEADERS)
+            self._current_map_perf_status = 'unknown'
+            self._current_map_perf_warning = ''
 
             self.full_map_pixmap = None
             self.full_map_bounding_rect = QRectF()
@@ -723,6 +775,10 @@ class MapTab(QWidget):
         self.auto_control_checkbox = QCheckBox("자동 제어")
         self.auto_control_checkbox.setChecked(False)
         settings_h_layout_1.addWidget(self.auto_control_checkbox)
+        self.perf_logging_checkbox = QCheckBox("CSV 기록")
+        self.perf_logging_checkbox.setChecked(self._perf_logging_enabled)
+        self.perf_logging_checkbox.toggled.connect(self._on_perf_logging_toggled)
+        settings_h_layout_1.addWidget(self.perf_logging_checkbox)
         settings_h_layout_1.addStretch(1)
         settings_h_layout_1.addWidget(QLabel("시작 딜레이:"))
         self.initial_delay_spinbox = QSpinBox()
@@ -1197,6 +1253,10 @@ class MapTab(QWidget):
         profile_to_load = None
         last_profile = self.load_global_settings()
         self.hotkey_display_label.setText(self.current_hotkey.upper())
+        if hasattr(self, 'perf_logging_checkbox'):
+            block_state = self.perf_logging_checkbox.blockSignals(True)
+            self.perf_logging_checkbox.setChecked(self._perf_logging_enabled)
+            self.perf_logging_checkbox.blockSignals(block_state)
         if self.hotkey_manager:
             try:
                 self.hotkey_manager.register_hotkey(self.current_hotkey)
@@ -1815,18 +1875,22 @@ class MapTab(QWidget):
                     settings = json.load(f)
                     #  단축키 정보 로드
                     self.current_hotkey = settings.get('hotkey', 'None')
+                    self._perf_logging_enabled = bool(settings.get('perf_logging_enabled', False))
                     return settings.get('active_profile')
             except json.JSONDecodeError:
                 self.current_hotkey = 'None'
+                self._perf_logging_enabled = False
                 return None
         self.current_hotkey = 'None'
+        self._perf_logging_enabled = False
         return None
 
     def save_global_settings(self):
         with open(GLOBAL_MAP_SETTINGS_FILE, 'w', encoding='utf-8') as f:
             settings = {
                 'active_profile': self.active_profile_name,
-                'hotkey': self.current_hotkey #  단축키 정보 저장
+                'hotkey': self.current_hotkey, #  단축키 정보 저장
+                'perf_logging_enabled': bool(self._perf_logging_enabled),
             }
             json.dump(settings, f)
 
@@ -3061,7 +3125,11 @@ class MapTab(QWidget):
                 self.detection_thread = AnchorDetectionThread(self.key_features, capture_thread=self.capture_thread, parent_tab=self)
                 self.detection_thread.detection_ready.connect(self.on_detection_ready)
                 self.detection_thread.status_updated.connect(self.update_detection_log_message)
+                self.detection_thread.perf_sampled.connect(self._handle_detection_perf_sample)
                 self.detection_thread.start()
+
+                if self._perf_logging_enabled:
+                    self._start_perf_logging()
 
                 self._reset_walk_teleport_state()
                 self.detect_anchor_btn.setText("탐지 중단")
@@ -3090,8 +3158,13 @@ class MapTab(QWidget):
                 self.update_detection_log_message("탐지 중단됨", "black")
                 self.minimap_view_label.setText("탐지 중단됨")
 
+                if self._perf_log_writer:
+                    self._stop_perf_logging()
+
                 self.detection_thread = None
                 self.capture_thread = None
+                self._map_perf_queue.clear()
+                self.latest_perf_stats = {}
                 self._last_walk_teleport_check_time = 0.0
 
                 # --- [v12.3.1] 탐지 중지 시에도 상태 초기화 ---
@@ -3482,7 +3555,7 @@ class MapTab(QWidget):
         self.is_measuring_jump_time = True
         self.jump_measure_start_time = 0.0
 
-    def on_detection_ready(self, frame_bgr, found_features, my_player_rects, other_player_rects):
+    def _on_detection_ready_impl(self, frame_bgr, found_features, my_player_rects, other_player_rects):
         """
         [MODIFIED] v14.3.1: UnboundLocalError 수정을 위해 로직 실행 순서 정상화.
         - 1. final_player_pos를 가장 먼저 계산.
@@ -3804,6 +3877,231 @@ class MapTab(QWidget):
         
         outlier_list = [f for f in reliable_features if f['id'] not in inlier_ids]
         self.update_detection_log_from_features(inlier_features, outlier_list)
+
+    def on_detection_ready(self, frame_bgr, found_features, my_player_rects, other_player_rects):
+        map_perf = {
+            'timestamp': time.time(),
+            'processing_start_monotonic': time.perf_counter(),
+            'feature_candidates': len(found_features) if isinstance(found_features, list) else 0,
+            'player_icon_input_count': len(my_player_rects) if isinstance(my_player_rects, list) else 0,
+            'other_player_icon_input_count': len(other_player_rects) if isinstance(other_player_rects, list) else 0,
+            'map_status': 'ok',
+            'map_warning': '',
+            'queue_delay_ms': 0.0,
+        }
+
+        if not self.is_detection_running:
+            map_perf['map_status'] = 'inactive'
+            map_perf['map_warning'] = 'detection_inactive'
+            map_perf['processing_end_monotonic'] = time.perf_counter()
+            self._finalize_map_perf_sample(map_perf)
+            return
+
+        if not isinstance(my_player_rects, list) or not my_player_rects:
+            map_perf['map_status'] = 'no_player_icon'
+            map_perf['map_warning'] = 'player_icon_missing'
+            map_perf['processing_end_monotonic'] = time.perf_counter()
+            self._finalize_map_perf_sample(map_perf)
+            return
+
+        self._current_map_perf_status = 'ok'
+        self._current_map_perf_warning = ''
+        try:
+            self._on_detection_ready_impl(frame_bgr, found_features, my_player_rects, other_player_rects)
+        except Exception as exc:
+            warning_text = str(exc)
+            self._current_map_perf_status = 'error'
+            self._current_map_perf_warning = warning_text
+            map_perf['map_status'] = 'error'
+            map_perf['map_warning'] = warning_text
+            self._finalize_map_perf_sample(map_perf)
+            raise
+        else:
+            self._finalize_map_perf_sample(map_perf)
+
+    def _finalize_map_perf_sample(self, map_perf: dict) -> None:
+        if 'processing_end_monotonic' not in map_perf:
+            map_perf['processing_end_monotonic'] = time.perf_counter()
+
+        start = map_perf.get('processing_start_monotonic')
+        end = map_perf.get('processing_end_monotonic')
+        if isinstance(start, (int, float)) and isinstance(end, (int, float)):
+            map_perf['map_processing_ms'] = max(0.0, (end - start) * 1000.0)
+        else:
+            map_perf['map_processing_ms'] = float(map_perf.get('map_processing_ms', 0.0) or 0.0)
+
+        status = map_perf.get('map_status') or getattr(self, '_current_map_perf_status', 'unknown') or 'unknown'
+        map_perf['map_status'] = status
+
+        warning = map_perf.get('map_warning') or getattr(self, '_current_map_perf_warning', '')
+        map_perf['map_warning'] = warning
+
+        pos = getattr(self, 'smoothed_player_pos', None)
+        if pos is not None:
+            try:
+                map_perf['global_x'] = float(pos.x())
+                map_perf['global_y'] = float(pos.y())
+            except Exception:
+                map_perf['global_x'] = 0.0
+                map_perf['global_y'] = 0.0
+        else:
+            map_perf.setdefault('global_x', 0.0)
+            map_perf.setdefault('global_y', 0.0)
+
+        map_perf['player_state'] = getattr(self, 'player_state', '') or ''
+        map_perf['navigation_action'] = getattr(self, 'navigation_action', '') or ''
+        map_perf['event_in_progress_flag'] = bool(getattr(self, 'event_in_progress', False))
+        map_perf['current_floor'] = getattr(self, 'current_player_floor', '') or ''
+        map_perf['active_profile'] = self.active_profile_name or ''
+        map_perf['active_route_profile'] = self.active_route_profile_name or ''
+        map_perf['target_waypoint'] = getattr(self, 'target_waypoint_id', '') or ''
+
+        map_perf.setdefault('feature_candidates', 0)
+        map_perf.setdefault('player_icon_input_count', 0)
+        map_perf.setdefault('other_player_icon_input_count', 0)
+
+        if len(self._map_perf_queue) >= 64:
+            self._map_perf_queue.popleft()
+        self._map_perf_queue.append(dict(map_perf))
+
+    def _handle_detection_perf_sample(self, perf: dict) -> None:
+        self._latest_thread_perf = dict(perf)
+        if self._map_perf_queue:
+            map_perf = self._map_perf_queue.popleft()
+        else:
+            map_perf = {
+                'timestamp': time.time(),
+                'map_status': 'missing_map_perf',
+                'map_warning': '',
+                'map_processing_ms': 0.0,
+                'queue_delay_ms': 0.0,
+            }
+        combined = self._compose_perf_stats(perf, map_perf)
+        self.latest_perf_stats = combined
+        if self._perf_logging_enabled:
+            self._append_perf_log()
+
+    def _compose_perf_stats(self, thread_perf: dict, map_perf: dict) -> dict:
+        combined: dict[str, object] = {}
+        combined.update(thread_perf)
+        combined.update(map_perf)
+
+        combined['timestamp'] = float(thread_perf.get('timestamp', map_perf.get('timestamp', time.time())))
+        loop_ms = float(combined.get('loop_total_ms', 0.0) or 0.0)
+        combined['fps'] = 1000.0 / loop_ms if loop_ms > 0 else 0.0
+
+        start = map_perf.get('processing_start_monotonic')
+        end = map_perf.get('processing_end_monotonic')
+        if isinstance(start, (int, float)) and isinstance(end, (int, float)):
+            combined['map_processing_ms'] = max(0.0, (end - start) * 1000.0)
+        else:
+            combined['map_processing_ms'] = float(combined.get('map_processing_ms', 0.0) or 0.0)
+
+        dispatch_t0 = thread_perf.get('signal_dispatch_t0')
+        if isinstance(dispatch_t0, (int, float)) and isinstance(start, (int, float)):
+            combined['queue_delay_ms'] = max(0.0, (start - dispatch_t0) * 1000.0)
+        else:
+            combined['queue_delay_ms'] = float(combined.get('queue_delay_ms', 0.0) or 0.0)
+
+        combined.pop('processing_start_monotonic', None)
+        combined.pop('processing_end_monotonic', None)
+        combined.pop('signal_dispatch_t0', None)
+        combined.pop('loop_start_monotonic', None)
+
+        frame_status = combined.get('frame_status') or ''
+        combined['frame_status'] = frame_status
+        error_text = combined.get('error') or ''
+        combined['error'] = error_text
+        downscale_adjusted = combined.get('downscale_adjusted')
+        if isinstance(downscale_adjusted, (int, float)):
+            combined['downscale_adjusted'] = float(downscale_adjusted)
+        elif downscale_adjusted:
+            combined['downscale_adjusted'] = downscale_adjusted
+        else:
+            combined['downscale_adjusted'] = ''
+        combined['map_warning'] = combined.get('map_warning') or ''
+        combined['map_status'] = combined.get('map_status') or ''
+
+        return combined
+
+    def _ensure_perf_log_dir(self) -> str:
+        os.makedirs(self._perf_logs_dir, exist_ok=True)
+        return self._perf_logs_dir
+
+    def _start_perf_logging(self) -> None:
+        if self._perf_log_writer is not None:
+            return
+        try:
+            logs_dir = self._ensure_perf_log_dir()
+            file_name = time.strftime('map_perf_%Y%m%d_%H%M%S.csv')
+            path = os.path.join(logs_dir, file_name)
+            handle = open(path, 'w', newline='', encoding='utf-8')
+            writer = csv.writer(handle)
+            writer.writerow(self._perf_log_headers)
+            handle.flush()
+            self._perf_log_path = path
+            self._perf_log_handle = handle
+            self._perf_log_writer = writer
+            self.update_general_log(f"맵 성능 로그 기록 시작: {path}", "green")
+        except Exception as exc:
+            self.update_general_log(f"맵 성능 로그 파일 생성 실패: {exc}", "red")
+            self._perf_log_handle = None
+            self._perf_log_writer = None
+            self._perf_log_path = None
+
+    def _stop_perf_logging(self) -> None:
+        handle = self._perf_log_handle
+        path = self._perf_log_path
+        self._perf_log_handle = None
+        self._perf_log_writer = None
+        self._perf_log_path = None
+        if handle is not None:
+            try:
+                handle.flush()
+                handle.close()
+            except Exception:
+                pass
+        if path and self._perf_logging_enabled:
+            self.update_general_log(f"맵 성능 로그 기록 종료: {path}", "info")
+
+    def _append_perf_log(self) -> None:
+        if not self._perf_logging_enabled:
+            return
+        if not self._perf_log_writer or not self._perf_log_handle:
+            self._start_perf_logging()
+        if not self._perf_log_writer or not self._perf_log_handle:
+            return
+
+        stats = self.latest_perf_stats or {}
+        if not stats:
+            return
+
+        row = []
+        for key in self._perf_log_headers:
+            value = stats.get(key, '')
+            if isinstance(value, bool):
+                value = int(value)
+            elif isinstance(value, float):
+                value = round(value, 4)
+            elif value is None:
+                value = ''
+            row.append(value)
+
+        try:
+            self._perf_log_writer.writerow(row)
+            self._perf_log_handle.flush()
+        except Exception as exc:
+            self.update_general_log(f"맵 성능 로그 기록 실패: {exc}", "red")
+            self._stop_perf_logging()
+
+    def _on_perf_logging_toggled(self, checked: bool) -> None:
+        self._perf_logging_enabled = bool(checked)
+        if self._perf_logging_enabled:
+            if self.is_detection_running:
+                self._start_perf_logging()
+        else:
+            self._stop_perf_logging()
+        self.save_global_settings()
 
     def _generate_full_map_pixmap(self):
         """
@@ -7026,6 +7324,10 @@ class MapTab(QWidget):
         # [수정] 단축키 로드 및 등록 로직
         last_profile = self.load_global_settings()
         self.hotkey_display_label.setText(self.current_hotkey.upper())
+        if hasattr(self, 'perf_logging_checkbox'):
+            block_state = self.perf_logging_checkbox.blockSignals(True)
+            self.perf_logging_checkbox.setChecked(self._perf_logging_enabled)
+            self.perf_logging_checkbox.blockSignals(block_state)
         if self.hotkey_manager:
             try:
                 self.hotkey_manager.register_hotkey(self.current_hotkey)
@@ -7049,6 +7351,8 @@ def cleanup_on_close(self):
         self.save_global_settings()
         # 프로그램 종료 시에도 탐지 상태 플래그를 False로 설정
         self.is_detection_running = False
+
+        self._stop_perf_logging()
 
         if self.detection_thread and self.detection_thread.isRunning():
             self.detection_thread.stop()

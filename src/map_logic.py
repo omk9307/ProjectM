@@ -119,6 +119,7 @@ class AnchorDetectionThread(QThread):
 
     detection_ready = pyqtSignal(object, list, list, list)
     status_updated = pyqtSignal(str, str)
+    perf_sampled = pyqtSignal(dict)
 
     def __init__(self, all_key_features, capture_thread=None, parent_tab=None):
         super().__init__()
@@ -128,6 +129,7 @@ class AnchorDetectionThread(QThread):
         self.is_running = False
         self.feature_templates = {}
         self._downscale = MapConfig["downscale"]
+        self._frame_index = 0
 
         for fid, fdata in self.all_key_features.items():
             try:
@@ -155,22 +157,64 @@ class AnchorDetectionThread(QThread):
         self.is_running = True
         while self.is_running:
             loop_start = time.perf_counter()
+            perf = {
+                'timestamp': time.time(),
+                'loop_start_monotonic': loop_start,
+                'frame_index': self._frame_index,
+                'downscale': float(self._downscale),
+                'template_count': len(self.feature_templates),
+            }
+            self._frame_index += 1
+            perf_emitted = False
             try:
+                capture_start = time.perf_counter()
                 frame_bgr = safe_read_latest_frame(self.capture_thread)
+                perf['capture_ms'] = (time.perf_counter() - capture_start) * 1000.0
+
                 if frame_bgr is None:
+                    perf['frame_status'] = 'no_frame'
+                    perf['sleep_ms'] = 5.0
+                    perf['loop_total_ms'] = (time.perf_counter() - loop_start) * 1000.0
+                    try:
+                        self.perf_sampled.emit(perf)
+                        perf_emitted = True
+                    except Exception:
+                        pass
                     time.sleep(0.005)
                     continue
 
+                perf['frame_status'] = 'ok'
+                perf['frame_width'] = int(frame_bgr.shape[1])
+                perf['frame_height'] = int(frame_bgr.shape[0])
+
                 my_player_rects = []
                 other_player_rects = []
+
+                player_icon_start = time.perf_counter()
                 if self.parent_tab:
                     my_player_rects = self.parent_tab.find_player_icon(frame_bgr)
-                    other_player_rects = self.parent_tab.find_other_player_icons(frame_bgr)
+                perf['player_icon_ms'] = (time.perf_counter() - player_icon_start) * 1000.0
+                perf['player_icon_count'] = len(my_player_rects)
 
+                other_icon_start = time.perf_counter()
+                if self.parent_tab:
+                    other_player_rects = self.parent_tab.find_other_player_icons(frame_bgr)
+                perf['other_player_icon_ms'] = (time.perf_counter() - other_icon_start) * 1000.0
+                perf['other_player_icon_count'] = len(other_player_rects)
+
+                preprocess_start = time.perf_counter()
                 frame_gray = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2GRAY)
-                frame_gray_small = cv2.resize(frame_gray, (0, 0), fx=self._downscale, fy=self._downscale, interpolation=cv2.INTER_AREA)
+                frame_gray_small = cv2.resize(
+                    frame_gray,
+                    (0, 0),
+                    fx=self._downscale,
+                    fy=self._downscale,
+                    interpolation=cv2.INTER_AREA,
+                )
+                perf['preprocess_ms'] = (time.perf_counter() - preprocess_start) * 1000.0
 
                 all_detected_features = []
+                feature_start = time.perf_counter()
                 for fid, tpl_data in self.feature_templates.items():
                     tpl_small = tpl_data["template_gray_small"]
                     t_h, t_w = tpl_small.shape
@@ -215,22 +259,60 @@ class AnchorDetectionThread(QThread):
                         all_detected_features.append(search_result)
                         self.last_positions[fid] = search_result['local_pos']
 
+                perf['feature_match_ms'] = (time.perf_counter() - feature_start) * 1000.0
+                perf['features_detected'] = len(all_detected_features)
+
+                dispatch_t0 = time.perf_counter()
+                perf['signal_dispatch_t0'] = dispatch_t0
                 self.detection_ready.emit(frame_bgr, all_detected_features, my_player_rects, other_player_rects)
+                perf['emit_ms'] = (time.perf_counter() - dispatch_t0) * 1000.0
 
                 loop_time_ms = (time.perf_counter() - loop_start) * 1000.0
+                perf['loop_total_ms'] = loop_time_ms
+                perf['sleep_ms'] = 0.0
+
                 if loop_time_ms > MapConfig["loop_time_fallback_ms"]:
                     old_scale = self._downscale
                     self._downscale = max(0.3, old_scale * 0.95)
                     MapConfig["downscale"] = self._downscale
+                    perf['downscale_adjusted'] = float(self._downscale)
                     print(
                         f"[AnchorDetectionThread] 느린 루프 감지 ({loop_time_ms:.1f}ms), "
                         f"다운스케일 조정: {old_scale:.2f} -> {self._downscale:.2f}"
                     )
 
             except Exception as e:
+                perf['frame_status'] = 'error'
+                perf['error'] = str(e)
+                perf['loop_total_ms'] = (time.perf_counter() - loop_start) * 1000.0
                 print(f"[AnchorDetectionThread] 예기치 않은 오류: {e}")
                 traceback.print_exc()
                 time.sleep(0.02)
+            finally:
+                perf.setdefault('frame_status', 'unknown')
+                if 'loop_total_ms' not in perf:
+                    perf['loop_total_ms'] = (time.perf_counter() - loop_start) * 1000.0
+                perf.setdefault('sleep_ms', 0.0)
+                perf.setdefault('loop_start_monotonic', loop_start)
+                perf.setdefault('signal_dispatch_t0', perf.get('loop_start_monotonic', loop_start))
+                perf.setdefault('capture_ms', 0.0)
+                perf.setdefault('player_icon_ms', 0.0)
+                perf.setdefault('other_player_icon_ms', 0.0)
+                perf.setdefault('preprocess_ms', 0.0)
+                perf.setdefault('feature_match_ms', 0.0)
+                perf.setdefault('emit_ms', 0.0)
+                perf.setdefault('features_detected', 0)
+                perf.setdefault('player_icon_count', 0)
+                perf.setdefault('other_player_icon_count', 0)
+                perf.setdefault('frame_width', 0)
+                perf.setdefault('frame_height', 0)
+                perf.setdefault('error', '')
+                perf.setdefault('downscale_adjusted', None)
+                if not perf_emitted:
+                    try:
+                        self.perf_sampled.emit(perf)
+                    except Exception:
+                        pass
 
     def stop(self):
         self.is_running = False
