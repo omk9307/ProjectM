@@ -1900,15 +1900,25 @@ class AutoControlTab(QWidget):
                     released = self._release_key(key_obj, force=force_requested)
                     if released:
                         log_label = "(떼기-forced)" if force_requested else "(떼기)"
-                        self.log_generated.emit(f"{log_label} {self._translate_key_for_logging(step.get('key_str'))}", "white")
+                        color = "red" if force_requested else "white"
+                        self.log_generated.emit(
+                            f"{log_label} {self._translate_key_for_logging(step.get('key_str'))}",
+                            color,
+                        )
                     else:
                         if force_requested:
-                            self.log_generated.emit(f"(떼기-forced) {self._translate_key_for_logging(step.get('key_str'))}", "white")
+                            self.log_generated.emit(
+                                f"(떼기-forced) {self._translate_key_for_logging(step.get('key_str'))}",
+                                "red",
+                            )
                         else:
                             if self.console_log_checkbox.isChecked():
                                 print(f"[AutoControl] RELEASE skipped (not held) -> 강제 릴리즈 시도: {key_obj}")
                             self._release_key(key_obj, force=True)
-                            self.log_generated.emit(f"(떼기-forced) {self._translate_key_for_logging(step.get('key_str'))}", "white")
+                            self.log_generated.emit(
+                                f"(떼기-forced) {self._translate_key_for_logging(step.get('key_str'))}",
+                                "red",
+                            )
 
             elif action_type == "delay":
                 min_ms = step.get("min_ms", 0)
@@ -2044,15 +2054,16 @@ class AutoControlTab(QWidget):
                     released = self._release_key_for_owner(owner, key_obj, force=force_requested)
                     if released:
                         action_label = "(떼기-forced)" if force_requested else "(떼기)"
+                        color = "red" if force_requested else "white"
                         self.log_generated.emit(
                             f"[{command_name}] {action_label} {self._translate_key_for_logging(step.get('key_str'))}",
-                            "white",
+                            color,
                         )
                     else:
                         if force_requested:
                             self.log_generated.emit(
                                 f"[{command_name}] (떼기-forced) {self._translate_key_for_logging(step.get('key_str'))}",
-                                "white",
+                                "red",
                             )
                         else:
                             if self.global_key_counts.get(key_obj, 0) == 0:
@@ -2060,7 +2071,7 @@ class AutoControlTab(QWidget):
                                 if forced:
                                     self.log_generated.emit(
                                         f"[{command_name}] (떼기-forced) {self._translate_key_for_logging(step.get('key_str'))}",
-                                        "white",
+                                        "red",
                                     )
                             elif self.console_log_checkbox.isChecked():
                                 print(f"[AutoControl] 병렬 RELEASE skipped (held elsewhere): {step.get('key_str')}")

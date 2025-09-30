@@ -1223,7 +1223,15 @@ class HuntTab(QWidget):
         )
         return True
 
-    def _queue_completion_delay(self, command: str, min_delay: float, max_delay: float, context: str) -> None:
+    def _queue_completion_delay(
+        self,
+        command: str,
+        min_delay: float,
+        max_delay: float,
+        context: str,
+        *,
+        payload: Optional[dict] = None,
+    ) -> None:
         if not command:
             return
         try:
@@ -1240,6 +1248,7 @@ class HuntTab(QWidget):
             'min': min_val,
             'max': max_val,
             'context': context,
+            'payload': payload,
         })
 
     def _pop_completion_delay(self, command: str) -> Optional[dict]:
@@ -1257,8 +1266,14 @@ class HuntTab(QWidget):
         entry = self._pop_completion_delay(command)
         if not entry:
             return
-        if not success:
+
+        if success:
+            payload = entry.get('payload')
+            if payload:
+                self._handle_command_completion_payload(payload)
+        else:
             return
+
         delay = random.uniform(entry.get('min', 0.0), entry.get('max', 0.0))
         if delay <= 0:
             return
@@ -5690,15 +5705,20 @@ class HuntTab(QWidget):
 
         self._next_command_ready_ts = max(self._next_command_ready_ts, time.time())
         self._emit_control_command(skill.command)
-        self._queue_completion_delay(skill.command, skill.completion_delay_min, skill.completion_delay_max, f"스킬 '{skill.name}'")
+        self._queue_completion_delay(
+            skill.command,
+            skill.completion_delay_min,
+            skill.completion_delay_max,
+            f"스킬 '{skill.name}'",
+            payload={'type': 'attack', 'skill': skill},
+        )
         self.last_attack_ts = time.time()
         self.hunting_active = True
         post_delay = self._sample_delay(skill.post_delay_min, skill.post_delay_max)
         if post_delay > 0.0:
             self._set_command_cooldown(post_delay)
             self._log_delay_message(f"스킬 '{skill.name}'", post_delay)
-        self._decrement_primary_reset_counter(skill)
-        self._maybe_trigger_primary_release(skill)
+        # 주 스킬 회전 카운터는 시퀀스 완료 시점에 갱신합니다.
 
     def _trigger_buff_skill(self, buff: BuffSkill, *, is_test: bool = False) -> bool:
         if not buff.enabled:
@@ -5999,13 +6019,18 @@ class HuntTab(QWidget):
             exec_time = time.time()
             self._next_command_ready_ts = max(self._next_command_ready_ts, exec_time)
             self._emit_control_command(command)
-            self._queue_completion_delay(command, skill.completion_delay_min, skill.completion_delay_max, context_label)
+            self._queue_completion_delay(
+                command,
+                skill.completion_delay_min,
+                skill.completion_delay_max,
+                context_label,
+                payload={'type': 'attack', 'skill': skill},
+            )
             post_delay = self._sample_delay(skill.post_delay_min, skill.post_delay_max)
             if post_delay > 0.0:
                 self._set_command_cooldown(post_delay)
                 self._log_delay_message(context_label, post_delay)
-            self._decrement_primary_reset_counter(skill)
-            self._maybe_trigger_primary_release(skill)
+            # 주 스킬 회전 카운터는 시퀀스 완료 시점에 갱신합니다.
 
         pre_delay = self._sample_delay(getattr(skill, 'pre_delay_min', 0.0), getattr(skill, 'pre_delay_max', 0.0))
         if pre_delay > 0.0:
@@ -6233,7 +6258,6 @@ class HuntTab(QWidget):
         reason_suffix = f"주 스킬 사용 {usage_count}회"
         reason = f"primary_release|{reason_suffix}"
         self._emit_control_command(command, reason=reason)
-        self.append_log(f"[주 스킬] 해제 명령 실행 ({reason_suffix})", 'info')
         self._initialize_primary_reset_counter()
 
     def _decrement_primary_reset_counter(self, skill: AttackSkill) -> None:
@@ -6246,6 +6270,21 @@ class HuntTab(QWidget):
         if self._primary_reset_remaining <= 0:
             return
         self._primary_reset_remaining = max(0, self._primary_reset_remaining - 1)
+
+    def _handle_command_completion_payload(self, payload: dict) -> None:
+        if not isinstance(payload, dict):
+            return
+        payload_type = payload.get('type')
+        if payload_type == 'attack':
+            skill = payload.get('skill')
+            if not isinstance(skill, AttackSkill):
+                return
+            if skill not in self.attack_skills:
+                return
+            if not skill.enabled:
+                return
+            self._decrement_primary_reset_counter(skill)
+            self._maybe_trigger_primary_release(skill)
 
     def _update_buff_buttons(self) -> None:
         if not hasattr(self, "add_buff_btn"):
