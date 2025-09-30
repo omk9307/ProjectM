@@ -3495,7 +3495,14 @@ class HuntTab(QWidget):
             parts = reason_text.split('|', 1)
             reason_text = parts[1].strip() if len(parts) == 2 else ""
         if not is_primary_release_command:
-            log_message = f"{normalized} (원인: {reason_text})" if reason_text else normalized
+            formatted_message = None
+            if reason_text.startswith('사용원인'):
+                formatted_message = f"{normalized} - {reason_text}"
+
+            if reason_text and formatted_message is None:
+                log_message = f"{normalized} (원인: {reason_text})"
+            else:
+                log_message = formatted_message or normalized
             self._append_control_log(log_message)
 
     def _append_control_log(self, message: str, color: Optional[str] = None) -> None:
@@ -5877,6 +5884,50 @@ class HuntTab(QWidget):
             return False
         return True
 
+    def _build_attack_usage_reason(
+        self,
+        skill: AttackSkill,
+        *,
+        monster_count: int,
+        total_monster_count: int,
+    ) -> str:
+        """사냥 탭 키보드 로그에 남길 공격 스킬 사용 사유 문자열을 생성합니다."""
+
+        normalized_primary_count = max(0, int(monster_count))
+        normalized_total_count = max(0, int(total_monster_count))
+
+        detail_parts: list[str] = []
+        detail_parts.append(f"주 스킬 범위 몬스터 {normalized_primary_count}마리")
+
+        if (
+            normalized_total_count > 0
+            and normalized_total_count != normalized_primary_count
+        ):
+            detail_parts.append(f"전체 감지 {normalized_total_count}마리")
+
+        min_required = max(1, getattr(skill, 'min_monsters', 1))
+        if min_required > 1:
+            detail_parts.append(f"최소 조건 {min_required}마리 충족")
+
+        max_allowed = getattr(skill, 'max_monsters', None)
+        if isinstance(max_allowed, int) and max_allowed > 0:
+            detail_parts.append(f"최대 {max_allowed}마리 이하 유지")
+
+        if getattr(skill, 'is_primary', False):
+            detail_parts.append("주 스킬")
+
+        target_side = getattr(self, '_last_target_side', None)
+        target_distance = getattr(self, '_last_target_distance', None)
+        if target_side in ('left', 'right'):
+            direction_label = '좌' if target_side == 'left' else '우'
+            if isinstance(target_distance, (int, float)) and target_distance > 0:
+                detail_parts.append(f"목표 {direction_label} {int(round(target_distance))}px")
+            else:
+                detail_parts.append(f"목표 {direction_label}측")
+
+        detail_text = ', '.join(detail_parts) if detail_parts else '조건 충족'
+        return f"사용원인 ({detail_text})"
+
     def _execute_attack_skill(self, skill: AttackSkill, *, skip_pre_delay: bool = False) -> None:
         if not skill.enabled:
             return
@@ -5903,7 +5954,12 @@ class HuntTab(QWidget):
                     return
 
         self._next_command_ready_ts = max(self._next_command_ready_ts, time.time())
-        self._emit_control_command(skill.command)
+        usage_reason = self._build_attack_usage_reason(
+            skill,
+            monster_count=monster_count,
+            total_monster_count=self.latest_monster_count,
+        )
+        self._emit_control_command(skill.command, reason=usage_reason)
         self._queue_completion_delay(
             skill.command,
             skill.completion_delay_min,
