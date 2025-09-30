@@ -350,7 +350,9 @@ class MapTab(QWidget):
         "target_waypoint",
         "global_x",
         "global_y",
-        "ui_display_enabled",
+        "minimap_display_enabled",
+        "general_log_enabled",
+        "detection_log_enabled",
         "ui_update_called",
         "static_rebuild_ms",
         "error",
@@ -871,9 +873,21 @@ class MapTab(QWidget):
         logs_layout.setContentsMargins(0, 0, 0, 0)
         logs_layout.setSpacing(6)
 
+        general_log_header_layout = QHBoxLayout()
+        general_log_header_layout.setContentsMargins(0, 0, 0, 0)
+        general_log_header_layout.setSpacing(6)
+
         general_log_label = QLabel("일반 로그")
         general_log_label.setContentsMargins(0, 0, 0, 0)
-        logs_layout.addWidget(general_log_label)
+        general_log_header_layout.addWidget(general_log_label)
+
+        self.general_log_checkbox = QCheckBox("표시")
+        self.general_log_checkbox.setChecked(True)
+        self.general_log_checkbox.toggled.connect(self._handle_general_log_toggle)
+        general_log_header_layout.addWidget(self.general_log_checkbox)
+        general_log_header_layout.addStretch(1)
+
+        logs_layout.addLayout(general_log_header_layout)
 
         self.general_log_viewer = QTextEdit()
         self.general_log_viewer.setReadOnly(True)
@@ -882,9 +896,21 @@ class MapTab(QWidget):
         self.general_log_viewer.document().setDocumentMargin(6)
         logs_layout.addWidget(self.general_log_viewer, 1)
 
+        detection_log_header_layout = QHBoxLayout()
+        detection_log_header_layout.setContentsMargins(0, 0, 0, 0)
+        detection_log_header_layout.setSpacing(6)
+
         detection_log_label = QLabel("탐지 상태 로그")
         detection_log_label.setContentsMargins(0, 0, 0, 0)
-        logs_layout.addWidget(detection_log_label)
+        detection_log_header_layout.addWidget(detection_log_label)
+
+        self.detection_log_checkbox = QCheckBox("표시")
+        self.detection_log_checkbox.setChecked(True)
+        self.detection_log_checkbox.toggled.connect(self._handle_detection_log_toggle)
+        detection_log_header_layout.addWidget(self.detection_log_checkbox)
+        detection_log_header_layout.addStretch(1)
+
+        logs_layout.addLayout(detection_log_header_layout)
 
         self.detection_log_viewer = QTextEdit()
         self.detection_log_viewer.setReadOnly(True)
@@ -901,9 +927,9 @@ class MapTab(QWidget):
         self._general_log_last_entry = None
         self._general_log_last_ts = 0.0
         self._general_log_min_interval = 0.2
-        self._deferred_general_logs = []
-        self._deferred_general_logs_limit = 200
-        self._ui_display_enabled = True
+        self._general_log_enabled = True
+        self._detection_log_enabled = True
+        self._minimap_display_enabled = True
         self._status_last_ui_update = {'hp': 0.0, 'mp': 0.0}
         self._status_update_min_interval = 0.2
         self._render_detection_log(None, force=True)
@@ -4039,7 +4065,9 @@ class MapTab(QWidget):
                 ui_update_called = bool(self.minimap_view_label.consume_update_flag())
             except Exception:
                 ui_update_called = False
-        map_perf['ui_display_enabled'] = bool(getattr(self, '_ui_display_enabled', True))
+        map_perf['minimap_display_enabled'] = bool(getattr(self, '_minimap_display_enabled', True))
+        map_perf['general_log_enabled'] = bool(getattr(self, '_general_log_enabled', True))
+        map_perf['detection_log_enabled'] = bool(getattr(self, '_detection_log_enabled', True))
         map_perf['ui_update_called'] = ui_update_called
         self._ui_update_called_pending = ui_update_called
 
@@ -6497,15 +6525,15 @@ class MapTab(QWidget):
         self._general_log_last_entry = entry
         self._general_log_last_ts = now
 
-        if not self._ui_display_enabled:
-            if len(self._deferred_general_logs) >= self._deferred_general_logs_limit:
-                self._deferred_general_logs.pop(0)
-            self._deferred_general_logs.append(entry)
+        if not self._general_log_enabled:
             return
 
         self._write_general_log_to_viewer(message, normalized_color)
 
     def _write_general_log_to_viewer(self, message: str, color: str) -> None:
+        if not self._general_log_enabled:
+            return
+
         normalized_color = self._normalize_general_log_color(color)
         self._general_log_last_entry = (message, normalized_color)
         self._general_log_last_ts = time.time()
@@ -6530,7 +6558,8 @@ class MapTab(QWidget):
 
         self._pending_detection_html = combined
 
-        if not self._ui_display_enabled:
+        if not self._detection_log_enabled:
+            self._last_detection_rendered_html = ""
             return
 
         if not force and combined == self._last_detection_rendered_html:
@@ -6541,20 +6570,12 @@ class MapTab(QWidget):
         self._last_detection_rendered_html = combined
         self._last_detection_render_ts = now
 
-    def _flush_deferred_general_logs(self) -> None:
-        if not self._deferred_general_logs:
-            return
-
-        for message, color in self._deferred_general_logs:
-            self._write_general_log_to_viewer(message, color)
-        self._deferred_general_logs.clear()
-
     def _handle_display_toggle(self, checked: bool) -> None:
-        self._ui_display_enabled = bool(checked)
+        self._minimap_display_enabled = bool(checked)
         if hasattr(self, 'minimap_view_label'):
-            self.minimap_view_label.set_display_enabled(self._ui_display_enabled)
+            self.minimap_view_label.set_display_enabled(self._minimap_display_enabled)
 
-        if not self._ui_display_enabled:
+        if not self._minimap_display_enabled:
             if hasattr(self, 'minimap_view_label'):
                 self.minimap_view_label.setText("실시간 표시 꺼짐")
             return
@@ -6562,8 +6583,21 @@ class MapTab(QWidget):
         if hasattr(self, 'minimap_view_label') and not self.is_detection_running:
             self.minimap_view_label.setText("탐지를 시작하세요.")
 
-        self._flush_deferred_general_logs()
-        if self._pending_detection_html:
+    def _handle_general_log_toggle(self, checked: bool) -> None:
+        self._general_log_enabled = bool(checked)
+        self.general_log_viewer.setVisible(self._general_log_enabled)
+        if not self._general_log_enabled:
+            self.general_log_viewer.clear()
+
+    def _handle_detection_log_toggle(self, checked: bool) -> None:
+        self._detection_log_enabled = bool(checked)
+        self.detection_log_viewer.setVisible(self._detection_log_enabled)
+        if not self._detection_log_enabled:
+            self.detection_log_viewer.clear()
+            self._last_detection_rendered_html = ""
+            self._pending_detection_html = ""
+            self.log_update_counter = 0
+        else:
             self._render_detection_log(self._last_detection_log_body, force=True)
 
     def attach_status_monitor(self, monitor: StatusMonitorThread, data_manager) -> None:
@@ -6701,6 +6735,9 @@ class MapTab(QWidget):
 
     def update_detection_log_from_features(self, inliers, outliers):
         """정상치와 이상치 피처 목록을 받아 탐지 상태 로그를 업데이트합니다."""
+        if not self._detection_log_enabled:
+            return
+
         #  5프레임마다 한 번씩만 업데이트하도록 조절
         self.log_update_counter += 1
         if self.log_update_counter % 5 != 0:
