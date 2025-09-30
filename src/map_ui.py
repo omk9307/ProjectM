@@ -593,6 +593,7 @@ class MapTab(QWidget):
             self.CLIMBING_RECOVERY_KEYWORDS = ["오르기", "사다리타기"] # 등반 복구 식별용
             self.recovery_cooldown_until = 0.0 # 복구 후 판단을 유예할 시간
             self.last_command_sent_time = 0.0 # 마지막으로 명령을 보낸 시간
+            self.last_command_context = None  # 최근 전송한 이동 명령의 상태 정보
             self.NON_WALK_STUCK_THRESHOLD_S = 1.0            # 걷기/정지 이외 상태에서 멈춤으로 간주할 시간 (초)
             self.cfg_airborne_recovery_wait = AIRBORNE_RECOVERY_WAIT_DEFAULT  # 공중 자동복구 대기시간 (초)
             self.cfg_ladder_recovery_resend_delay = LADDER_RECOVERY_RESEND_DELAY_DEFAULT  # 사다리 복구 재전송 대기시간 (초)
@@ -3110,6 +3111,7 @@ class MapTab(QWidget):
                 self.last_printed_direction = None
                 self.last_printed_player_state = None
                 self.last_command_sent_time = 0.0
+                self.last_command_context = None
                 self.jump_direction = None
                 # --- 초기화 끝 ---
 
@@ -3120,6 +3122,7 @@ class MapTab(QWidget):
                 self.airborne_path_warning_active = False
                 self.ladder_float_recovery_cooldown_until = 0.0
                 self.route_cycle_initialized = False
+                self.last_command_context = None
 
                 self._refresh_event_waypoint_states()
 
@@ -5062,8 +5065,8 @@ class MapTab(QWidget):
                 self.last_action_time = self.last_movement_time
             else:
                 self.last_action_time = time.time()
-            # [핵심 수정] 명령을 보낸 지 0.5초 이내에 발생한 움직임만 '의도된' 것으로 간주
-            is_intentional_move = (time.time() - self.last_command_sent_time < 0.5)
+            # [핵심 수정] 최근 명령 컨텍스트를 기반으로 의도된 움직임 여부 판정
+            is_intentional_move = self._was_recent_intentional_movement(final_player_pos)
 
             if self.stuck_recovery_attempts > 0 and is_intentional_move:
                 self.update_general_log("[자동 복구] 의도된 움직임 감지. 복구 상태를 초기화합니다.", "green")
@@ -5259,6 +5262,67 @@ class MapTab(QWidget):
         self.last_player_pos = final_player_pos
 
 
+    def _record_command_context(self, command: str, *, player_pos: Optional[QPointF] = None) -> None:
+        """전송한 이동 명령의 맥락을 저장합니다."""
+        movement_keywords = ["걷기", "점프", "오르기", "사다리타기", "정렬", "아래점프", "텔레포트"]
+        if not any(keyword in command for keyword in movement_keywords):
+            return
+
+        now = time.time()
+        pos_to_use = player_pos if player_pos is not None else self.last_player_pos
+        position_tuple = None
+        if pos_to_use is not None:
+            position_tuple = (pos_to_use.x(), pos_to_use.y())
+
+        self.last_command_context = {
+            "command": command,
+            "sent_at": now,
+            "floor": self.current_player_floor,
+            "player_state": self.player_state,
+            "navigation_action": self.navigation_action,
+            "last_on_terrain_y": self.last_on_terrain_y,
+            "position": position_tuple,
+            "failure_logged": False,
+        }
+
+    def _was_recent_intentional_movement(self, final_player_pos: Optional[QPointF]) -> bool:
+        """최근 전송한 명령이 실제로 반영된 움직임인지 확인합니다."""
+        if not self.last_command_context:
+            return False
+
+        context = self.last_command_context
+        elapsed = time.time() - context.get("sent_at", 0.0)
+        if elapsed > 0.7:
+            command = context.get("command")
+            if (
+                command == "아래점프"
+                and not context.get("failure_logged")
+                and self.stuck_recovery_attempts > 0
+            ):
+                self.update_general_log(
+                    "[자동 복구] 아래점프 낙하를 감지하지 못했습니다. 재시도를 계속합니다.",
+                    "gray",
+                )
+                context["failure_logged"] = True
+            self.last_command_context = None
+            return False
+
+        command = context.get("command")
+        if command == "아래점프":
+            baseline_y = context.get("last_on_terrain_y")
+            if baseline_y is None or final_player_pos is None:
+                return False
+
+            downward_threshold = self.cfg_y_movement_deadzone if self.cfg_y_movement_deadzone is not None else 0.0
+            downward_threshold = max(downward_threshold, 4.0)
+            if final_player_pos.y() - baseline_y < downward_threshold:
+                return False
+
+            if self.player_state not in ['falling', 'jumping']:
+                return False
+
+        return True
+
     def _execute_recovery_resend(self):
         """마지막 이동 명령을 실제로 재전송하는 역할을 합니다."""
         command = self.last_movement_command
@@ -5267,6 +5331,7 @@ class MapTab(QWidget):
             command = "아래점프"
             self.last_movement_command = command
             self.last_command_sent_time = time.time()
+            self._record_command_context(command)
 
         if command:
             if command in ("걷기(우)", "걷기(좌)"):
@@ -5275,6 +5340,7 @@ class MapTab(QWidget):
                 print(f"[자동 제어 테스트] RECOVERY: {command}")
             elif self.auto_control_checkbox.isChecked():
                 self._emit_control_command(command, None)
+            self._record_command_context(command)
 
     def _trigger_stuck_recovery(self, final_player_pos, log_message):
         """공통 멈춤 복구 절차를 실행합니다."""
@@ -5769,7 +5835,8 @@ class MapTab(QWidget):
                         if ("텔레포트" not in command_to_send
                                 and any(keyword in command_to_send for keyword in movement_related_keywords)):
                             self.last_movement_command = command_to_send
-                        
+                        self._record_command_context(command_to_send, player_pos=final_player_pos)
+
                         if self.debug_auto_control_checkbox.isChecked():
                             print(f"[자동 제어 테스트] {command_to_send}")
                         elif self.auto_control_checkbox.isChecked():
