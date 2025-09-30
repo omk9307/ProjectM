@@ -740,6 +740,12 @@ class HuntTab(QWidget):
             'emit_ms': 0.0,
             'payload_latency_ms': 0.0,
             'handler_ms': 0.0,
+            'downscale_active': 0.0,
+            'scale_factor': 1.0,
+            'frame_width': 0.0,
+            'frame_height': 0.0,
+            'input_width': 0.0,
+            'input_height': 0.0,
         }
         self._active_target_names: List[str] = []
 
@@ -1022,6 +1028,12 @@ class HuntTab(QWidget):
             'emit_ms',
             'payload_latency_ms',
             'handler_ms',
+            'downscale_active',
+            'scale_factor',
+            'frame_width',
+            'frame_height',
+            'input_width',
+            'input_height',
             'monster_count',
             'primary_monster_count',
             'nameplate_detected_count',
@@ -1160,6 +1172,12 @@ class HuntTab(QWidget):
                 float(perf.get('emit_ms', 0.0)),
                 float(perf.get('payload_latency_ms', 0.0)),
                 float(perf.get('handler_ms', 0.0)),
+                float(perf.get('downscale_active', 0.0)),
+                float(perf.get('scale_factor', 0.0)),
+                float(perf.get('frame_width', 0.0)),
+                float(perf.get('frame_height', 0.0)),
+                float(perf.get('input_width', 0.0)),
+                float(perf.get('input_height', 0.0)),
                 int(getattr(self, 'latest_monster_count', 0)),
                 int(getattr(self, 'latest_primary_monster_count', 0)),
             ]
@@ -3923,6 +3941,12 @@ class HuntTab(QWidget):
                 'yolo_ms',
                 'nickname_ms',
                 'nameplate_ms',
+                'downscale_active',
+                'scale_factor',
+                'frame_width',
+                'frame_height',
+                'input_width',
+                'input_height',
             )
             detail_keys = (
                 'preprocess_ms',

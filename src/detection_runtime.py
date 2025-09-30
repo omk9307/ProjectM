@@ -25,7 +25,6 @@ from PyQt6.QtWidgets import (
     QVBoxLayout,
 )
 from ultralytics import YOLO
-from ultralytics.utils.ops import scale_boxes
 
 from nickname_detection import NicknameDetector
 from direction_detection import DirectionDetector
@@ -378,6 +377,12 @@ class DetectionThread(QThread):
             "post_ms": 0.0,
             "render_ms": 0.0,
             "emit_ms": 0.0,
+            "downscale_active": 0.0,
+            "scale_factor": 1.0,
+            "frame_width": 0.0,
+            "frame_height": 0.0,
+            "input_width": 0.0,
+            "input_height": 0.0,
         }
 
         # 캡처-추론 병렬화를 위한 공유 상태
@@ -466,6 +471,13 @@ class DetectionThread(QThread):
                     capture_ms = (fallback_end - fallback_start) * 1000
 
                 preprocess_start = time.perf_counter()
+                frame_height: float = 0.0
+                frame_width: float = 0.0
+                if frame is not None and getattr(frame, "ndim", 0) >= 2:
+                    frame_height = float(frame.shape[0])
+                    frame_width = float(frame.shape[1])
+                self.perf_stats["frame_height"] = frame_height
+                self.perf_stats["frame_width"] = frame_width
                 if self._region_mask is not None:
                     if (
                         self._region_mask.shape[0] == frame.shape[0]
@@ -473,7 +485,6 @@ class DetectionThread(QThread):
                     ):
                         frame = frame.copy()
                         frame[~self._region_mask] = 0
-                original_shape = frame.shape[:2]
                 yolo_input = frame
                 if self.scale_factor < 0.999:
                     yolo_input = cv2.resize(
@@ -483,7 +494,18 @@ class DetectionThread(QThread):
                         fy=self.scale_factor,
                         interpolation=cv2.INTER_AREA,
                     )
-                yolo_input_shape = yolo_input.shape[:2]
+                input_height: float = 0.0
+                input_width: float = 0.0
+                if yolo_input is not None and getattr(yolo_input, "ndim", 0) >= 2:
+                    input_height = float(yolo_input.shape[0])
+                    input_width = float(yolo_input.shape[1])
+                self.perf_stats["input_height"] = input_height
+                self.perf_stats["input_width"] = input_width
+                applied_scale = self.scale_factor
+                if frame_width > 0.0 and input_width > 0.0:
+                    applied_scale = input_width / frame_width
+                self.perf_stats["scale_factor"] = float(applied_scale)
+                self.perf_stats["downscale_active"] = 1.0 if applied_scale < 0.999 else 0.0
                 preprocess_end = time.perf_counter()
 
                 now = time.perf_counter()
@@ -546,15 +568,6 @@ class DetectionThread(QThread):
                 self.perf_stats["yolo_ms"] = (yolo_end - yolo_start) * 1000
 
                 result = results[0]
-                if self.scale_factor < 0.999 and result.boxes is not None and len(result.boxes) > 0:
-                    boxes_tensor = result.boxes.data[:, :4]
-                    scaled_boxes = scale_boxes(
-                        (yolo_input_shape[0], yolo_input_shape[1]),
-                        boxes_tensor,
-                        (original_shape[0], original_shape[1]),
-                    )
-                    result.boxes.data[:, :4] = scaled_boxes
-                    result.boxes.orig_shape = (original_shape[0], original_shape[1])
                 speed_info = getattr(result, "speed", None)
                 if isinstance(speed_info, dict):
                     try:
@@ -582,6 +595,8 @@ class DetectionThread(QThread):
 
                 post_start = time.perf_counter()
 
+                scale_multiplier = 1.0 / self.scale_factor if self.scale_factor < 0.999 else 1.0
+
                 if len(result.boxes) > 0 and use_char_class:
                     char_indices_with_conf: List[tuple[int, float]] = []
                     other_indices: List[int] = []
@@ -589,6 +604,11 @@ class DetectionThread(QThread):
                         cls_id = int(box.cls)
                         conf = float(box.conf.item())
                         x1, y1, x2, y2 = box.xyxy[0].tolist()
+                        if scale_multiplier != 1.0:
+                            x1 *= scale_multiplier
+                            y1 *= scale_multiplier
+                            x2 *= scale_multiplier
+                            y2 *= scale_multiplier
                         width = float(x2 - x1)
                         height = float(y2 - y1)
                         if cls_id == self.char_class_index:
@@ -641,7 +661,11 @@ class DetectionThread(QThread):
                 boxes_for_payload: List[Dict[str, float]] = []
                 if len(result.boxes) > 0:
                     for box in result.boxes:
-                        x1, y1, x2, y2 = [int(coord) for coord in box.xyxy[0].tolist()]
+                        coords = box.xyxy[0].tolist()
+                        if scale_multiplier != 1.0:
+                            coords = [coord * scale_multiplier for coord in coords]
+                        x1, y1, x2, y2 = coords
+                        x1_int, y1_int, x2_int, y2_int = (int(round(x1)), int(round(y1)), int(round(x2)), int(round(y2)))
                         class_id = int(box.cls)
                         width_px = float(x2 - x1)
                         height_px = float(y2 - y1)
@@ -671,7 +695,7 @@ class DetectionThread(QThread):
                         color = class_color_map[class_id]
 
                         if annotated_frame is not None:
-                            cv2.rectangle(annotated_frame, (x1, y1), (x2, y2), color, 2)
+                            cv2.rectangle(annotated_frame, (x1_int, y1_int), (x2_int, y2_int), color, 2)
 
                             should_draw_confidence = True
                             if class_id != self.char_class_index and not self.show_monster_confidence:
@@ -681,19 +705,19 @@ class DetectionThread(QThread):
                                 label = f"{item['score']:.2f}"
 
                                 (w, h), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 2)
-                                text_bg_y2 = y1 - 5
+                                text_bg_y2 = y1_int - 5
                                 text_bg_y1 = text_bg_y2 - h - 5
                                 if text_bg_y1 < 0:
-                                    text_bg_y1 = y1 + 5
+                                    text_bg_y1 = y1_int + 5
                                     text_bg_y2 = text_bg_y1 + h + 5
 
-                                cv2.rectangle(annotated_frame, (x1, text_bg_y1), (x1 + w, text_bg_y2), color, -1)
+                                cv2.rectangle(annotated_frame, (x1_int, text_bg_y1), (x1_int + w, text_bg_y2), color, -1)
 
-                                text_y = y1 - 10 if text_bg_y1 < y1 else y1 + h + 5
+                                text_y = y1_int - 10 if text_bg_y1 < y1_int else y1_int + h + 5
                                 cv2.putText(
                                     annotated_frame,
                                     label,
-                                    (x1 + 2, text_y),
+                                    (x1_int + 2, text_y),
                                     cv2.FONT_HERSHEY_SIMPLEX,
                                     0.5,
                                     (255, 255, 255),
@@ -917,6 +941,12 @@ class DetectionThread(QThread):
                     "post_ms": float(self.perf_stats["post_ms"]),
                     "render_ms": float(self.perf_stats["render_ms"]),
                     "emit_ms": float(self.perf_stats["emit_ms"]),
+                    "downscale_active": float(self.perf_stats["downscale_active"]),
+                    "scale_factor": float(self.perf_stats["scale_factor"]),
+                    "frame_width": float(self.perf_stats["frame_width"]),
+                    "frame_height": float(self.perf_stats["frame_height"]),
+                    "input_width": float(self.perf_stats["input_width"]),
+                    "input_height": float(self.perf_stats["input_height"]),
                 }
 
                 emit_start = time.perf_counter()

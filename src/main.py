@@ -30,17 +30,18 @@ if os.name == 'nt':
 
     WM_HOTKEY = 0x0312
     VK_ESCAPE = 0x1B
+    MOD_SHIFT = 0x0004
 
     class _EscHotkeyEventFilter(QAbstractNativeEventFilter):
-        def __init__(self, hotkey_id: int, callback):
+        def __init__(self, hotkey_ids: set[int], callback):
             super().__init__()
-            self.hotkey_id = hotkey_id
+            self.hotkey_ids = set(hotkey_ids)
             self.callback = callback
 
         def nativeEventFilter(self, event_type, message):
             if event_type == "windows_generic_MSG":
                 msg = wintypes.MSG.from_address(int(message))
-                if msg.message == WM_HOTKEY and msg.wParam == self.hotkey_id:
+                if msg.message == WM_HOTKEY and msg.wParam in self.hotkey_ids:
                     self.callback()
             return False, 0
 
@@ -49,21 +50,43 @@ if os.name == 'nt':
 
         def __init__(self):
             self.user32 = ctypes.windll.user32
-            self.hotkey_id = None
+            self._registered: dict[tuple[int, int], int] = {}
 
-        def register_hotkey(self) -> int:
-            self.unregister_hotkey()
+        def register_hotkey(self, modifiers: int, key_code: int) -> int:
+            combo = (modifiers, key_code)
+            existing_id = self._registered.pop(combo, None)
+            if existing_id is not None:
+                self.user32.UnregisterHotKey(None, existing_id)
+
             hotkey_id = _EscHotkeyManager._NEXT_ID
             _EscHotkeyManager._NEXT_ID += 1
-            if not self.user32.RegisterHotKey(None, hotkey_id, 0, VK_ESCAPE):
-                raise RuntimeError("RegisterHotKey for ESC failed")
-            self.hotkey_id = hotkey_id
+
+            if not self.user32.RegisterHotKey(None, hotkey_id, modifiers, key_code):
+                raise RuntimeError(f"RegisterHotKey failed for modifiers={modifiers:#04x}, key_code={key_code:#04x}")
+
+            self._registered[combo] = hotkey_id
             return hotkey_id
 
-        def unregister_hotkey(self) -> None:
-            if self.hotkey_id is not None:
-                self.user32.UnregisterHotKey(None, self.hotkey_id)
-                self.hotkey_id = None
+        def register_multiple(self, combos: list[tuple[int, int]]) -> set[int]:
+            registered_ids: list[int] = []
+            try:
+                for modifiers, key_code in combos:
+                    registered_ids.append(self.register_hotkey(modifiers, key_code))
+                return set(registered_ids)
+            except Exception as exc:
+                for modifiers, key_code in combos:
+                    self.unregister_hotkey(modifiers, key_code)
+                raise exc
+
+        def unregister_hotkey(self, modifiers: int, key_code: int) -> None:
+            combo = (modifiers, key_code)
+            hotkey_id = self._registered.pop(combo, None)
+            if hotkey_id is not None:
+                self.user32.UnregisterHotKey(None, hotkey_id)
+
+        def unregister_all(self) -> None:
+            for modifiers, key_code in list(self._registered.keys()):
+                self.unregister_hotkey(modifiers, key_code)
 else:
     _EscHotkeyEventFilter = None
     _EscHotkeyManager = None
@@ -172,6 +195,8 @@ class MainWindow(QMainWindow):
         self.esc_hotkey_manager = None
         self.esc_hotkey_filter = None
         self._tab_color_states: dict[str, str] = {}
+        self._hunt_detection_active = False
+        self._map_detection_active = False
 
         self.load_tabs()
 
@@ -191,7 +216,7 @@ class MainWindow(QMainWindow):
             
         # [추가] 모든 탭 로드 후 시그널-슬롯 연결
         self.connect_tabs()
-        self._setup_global_hotkeys()
+        self._update_global_hotkey_state()
 
     def load_tab(self, module_name, class_name, tab_title):
         """
@@ -319,7 +344,7 @@ class MainWindow(QMainWindow):
         창의 위치와 크기를 저장합니다.
         """
         self.settings.setValue("geometry", self.saveGeometry())
-        
+
         for i in range(self.tab_widget.count()):
             widget = self.tab_widget.widget(i)
             if hasattr(widget, 'cleanup_on_close') and callable(getattr(widget, 'cleanup_on_close')):
@@ -335,7 +360,18 @@ class MainWindow(QMainWindow):
 
         event.accept()
 
+    def _update_global_hotkey_state(self) -> None:
+        should_enable = self._hunt_detection_active or self._map_detection_active
+        currently_enabled = self.esc_hotkey_manager is not None and self.esc_hotkey_filter is not None
+
+        if should_enable and not currently_enabled:
+            self._setup_global_hotkeys()
+        elif not should_enable and currently_enabled:
+            self._teardown_global_hotkeys()
+
     def _setup_global_hotkeys(self) -> None:
+        if self.esc_hotkey_manager or self.esc_hotkey_filter:
+            return
         if _EscHotkeyManager is None or _EscHotkeyEventFilter is None:
             return
 
@@ -345,10 +381,11 @@ class MainWindow(QMainWindow):
 
         try:
             self.esc_hotkey_manager = _EscHotkeyManager()
-            hotkey_id = self.esc_hotkey_manager.register_hotkey()
-            self.esc_hotkey_filter = _EscHotkeyEventFilter(hotkey_id, self._handle_global_escape)
+            combos = [(0, VK_ESCAPE), (MOD_SHIFT, VK_ESCAPE)]
+            hotkey_ids = self.esc_hotkey_manager.register_multiple(combos)
+            self.esc_hotkey_filter = _EscHotkeyEventFilter(hotkey_ids, self._handle_global_escape)
             app.installNativeEventFilter(self.esc_hotkey_filter)
-            print("성공: ESC 전역 단축키를 등록했습니다.")
+            print("성공: ESC 및 SHIFT+ESC 전역 단축키를 등록했습니다.")
         except Exception as exc:
             print(f"경고: ESC 전역 단축키 등록에 실패했습니다: {exc}")
             self._teardown_global_hotkeys()
@@ -362,7 +399,7 @@ class MainWindow(QMainWindow):
                 pass
         if self.esc_hotkey_manager:
             try:
-                self.esc_hotkey_manager.unregister_hotkey()
+                self.esc_hotkey_manager.unregister_all()
             except Exception:
                 pass
         self.esc_hotkey_filter = None
@@ -439,12 +476,16 @@ class MainWindow(QMainWindow):
                 tab_bar.set_tab_color(index, color)
 
     def _on_hunt_detection_status_changed(self, active: bool) -> None:
+        self._hunt_detection_active = bool(active)
         color = "#D32F2F" if active else None
         self._set_tab_color('사냥', color)
+        self._update_global_hotkey_state()
 
     def _on_map_detection_status_changed(self, active: bool) -> None:
+        self._map_detection_active = bool(active)
         color = "#1E88E5" if active else None
         self._set_tab_color('맵', color)
+        self._update_global_hotkey_state()
 
 
 if __name__ == '__main__':
