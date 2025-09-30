@@ -318,6 +318,10 @@ class MapTab(QWidget):
         "capture_ms",
         "preprocess_ms",
         "feature_match_ms",
+        "fallback_scan_count",
+        "skipped_templates",
+        "avg_roi_radius",
+        "max_roi_radius",
         "player_icon_ms",
         "other_player_icon_ms",
         "emit_ms",
@@ -346,6 +350,9 @@ class MapTab(QWidget):
         "target_waypoint",
         "global_x",
         "global_y",
+        "ui_display_enabled",
+        "ui_update_called",
+        "static_rebuild_ms",
         "error",
     ]
     
@@ -368,7 +375,12 @@ class MapTab(QWidget):
             self.debug_dialog = None
             self.editor_dialog = None 
             self.global_positions = {}
-            
+            self._player_icon_roi: QRect | None = None
+            self._player_icon_roi_fail_streak = 0
+            self._player_icon_roi_margin = 24
+            self._ui_update_called_pending = False
+            self._static_rebuild_ms_pending = 0.0
+
             # 탐지 스레드의 실행 상태를 명확하게 추적하기 위한 플래그
             self.is_detection_running = False
 
@@ -1658,7 +1670,12 @@ class MapTab(QWidget):
             self.update_general_log(f"'{profile_name}' 맵 프로필을 로드했습니다.", "blue")
             self._center_realtime_view_on_map()
         except Exception as e:
-            self.update_general_log(f"'{profile_name}' 프로필 로드 오류: {e}", "red")
+            detailed_trace = traceback.format_exc()
+            self.update_general_log(
+                f"'{profile_name}' 프로필 로드 오류: {e}",
+                "red",
+            )
+            print("[MapTab] load_profile_data exception:\n" + detailed_trace)
             self.update_ui_for_no_profile()
 
     def migrate_data_structures(self, config, features, geometry):
@@ -2953,63 +2970,86 @@ class MapTab(QWidget):
                 self.debug_dialog.close()
 
     # [v11.0.0] AnchorDetectionThread에서 책임 이동된 메서드들
-    def find_player_icon(self, frame_bgr):
-        hsv = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2HSV)
-        mask = cv2.inRange(hsv, PLAYER_ICON_LOWER, PLAYER_ICON_UPPER)
-        
+    def _extract_player_icon_rects_from_mask(self, mask, *, offset_x: int = 0, offset_y: int = 0) -> list[QRect]:
         output = cv2.connectedComponentsWithStats(mask, 8, cv2.CV_32S)
         num_labels = output[0]
         stats = output[2]
-        
-        valid_rects = []
+
+        valid_rects: list[QRect] = []
         for i in range(1, num_labels):
-            x = stats[i, cv2.CC_STAT_LEFT]
-            y = stats[i, cv2.CC_STAT_TOP]
+            x = stats[i, cv2.CC_STAT_LEFT] + offset_x
+            y = stats[i, cv2.CC_STAT_TOP] + offset_y
             w = stats[i, cv2.CC_STAT_WIDTH]
             h = stats[i, cv2.CC_STAT_HEIGHT]
-            
+
             if (MIN_ICON_WIDTH <= w < MAX_ICON_WIDTH and
                 MIN_ICON_HEIGHT <= h < MAX_ICON_HEIGHT):
-                
+
                 center_x = x + w / 2
                 center_y = y + h / 2
-                
+
                 new_x = int(center_x - PLAYER_ICON_STD_WIDTH / 2)
                 new_y = int(center_y - PLAYER_ICON_STD_HEIGHT / 2)
-                
+
                 valid_rects.append(QRect(new_x, new_y, PLAYER_ICON_STD_WIDTH, PLAYER_ICON_STD_HEIGHT))
-                
+
         return valid_rects
 
-    def find_other_player_icons(self, frame_bgr):
-        hsv = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2HSV)
-        mask1 = cv2.inRange(hsv, OTHER_PLAYER_ICON_LOWER1, OTHER_PLAYER_ICON_UPPER1)
-        mask2 = cv2.inRange(hsv, OTHER_PLAYER_ICON_LOWER2, OTHER_PLAYER_ICON_UPPER2)
+    def _expand_player_roi(self, rect: QRect, frame_w: int, frame_h: int) -> QRect:
+        margin = self._player_icon_roi_margin
+        expanded = rect.adjusted(-margin, -margin, margin, margin)
+        full_rect = QRect(0, 0, frame_w, frame_h)
+        expanded = expanded.intersected(full_rect)
+        if expanded.width() <= 0 or expanded.height() <= 0:
+            expanded = rect.intersected(full_rect)
+        if expanded.width() <= 0 or expanded.height() <= 0:
+            return full_rect
+        return expanded
+
+    def find_player_icon(self, frame_bgr, frame_hsv=None):
+        if frame_hsv is None:
+            frame_hsv = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2HSV)
+
+        frame_h, frame_w = frame_bgr.shape[:2]
+
+        def detect_in_region(x: int, y: int, w: int, h: int):
+            roi_hsv = frame_hsv[y:y + h, x:x + w]
+            if roi_hsv.size == 0:
+                return []
+            mask = cv2.inRange(roi_hsv, PLAYER_ICON_LOWER, PLAYER_ICON_UPPER)
+            return self._extract_player_icon_rects_from_mask(mask, offset_x=x, offset_y=y)
+
+        if self._player_icon_roi is not None:
+            roi = self._player_icon_roi.intersected(QRect(0, 0, frame_w, frame_h))
+            if roi.width() > 0 and roi.height() > 0:
+                rects = detect_in_region(roi.left(), roi.top(), roi.width(), roi.height())
+                if rects:
+                    self._player_icon_roi_fail_streak = 0
+                    self._player_icon_roi = self._expand_player_roi(rects[0], frame_w, frame_h)
+                    return rects
+                self._player_icon_roi_fail_streak += 1
+                if self._player_icon_roi_fail_streak >= 3:
+                    self._player_icon_roi = None
+
+        rects = detect_in_region(0, 0, frame_w, frame_h)
+        if rects:
+            self._player_icon_roi_fail_streak = 0
+            self._player_icon_roi = self._expand_player_roi(rects[0], frame_w, frame_h)
+        else:
+            self._player_icon_roi_fail_streak += 1
+            if self._player_icon_roi_fail_streak >= 10:
+                self._player_icon_roi = None
+        return rects
+
+    def find_other_player_icons(self, frame_bgr, frame_hsv=None):
+        if frame_hsv is None:
+            frame_hsv = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2HSV)
+
+        mask1 = cv2.inRange(frame_hsv, OTHER_PLAYER_ICON_LOWER1, OTHER_PLAYER_ICON_UPPER1)
+        mask2 = cv2.inRange(frame_hsv, OTHER_PLAYER_ICON_LOWER2, OTHER_PLAYER_ICON_UPPER2)
         mask = cv2.bitwise_or(mask1, mask2)
-        
-        output = cv2.connectedComponentsWithStats(mask, 8, cv2.CV_32S)
-        num_labels = output[0]
-        stats = output[2]
-        
-        valid_rects = []
-        for i in range(1, num_labels):
-            x = stats[i, cv2.CC_STAT_LEFT]
-            y = stats[i, cv2.CC_STAT_TOP]
-            w = stats[i, cv2.CC_STAT_WIDTH]
-            h = stats[i, cv2.CC_STAT_HEIGHT]
-            
-            if (MIN_ICON_WIDTH <= w < MAX_ICON_WIDTH and
-                MIN_ICON_HEIGHT <= h < MAX_ICON_HEIGHT):
-                
-                center_x = x + w / 2
-                center_y = y + h / 2
-                
-                new_x = int(center_x - PLAYER_ICON_STD_WIDTH / 2)
-                new_y = int(center_y - PLAYER_ICON_STD_HEIGHT / 2)
 
-                valid_rects.append(QRect(new_x, new_y, PLAYER_ICON_STD_WIDTH, PLAYER_ICON_STD_HEIGHT))
-                
-        return valid_rects
+        return self._extract_player_icon_rects_from_mask(mask)
 
     def force_stop_detection(self) -> bool:
         stopped = False
@@ -3140,6 +3180,9 @@ class MapTab(QWidget):
                     self.status_monitor.set_tab_active(map_tab=True)
                 self._render_detection_log(self._last_detection_log_body, force=True)
 
+                self._player_icon_roi = None
+                self._player_icon_roi_fail_streak = 0
+
                 if self.debug_view_checkbox.isChecked():
                     if not self.debug_dialog:
                         self.debug_dialog = DebugViewDialog(self)
@@ -3192,6 +3235,9 @@ class MapTab(QWidget):
                 self._map_perf_queue.clear()
                 self.latest_perf_stats = {}
                 self._last_walk_teleport_check_time = 0.0
+
+                self._player_icon_roi = None
+                self._player_icon_roi_fail_streak = 0
 
                 # --- [v12.3.1] 탐지 중지 시에도 상태 초기화 ---
                 self.journey_plan = []
@@ -3986,6 +4032,20 @@ class MapTab(QWidget):
         map_perf.setdefault('feature_candidates', 0)
         map_perf.setdefault('player_icon_input_count', 0)
         map_perf.setdefault('other_player_icon_input_count', 0)
+
+        ui_update_called = False
+        if hasattr(self, 'minimap_view_label') and self.minimap_view_label:
+            try:
+                ui_update_called = bool(self.minimap_view_label.consume_update_flag())
+            except Exception:
+                ui_update_called = False
+        map_perf['ui_display_enabled'] = bool(getattr(self, '_ui_display_enabled', True))
+        map_perf['ui_update_called'] = ui_update_called
+        self._ui_update_called_pending = ui_update_called
+
+        static_ms = float(getattr(self, '_static_rebuild_ms_pending', 0.0) or 0.0)
+        map_perf['static_rebuild_ms'] = static_ms
+        self._static_rebuild_ms_pending = 0.0
 
         if len(self._map_perf_queue) >= 64:
             self._map_perf_queue.popleft()

@@ -1839,7 +1839,7 @@ class AutoControlTab(QWidget):
         self.last_command_start_time = time.time()
         
         if self.current_command_reason_display:
-            start_msg = f"--- (시작) {self.current_command_name} (원인: {self.current_command_reason_display}) ---"
+            start_msg = f"--- (시작) {self.current_command_name} -원인: {self.current_command_reason_display} ---"
         else:
             start_msg = f"--- (시작) {self.current_command_name} ---"              # <<< (추가) UI에 '(시작)' 로그를 즉시 남기기 위해 생성
         start_color = "orange" if self._is_skill_profile(self.current_command_name) else "magenta"
@@ -1872,7 +1872,7 @@ class AutoControlTab(QWidget):
             if self.current_sequence_index >= len(self.current_sequence):
                 self.sequence_watchdog.stop()
                 if self.current_command_reason_display:
-                    log_msg = f"--- (완료) {self.current_command_name} (원인: {self.current_command_reason_display}) ---"
+                    log_msg = f"--- (완료) {self.current_command_name} -원인: {self.current_command_reason_display} ---"
                 else:
                     log_msg = f"--- (완료) {self.current_command_name} ---"
                 completion_color = "orange" if self._is_skill_profile(self.current_command_name) else "lightgreen"
@@ -1933,7 +1933,7 @@ class AutoControlTab(QWidget):
             elif action_type == "release_all":
                 self._release_all_keys(force=True)
                 if self.current_command_reason_display:
-                    self.log_generated.emit(f"(모든 키 떼기) (원인: {self.current_command_reason_display})", "white")
+                    self.log_generated.emit(f"(모든 키 떼기) -원인: {self.current_command_reason_display}", "white")
                 else:
                     self.log_generated.emit("(모든 키 떼기)", "white")
 
@@ -2006,7 +2006,7 @@ class AutoControlTab(QWidget):
         start_color = "orange" if self._is_skill_profile(command_name) else "cyan"
         display_reason = reason_display or None
         if display_reason:
-            self.log_generated.emit(f"[{command_name}] (시작) (원인: {display_reason})", start_color)
+            self.log_generated.emit(f"[{command_name}] (시작) -원인: {display_reason}", start_color)
         else:
             self.log_generated.emit(f"[{command_name}] (시작)", start_color)
 
@@ -2133,7 +2133,7 @@ class AutoControlTab(QWidget):
         self.active_parallel_sequences.pop(command_name, None)
 
         display_reason = state.get("reason_display") or state.get("reason")
-        suffix = f" (원인: {display_reason})" if display_reason else ""
+        suffix = f" -원인: {display_reason}" if display_reason else ""
         if success:
             completion_color = "orange" if self._is_skill_profile(command_name) else "lightgreen"
             self.log_generated.emit(f"[{command_name}] (완료){suffix}", completion_color)

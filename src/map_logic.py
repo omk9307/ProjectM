@@ -231,15 +231,19 @@ class AnchorDetectionThread(QThread):
                 my_player_rects = []
                 other_player_rects = []
 
+                frame_hsv = None
+                if self.parent_tab:
+                    frame_hsv = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2HSV)
+
                 player_icon_start = time.perf_counter()
                 if self.parent_tab:
-                    my_player_rects = self.parent_tab.find_player_icon(frame_bgr)
+                    my_player_rects = self.parent_tab.find_player_icon(frame_bgr, frame_hsv)
                 perf['player_icon_ms'] = (time.perf_counter() - player_icon_start) * 1000.0
                 perf['player_icon_count'] = len(my_player_rects)
 
                 other_icon_start = time.perf_counter()
                 if self.parent_tab:
-                    other_player_rects = self.parent_tab.find_other_player_icons(frame_bgr)
+                    other_player_rects = self.parent_tab.find_other_player_icons(frame_bgr, frame_hsv)
                 perf['other_player_icon_ms'] = (time.perf_counter() - other_icon_start) * 1000.0
                 perf['other_player_icon_count'] = len(other_player_rects)
 
@@ -373,6 +377,20 @@ class AnchorDetectionThread(QThread):
                     elif runtime.get('failure_count', 0) >= self._roi_failure_before_backoff:
                         self.last_positions[fid] = None
 
+                if self._template_runtime:
+                    scale = self._downscale if self._downscale else 1.0
+                    scale = scale if scale > 0 else 1.0
+                    radii = [runtime.get('roi_radius', 0.0) / scale for runtime in self._template_runtime.values()]
+                    if radii:
+                        perf['avg_roi_radius'] = float(sum(radii) / len(radii))
+                        perf['max_roi_radius'] = float(max(radii))
+                    else:
+                        perf['avg_roi_radius'] = 0.0
+                        perf['max_roi_radius'] = 0.0
+                else:
+                    perf['avg_roi_radius'] = 0.0
+                    perf['max_roi_radius'] = 0.0
+
                 perf['feature_match_ms'] = (time.perf_counter() - feature_start) * 1000.0
                 perf['features_detected'] = len(all_detected_features)
 
@@ -418,6 +436,8 @@ class AnchorDetectionThread(QThread):
                 perf.setdefault('features_detected', 0)
                 perf.setdefault('fallback_scan_count', 0)
                 perf.setdefault('skipped_templates', 0)
+                perf.setdefault('avg_roi_radius', 0.0)
+                perf.setdefault('max_roi_radius', 0.0)
                 perf.setdefault('player_icon_count', 0)
                 perf.setdefault('other_player_icon_count', 0)
                 perf.setdefault('frame_width', 0)

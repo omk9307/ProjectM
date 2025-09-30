@@ -5,6 +5,7 @@ from __future__ import annotations
 import base64
 import ctypes
 import math
+import time
 from typing import Optional
 
 import numpy as np
@@ -422,6 +423,13 @@ class RealtimeMinimapView(QLabel):
         self._cached_static_bounds = QRectF()
         self._cached_static_dirty = True
         self._cached_feature_pixmaps: dict[str, QPixmap] = {}
+        self._min_update_interval = 1.0 / 30.0
+        self._min_camera_move_threshold = 1.5
+        self._min_player_move_threshold = 1.5
+        self._last_paint_time: float | None = None
+        self._last_painted_camera_center: QPointF | None = None
+        self._last_painted_player_center: QPointF | None = None
+        self._update_scheduled_since_last_check = False
     
     def wheelEvent(self, event):
         """마우스 휠 스크롤로 줌 레벨을 조절합니다."""
@@ -498,32 +506,101 @@ class RealtimeMinimapView(QLabel):
 
     def update_view_data(self, camera_center, active_features, my_players, other_players, target_wp_id, reached_wp_id, final_player_pos, is_forward, intermediate_pos, intermediate_type, nav_action, intermediate_node_type):
         """MapTab으로부터 렌더링에 필요한 최신 데이터를 받습니다."""
-        self.camera_center_global = camera_center
+        camera_point = self._to_pointf(camera_center)
+        if camera_point is not None:
+            self.camera_center_global = camera_point
         self.active_features = active_features
         self.my_player_rects = my_players
         self.other_player_rects = other_players
         self.target_waypoint_id = target_wp_id
         self.last_reached_waypoint_id = reached_wp_id
-        self.final_player_pos_global = final_player_pos
+        self.final_player_pos_global = self._to_pointf(final_player_pos) if final_player_pos is not None else None
         self.is_forward = is_forward
-        self.intermediate_target_pos = intermediate_pos
+        self.intermediate_target_pos = self._to_pointf(intermediate_pos) if intermediate_pos is not None else None
         self.intermediate_target_type = intermediate_type
         self.navigation_action = nav_action
         self.intermediate_node_type = intermediate_node_type
-        if self._display_enabled:
-            self.update()
-        else:
+
+        if not self._display_enabled:
             self._pending_update = True
+            self._update_scheduled_since_last_check = False
+            return False
+
+        now = time.perf_counter()
+
+        should_update = False
+        if self._last_paint_time is None:
+            should_update = True
+        else:
+            camera_delta = 0.0
+            player_delta = 0.0
+
+            if isinstance(self.camera_center_global, QPointF) and self._last_painted_camera_center is not None:
+                camera_delta = max(
+                    abs(self.camera_center_global.x() - self._last_painted_camera_center.x()),
+                    abs(self.camera_center_global.y() - self._last_painted_camera_center.y()),
+                )
+
+            player_delta = 0.0
+            if isinstance(self.final_player_pos_global, QPointF) and self._last_painted_player_center is not None:
+                player_delta = max(
+                    abs(self.final_player_pos_global.x() - self._last_painted_player_center.x()),
+                    abs(self.final_player_pos_global.y() - self._last_painted_player_center.y()),
+                )
+
+            if camera_delta >= self._min_camera_move_threshold or player_delta >= self._min_player_move_threshold:
+                should_update = True
+            elif (now - self._last_paint_time) >= self._min_update_interval:
+                should_update = True
+
+        if should_update:
+            self._pending_update = False
+            self._update_scheduled_since_last_check = True
+            self.update()
+            return True
+
+        self._pending_update = True
+        self._update_scheduled_since_last_check = False
+        return False
 
     def set_display_enabled(self, enabled: bool) -> None:
         self._display_enabled = bool(enabled)
-        if self._display_enabled and self._pending_update:
-            self._pending_update = False
-            self.update()
+        if self._display_enabled:
+            if self._pending_update:
+                self._pending_update = False
+                self._update_scheduled_since_last_check = True
+                self.update()
+        else:
+            self._update_scheduled_since_last_check = False
 
     def _make_render_opts_signature(self, render_opts: dict) -> tuple:
         keys = ('terrain', 'objects', 'jump_links', 'forbidden_walls')
         return tuple((key, bool(render_opts.get(key, True))) for key in keys)
+
+    def consume_update_flag(self) -> bool:
+        value = self._update_scheduled_since_last_check
+        self._update_scheduled_since_last_check = False
+        return value
+
+    @staticmethod
+    def _to_pointf(value) -> QPointF | None:
+        if isinstance(value, QPointF):
+            return value
+        if isinstance(value, QPoint):
+            return QPointF(value)
+        if hasattr(value, 'x') and hasattr(value, 'y'):
+            try:
+                return QPointF(float(value.x()), float(value.y()))
+            except Exception:
+                return None
+        if isinstance(value, (tuple, list)) and len(value) >= 2:
+            try:
+                return QPointF(float(value[0]), float(value[1]))
+            except Exception:
+                return None
+        if isinstance(value, (int, float)):
+            return QPointF(float(value), 0.0)
+        return None
 
     def _ensure_static_overlay(self, render_opts: dict, bounding_rect: QRectF) -> None:
         opts_sig = self._make_render_opts_signature(render_opts)
@@ -548,6 +625,8 @@ class RealtimeMinimapView(QLabel):
         size = bounding_rect.size().toSize()
         if size.isEmpty():
             return
+
+        build_started_at = time.perf_counter()
 
         pixmap = QPixmap(size)
         pixmap.fill(Qt.GlobalColor.transparent)
@@ -657,9 +736,9 @@ class RealtimeMinimapView(QLabel):
                 points = obj_data.get("points", [])
                 if len(points) != 2:
                     continue
-                start = QPointF(float(points[0][0]), float(points[0][1]))
-                end = QPointF(float(points[1][0]), float(points[1][1]))
-                painter.drawLine(start, end)
+                segment_start = QPointF(float(points[0][0]), float(points[0][1]))
+                segment_end = QPointF(float(points[1][0]), float(points[1][1]))
+                painter.drawLine(segment_start, segment_end)
             painter.restore()
 
         if render_opts.get('jump_links', True):
@@ -667,12 +746,12 @@ class RealtimeMinimapView(QLabel):
             pen = QPen(QColor(0, 255, 0, 200), 2, Qt.PenStyle.DashLine)
             painter.setPen(pen)
             for jump_data in geometry_data.get("jump_links", []):
-                start = jump_data.get('start_vertex_pos')
-                end = jump_data.get('end_vertex_pos')
-                if not start or not end:
+                start_vertex = jump_data.get('start_vertex_pos')
+                end_vertex = jump_data.get('end_vertex_pos')
+                if not start_vertex or not end_vertex:
                     continue
-                p1 = QPointF(float(start[0]), float(start[1]))
-                p2 = QPointF(float(end[0]), float(end[1]))
+                p1 = QPointF(float(start_vertex[0]), float(start_vertex[1]))
+                p2 = QPointF(float(end_vertex[0]), float(end_vertex[1]))
                 painter.drawLine(p1, p2)
             painter.restore()
 
@@ -708,6 +787,14 @@ class RealtimeMinimapView(QLabel):
 
         painter.end()
         self._cached_static_pixmap = pixmap
+
+        elapsed_ms = (time.perf_counter() - build_started_at) * 1000.0
+        parent = getattr(self, 'parent_tab', None)
+        if parent is not None:
+            try:
+                parent._static_rebuild_ms_pending = float(elapsed_ms)
+            except Exception:
+                pass
 
     def rebuild_static_overlay_now(self) -> None:
         bounding_rect = self.parent_tab.full_map_bounding_rect
@@ -760,7 +847,10 @@ class RealtimeMinimapView(QLabel):
             painter.drawPixmap(target_rect, self._cached_static_pixmap, image_source_rect)
 
         def global_to_local(global_pos):
-            relative_pos = global_pos - source_rect.topLeft()
+            point = self._to_pointf(global_pos)
+            if point is None:
+                point = QPointF(0.0, 0.0)
+            relative_pos = point - source_rect.topLeft()
             return relative_pos * self.zoom_level
 
         #핵심 지형 렌더링 (텍스트 스타일 변경) ---
@@ -1039,16 +1129,21 @@ class RealtimeMinimapView(QLabel):
         # ---  정확한 플레이어 발밑 위치 표시 ---
         if self.final_player_pos_global:
             local_player_pos = global_to_local(self.final_player_pos_global)
-            
+
             painter.save()
             pen = QPen(QColor(255, 255, 0, 200), 1.5)
             painter.setPen(pen)
             painter.drawLine(local_player_pos + QPointF(-5, 0), local_player_pos + QPointF(5, 0))
             painter.drawLine(local_player_pos + QPointF(0, -5), local_player_pos + QPointF(0, 5))
-            
+
             painter.setBrush(QBrush(Qt.GlobalColor.yellow))
             painter.drawEllipse(local_player_pos, 2, 2)
             painter.restore()
+
+        self._last_paint_time = time.perf_counter()
+        self._last_painted_camera_center = QPointF(self.camera_center_global)
+        player_point = self._to_pointf(self.final_player_pos_global)
+        self._last_painted_player_center = player_point
 
     def _draw_text_with_outline(self, painter, rect, flags, text, font, text_color, outline_color):
         """지정한 사각형 영역에 테두리가 있는 텍스트를 그립니다."""

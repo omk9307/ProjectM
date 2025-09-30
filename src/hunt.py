@@ -3521,12 +3521,14 @@ class HuntTab(QWidget):
         if not is_primary_release_command:
             formatted_message = None
             if reason_text.startswith('사용원인'):
-                formatted_message = f"{normalized} - {reason_text}"
+                reason_body = reason_text[len('사용원인'):].strip()
+                if reason_body.startswith('(') and reason_body.endswith(')'):
+                    reason_body = reason_body[1:-1].strip()
+                formatted_message = f"{normalized} -원인: {reason_body}" if reason_body else None
+            elif reason_text:
+                formatted_message = f"{normalized} -원인: {reason_text}"
 
-            if reason_text and formatted_message is None:
-                log_message = f"{normalized} (원인: {reason_text})"
-            else:
-                log_message = formatted_message or normalized
+            log_message = formatted_message or (f"{normalized} -원인: {reason_text}" if reason_text else normalized)
             self._append_control_log(log_message)
 
     def _append_control_log(self, message: str, color: Optional[str] = None) -> None:
@@ -5986,8 +5988,16 @@ class HuntTab(QWidget):
             else:
                 detail_parts.append(f"목표 {direction_label}측")
 
-        detail_text = ', '.join(detail_parts) if detail_parts else '조건 충족'
-        return f"사용원인 ({detail_text})"
+        facing_side: Optional[str] = None
+        if self.last_facing in ('left', 'right'):
+            facing_side = self.last_facing
+        elif getattr(self, '_direction_last_side', None) in ('left', 'right'):
+            facing_side = getattr(self, '_direction_last_side')
+        if facing_side:
+            facing_label = '좌' if facing_side == 'left' else '우'
+            detail_parts.append(f"캐릭터 방향 : {facing_label}")
+
+        return ', '.join(detail_parts) if detail_parts else '조건 충족'
 
     def _execute_attack_skill(self, skill: AttackSkill, *, skip_pre_delay: bool = False) -> None:
         if not skill.enabled:
