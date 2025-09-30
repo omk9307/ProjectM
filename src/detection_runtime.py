@@ -221,6 +221,7 @@ class DetectionThread(QThread):
         nameplate_templates: Optional[Dict[int, List[dict]]] = None,
         nameplate_thresholds: Optional[Dict[int, float]] = None,
         show_nameplate_overlay: bool = True,
+        show_monster_confidence: bool = True,
         nms_iou: float = 0.45,
         max_det: int = 100,
         allowed_subregions: Optional[Iterable[dict]] = None,
@@ -244,6 +245,7 @@ class DetectionThread(QThread):
         self.show_direction_overlay = bool(show_direction_overlay)
         self.show_nickname_range_overlay = bool(show_nickname_range_overlay)
         self.show_nameplate_overlay = bool(show_nameplate_overlay)
+        self.show_monster_confidence = bool(show_monster_confidence)
         self.is_running = True
         self.min_monster_box_size = MIN_MONSTER_BOX_SIZE
         self.current_authority: str = "map"
@@ -635,27 +637,32 @@ class DetectionThread(QThread):
 
                         cv2.rectangle(annotated_frame, (x1, y1), (x2, y2), color, 2)
 
-                        label = f"{item['score']:.2f}"
+                        should_draw_confidence = True
+                        if class_id != self.char_class_index and not self.show_monster_confidence:
+                            should_draw_confidence = False
 
-                        (w, h), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 2)
-                        text_bg_y2 = y1 - 5
-                        text_bg_y1 = text_bg_y2 - h - 5
-                        if text_bg_y1 < 0:
-                            text_bg_y1 = y1 + 5
-                            text_bg_y2 = text_bg_y1 + h + 5
+                        if should_draw_confidence:
+                            label = f"{item['score']:.2f}"
 
-                        cv2.rectangle(annotated_frame, (x1, text_bg_y1), (x1 + w, text_bg_y2), color, -1)
+                            (w, h), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 2)
+                            text_bg_y2 = y1 - 5
+                            text_bg_y1 = text_bg_y2 - h - 5
+                            if text_bg_y1 < 0:
+                                text_bg_y1 = y1 + 5
+                                text_bg_y2 = text_bg_y1 + h + 5
 
-                        text_y = y1 - 10 if text_bg_y1 < y1 else y1 + h + 5
-                        cv2.putText(
-                            annotated_frame,
-                            label,
-                            (x1 + 2, text_y),
-                            cv2.FONT_HERSHEY_SIMPLEX,
-                            0.5,
-                            (255, 255, 255),
-                            2,
-                        )
+                            cv2.rectangle(annotated_frame, (x1, text_bg_y1), (x1 + w, text_bg_y2), color, -1)
+
+                            text_y = y1 - 10 if text_bg_y1 < y1 else y1 + h + 5
+                            cv2.putText(
+                                annotated_frame,
+                                label,
+                                (x1 + 2, text_y),
+                                cv2.FONT_HERSHEY_SIMPLEX,
+                                0.5,
+                                (255, 255, 255),
+                                2,
+                            )
 
                         if class_id != self.char_class_index and self._nameplate_tracks:
                             center_x, center_y = self._box_center(item)

@@ -535,6 +535,7 @@ class HuntTab(QWidget):
             'nickname_range': True,
             'nameplate_area': True,
             'nameplate_tracking': False,
+            'monster_confidence': True,
         }
         self._direction_area_user_pref = True
         self._nickname_range_user_pref = True
@@ -1413,9 +1414,12 @@ class HuntTab(QWidget):
         self.show_nameplate_checkbox = QCheckBox("몬스터 이름표 범위")
         self.show_nameplate_checkbox.setChecked(True)
         self.show_nameplate_checkbox.toggled.connect(self._on_overlay_toggle_changed)
-        self.show_nameplate_tracking_checkbox = QCheckBox("몬스터 이름 시각화")
+        self.show_nameplate_tracking_checkbox = QCheckBox("몬스터 이름표 시각화")
         self.show_nameplate_tracking_checkbox.setChecked(self.overlay_preferences.get('nameplate_tracking', False))
         self.show_nameplate_tracking_checkbox.toggled.connect(self._on_nameplate_tracking_toggle_changed)
+        self.show_monster_confidence_checkbox = QCheckBox("몬스터 신뢰도 표시")
+        self.show_monster_confidence_checkbox.setChecked(self.overlay_preferences.get('monster_confidence', True))
+        self.show_monster_confidence_checkbox.toggled.connect(self._on_monster_confidence_toggle_changed)
 
         for checkbox in (
             self.show_hunt_area_checkbox,
@@ -1424,6 +1428,7 @@ class HuntTab(QWidget):
             self.show_nickname_range_checkbox,
             self.show_nameplate_checkbox,
             self.show_nameplate_tracking_checkbox,
+            self.show_monster_confidence_checkbox,
         ):
             checkbox.setSizePolicy(
                 QSizePolicy(QSizePolicy.Policy.Maximum, QSizePolicy.Policy.Fixed)
@@ -1437,6 +1442,7 @@ class HuntTab(QWidget):
         button_row.addWidget(self.show_nickname_range_checkbox)
         button_row.addWidget(self.show_nameplate_checkbox)
         button_row.addWidget(self.show_nameplate_tracking_checkbox)
+        button_row.addWidget(self.show_monster_confidence_checkbox)
 
         button_row.addStretch(1)
         control_layout.addLayout(button_row)
@@ -1914,6 +1920,7 @@ class HuntTab(QWidget):
                     nameplate_templates=nameplate_templates_payload,
                     nameplate_thresholds=nameplate_thresholds_payload,
                     show_nameplate_overlay=self._is_nameplate_overlay_active(),
+                    show_monster_confidence=self._is_monster_confidence_display_active(),
                     nms_iou=self.yolo_nms_iou,
                     max_det=self.yolo_max_det,
                     allowed_subregions=capture_subregions,
@@ -1937,6 +1944,7 @@ class HuntTab(QWidget):
                     nameplate_templates=nameplate_templates_payload,
                     nameplate_thresholds=nameplate_thresholds_payload,
                     show_nameplate_overlay=self._is_nameplate_overlay_active(),
+                    show_monster_confidence=self._is_monster_confidence_display_active(),
                     nms_iou=self.yolo_nms_iou,
                     max_det=self.yolo_max_det,
                     allowed_subregions=capture_subregions,
@@ -2490,6 +2498,16 @@ class HuntTab(QWidget):
                 return False
         return bool(self._nameplate_config.get('show_overlay', True))
 
+    def _is_monster_confidence_display_active(self) -> bool:
+        if not self.overlay_preferences.get('monster_confidence', True):
+            return False
+        checkbox = getattr(self, 'show_monster_confidence_checkbox', None)
+        if checkbox is not None:
+            if not checkbox.isEnabled():
+                return False
+            return bool(checkbox.isChecked())
+        return True
+
     def _toggle_detection_popup(self) -> None:
         if self.is_popup_active:
             if self.detection_popup:
@@ -2971,6 +2989,12 @@ class HuntTab(QWidget):
         self._update_detection_thread_overlay_flags()
         self._save_settings()
 
+    def _on_monster_confidence_toggle_changed(self, checked: bool) -> None:
+        state = bool(checked)
+        self.overlay_preferences['monster_confidence'] = state
+        self._update_detection_thread_overlay_flags()
+        self._save_settings()
+
     def _update_detection_thread_overlay_flags(self) -> None:
         if not self.detection_thread:
             return
@@ -2985,6 +3009,10 @@ class HuntTab(QWidget):
             debug_active = bool(self._nameplate_visual_debug_enabled and getattr(self, '_nameplate_enabled', False))
             detection_active = overlay_active or debug_active
             self.detection_thread.show_nameplate_overlay = bool(detection_active)
+        if hasattr(self.detection_thread, 'show_monster_confidence'):
+            self.detection_thread.show_monster_confidence = bool(
+                self._is_monster_confidence_display_active()
+            )
 
     def _sync_detection_thread_status(self) -> None:
         if not self.detection_thread:
@@ -3046,6 +3074,16 @@ class HuntTab(QWidget):
                 self.show_nameplate_tracking_checkbox.blockSignals(True)
                 self.show_nameplate_tracking_checkbox.setChecked(tracking_state)
                 self.show_nameplate_tracking_checkbox.blockSignals(False)
+        if 'monster_confidence' in options:
+            monster_conf_state = bool(options['monster_confidence'])
+            self.overlay_preferences['monster_confidence'] = monster_conf_state
+            if (
+                hasattr(self, 'show_monster_confidence_checkbox')
+                and self.show_monster_confidence_checkbox.isChecked() != monster_conf_state
+            ):
+                self.show_monster_confidence_checkbox.blockSignals(True)
+                self.show_monster_confidence_checkbox.setChecked(monster_conf_state)
+                self.show_monster_confidence_checkbox.blockSignals(False)
         self._emit_area_overlays()
         self._update_detection_thread_overlay_flags()
         self._save_settings()
@@ -4713,6 +4751,14 @@ class HuntTab(QWidget):
                     else self.overlay_preferences.get('nameplate_tracking', False),
                 )
             )
+            show_monster_confidence = bool(
+                display.get(
+                    'show_monster_confidence',
+                    self.show_monster_confidence_checkbox.isChecked()
+                    if hasattr(self, 'show_monster_confidence_checkbox')
+                    else self.overlay_preferences.get('monster_confidence', True),
+                )
+            )
             screen_output_enabled = bool(
                 display.get(
                     'screen_output',
@@ -4739,6 +4785,8 @@ class HuntTab(QWidget):
             self.show_nameplate_checkbox.setChecked(show_nameplate)
             if hasattr(self, 'show_nameplate_tracking_checkbox'):
                 self.show_nameplate_tracking_checkbox.setChecked(show_nameplate_tracking)
+            if hasattr(self, 'show_monster_confidence_checkbox'):
+                self.show_monster_confidence_checkbox.setChecked(show_monster_confidence)
             self.screen_output_checkbox.setChecked(screen_output_enabled)
             self.show_confidence_summary_checkbox.setChecked(summary_confidence)
             self.show_frame_summary_checkbox.setChecked(summary_frame)
@@ -4990,6 +5038,11 @@ class HuntTab(QWidget):
                     self.show_nameplate_tracking_checkbox.isChecked()
                 ) if hasattr(self, 'show_nameplate_tracking_checkbox') else bool(
                     self.overlay_preferences.get('nameplate_tracking', False)
+                ),
+                'show_monster_confidence': bool(
+                    self.show_monster_confidence_checkbox.isChecked()
+                ) if hasattr(self, 'show_monster_confidence_checkbox') else bool(
+                    self.overlay_preferences.get('monster_confidence', True)
                 ),
                 'screen_output': self.screen_output_checkbox.isChecked(),
                 'summary_confidence': self.show_confidence_summary_checkbox.isChecked(),
