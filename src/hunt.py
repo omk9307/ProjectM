@@ -690,6 +690,10 @@ class HuntTab(QWidget):
         self._pending_direction_timer: Optional[QTimer] = None
         self._pending_direction_side: Optional[str] = None
         self._pending_direction_skill: Optional[AttackSkill] = None
+        self._last_target_side: Optional[str] = None
+        self._last_target_distance: Optional[float] = None
+        self._last_target_update_ts: float = 0.0
+        self._last_direction_change_ts: float = 0.0
         self._last_monster_seen_ts = time.time()
         self._next_command_ready_ts = 0.0
         self._last_condition_poll_ts = 0.0
@@ -1314,7 +1318,8 @@ class HuntTab(QWidget):
         detection_group = self._create_detection_group()
         range_group = self._create_range_group()
         condition_group = self._create_condition_group()
-        misc_group = self._create_misc_group()
+        direction_switch_group = self._create_direction_switch_group()
+        direction_group = self._create_direction_settings_group()
 
         left_column.addWidget(detection_group)
         left_column.addStretch(1)
@@ -1327,11 +1332,27 @@ class HuntTab(QWidget):
 
         config_row = QHBoxLayout()
         config_row.setSpacing(10)
-        for group in (range_group, misc_group, condition_group):
+        range_column = QVBoxLayout()
+        range_column.setSpacing(10)
+        range_group.setSizePolicy(QSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed))
+        range_group.setMaximumWidth(260)
+        range_group.setMinimumWidth(200)
+        condition_group.setSizePolicy(QSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed))
+        condition_group.setMaximumWidth(260)
+        condition_group.setMinimumWidth(200)
+        range_column.addWidget(range_group)
+        range_column.addWidget(condition_group)
+
+        direction_column = QVBoxLayout()
+        direction_column.setSpacing(10)
+        for group in (direction_switch_group, direction_group):
             group.setSizePolicy(QSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed))
             group.setMaximumWidth(260)
             group.setMinimumWidth(200)
-            config_row.addWidget(group, 1)
+            direction_column.addWidget(group)
+
+        config_row.addLayout(range_column, 1)
+        config_row.addLayout(direction_column, 1)
         right_column.addLayout(config_row)
         right_column.addStretch(1)
 
@@ -1429,8 +1450,38 @@ class HuntTab(QWidget):
         group.setSizePolicy(QSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed))
         return group
 
-    def _create_misc_group(self) -> QGroupBox:
-        group = QGroupBox("기타 조건")
+    def _create_direction_switch_group(self) -> QGroupBox:
+        group = QGroupBox("방향 전환")
+        group.setSizePolicy(
+            QSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+        )
+        group.setMinimumWidth(0)
+
+        form = QFormLayout()
+
+        self.direction_threshold_spinbox = QSpinBox()
+        self.direction_threshold_spinbox.setRange(0, 1000)
+        self.direction_threshold_spinbox.setSingleStep(5)
+        self.direction_threshold_spinbox.setValue(50)
+        self.direction_threshold_spinbox.setSuffix(" px")
+        form.addRow("방향전환 Threshold", self.direction_threshold_spinbox)
+        self.direction_threshold_spinbox.valueChanged.connect(self._handle_setting_changed)
+
+        self.direction_cooldown_spinbox = QDoubleSpinBox()
+        self.direction_cooldown_spinbox.setRange(0.0, 10.0)
+        self.direction_cooldown_spinbox.setSingleStep(0.1)
+        self.direction_cooldown_spinbox.setDecimals(2)
+        self.direction_cooldown_spinbox.setValue(0.2)
+        self.direction_cooldown_spinbox.setSuffix(" s")
+        form.addRow("방향전환 최소 시간", self.direction_cooldown_spinbox)
+        self.direction_cooldown_spinbox.valueChanged.connect(self._handle_setting_changed)
+
+        group.setLayout(form)
+        group.setSizePolicy(QSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed))
+        return group
+
+    def _create_direction_settings_group(self) -> QGroupBox:
+        group = QGroupBox("방향 설정")
         group.setSizePolicy(
             QSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
         )
@@ -2261,6 +2312,10 @@ class HuntTab(QWidget):
         self._clear_pending_skill()
         self._clear_pending_direction()
         self._cancel_facing_reset_timer()
+        self._last_target_side = None
+        self._last_target_distance = None
+        self._last_target_update_ts = 0.0
+        self._last_direction_change_ts = 0.0
 
     def _on_detection_thread_finished(self) -> None:
         self.detect_btn.setChecked(False)
@@ -5177,6 +5232,14 @@ class HuntTab(QWidget):
                 self.facing_reset_max_spinbox.setValue(float(misc.get('facing_reset_max_sec', self.facing_reset_max_spinbox.value())))
             except (TypeError, ValueError):
                 pass
+            try:
+                self.direction_threshold_spinbox.setValue(int(misc.get('direction_switch_threshold_px', self.direction_threshold_spinbox.value())))
+            except (TypeError, ValueError):
+                pass
+            try:
+                self.direction_cooldown_spinbox.setValue(float(misc.get('direction_switch_cooldown_sec', self.direction_cooldown_spinbox.value())))
+            except (TypeError, ValueError):
+                pass
 
         teleport = data.get('teleport', {})
         if teleport:
@@ -5360,6 +5423,8 @@ class HuntTab(QWidget):
                 'direction_delay_max': self.direction_delay_max_spinbox.value(),
                 'facing_reset_min_sec': self.facing_reset_min_spinbox.value(),
                 'facing_reset_max_sec': self.facing_reset_max_spinbox.value(),
+                'direction_switch_threshold_px': self.direction_threshold_spinbox.value(),
+                'direction_switch_cooldown_sec': self.direction_cooldown_spinbox.value(),
             },
             'teleport': {
                 'enabled': self.teleport_settings.enabled,
@@ -5951,6 +6016,8 @@ class HuntTab(QWidget):
             return None
         monsters = self._get_recent_monster_boxes()
         if not monsters:
+            self._last_target_side = None
+            self._last_target_distance = None
             return None
         candidates = monsters
         if self.current_primary_area:
@@ -5958,6 +6025,8 @@ class HuntTab(QWidget):
             if primary_monsters:
                 candidates = primary_monsters
             else:
+                self._last_target_side = None
+                self._last_target_distance = None
                 return None
         char_x = character_box.center_x
         facing = self.last_facing if self.last_facing in ('left', 'right') else None
@@ -5968,13 +6037,52 @@ class HuntTab(QWidget):
                 same_side = [box for box in candidates if box.center_x >= char_x]
             if same_side:
                 candidates = same_side
-        return min(candidates, key=lambda box: abs(box.center_x - char_x))
+
+        selected = min(candidates, key=lambda box: abs(box.center_x - char_x))
+        selected_distance = abs(selected.center_x - char_x)
+        selected_side = 'left' if selected.center_x < char_x else 'right'
+
+        previous_side = self._last_target_side
+        prev_candidate = None
+        prev_distance = None
+        if previous_side:
+            if previous_side == 'left':
+                prev_candidates = [box for box in candidates if box.center_x <= char_x]
+            else:
+                prev_candidates = [box for box in candidates if box.center_x >= char_x]
+            if prev_candidates:
+                prev_candidate = min(prev_candidates, key=lambda box: abs(box.center_x - char_x))
+                prev_distance = abs(prev_candidate.center_x - char_x)
+
+        if previous_side and prev_candidate and previous_side != selected_side:
+            threshold_spin = getattr(self, 'direction_threshold_spinbox', None)
+            cooldown_spin = getattr(self, 'direction_cooldown_spinbox', None)
+            threshold_px = float(threshold_spin.value()) if threshold_spin else 0.0
+            cooldown_sec = float(cooldown_spin.value()) if cooldown_spin else 0.0
+            now = time.time()
+            within_cooldown = cooldown_sec > 0.0 and (now - self._last_direction_change_ts) < cooldown_sec
+
+            if within_cooldown:
+                selected = prev_candidate
+                selected_side = previous_side
+                selected_distance = prev_distance if prev_distance is not None else selected_distance
+            else:
+                if prev_distance is not None and (selected_distance + threshold_px) >= prev_distance:
+                    selected = prev_candidate
+                    selected_side = previous_side
+                    selected_distance = prev_distance
+
+        self._last_target_side = selected_side
+        self._last_target_distance = selected_distance
+        self._last_target_update_ts = time.time()
+        return selected
 
     def _ensure_direction(self, target_side: str, next_skill: Optional[AttackSkill] = None) -> bool:
         current = self.last_facing if self.last_facing in ('left', 'right') else None
         if current == target_side:
             return False
         self._schedule_direction_command(target_side, next_skill)
+        self._last_direction_change_ts = time.time()
         return True
 
     def _schedule_direction_command(self, target_side: str, next_skill: Optional[AttackSkill]) -> None:
@@ -6005,6 +6113,7 @@ class HuntTab(QWidget):
         self._pending_direction_side = None
         self._pending_direction_skill = None
         command = '방향설정(좌)' if target_side == 'left' else '방향설정(우)'
+        self._last_direction_change_ts = time.time()
         self._emit_control_command(command)
         delay_min = min(self.direction_delay_min_spinbox.value(), self.direction_delay_max_spinbox.value())
         delay_max = max(self.direction_delay_min_spinbox.value(), self.direction_delay_max_spinbox.value())
