@@ -558,6 +558,7 @@ class MapTab(QWidget):
             self.alignment_expected_group = None
             self.verify_alignment_start_time = 0.0  # 정렬 확인 시작 시간
             self.last_align_command_time = 0.0      # 마지막 정렬 명령 전송 시간
+            self._climb_last_near_ladder_time = 0.0 # 최근 사다리 근접 판정 시각 (이탈 오판 방지용)
 
             # 공중 경로 계산 대기 메시지 중복 방지 플래그
             self.airborne_path_warning_active = False
@@ -4634,11 +4635,13 @@ class MapTab(QWidget):
             self.navigation_state_locked = False
             self.current_segment_path = []
             self.expected_terrain_group = None
+            self._climb_last_near_ladder_time = 0.0
 
         elif action_completed:
             action_name = self.navigation_action
             self.navigation_action = 'move_to_target'
             self.navigation_state_locked = False
+            self._climb_last_near_ladder_time = 0.0
             
             via_node_types = {'fall_landing', 'djump_landing', 'ladder_exit'}
             self.current_segment_index += 1
@@ -5363,6 +5366,7 @@ class MapTab(QWidget):
                         self.navigation_action = 'climb_in_progress'
                         self.navigation_state_locked = True
                         self.lock_timeout_start = time.time()
+                        self._climb_last_near_ladder_time = time.time()
                         if self.debug_basic_pathfinding_checkbox and self.debug_basic_pathfinding_checkbox.isChecked():
                             print("[INFO] 'prepare_to_climb_upward' -> 'climb_in_progress' 상태 즉시 전환")
 
@@ -5847,7 +5851,7 @@ class MapTab(QWidget):
     def _handle_action_in_progress(self, final_player_pos):
         """'..._in_progress' 상태일 때의 로직을 담당합니다."""
         # <<< [수정] 아래 로직 전체 추가
-        # 1. 등반 중 이탈 감지
+        # 1. 등반 중 이탈 감지 (사다리에서 떨어졌는지 추가 검증)
         if self.navigation_action == 'climb_in_progress':
             # 현재 액션 노드(사다리 입구) 정보를 가져옴
             action_node_key = self.current_segment_path[self.current_segment_index]
@@ -5858,14 +5862,69 @@ class MapTab(QWidget):
                 # 해당 사다리 객체만 특정하여 검사
                 current_ladder = next((obj for obj in self.geometry_data.get("transition_objects", []) if obj.get('id') == obj_id), None)
                 if current_ladder:
-                    is_on_ladder = self._check_near_ladder(final_player_pos, [current_ladder], self.cfg_ladder_arrival_x_threshold)
-                    if not is_on_ladder:
-                        self.update_general_log("등반 중 사다리 범위를 벗어나 경로를 재탐색합니다.", "orange")
-                        self.navigation_action = 'move_to_target'
-                        self.navigation_state_locked = False
-                        self.current_segment_path = []
-                        self.expected_terrain_group = None
-                        return # 즉시 함수 종료
+                    now = time.time()
+                    if self._climb_last_near_ladder_time == 0.0:
+                        self._climb_last_near_ladder_time = now
+
+                    contact_terrain = self._get_contact_terrain(final_player_pos)
+                    next_node = None
+                    expected_group = None
+                    target_pos = None
+
+                    if self.current_segment_index + 1 < len(self.current_segment_path):
+                        next_node_key = self.current_segment_path[self.current_segment_index + 1]
+                        next_node = self.nav_nodes.get(next_node_key, {})
+                        expected_group = next_node.get('group')
+                        target_pos = next_node.get('pos')
+
+                    # 목표 발판(사다리 출구)에 이미 도착했는지 우선 확인
+                    target_y = None
+                    if isinstance(target_pos, QPointF):
+                        target_y = target_pos.y()
+                    elif isinstance(target_pos, (list, tuple)) and len(target_pos) >= 2:
+                        target_y = float(target_pos[1])
+
+                    if (
+                        contact_terrain
+                        and expected_group
+                        and contact_terrain.get('dynamic_name') == expected_group
+                        and (target_y is None or final_player_pos.y() <= target_y + 1.5)
+                    ):
+                        self._climb_last_near_ladder_time = now
+                        return
+
+                    ladder_states = {'climbing_up', 'climbing_down', 'on_ladder_idle'}
+                    is_on_ladder, _, dist_x = self._check_near_ladder(
+                        final_player_pos,
+                        [current_ladder],
+                        self.cfg_ladder_arrival_x_threshold,
+                        return_dist=True,
+                        current_floor=self.current_player_floor,
+                    )
+
+                    # 사다리 근처에 있거나 등반 상태면 정상 진행으로 간주
+                    if is_on_ladder or self.player_state in ladder_states:
+                        self._climb_last_near_ladder_time = now
+                        return
+
+                    # 방금 전까지 사다리 근처였으면 짧은 유예 시간을 둔다.
+                    LADDER_DETACH_GRACE = 0.5
+                    if now - self._climb_last_near_ladder_time <= LADDER_DETACH_GRACE:
+                        return
+
+                    dist_info = ""
+                    if isinstance(dist_x, (int, float)) and dist_x >= 0:
+                        dist_info = f" (사다리와의 X 거리: {dist_x:.1f}px)"
+
+                    self.update_general_log(
+                        f"등반 중 사다리 범위를 벗어나 경로를 재탐색합니다.{dist_info}", "orange"
+                    )
+                    self.navigation_action = 'move_to_target'
+                    self.navigation_state_locked = False
+                    self.current_segment_path = []
+                    self.expected_terrain_group = None
+                    self._climb_last_near_ladder_time = 0.0
+                    return # 즉시 함수 종료
 
     def _get_terrain_id_from_vertex(self, vertex_pos):
         """주어진 꼭짓점(vertex) 좌표에 연결된 지형선 ID를 반환합니다."""
