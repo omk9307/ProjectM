@@ -5688,7 +5688,6 @@ class HuntTab(QWidget):
                 ):
                     return
 
-        self._maybe_trigger_primary_release(skill)
         self._next_command_ready_ts = max(self._next_command_ready_ts, time.time())
         self._emit_control_command(skill.command)
         self._queue_completion_delay(skill.command, skill.completion_delay_min, skill.completion_delay_max, f"스킬 '{skill.name}'")
@@ -5699,6 +5698,7 @@ class HuntTab(QWidget):
             self._set_command_cooldown(post_delay)
             self._log_delay_message(f"스킬 '{skill.name}'", post_delay)
         self._decrement_primary_reset_counter(skill)
+        self._maybe_trigger_primary_release(skill)
 
     def _trigger_buff_skill(self, buff: BuffSkill, *, is_test: bool = False) -> bool:
         if not buff.enabled:
@@ -5997,7 +5997,6 @@ class HuntTab(QWidget):
 
         def emit() -> None:
             exec_time = time.time()
-            self._maybe_trigger_primary_release(skill)
             self._next_command_ready_ts = max(self._next_command_ready_ts, exec_time)
             self._emit_control_command(command)
             self._queue_completion_delay(command, skill.completion_delay_min, skill.completion_delay_max, context_label)
@@ -6006,6 +6005,7 @@ class HuntTab(QWidget):
                 self._set_command_cooldown(post_delay)
                 self._log_delay_message(context_label, post_delay)
             self._decrement_primary_reset_counter(skill)
+            self._maybe_trigger_primary_release(skill)
 
         pre_delay = self._sample_delay(getattr(skill, 'pre_delay_min', 0.0), getattr(skill, 'pre_delay_max', 0.0))
         if pre_delay > 0.0:
@@ -6226,7 +6226,7 @@ class HuntTab(QWidget):
             self._initialize_primary_reset_counter()
         if self._primary_reset_remaining is None:
             return
-        if self._primary_reset_remaining > 1:
+        if self._primary_reset_remaining > 0:
             return
 
         usage_count = self._primary_reset_current_goal or 1
@@ -6239,6 +6239,8 @@ class HuntTab(QWidget):
     def _decrement_primary_reset_counter(self, skill: AttackSkill) -> None:
         if not getattr(skill, 'is_primary', False):
             return
+        if self._primary_reset_remaining is None:
+            self._initialize_primary_reset_counter()
         if self._primary_reset_remaining is None:
             return
         if self._primary_reset_remaining <= 0:
