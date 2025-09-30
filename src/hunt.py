@@ -304,6 +304,14 @@ class AttackSkillDialog(QDialog):
         self.min_monsters_spinbox.setRange(1, 50)
         self.min_monsters_spinbox.setValue(1)
 
+        self.max_monsters_spinbox = QSpinBox()
+        self.max_monsters_spinbox.setRange(0, 50)
+        self.max_monsters_spinbox.setSpecialValueText("제한 없음")
+        self.max_monsters_spinbox.setValue(0)
+
+        self.min_monsters_spinbox.valueChanged.connect(self._sync_monster_bounds)
+        self.max_monsters_spinbox.valueChanged.connect(self._sync_monster_bounds)
+
         self.probability_spinbox = QSpinBox()
         self.probability_spinbox.setRange(0, 100)
         self.probability_spinbox.setValue(100)
@@ -359,6 +367,11 @@ class AttackSkillDialog(QDialog):
             self.enabled_checkbox.setChecked(skill.enabled)
             self.primary_checkbox.setChecked(skill.is_primary)
             self.min_monsters_spinbox.setValue(skill.min_monsters)
+            max_monsters = getattr(skill, 'max_monsters', None)
+            if isinstance(max_monsters, int) and max_monsters > 0:
+                self.max_monsters_spinbox.setValue(max_monsters)
+            else:
+                self.max_monsters_spinbox.setValue(0)
             self.probability_spinbox.setValue(skill.probability)
             self.pre_delay_min_spinbox.setValue(getattr(skill, 'pre_delay_min', 0.0))
             self.pre_delay_max_spinbox.setValue(getattr(skill, 'pre_delay_max', 0.0))
@@ -385,6 +398,7 @@ class AttackSkillDialog(QDialog):
         form.addRow(self.primary_reset_label, self.primary_reset_widget)
         form.addRow(self.primary_release_label, self.primary_release_combo)
         form.addRow("사용 최소 몬스터 수", self.min_monsters_spinbox)
+        form.addRow("사용 최대 몬스터 수", self.max_monsters_spinbox)
         form.addRow("사용 확률", self.probability_spinbox)
         form.addRow("스킬 발동 전 대기 최소", self.pre_delay_min_spinbox)
         form.addRow("스킬 발동 전 대기 최대", self.pre_delay_max_spinbox)
@@ -420,12 +434,17 @@ class AttackSkillDialog(QDialog):
         reset_command = str(reset_command).strip()
         if not is_primary or (reset_min == 0 and reset_max == 0):
             reset_command = ""
+        max_monsters_value = self.max_monsters_spinbox.value()
+        min_monsters_value = self.min_monsters_spinbox.value()
+        if max_monsters_value != 0 and max_monsters_value < min_monsters_value:
+            max_monsters_value = min_monsters_value
         return AttackSkill(
             name=name,
             command=command,
             enabled=self.enabled_checkbox.isChecked(),
             is_primary=is_primary,
             min_monsters=self.min_monsters_spinbox.value(),
+            max_monsters=max_monsters_value or None,
             probability=self.probability_spinbox.value(),
             pre_delay_min=min(self.pre_delay_min_spinbox.value(), self.pre_delay_max_spinbox.value()),
             pre_delay_max=max(self.pre_delay_min_spinbox.value(), self.pre_delay_max_spinbox.value()),
@@ -447,6 +466,18 @@ class AttackSkillDialog(QDialog):
                 self.primary_reset_max_spinbox.setValue(min_val)
             else:
                 self.primary_reset_min_spinbox.setValue(max_val)
+
+    def _sync_monster_bounds(self) -> None:
+        min_val = self.min_monsters_spinbox.value()
+        max_val = self.max_monsters_spinbox.value()
+        sender = self.sender()
+        if max_val == 0:
+            return
+        if max_val < min_val:
+            if sender is self.min_monsters_spinbox:
+                self.max_monsters_spinbox.setValue(min_val)
+            else:
+                self.min_monsters_spinbox.setValue(max_val)
 
     def _update_primary_reset_controls(self, checked: bool) -> None:
         self.primary_reset_label.setVisible(checked)
@@ -5061,6 +5092,7 @@ class HuntTab(QWidget):
                         enabled=bool(item.get('enabled', True)),
                         is_primary=bool(item.get('is_primary', False)),
                         min_monsters=int(item.get('min_monsters', 1)),
+                        max_monsters=self._parse_max_monsters(item.get('max_monsters')),
                         probability=int(item.get('probability', 100)),
                         pre_delay_min=float(item.get('pre_delay_min', 0.0)),
                         pre_delay_max=float(item.get('pre_delay_max', 0.0)),
@@ -5209,6 +5241,7 @@ class HuntTab(QWidget):
                     'enabled': skill.enabled,
                     'is_primary': skill.is_primary,
                     'min_monsters': skill.min_monsters,
+                    'max_monsters': skill.max_monsters,
                     'probability': skill.probability,
                     'pre_delay_min': getattr(skill, 'pre_delay_min', 0.0),
                     'pre_delay_max': getattr(skill, 'pre_delay_max', 0.0),
@@ -5621,10 +5654,22 @@ class HuntTab(QWidget):
 
         return False
 
+    def _skill_meets_monster_conditions(self, skill: AttackSkill, monster_count: int) -> bool:
+        min_required = max(1, getattr(skill, 'min_monsters', 1))
+        if monster_count < min_required:
+            return False
+        max_allowed = getattr(skill, 'max_monsters', None)
+        if isinstance(max_allowed, int) and max_allowed > 0 and monster_count > max_allowed:
+            return False
+        return True
+
     def _execute_attack_skill(self, skill: AttackSkill, *, skip_pre_delay: bool = False) -> None:
         if not skill.enabled:
             return
         if not self.auto_hunt_enabled or self.current_authority != "hunt":
+            return
+        monster_count = self.latest_primary_monster_count
+        if not self._skill_meets_monster_conditions(skill, monster_count):
             return
 
         remaining = self._get_command_delay_remaining()
@@ -5724,22 +5769,28 @@ class HuntTab(QWidget):
             return None
 
         primary_skill = next((s for s in enabled_skills if s.is_primary), None)
-        if not primary_skill:
-            primary_skill = enabled_skills[0]
-
-        chosen = primary_skill
         primary_count = self.latest_primary_monster_count
+        fallback_skill: Optional[AttackSkill] = None
+        if primary_skill and self._skill_meets_monster_conditions(primary_skill, primary_count):
+            fallback_skill = primary_skill
+
         for skill in enabled_skills:
             if skill.is_primary:
                 continue
-            if primary_count < max(1, skill.min_monsters):
+            if not self._skill_meets_monster_conditions(skill, primary_count):
                 continue
             probability = max(0, min(skill.probability, 100))
             if random.randint(1, 100) <= probability:
-                chosen = skill
-                break
+                return skill
+            if fallback_skill is None:
+                fallback_skill = skill
 
-        return chosen
+        if fallback_skill:
+            return fallback_skill
+
+        if primary_skill and primary_skill.enabled:
+            return primary_skill if self._skill_meets_monster_conditions(primary_skill, primary_count) else None
+        return None
 
     def _select_target_monster(self, character_box: DetectionBox) -> Optional[DetectionBox]:
         if not self.latest_snapshot:
@@ -6016,7 +6067,8 @@ class HuntTab(QWidget):
             item.setText(1, skill.name)
             item.setText(2, skill.command)
             item.setText(3, "주 스킬" if skill.is_primary else "-")
-            item.setText(4, f">= {skill.min_monsters}마리 | {skill.probability}%")
+            condition_label = self._format_skill_condition(skill)
+            item.setText(4, f"{condition_label} | {skill.probability}%")
         self.attack_tree.blockSignals(False)
         self._update_attack_buttons()
 
@@ -6036,6 +6088,26 @@ class HuntTab(QWidget):
             item.setText(4, f"{skill.jitter_percent}%")
         self.buff_tree.blockSignals(False)
         self._update_buff_buttons()
+
+    def _format_skill_condition(self, skill: AttackSkill) -> str:
+        min_count = max(1, getattr(skill, 'min_monsters', 1))
+        max_count = getattr(skill, 'max_monsters', None)
+        if isinstance(max_count, int) and max_count > 0:
+            if max_count <= min_count:
+                return f"= {min_count}마리"
+            return f"{min_count}~{max_count}마리"
+        return f">= {min_count}마리"
+
+    def _parse_max_monsters(self, value) -> Optional[int]:
+        if value in (None, "", False):
+            return None
+        try:
+            parsed = int(value)
+        except (TypeError, ValueError):
+            return None
+        if parsed <= 0:
+            return None
+        return parsed
 
     def _get_selected_attack_index(self) -> Optional[int]:
         if not hasattr(self, "attack_tree"):
