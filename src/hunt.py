@@ -5976,9 +5976,6 @@ class HuntTab(QWidget):
         if isinstance(max_allowed, int) and max_allowed > 0:
             detail_parts.append(f"최대 {max_allowed}마리 이하 유지")
 
-        if getattr(skill, 'is_primary', False):
-            detail_parts.append("주 스킬")
-
         target_side = getattr(self, '_last_target_side', None)
         target_distance = getattr(self, '_last_target_distance', None)
         if target_side in ('left', 'right'):

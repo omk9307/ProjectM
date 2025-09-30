@@ -4052,6 +4052,8 @@ class MapTab(QWidget):
         self._map_perf_queue.append(dict(map_perf))
 
     def _handle_detection_perf_sample(self, perf: dict) -> None:
+        if not self.is_detection_running:
+            return
         self._latest_thread_perf = dict(perf)
         if self._map_perf_queue:
             map_perf = self._map_perf_queue.popleft()
@@ -6464,8 +6466,26 @@ class MapTab(QWidget):
                     return line_data
         return None
 
+    _GENERAL_LOG_COLOR_ALIASES: dict[str, str] = {
+        "info": "cyan",
+    }
+    _GENERAL_LOG_DEFAULT_COLOR = "black"
+
+    def _normalize_general_log_color(self, color: object) -> str:
+        raw_color = (str(color).strip() if color is not None else "")
+        if not raw_color:
+            return self._GENERAL_LOG_DEFAULT_COLOR
+
+        alias = self._GENERAL_LOG_COLOR_ALIASES.get(raw_color.lower())
+        candidate = alias or raw_color
+        if QColor.isValidColor(candidate):
+            return candidate
+
+        return self._GENERAL_LOG_DEFAULT_COLOR
+
     def update_general_log(self, message, color):
-        entry = (message, color)
+        normalized_color = self._normalize_general_log_color(color)
+        entry = (message, normalized_color)
         now = time.time()
 
         if (
@@ -6483,12 +6503,15 @@ class MapTab(QWidget):
             self._deferred_general_logs.append(entry)
             return
 
-        self._write_general_log_to_viewer(message, color)
+        self._write_general_log_to_viewer(message, normalized_color)
 
     def _write_general_log_to_viewer(self, message: str, color: str) -> None:
-        self._general_log_last_entry = (message, color)
+        normalized_color = self._normalize_general_log_color(color)
+        self._general_log_last_entry = (message, normalized_color)
         self._general_log_last_ts = time.time()
-        self.general_log_viewer.append(f'<font color="{color}">{message}</font>')
+        self.general_log_viewer.append(
+            f'<font color="{normalized_color}">{message}</font>'
+        )
         self.general_log_viewer.verticalScrollBar().setValue(
             self.general_log_viewer.verticalScrollBar().maximum()
         )
