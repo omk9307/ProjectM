@@ -25,6 +25,7 @@ from PyQt6.QtWidgets import (
     QVBoxLayout,
 )
 from ultralytics import YOLO
+from ultralytics.utils.ops import scale_boxes
 
 from nickname_detection import NicknameDetector
 from direction_detection import DirectionDetector
@@ -227,6 +228,7 @@ class DetectionThread(QThread):
         max_det: int = 100,
         allowed_subregions: Optional[Iterable[dict]] = None,
         monster_confidence_overrides: Optional[Dict[int, float]] = None,
+        scale_factor: float = 1.0,
     ) -> None:
         super().__init__()
         self.model_path = model_path
@@ -386,6 +388,11 @@ class DetectionThread(QThread):
         self._frame_version: int = 0
         self._capture_thread_obj: Optional[threading.Thread] = None
         self._capture_stop_event = threading.Event()
+        try:
+            raw_factor = float(scale_factor)
+        except (TypeError, ValueError):
+            raw_factor = 1.0
+        self.scale_factor = max(0.1, min(1.0, raw_factor))
 
     def _monster_threshold_for_class(self, class_id: int) -> float:
         return self.monster_confidence_overrides.get(class_id, self.conf_monster)
@@ -466,6 +473,17 @@ class DetectionThread(QThread):
                     ):
                         frame = frame.copy()
                         frame[~self._region_mask] = 0
+                original_shape = frame.shape[:2]
+                yolo_input = frame
+                if self.scale_factor < 0.999:
+                    yolo_input = cv2.resize(
+                        frame,
+                        (0, 0),
+                        fx=self.scale_factor,
+                        fy=self.scale_factor,
+                        interpolation=cv2.INTER_AREA,
+                    )
+                yolo_input_shape = yolo_input.shape[:2]
                 preprocess_end = time.perf_counter()
 
                 now = time.perf_counter()
@@ -517,7 +535,7 @@ class DetectionThread(QThread):
 
                 yolo_start = time.perf_counter()
                 results = model(
-                    frame,
+                    yolo_input,
                     conf=low_conf,
                     classes=self.target_class_indices,
                     iou=self.nms_iou,
@@ -528,6 +546,15 @@ class DetectionThread(QThread):
                 self.perf_stats["yolo_ms"] = (yolo_end - yolo_start) * 1000
 
                 result = results[0]
+                if self.scale_factor < 0.999 and result.boxes is not None and len(result.boxes) > 0:
+                    boxes_tensor = result.boxes.data[:, :4]
+                    scaled_boxes = scale_boxes(
+                        (yolo_input_shape[0], yolo_input_shape[1]),
+                        boxes_tensor,
+                        (original_shape[0], original_shape[1]),
+                    )
+                    result.boxes.data[:, :4] = scaled_boxes
+                    result.boxes.orig_shape = (original_shape[0], original_shape[1])
                 speed_info = getattr(result, "speed", None)
                 if isinstance(speed_info, dict):
                     try:
@@ -899,7 +926,7 @@ class DetectionThread(QThread):
                     self.frame_ready.emit(qt_image.copy())
                 emit_end = time.perf_counter()
                 self.perf_stats["emit_ms"] = (emit_end - emit_start) * 1000
-                self.msleep(1)
+                self.msleep(15)
         except Exception as exc:
             print(f"탐지 스레드 오류: {exc}")
         finally:

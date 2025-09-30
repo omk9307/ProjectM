@@ -36,6 +36,7 @@ from PyQt6.QtWidgets import (
     QVBoxLayout,
     QWidget,
     QSizePolicy,
+    QInputDialog,
 )
 
 from PyQt6.QtGui import QPixmap, QPainter, QPen, QColor, QBrush, QTextCursor, QGuiApplication
@@ -652,6 +653,9 @@ class HuntTab(QWidget):
         self._nickname_range_user_pref = True
         self._nameplate_area_user_pref = True
         self._nameplate_tracking_user_pref = False
+        self.downscale_enabled = False
+        self.downscale_factor = 0.5
+        self._suppress_downscale_prompt = False
         self._last_character_boxes: List[DetectionBox] = []
         self._last_character_details: List[dict] = []
         self._last_character_seen_ts: float = 0.0
@@ -1522,6 +1526,14 @@ class HuntTab(QWidget):
         control_row.addWidget(self.screen_output_checkbox)
         control_row.addWidget(self.auto_request_checkbox)
 
+        self.downscale_checkbox = QCheckBox("다운스케일")
+        self.downscale_checkbox.setSizePolicy(
+            QSizePolicy(QSizePolicy.Policy.Maximum, QSizePolicy.Policy.Fixed)
+        )
+        self.downscale_checkbox.toggled.connect(self._on_downscale_toggled)
+        control_row.addWidget(self.downscale_checkbox)
+        self._update_downscale_checkbox_text()
+
         control_row.addStretch(1)
         control_layout.addLayout(control_row)
 
@@ -2056,6 +2068,7 @@ class HuntTab(QWidget):
                     max_det=self.yolo_max_det,
                     allowed_subregions=capture_subregions,
                     monster_confidence_overrides=monster_conf_overrides,
+                    scale_factor=self.downscale_factor if self.downscale_enabled else 1.0,
                 )
             except TypeError:
                 # 구버전 런타임과의 호환성 확보
@@ -2081,6 +2094,7 @@ class HuntTab(QWidget):
                     max_det=self.yolo_max_det,
                     allowed_subregions=capture_subregions,
                     monster_confidence_overrides=monster_conf_overrides,
+                    scale_factor=self.downscale_factor if self.downscale_enabled else 1.0,
                 )
                 # 방향 감지를 비활성화하고 상태 초기화
                 direction_detector_instance = None
@@ -3262,6 +3276,58 @@ class HuntTab(QWidget):
     def _handle_setting_changed(self, *args, **kwargs) -> None:
         self._save_settings()
         self._update_detection_summary()
+
+    def _on_downscale_toggled(self, checked: bool) -> None:
+        if self._suppress_downscale_prompt:
+            self.downscale_enabled = bool(checked)
+            self._update_downscale_checkbox_text()
+            self._handle_setting_changed()
+            return
+
+        if checked:
+            base_factor = self.downscale_factor if self.downscale_factor else 0.5
+            new_factor = self._prompt_downscale_factor(base_factor)
+            if new_factor is None:
+                self.downscale_checkbox.blockSignals(True)
+                self.downscale_checkbox.setChecked(False)
+                self.downscale_checkbox.blockSignals(False)
+                return
+            self.downscale_enabled = True
+            self.downscale_factor = new_factor
+            self.append_log(f"다운스케일 {self.downscale_factor:.2f}x 적용", "info")
+        else:
+            self.downscale_enabled = False
+            self.append_log("다운스케일을 비활성화했습니다.", "info")
+
+        self._update_downscale_checkbox_text()
+        if self.detection_thread and self.detection_thread.isRunning():
+            self.append_log("변경 내용은 탐지를 다시 시작하면 반영됩니다.", "warn")
+        self._handle_setting_changed()
+
+    def _prompt_downscale_factor(self, initial: float) -> Optional[float]:
+        clamped_initial = max(0.1, min(1.0, float(initial)))
+        value, ok = QInputDialog.getDouble(
+            self,
+            "다운스케일 배율",
+            "YOLO 입력에 적용할 배율 (0.10~1.00):",
+            clamped_initial,
+            0.1,
+            1.0,
+            decimals=2,
+        )
+        if not ok:
+            return None
+        return max(0.1, min(1.0, float(value)))
+
+    def _update_downscale_checkbox_text(self) -> None:
+        if not hasattr(self, 'downscale_checkbox'):
+            return
+        if self.downscale_enabled:
+            self.downscale_checkbox.setText(f"다운스케일 ({self.downscale_factor:.2f}x)")
+            self.downscale_checkbox.setToolTip("YOLO 입력 프레임을 지정한 배율로 축소합니다.")
+        else:
+            self.downscale_checkbox.setText("다운스케일")
+            self.downscale_checkbox.setToolTip("YOLO 입력을 축소해 성능을 개선합니다.")
 
     def _schedule_condition_poll(self, delay_ms: Optional[int] = None) -> None:
         if not self._condition_debounce_timer:
@@ -4867,6 +4933,7 @@ class HuntTab(QWidget):
 
     def _load_settings(self) -> None:
         self._suppress_settings_save = True
+        self._suppress_downscale_prompt = True
         data = {}
         try:
             with open(self._settings_path, 'r', encoding='utf-8') as f:
@@ -4975,6 +5042,19 @@ class HuntTab(QWidget):
             self.control_log_checkbox.setChecked(control_log_enabled)
             self.keyboard_log_checkbox.setChecked(keyboard_log_enabled)
             self.main_log_checkbox.setChecked(main_log_enabled)
+
+        downscale_cfg = data.get('downscale')
+        if isinstance(downscale_cfg, dict):
+            try:
+                self.downscale_factor = max(0.1, min(1.0, float(downscale_cfg.get('factor', self.downscale_factor))))
+            except (TypeError, ValueError):
+                self.downscale_factor = max(0.1, min(1.0, self.downscale_factor))
+            self.downscale_enabled = bool(downscale_cfg.get('enabled', self.downscale_enabled))
+            if hasattr(self, 'downscale_checkbox'):
+                self.downscale_checkbox.blockSignals(True)
+                self.downscale_checkbox.setChecked(self.downscale_enabled)
+                self.downscale_checkbox.blockSignals(False)
+                self._update_downscale_checkbox_text()
 
         self._sync_frame_detail_checkbox_state()
 
@@ -5187,6 +5267,7 @@ class HuntTab(QWidget):
                 self.last_popup_position = None
 
         self._suppress_settings_save = False
+        self._suppress_downscale_prompt = False
         self._emit_area_overlays()
         self._save_settings()
 
@@ -5245,6 +5326,10 @@ class HuntTab(QWidget):
                 'log_control': bool(self.control_log_checkbox.isChecked()) if hasattr(self, 'control_log_checkbox') else True,
                 'log_keyboard': bool(self.keyboard_log_checkbox.isChecked()) if hasattr(self, 'keyboard_log_checkbox') else True,
                 'log_main': bool(self.main_log_checkbox.isChecked()) if hasattr(self, 'main_log_checkbox') else True,
+            },
+            'downscale': {
+                'enabled': bool(self.downscale_enabled and self.downscale_checkbox.isChecked()),
+                'factor': float(self.downscale_factor),
             },
             'misc': {
                 'direction_delay_min': self.direction_delay_min_spinbox.value(),
