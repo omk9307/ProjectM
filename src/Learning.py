@@ -5524,13 +5524,14 @@ class LearningTab(QWidget):
             QApplication.processEvents() # UI 업데이트
             QThread.msleep(250)
 
-            target_windows = gw.getWindowsWithTitle('Maple') or gw.getWindowsWithTitle('메이플')
+            target_windows = gw.getWindowsWithTitle('Mapleland')
             if not target_windows:
                 QMessageBox.warning(self, '오류', '메이플스토리 게임 창을 찾을 수 없습니다.')
                 return
 
             target_window = target_windows[0]
             if target_window.isMinimized: target_window.restore(); QThread.msleep(500)
+            self.update_status_message(f"게임 창 활성화: '{target_window.title}'")
 
             capture_region = {'top': target_window.top, 'left': target_window.left, 'width': target_window.width, 'height': target_window.height}
 

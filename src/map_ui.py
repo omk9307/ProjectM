@@ -2957,16 +2957,20 @@ class MapTab(QWidget):
             if checked:
                 # --- "maple" 창 탐색 및 활성화 ---
                 try:
-                    maple_windows = gw.getWindowsWithTitle('Maple')
+                    maple_windows = gw.getWindowsWithTitle('Mapleland')
                     if not maple_windows:
                         QMessageBox.warning(self, "오류", "MapleStory 클라이언트 창을 찾을 수 없습니다.\n게임을 먼저 실행해주세요.")
                         self.detect_anchor_btn.setChecked(False)
                         return
-                    
+
                     target_window = maple_windows[0]
                     if not target_window.isActive:
                         target_window.activate()
                         QThread.msleep(100) # 창이 활성화될 시간을 줌
+                    self.update_general_log(
+                        f"게임 창 활성화: '{target_window.title}'",
+                        "SaddleBrown",
+                    )
                 except Exception as e:
                     QMessageBox.warning(self, "창 활성화 오류", f"게임 창을 활성화하는 중 오류가 발생했습니다:\n{e}")
                     self.detect_anchor_btn.setChecked(False)

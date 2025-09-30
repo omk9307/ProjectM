@@ -147,12 +147,29 @@ class DetectionPopup(QDialog):
 
     closed = pyqtSignal()
     scale_changed = pyqtSignal(int)
+    size_changed = pyqtSignal(int, int)
 
-    def __init__(self, initial_scale: int = 50, parent=None):
+    def __init__(
+        self,
+        initial_scale: int = 50,
+        parent=None,
+        initial_size: Optional[Tuple[int, int]] = None,
+    ):
         super().__init__(parent)
         self.setWindowTitle("탐지 팝업")
         self.setMinimumSize(320, 240)
         self.original_frame_size: Optional[QSize] = None
+        self._initial_size_override = False
+
+        if (
+            initial_size
+            and isinstance(initial_size, tuple)
+            and len(initial_size) == 2
+            and initial_size[0] > 0
+            and initial_size[1] > 0
+        ):
+            self.resize(int(initial_size[0]), int(initial_size[1]))
+            self._initial_size_override = True
 
         layout = QVBoxLayout(self)
 
@@ -180,7 +197,8 @@ class DetectionPopup(QDialog):
     def update_frame(self, q_image: QImage) -> None:
         if self.original_frame_size is None:
             self.original_frame_size = q_image.size()
-            self.on_scale_changed(self.slider.value())
+            if not self._initial_size_override:
+                self.on_scale_changed(self.slider.value())
 
         scaled_pixmap = QPixmap.fromImage(q_image).scaled(
             self.view_label.size(),
@@ -196,6 +214,11 @@ class DetectionPopup(QDialog):
     def closeEvent(self, event):  # noqa: N802
         self.closed.emit()
         super().closeEvent(event)
+
+    def resizeEvent(self, event):  # noqa: N802
+        super().resizeEvent(event)
+        size = event.size()
+        self.size_changed.emit(size.width(), size.height())
 
 
 class DetectionThread(QThread):

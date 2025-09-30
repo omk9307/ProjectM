@@ -707,6 +707,7 @@ class HuntTab(QWidget):
         self.is_popup_active = False
         self.last_popup_scale = 50
         self.last_popup_position: Optional[tuple[int, int]] = None
+        self.last_popup_size: Optional[tuple[int, int]] = None
         self.manual_capture_region: Optional[dict] = None
         self.manual_capture_regions: list[dict] = []
         self.last_used_model: Optional[str] = None
@@ -1905,7 +1906,7 @@ class HuntTab(QWidget):
 
     def _activate_maple_window(self) -> Optional[object]:
         try:
-            maple_windows = gw.getWindowsWithTitle('Maple') or gw.getWindowsWithTitle('메이플')
+            maple_windows = gw.getWindowsWithTitle('Mapleland')
         except Exception as exc:
             self.append_log(f"게임 창 검색 실패: {exc}", "warn")
             return None
@@ -1920,6 +1921,10 @@ class HuntTab(QWidget):
                 QThread.msleep(200)
             target_window.activate()
             QThread.msleep(120)
+            self.append_log(
+                f"게임 창 활성화: '{target_window.title}'",
+                "debug",
+            )
         except Exception as exc:
             self.append_log(f"게임 창 활성화 중 오류 발생: {exc}", "warn")
             return None
@@ -2758,9 +2763,15 @@ class HuntTab(QWidget):
             popup_button.setToolTip("탐지 화면을 메인 창으로 복귀")
 
         if not self.detection_popup:
-            self.detection_popup = DetectionPopup(self.last_popup_scale, self)
+            popup_size = self.last_popup_size if self.last_popup_size else None
+            self.detection_popup = DetectionPopup(
+                self.last_popup_scale,
+                self,
+                initial_size=popup_size,
+            )
             self.detection_popup.closed.connect(self._handle_popup_closed)
             self.detection_popup.scale_changed.connect(self._on_popup_scale_changed)
+            self.detection_popup.size_changed.connect(self._on_popup_size_changed)
 
         self._restore_popup_position()
         self.detection_popup.set_waiting_message()
@@ -2773,9 +2784,16 @@ class HuntTab(QWidget):
         self.last_popup_scale = value
         self._save_settings()
 
+    def _on_popup_size_changed(self, width: int, height: int) -> None:
+        if width <= 0 or height <= 0:
+            return
+        self.last_popup_size = (int(width), int(height))
+        self._save_settings()
+
     def _handle_popup_closed(self) -> None:
         if self.detection_popup:
             self.last_popup_position = (self.detection_popup.x(), self.detection_popup.y())
+            self.last_popup_size = (self.detection_popup.width(), self.detection_popup.height())
             self._save_settings()
         self.is_popup_active = False
         popup_button = getattr(self, 'popup_btn', None)
@@ -5353,12 +5371,28 @@ class HuntTab(QWidget):
 
         self.last_popup_scale = int(data.get('last_popup_scale', self.last_popup_scale))
 
+        self.last_popup_position = None
         popup_pos = data.get('last_popup_position')
         if isinstance(popup_pos, (list, tuple)) and len(popup_pos) == 2:
             try:
-                self.last_popup_position = (int(popup_pos[0]), int(popup_pos[1]))
+                x_pos = int(popup_pos[0])
+                y_pos = int(popup_pos[1])
             except (TypeError, ValueError):
-                self.last_popup_position = None
+                pass
+            else:
+                self.last_popup_position = (x_pos, y_pos)
+
+        self.last_popup_size = None
+        popup_size = data.get('last_popup_size')
+        if isinstance(popup_size, (list, tuple)) and len(popup_size) == 2:
+            try:
+                width = int(popup_size[0])
+                height = int(popup_size[1])
+            except (TypeError, ValueError):
+                pass
+            else:
+                if width > 0 and height > 0:
+                    self.last_popup_size = (width, height)
 
         self._suppress_settings_save = False
         self._suppress_downscale_prompt = False
@@ -5495,6 +5529,7 @@ class HuntTab(QWidget):
             'last_popup_scale': self.last_popup_scale,
             'last_facing': self.last_facing,
             'last_popup_position': list(self.last_popup_position) if self.last_popup_position else None,
+            'last_popup_size': list(self.last_popup_size) if self.last_popup_size else None,
         }
 
         try:
