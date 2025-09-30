@@ -690,6 +690,11 @@ class HuntTab(QWidget):
         self._pending_direction_timer: Optional[QTimer] = None
         self._pending_direction_side: Optional[str] = None
         self._pending_direction_skill: Optional[AttackSkill] = None
+        self._pending_direction_confirm_skill: Optional[AttackSkill] = None
+        self._pending_direction_confirm_side: Optional[str] = None
+        self._pending_direction_confirm_deadline: float = 0.0
+        self._pending_direction_confirm_command_ts: float = 0.0
+        self._pending_direction_confirm_attempts: int = 0
         self._last_target_side: Optional[str] = None
         self._last_target_distance: Optional[float] = None
         self._last_target_update_ts: float = 0.0
@@ -2316,6 +2321,7 @@ class HuntTab(QWidget):
             self.detection_popup.close()
         self._clear_pending_skill()
         self._clear_pending_direction()
+        self._clear_direction_confirmation()
         self._cancel_facing_reset_timer()
         self._last_target_side = None
         self._last_target_distance = None
@@ -4643,6 +4649,7 @@ class HuntTab(QWidget):
         self._last_direction_score = float(score)
         self._cancel_facing_reset_timer()
         self._set_current_facing(side, save=False, from_direction=True)
+        self._maybe_complete_direction_confirmation()
 
     def _evaluate_direction_timeout(self) -> None:
         if not self._direction_active:
@@ -5688,6 +5695,25 @@ class HuntTab(QWidget):
             return
         if self._get_command_delay_remaining() > 0:
             return
+        if self._direction_confirmation_pending():
+            if self._maybe_complete_direction_confirmation():
+                return
+            pending_skill = self._pending_direction_confirm_skill
+            pending_side = self._pending_direction_confirm_side
+            if self._direction_confirmation_expired() and pending_skill is not None:
+                if pending_side in ('left', 'right'):
+                    if self._pending_direction_confirm_attempts >= 2:
+                        self.append_log("방향 확인 실패 → 스킬 강행", 'warn')
+                        skill_to_fire = pending_skill
+                        self._clear_direction_confirmation()
+                        self._schedule_skill_after_direction(skill_to_fire)
+                        return
+                    self.append_log("방향 확인 지연 → 재시도", 'warn')
+                    self._register_direction_retry()
+                    self._schedule_direction_command(pending_side, pending_skill)
+                    return
+                self._clear_direction_confirmation()
+            return
         now = time.time()
         if self._evaluate_buff_usage(now):
             return
@@ -6171,6 +6197,8 @@ class HuntTab(QWidget):
     def _ensure_direction(self, target_side: str, next_skill: Optional[AttackSkill] = None) -> bool:
         current = self.last_facing if self.last_facing in ('left', 'right') else None
         if current == target_side:
+            if next_skill is not None:
+                self._clear_direction_confirmation(skill=next_skill)
             return False
         self._schedule_direction_command(target_side, next_skill)
         self._last_direction_change_ts = time.time()
@@ -6204,7 +6232,8 @@ class HuntTab(QWidget):
         self._pending_direction_side = None
         self._pending_direction_skill = None
         command = '방향설정(좌)' if target_side == 'left' else '방향설정(우)'
-        self._last_direction_change_ts = time.time()
+        now = time.time()
+        self._last_direction_change_ts = now
         self._emit_control_command(command)
         delay_min = min(self.direction_delay_min_spinbox.value(), self.direction_delay_max_spinbox.value())
         delay_max = max(self.direction_delay_min_spinbox.value(), self.direction_delay_max_spinbox.value())
@@ -6212,9 +6241,14 @@ class HuntTab(QWidget):
         self._set_command_cooldown(delay_sec)
         self._log_delay_message("방향설정", delay_sec)
         if next_skill:
-            self._schedule_skill_after_direction(next_skill)
+            if self._direction_detector_available:
+                self._start_direction_confirmation(target_side, next_skill, now)
+            else:
+                self._clear_direction_confirmation()
+                self._schedule_skill_after_direction(next_skill)
         else:
-            self.hunting_active = True
+            self._clear_direction_confirmation()
+        self.hunting_active = True
 
     def _schedule_skill_after_direction(self, skill: AttackSkill) -> None:
         delay_sec = random.uniform(0.035, 0.050)
@@ -6266,6 +6300,84 @@ class HuntTab(QWidget):
         self._pending_direction_timer = None
         self._pending_direction_side = None
         self._pending_direction_skill = None
+
+    def _start_direction_confirmation(self, side: str, skill: AttackSkill, command_ts: float) -> None:
+        if side not in ('left', 'right'):
+            return
+        if skill is None:
+            return
+        attempts = 0
+        if (
+            self._pending_direction_confirm_skill is skill
+            and self._pending_direction_confirm_side == side
+            and self._pending_direction_confirm_attempts > 0
+        ):
+            attempts = self._pending_direction_confirm_attempts
+        self._pending_direction_confirm_skill = skill
+        self._pending_direction_confirm_side = side
+        self._pending_direction_confirm_command_ts = command_ts
+        self._pending_direction_confirm_deadline = command_ts + max(0.75, self.DIRECTION_TIMEOUT_SEC)
+        self._pending_direction_confirm_attempts = attempts
+
+    def _register_direction_retry(self) -> None:
+        if self._pending_direction_confirm_skill is None:
+            return
+        now = time.time()
+        self._pending_direction_confirm_attempts += 1
+        self._pending_direction_confirm_command_ts = now
+        self._pending_direction_confirm_deadline = now + max(0.75, self.DIRECTION_TIMEOUT_SEC)
+
+    def _clear_direction_confirmation(self, *, skill: Optional[AttackSkill] = None) -> None:
+        if skill is not None and skill is not self._pending_direction_confirm_skill:
+            return
+        self._pending_direction_confirm_skill = None
+        self._pending_direction_confirm_side = None
+        self._pending_direction_confirm_command_ts = 0.0
+        self._pending_direction_confirm_deadline = 0.0
+        self._pending_direction_confirm_attempts = 0
+
+    def _direction_confirmation_pending(self) -> bool:
+        return self._pending_direction_confirm_skill is not None
+
+    def _direction_confirmation_expired(self) -> bool:
+        if not self._direction_confirmation_pending():
+            return False
+        return time.time() > self._pending_direction_confirm_deadline
+
+    def _direction_confirmation_met(self) -> bool:
+        if not self._direction_confirmation_pending():
+            return True
+        if not self._direction_detector_available:
+            return True
+        expected_side = self._pending_direction_confirm_side
+        if expected_side not in ('left', 'right'):
+            return True
+        if not getattr(self, '_direction_active', False):
+            return False
+        if self._direction_last_side != expected_side:
+            return False
+        if self._direction_last_seen_ts < self._pending_direction_confirm_command_ts:
+            return False
+        if (time.time() - self._direction_last_seen_ts) > self.DIRECTION_TIMEOUT_SEC:
+            return False
+        return True
+
+    def _maybe_complete_direction_confirmation(self) -> bool:
+        if not self._direction_confirmation_pending():
+            return False
+        skill = self._pending_direction_confirm_skill
+        if skill is None:
+            self._clear_direction_confirmation()
+            return False
+        if not self._direction_confirmation_met():
+            return False
+        side = self._pending_direction_confirm_side
+        self._clear_direction_confirmation()
+        self._schedule_skill_after_direction(skill)
+        if side in ('left', 'right'):
+            direction_text = '좌' if side == 'left' else '우'
+            self.append_log(f"방향 확인 완료 → 스킬 대기 ({direction_text})", 'debug')
+        return True
 
     def set_auto_hunt_enabled(self, enabled: bool) -> None:
         self.auto_hunt_enabled = bool(enabled)
@@ -6767,6 +6879,7 @@ class HuntTab(QWidget):
             return
         self._clear_pending_skill()
         self._clear_pending_direction()
+        self._clear_direction_confirmation()
         self._emit_control_command("모든 키 떼기", reason=reason)
         if isinstance(reason, str) and reason.strip():
             reason_text = reason.strip()
@@ -6799,6 +6912,7 @@ class HuntTab(QWidget):
     def _ensure_idle_keys(self, reason: Optional[str] = None) -> None:
         self._clear_pending_skill()
         self._clear_pending_direction()
+        self._clear_direction_confirmation()
         self._reset_walk_teleport_state()
         if self.hunting_active:
             self._issue_all_keys_release(reason)
