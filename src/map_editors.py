@@ -95,6 +95,7 @@ try:
         LADDER_X_GRAB_THRESHOLD,
         MAPS_DIR,
         MAX_JUMP_DURATION,
+        MAX_LOCK_DURATION,
         MapConfig,
         MOVE_DEADZONE,
         ROUTE_SLOT_IDS,
@@ -108,6 +109,7 @@ try:
         FALL_ON_LADDER_X_MOVEMENT_THRESHOLD,
         FALL_Y_MIN_THRESHOLD,
         IDLE_TIME_THRESHOLD,
+        PREPARE_TIMEOUT,
         AIRBORNE_RECOVERY_WAIT_DEFAULT,
         LADDER_RECOVERY_RESEND_DELAY_DEFAULT,
         JUMPING_STATE_FRAME_THRESHOLD,
@@ -128,6 +130,7 @@ except ImportError:
         LADDER_X_GRAB_THRESHOLD,
         MAPS_DIR,
         MAX_JUMP_DURATION,
+        MAX_LOCK_DURATION,
         MapConfig,
         MOVE_DEADZONE,
         ROUTE_SLOT_IDS,
@@ -141,6 +144,7 @@ except ImportError:
         FALL_ON_LADDER_X_MOVEMENT_THRESHOLD,
         FALL_Y_MIN_THRESHOLD,
         IDLE_TIME_THRESHOLD,
+        PREPARE_TIMEOUT,
         AIRBORNE_RECOVERY_WAIT_DEFAULT,
         LADDER_RECOVERY_RESEND_DELAY_DEFAULT,
         JUMPING_STATE_FRAME_THRESHOLD,
@@ -3649,6 +3653,8 @@ class StateConfigDialog(QDialog):
         self.config.setdefault("walk_teleport_bonus_delay", WALK_TELEPORT_BONUS_DELAY_DEFAULT)
         self.config.setdefault("walk_teleport_bonus_step", WALK_TELEPORT_BONUS_STEP_DEFAULT)
         self.config.setdefault("walk_teleport_bonus_max", WALK_TELEPORT_BONUS_MAX_DEFAULT)
+        self.config.setdefault("prepare_timeout", PREPARE_TIMEOUT)
+        self.config.setdefault("max_lock_duration", MAX_LOCK_DURATION)
         
         main_layout = QVBoxLayout(self)
         self.spinboxes = {}
@@ -3718,6 +3724,8 @@ class StateConfigDialog(QDialog):
         add_spinbox("stuck_detection_wait", "자동 복구 대기시간(초):", 0.1, 5.0, 0.1)
         add_spinbox("airborne_recovery_wait", "공중 자동복구 대기시간(초):", 0.5, 10.0, 0.1)
         add_spinbox("ladder_recovery_resend_delay", "사다리 복구 재전송 지연(초):", 0.05, 10.0, 0.05)
+        add_spinbox("prepare_timeout", "행동 준비 시간 제한(초):", 0.5, 30.0, 0.5)
+        add_spinbox("max_lock_duration", "행동 진행 잠금 시간(초):", 0.5, 30.0, 0.5)
         add_spinbox("on_ladder_enter_frame_threshold", "사다리 탑승 판정 프레임:", 1, 10, 1, is_double=False)
         add_spinbox("jump_initial_velocity_threshold", "점프 초기 속도 임계값(px/f):", 1.0, 10.0, 0.1)
         add_spinbox("climb_max_velocity", "등반 최대 속도(px/f):", 1.0, 10.0, 0.1)
@@ -3833,6 +3841,8 @@ class StateConfigDialog(QDialog):
             "stuck_detection_wait": STUCK_DETECTION_WAIT_DEFAULT,
             "airborne_recovery_wait": AIRBORNE_RECOVERY_WAIT_DEFAULT,
             "ladder_recovery_resend_delay": LADDER_RECOVERY_RESEND_DELAY_DEFAULT,
+            "prepare_timeout": PREPARE_TIMEOUT,
+            "max_lock_duration": MAX_LOCK_DURATION,
             "walk_teleport_probability": WALK_TELEPORT_PROBABILITY_DEFAULT,
             "walk_teleport_interval": WALK_TELEPORT_INTERVAL_DEFAULT,
             "walk_teleport_bonus_delay": WALK_TELEPORT_BONUS_DELAY_DEFAULT,

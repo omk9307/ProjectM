@@ -475,6 +475,8 @@ class MapTab(QWidget):
             self.cfg_walk_teleport_bonus_delay = None
             self.cfg_walk_teleport_bonus_step = None
             self.cfg_walk_teleport_bonus_max = None
+            self.cfg_prepare_timeout = None
+            self.cfg_max_lock_duration = None
 
             # ==================== v11.5.0 설정 변수 추가 시작 ====================
             self.cfg_arrival_frame_threshold = None
@@ -1511,6 +1513,8 @@ class MapTab(QWidget):
             self.cfg_stuck_detection_wait = STUCK_DETECTION_WAIT_DEFAULT
             self.cfg_airborne_recovery_wait = AIRBORNE_RECOVERY_WAIT_DEFAULT
             self.cfg_ladder_recovery_resend_delay = LADDER_RECOVERY_RESEND_DELAY_DEFAULT
+            self.cfg_prepare_timeout = PREPARE_TIMEOUT
+            self.cfg_max_lock_duration = MAX_LOCK_DURATION
             
             self.cfg_walk_teleport_probability = WALK_TELEPORT_PROBABILITY_DEFAULT
             self.cfg_walk_teleport_interval = WALK_TELEPORT_INTERVAL_DEFAULT
@@ -1599,6 +1603,8 @@ class MapTab(QWidget):
                     "walk_teleport_bonus_max",
                     self.cfg_walk_teleport_bonus_max,
                 )
+                self.cfg_prepare_timeout = state_config.get("prepare_timeout", self.cfg_prepare_timeout)
+                self.cfg_max_lock_duration = state_config.get("max_lock_duration", self.cfg_max_lock_duration)
 
                 self.cfg_walk_teleport_bonus_delay = max(self.cfg_walk_teleport_bonus_delay or 0.0, 0.1)
                 self.cfg_walk_teleport_bonus_step = max(self.cfg_walk_teleport_bonus_step or 0.0, 0.0)
@@ -1886,6 +1892,8 @@ class MapTab(QWidget):
                 "stuck_detection_wait": self.cfg_stuck_detection_wait,
                 "airborne_recovery_wait": self.cfg_airborne_recovery_wait,
                 "ladder_recovery_resend_delay": self.cfg_ladder_recovery_resend_delay,
+                "prepare_timeout": self.cfg_prepare_timeout if self.cfg_prepare_timeout is not None else PREPARE_TIMEOUT,
+                "max_lock_duration": self.cfg_max_lock_duration if self.cfg_max_lock_duration is not None else MAX_LOCK_DURATION,
                 "walk_teleport_probability": self.cfg_walk_teleport_probability,
                 "walk_teleport_interval": self.cfg_walk_teleport_interval,
                 "walk_teleport_bonus_delay": self.cfg_walk_teleport_bonus_delay,
@@ -3411,6 +3419,8 @@ class MapTab(QWidget):
             "stuck_detection_wait": self.cfg_stuck_detection_wait,
             "airborne_recovery_wait": self.cfg_airborne_recovery_wait,
             "ladder_recovery_resend_delay": self.cfg_ladder_recovery_resend_delay,
+            "prepare_timeout": self.cfg_prepare_timeout if self.cfg_prepare_timeout is not None else PREPARE_TIMEOUT,
+            "max_lock_duration": self.cfg_max_lock_duration if self.cfg_max_lock_duration is not None else MAX_LOCK_DURATION,
             "walk_teleport_probability": self.cfg_walk_teleport_probability,
             "walk_teleport_interval": self.cfg_walk_teleport_interval,
             "walk_teleport_bonus_delay": self.cfg_walk_teleport_bonus_delay,
@@ -5210,8 +5220,10 @@ class MapTab(QWidget):
         self._update_forbidden_wall_logic(final_player_pos, contact_terrain)
 
         # Phase 0: 타임아웃 (유지)
-        if (self.navigation_state_locked and (time.time() - self.lock_timeout_start > MAX_LOCK_DURATION)) or \
-           (self.navigation_action.startswith('prepare_to_') and (time.time() - self.prepare_timeout_start > PREPARE_TIMEOUT)):
+        max_lock_duration = self.cfg_max_lock_duration or MAX_LOCK_DURATION
+        prepare_timeout = self.cfg_prepare_timeout or PREPARE_TIMEOUT
+        if (self.navigation_state_locked and (time.time() - self.lock_timeout_start > max_lock_duration)) or \
+           (self.navigation_action.startswith('prepare_to_') and (time.time() - self.prepare_timeout_start > prepare_timeout)):
             self.update_general_log(f"경고: 행동({self.navigation_action}) 시간 초과. 경로를 재탐색합니다.", "orange")
             self.navigation_action = 'move_to_target'
             self.navigation_state_locked = False
