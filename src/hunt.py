@@ -210,6 +210,7 @@ class AttackSkill:
     enabled: bool = True
     is_primary: bool = False
     min_monsters: int = 1
+    max_monsters: Optional[int] = None
     probability: int = 100
     pre_delay_min: float = 0.0
     pre_delay_max: float = 0.0
@@ -3237,16 +3238,22 @@ class HuntTab(QWidget):
 
         reason_str = str(reason) if isinstance(reason, str) else ""
         is_status_command = reason_str.startswith('status:')
-        is_primary_command = reason_str.startswith('primary:')
+        is_primary_release_command = reason_str.startswith('primary_release')
         allow_during_cooldown = False
+        status_resource = ''
+        status_percent: Optional[float] = None
         if is_status_command:
-            try:
-                _, resource = reason_str.split(':', 1)
-            except ValueError:
-                resource = ''
-            if resource.strip().lower() == 'hp':
+            status_parts = reason_str.split(':')
+            if len(status_parts) >= 2:
+                status_resource = status_parts[1].strip().lower()
+            if len(status_parts) >= 3:
+                try:
+                    status_percent = float(status_parts[2])
+                except ValueError:
+                    status_percent = None
+            if status_resource == 'hp':
                 allow_during_cooldown = True
-        elif is_primary_command:
+        elif is_primary_release_command:
             allow_during_cooldown = True
 
         if (
@@ -3269,11 +3276,17 @@ class HuntTab(QWidget):
             elif "key.right" in lower and "key.left" not in lower:
                 self._set_current_facing('right', save=False)
         self.control_command_issued.emit(command, reason)
-        if not is_status_command and not is_primary_command and normalized != "모든 키 떼기":
+        if not is_status_command and not is_primary_release_command and normalized != "모든 키 떼기":
             self._last_command_issued = (command, reason)
 
         reason_text = reason_str.strip()
-        if reason_text.startswith('primary:'):
+        if is_status_command:
+            resource_label = status_resource.upper() if status_resource else 'STATUS'
+            if status_percent is not None:
+                reason_text = f"Status: {resource_label} ({int(round(status_percent))}%)"
+            else:
+                reason_text = f"Status: {resource_label}"
+        elif reason_text.startswith('primary_release'):
             parts = reason_text.split('|', 1)
             reason_text = parts[1].strip() if len(parts) == 2 else ""
         log_message = f"{normalized} (원인: {reason_text})" if reason_text else normalized
@@ -3406,7 +3419,7 @@ class HuntTab(QWidget):
         if resource == 'hp':
             if self._hp_guard_active:
                 return
-            self._issue_status_command(resource, command_name)
+            self._issue_status_command(resource, command_name, percentage)
             guard_delay = random.uniform(0.370, 0.400)
             self._hp_guard_active = True
             self._hp_guard_timer.start(int(guard_delay * 1000))
@@ -3421,21 +3434,31 @@ class HuntTab(QWidget):
                 self._status_mp_saved_command = self._last_command_issued
             else:
                 self._status_mp_saved_command = None
-            self._issue_status_command(resource, command_name)
+            self._issue_status_command(resource, command_name, percentage)
 
         self._status_last_command_ts[resource] = timestamp
 
-    def _issue_status_command(self, resource: str, command_name: str) -> None:
-        reason = f'status:{resource}'
+    def _issue_status_command(self, resource: str, command_name: str, percentage: Optional[float] = None) -> None:
+        percent_text = ''
+        if isinstance(percentage, (int, float)):
+            percent_value = max(0, min(100, int(round(float(percentage)))))
+            percent_text = f":{percent_value}"
+        reason = f'status:{resource}{percent_text}'
         self._emit_control_command(command_name, reason=reason)
-        self.append_log(f"[{resource.upper()}] 자동 명령 '{command_name}' 실행", 'info')
+        if percent_text:
+            self.append_log(
+                f"[{resource.upper()}] 자동 명령 '{command_name}' 실행 (현재 {percent_text.lstrip(':')}%)",
+                'info',
+            )
+        else:
+            self.append_log(f"[{resource.upper()}] 자동 명령 '{command_name}' 실행", 'info')
 
     def _handle_status_sequence_completed(self, command_name: str, reason: str, success: bool) -> None:
-        try:
-            _, resource = reason.split(':', 1)
-        except ValueError:
-            resource = ''
-        resource = resource.strip()
+        resource = ''
+        if isinstance(reason, str) and reason.startswith('status:'):
+            parts = reason.split(':')
+            if len(parts) >= 2:
+                resource = parts[1].strip()
         if resource == 'mp' and self._status_mp_saved_command:
             command, saved_reason = self._status_mp_saved_command
             self._status_mp_saved_command = None
@@ -6136,7 +6159,7 @@ class HuntTab(QWidget):
 
         usage_count = self._primary_reset_current_goal or 1
         reason_suffix = f"주스킬 사용 {usage_count}회"
-        reason = f"primary:release|{reason_suffix}"
+        reason = f"primary_release|{reason_suffix}"
         self._emit_control_command(command, reason=reason)
         self.append_log(f"[주 스킬] 해제 명령 실행 ({reason_suffix})", 'info')
         self._initialize_primary_reset_counter()
