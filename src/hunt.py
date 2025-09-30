@@ -3355,8 +3355,9 @@ class HuntTab(QWidget):
         elif reason_text.startswith('primary_release'):
             parts = reason_text.split('|', 1)
             reason_text = parts[1].strip() if len(parts) == 2 else ""
-        log_message = f"{normalized} (원인: {reason_text})" if reason_text else normalized
-        self._append_control_log(log_message)
+        if not is_primary_release_command:
+            log_message = f"{normalized} (원인: {reason_text})" if reason_text else normalized
+            self._append_control_log(log_message)
 
     def _append_control_log(self, message: str, color: Optional[str] = None) -> None:
         timestamp = self._format_timestamp_ms()

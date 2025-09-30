@@ -899,7 +899,7 @@ class DetectionThread(QThread):
                     self.frame_ready.emit(qt_image.copy())
                 emit_end = time.perf_counter()
                 self.perf_stats["emit_ms"] = (emit_end - emit_start) * 1000
-                self.msleep(15)
+                self.msleep(1)
         except Exception as exc:
             print(f"탐지 스레드 오류: {exc}")
         finally:
