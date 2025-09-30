@@ -2051,6 +2051,7 @@ class HuntTab(QWidget):
                     nameplate_thresholds=nameplate_thresholds_payload,
                     show_nameplate_overlay=self._is_nameplate_overlay_active(),
                     show_monster_confidence=self._is_monster_confidence_display_active(),
+                    screen_output_enabled=self.screen_output_checkbox.isChecked(),
                     nms_iou=self.yolo_nms_iou,
                     max_det=self.yolo_max_det,
                     allowed_subregions=capture_subregions,
@@ -2075,6 +2076,7 @@ class HuntTab(QWidget):
                     nameplate_thresholds=nameplate_thresholds_payload,
                     show_nameplate_overlay=self._is_nameplate_overlay_active(),
                     show_monster_confidence=self._is_monster_confidence_display_active(),
+                    screen_output_enabled=self.screen_output_checkbox.isChecked(),
                     nms_iou=self.yolo_nms_iou,
                     max_det=self.yolo_max_det,
                     allowed_subregions=capture_subregions,
@@ -2247,6 +2249,8 @@ class HuntTab(QWidget):
             self.append_log(msg, "debug")
 
     def _handle_detection_frame(self, q_image) -> None:
+        if not self._is_screen_output_enabled():
+            return
         image = q_image.copy()
         self._paint_overlays(image)
         if self.is_popup_active and self.detection_popup:
@@ -2572,6 +2576,16 @@ class HuntTab(QWidget):
         self.show_frame_detail_checkbox.setEnabled(show_frame)
 
     def _on_screen_output_toggled(self, checked: bool) -> None:
+        if self.detection_thread and hasattr(self.detection_thread, 'set_screen_output_enabled'):
+            try:
+                self.detection_thread.set_screen_output_enabled(bool(checked))
+            except Exception:
+                pass
+        if not checked and self.is_popup_active:
+            self._toggle_detection_popup()
+        if not checked and self.detection_view:
+            self.detection_view.setText("화면출력이 비활성화되었습니다.")
+            self.detection_view.setPixmap(QPixmap())
         if checked and self.detect_btn.isChecked() and not self.is_popup_active:
             self._toggle_detection_popup()
         self._handle_setting_changed()
@@ -2587,6 +2601,12 @@ class HuntTab(QWidget):
                 Qt.TransformationMode.SmoothTransformation,
             )
         )
+
+    def _is_screen_output_enabled(self) -> bool:
+        checkbox = getattr(self, 'screen_output_checkbox', None)
+        if checkbox is None:
+            return True
+        return bool(checkbox.isChecked())
 
     def _is_nickname_overlay_active(self) -> bool:
         return bool(self._show_nickname_overlay_config)

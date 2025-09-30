@@ -222,6 +222,7 @@ class DetectionThread(QThread):
         nameplate_thresholds: Optional[Dict[int, float]] = None,
         show_nameplate_overlay: bool = True,
         show_monster_confidence: bool = True,
+        screen_output_enabled: bool = True,
         nms_iou: float = 0.45,
         max_det: int = 100,
         allowed_subregions: Optional[Iterable[dict]] = None,
@@ -239,6 +240,7 @@ class DetectionThread(QThread):
             else -1
         )
         self.is_debug_mode = is_debug_mode
+        self.screen_output_enabled = bool(screen_output_enabled)
         self.nickname_detector = nickname_detector
         self.direction_detector = direction_detector
         self.show_nickname_overlay = bool(show_nickname_overlay)
@@ -403,6 +405,9 @@ class DetectionThread(QThread):
             self.current_facing = side
         else:
             self.current_facing = None
+
+    def set_screen_output_enabled(self, enabled: bool) -> None:
+        self.screen_output_enabled = bool(enabled)
 
     def run(self) -> None:  # noqa: D401
         consumer_name = f"detection:{id(self)}"
@@ -590,9 +595,12 @@ class DetectionThread(QThread):
                     payload["nickname_search"] = nickname_search_region
                 payload["direction"] = direction_info
 
-                annotated_frame = frame
-                if not annotated_frame.flags.writeable:
-                    annotated_frame = annotated_frame.copy()
+                annotated_frame: Optional[np.ndarray] = None
+                if self.screen_output_enabled:
+                    annotated_frame = frame
+                    if not annotated_frame.flags.writeable:
+                        annotated_frame = annotated_frame.copy()
+                draw_enabled = annotated_frame is not None
 
                 frame_now = float(payload["timestamp"])
                 track_events: List[dict] = []
@@ -635,34 +643,35 @@ class DetectionThread(QThread):
                             class_color_map[class_id] = np.random.randint(0, 256, size=3).tolist()
                         color = class_color_map[class_id]
 
-                        cv2.rectangle(annotated_frame, (x1, y1), (x2, y2), color, 2)
+                        if annotated_frame is not None:
+                            cv2.rectangle(annotated_frame, (x1, y1), (x2, y2), color, 2)
 
-                        should_draw_confidence = True
-                        if class_id != self.char_class_index and not self.show_monster_confidence:
-                            should_draw_confidence = False
+                            should_draw_confidence = True
+                            if class_id != self.char_class_index and not self.show_monster_confidence:
+                                should_draw_confidence = False
 
-                        if should_draw_confidence:
-                            label = f"{item['score']:.2f}"
+                            if should_draw_confidence:
+                                label = f"{item['score']:.2f}"
 
-                            (w, h), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 2)
-                            text_bg_y2 = y1 - 5
-                            text_bg_y1 = text_bg_y2 - h - 5
-                            if text_bg_y1 < 0:
-                                text_bg_y1 = y1 + 5
-                                text_bg_y2 = text_bg_y1 + h + 5
+                                (w, h), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 2)
+                                text_bg_y2 = y1 - 5
+                                text_bg_y1 = text_bg_y2 - h - 5
+                                if text_bg_y1 < 0:
+                                    text_bg_y1 = y1 + 5
+                                    text_bg_y2 = text_bg_y1 + h + 5
 
-                            cv2.rectangle(annotated_frame, (x1, text_bg_y1), (x1 + w, text_bg_y2), color, -1)
+                                cv2.rectangle(annotated_frame, (x1, text_bg_y1), (x1 + w, text_bg_y2), color, -1)
 
-                            text_y = y1 - 10 if text_bg_y1 < y1 else y1 + h + 5
-                            cv2.putText(
-                                annotated_frame,
-                                label,
-                                (x1 + 2, text_y),
-                                cv2.FONT_HERSHEY_SIMPLEX,
-                                0.5,
-                                (255, 255, 255),
-                                2,
-                            )
+                                text_y = y1 - 10 if text_bg_y1 < y1 else y1 + h + 5
+                                cv2.putText(
+                                    annotated_frame,
+                                    label,
+                                    (x1 + 2, text_y),
+                                    cv2.FONT_HERSHEY_SIMPLEX,
+                                    0.5,
+                                    (255, 255, 255),
+                                    2,
+                                )
 
                         if class_id != self.char_class_index and self._nameplate_tracks:
                             center_x, center_y = self._box_center(item)
@@ -746,13 +755,13 @@ class DetectionThread(QThread):
                     else:
                         log_messages.append(f"[{timestamp}] 탐색 완료. 객체 없음.")
                     self.detection_logged.emit(log_messages)
-                if self.show_nickname_overlay and nick_box_data:
+                if draw_enabled and self.show_nickname_overlay and nick_box_data:
                     x1, y1 = int(nick_box_data.get('x', 0)), int(nick_box_data.get('y', 0))
                     x2 = int(x1 + nick_box_data.get('width', 0))
                     y2 = int(y1 + nick_box_data.get('height', 0))
                     cv2.rectangle(annotated_frame, (x1, y1), (x2, y2), (0, 255, 255), 2)
 
-                if self.show_nickname_range_overlay and nickname_search_region:
+                if draw_enabled and self.show_nickname_range_overlay and nickname_search_region:
                     try:
                         rx = int(nickname_search_region.get('x', 0))
                         ry = int(nickname_search_region.get('y', 0))
@@ -763,7 +772,7 @@ class DetectionThread(QThread):
                     if rw > 0 and rh > 0:
                         cv2.rectangle(annotated_frame, (rx, ry), (rx + rw, ry + rh), (80, 200, 255), 1)
 
-                if self.show_direction_overlay and direction_info and isinstance(direction_info, dict):
+                if draw_enabled and self.show_direction_overlay and direction_info and isinstance(direction_info, dict):
                     roi_rect = direction_info.get('roi_rect')
                     if roi_rect:
                         dx1 = int(roi_rect.get('x', 0))
@@ -780,7 +789,7 @@ class DetectionThread(QThread):
                         color = (0, 200, 255) if direction_info.get('side') == 'left' else (255, 200, 0)
                         cv2.rectangle(annotated_frame, (mx1, my1), (mx2, my2), color, 2)
 
-                if nick_box_data and self.current_facing in ("left", "right"):
+                if draw_enabled and nick_box_data and self.current_facing in ("left", "right"):
                     frame_height, frame_width = annotated_frame.shape[:2]
                     x1 = int(nick_box_data.get('x', 0))
                     y1 = int(nick_box_data.get('y', 0))
@@ -812,49 +821,53 @@ class DetectionThread(QThread):
                 self.perf_stats["post_ms"] = (post_end - post_start) * 1000
                 self.perf_stats["total_ms"] = (post_end - loop_start_time) * 1000
 
-                cv2.rectangle(annotated_frame, (5, 5), (180, 80), (0, 0, 0), -1)
-                fps_text = f"FPS {self.fps:.1f}"
-                cv2.putText(
-                    annotated_frame,
-                    fps_text,
-                    (12, 32),
-                    cv2.FONT_HERSHEY_SIMPLEX,
-                    0.7,
-                    (0, 255, 0),
-                    2,
-                )
+                if draw_enabled:
+                    cv2.rectangle(annotated_frame, (5, 5), (180, 80), (0, 0, 0), -1)
+                    fps_text = f"FPS {self.fps:.1f}"
+                    cv2.putText(
+                        annotated_frame,
+                        fps_text,
+                        (12, 32),
+                        cv2.FONT_HERSHEY_SIMPLEX,
+                        0.7,
+                        (0, 255, 0),
+                        2,
+                    )
 
-                authority_key = (self.current_authority or "").lower()
-                if authority_key == "hunt":
-                    authority_display = "Hunt"
-                    authority_color = (0, 0, 255)
-                elif authority_key == "map":
-                    authority_display = "Map"
-                    authority_color = (255, 0, 0)
-                elif authority_key:
-                    authority_display = authority_key.title()
-                    authority_color = (200, 200, 200)
+                    authority_key = (self.current_authority or "").lower()
+                    if authority_key == "hunt":
+                        authority_display = "Hunt"
+                        authority_color = (0, 0, 255)
+                    elif authority_key == "map":
+                        authority_display = "Map"
+                        authority_color = (255, 0, 0)
+                    elif authority_key:
+                        authority_display = authority_key.title()
+                        authority_color = (200, 200, 200)
+                    else:
+                        authority_display = "-"
+                        authority_color = (200, 200, 200)
+
+                    cv2.putText(
+                        annotated_frame,
+                        authority_display,
+                        (12, 60),
+                        cv2.FONT_HERSHEY_SIMPLEX,
+                        0.7,
+                        authority_color,
+                        2,
+                    )
+
+                    render_start = time.perf_counter()
+                    rgb_image = cv2.cvtColor(annotated_frame, cv2.COLOR_BGR2RGB)
+                    h, w, ch = rgb_image.shape
+                    bytes_per_line = ch * w
+                    qt_image = QImage(rgb_image.data, w, h, bytes_per_line, QImage.Format.Format_RGB888)
+                    render_end = time.perf_counter()
+                    self.perf_stats["render_ms"] = (render_end - render_start) * 1000
                 else:
-                    authority_display = "-"
-                    authority_color = (200, 200, 200)
-
-                cv2.putText(
-                    annotated_frame,
-                    authority_display,
-                    (12, 60),
-                    cv2.FONT_HERSHEY_SIMPLEX,
-                    0.7,
-                    authority_color,
-                    2,
-                )
-
-                render_start = time.perf_counter()
-                rgb_image = cv2.cvtColor(annotated_frame, cv2.COLOR_BGR2RGB)
-                h, w, ch = rgb_image.shape
-                bytes_per_line = ch * w
-                qt_image = QImage(rgb_image.data, w, h, bytes_per_line, QImage.Format.Format_RGB888)
-                render_end = time.perf_counter()
-                self.perf_stats["render_ms"] = (render_end - render_start) * 1000
+                    qt_image = None
+                    self.perf_stats["render_ms"] = 0.0
 
                 payload["perf"] = {
                     "fps": float(self.fps),
@@ -882,7 +895,8 @@ class DetectionThread(QThread):
                 emit_start = time.perf_counter()
                 self.detections_ready.emit(payload)
 
-                self.frame_ready.emit(qt_image.copy())
+                if qt_image is not None:
+                    self.frame_ready.emit(qt_image.copy())
                 emit_end = time.perf_counter()
                 self.perf_stats["emit_ms"] = (emit_end - emit_start) * 1000
                 self.msleep(15)
@@ -1369,6 +1383,7 @@ class DetectionThread(QThread):
                 'width': float(box_w),
                 'height': float(box_h),
             }
+            include_overlay_details = bool(self.show_nameplate_overlay)
             match_entry = {
                 'class_id': class_id,
                 'class_name': item.get('class_name'),
@@ -1376,13 +1391,15 @@ class DetectionThread(QThread):
                 'threshold': float(threshold),
                 'matched': bool(matched),
                 'roi': roi_dict,
-                'template_id': best_template_id,
                 'source_box': box_dict,
                 'track_id': item.get('track_id'),
                 'source': item.get('source', 'yolo'),
-                'box_uid': item.get('box_uid'),
-                'match_rect': match_rect,
             }
+            if include_overlay_details:
+                match_entry['template_id'] = best_template_id
+                match_entry['box_uid'] = item.get('box_uid')
+                if match_rect is not None:
+                    match_entry['match_rect'] = match_rect
             if matched:
                 item['nameplate_confirmed'] = True
                 item['nameplate_score'] = float(best_score)
