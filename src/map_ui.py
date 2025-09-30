@@ -375,6 +375,7 @@ class MapTab(QWidget):
             self.status_monitor: Optional[StatusMonitorThread] = None
             self._status_config: StatusMonitorConfig = StatusMonitorConfig.default()
             self._status_log_lines = ["HP: --", "MP: --"]
+            self._status_last_ui_update = {'hp': 0.0, 'mp': 0.0}
             self._status_last_command_ts = {'hp': 0.0, 'mp': 0.0}
             self._status_active_resource: Optional[str] = None
             self._status_saved_command: Optional[tuple[str, object]] = None
@@ -880,11 +881,27 @@ class MapTab(QWidget):
 
         self._walk_teleport_probability_text = "텔레포트 확률: 0.0%"
         self._last_detection_log_body = ""
-        self._render_detection_log(None)
+        self._pending_detection_html = ""
+        self._last_detection_rendered_html = ""
+        self._last_detection_render_ts = 0.0
+        self._detection_render_min_interval = 0.2
+        self._general_log_last_entry = None
+        self._general_log_last_ts = 0.0
+        self._general_log_min_interval = 0.2
+        self._deferred_general_logs = []
+        self._deferred_general_logs_limit = 200
+        self._ui_display_enabled = True
+        self._status_last_ui_update = {'hp': 0.0, 'mp': 0.0}
+        self._status_update_min_interval = 0.2
+        self._render_detection_log(None, force=True)
 
         # 우측 레이아웃 (네비게이터 + 실시간 뷰)
         view_header_layout = QHBoxLayout()
         view_header_layout.addWidget(QLabel("실시간 미니맵 뷰 (휠: 확대/축소, 드래그: 이동)"))
+        self.display_enabled_checkbox = QCheckBox("미니맵 표시")
+        self.display_enabled_checkbox.setChecked(True)
+        self.display_enabled_checkbox.toggled.connect(self._handle_display_toggle)
+        view_header_layout.addWidget(self.display_enabled_checkbox)
         self.center_on_player_checkbox = QCheckBox("캐릭터 중심")
         self.center_on_player_checkbox.setChecked(True)
         view_header_layout.addWidget(self.center_on_player_checkbox)
@@ -2820,6 +2837,11 @@ class MapTab(QWidget):
                 height = int(clamped_roi.height() * scale_y)
 
                 self.minimap_region = {'top': top, 'left': left, 'width': width, 'height': height}
+                if width * height > (512 * 512):
+                    self.update_general_log(
+                        f"경고: 선택한 미니맵 영역({width}x{height})이 비정상적으로 큽니다. 미니맵만 포함하도록 다시 지정하는 것을 권장합니다.",
+                        "orange",
+                    )
                 self.update_general_log(f"새 미니맵 범위 지정 완료: {self.minimap_region}", "black")
                 self.save_profile_data()
             else:
@@ -3106,13 +3128,14 @@ class MapTab(QWidget):
                 self.initial_delay_active = True
 
                 self._status_log_lines = ["HP: --", "MP: --"]
+                self._status_last_ui_update = {'hp': 0.0, 'mp': 0.0}
                 self._status_active_resource = None
                 self._status_saved_command = None
                 self._last_regular_command = None
                 self._status_last_command_ts = {'hp': 0.0, 'mp': 0.0}
                 if self.status_monitor:
                     self.status_monitor.set_tab_active(map_tab=True)
-                self._render_detection_log(self._last_detection_log_body)
+                self._render_detection_log(self._last_detection_log_body, force=True)
 
                 if self.debug_view_checkbox.isChecked():
                     if not self.debug_dialog:
@@ -3194,7 +3217,8 @@ class MapTab(QWidget):
                 self._status_active_resource = None
                 self._status_saved_command = None
                 self._status_log_lines = ["HP: --", "MP: --"]
-                self._render_detection_log(self._last_detection_log_body)
+                self._status_last_ui_update = {'hp': 0.0, 'mp': 0.0}
+                self._render_detection_log(self._last_detection_log_body, force=True)
 
                 if self.debug_dialog:
                     self.debug_dialog.close()
@@ -6314,10 +6338,35 @@ class MapTab(QWidget):
         return None
 
     def update_general_log(self, message, color):
+        entry = (message, color)
+        now = time.time()
+
+        if (
+            self._general_log_last_entry == entry
+            and (now - self._general_log_last_ts) < self._general_log_min_interval
+        ):
+            return
+
+        self._general_log_last_entry = entry
+        self._general_log_last_ts = now
+
+        if not self._ui_display_enabled:
+            if len(self._deferred_general_logs) >= self._deferred_general_logs_limit:
+                self._deferred_general_logs.pop(0)
+            self._deferred_general_logs.append(entry)
+            return
+
+        self._write_general_log_to_viewer(message, color)
+
+    def _write_general_log_to_viewer(self, message: str, color: str) -> None:
+        self._general_log_last_entry = (message, color)
+        self._general_log_last_ts = time.time()
         self.general_log_viewer.append(f'<font color="{color}">{message}</font>')
-        self.general_log_viewer.verticalScrollBar().setValue(self.general_log_viewer.verticalScrollBar().maximum())
-        
-    def _render_detection_log(self, body_html: str | None) -> None:
+        self.general_log_viewer.verticalScrollBar().setValue(
+            self.general_log_viewer.verticalScrollBar().maximum()
+        )
+
+    def _render_detection_log(self, body_html: str | None, *, force: bool = False) -> None:
         self._last_detection_log_body = body_html or ""
         probability_html = f"<span>{self._walk_teleport_probability_text}</span>"
         status_html = "<br>".join(self._status_log_lines) if getattr(self, '_status_log_lines', None) else ""
@@ -6328,7 +6377,44 @@ class MapTab(QWidget):
         if self._last_detection_log_body:
             parts.append(self._last_detection_log_body)
         combined = "<br>".join(part for part in parts if part)
+
+        self._pending_detection_html = combined
+
+        if not self._ui_display_enabled:
+            return
+
+        if not force and combined == self._last_detection_rendered_html:
+            return
+
+        now = time.time()
         self.detection_log_viewer.setHtml(combined)
+        self._last_detection_rendered_html = combined
+        self._last_detection_render_ts = now
+
+    def _flush_deferred_general_logs(self) -> None:
+        if not self._deferred_general_logs:
+            return
+
+        for message, color in self._deferred_general_logs:
+            self._write_general_log_to_viewer(message, color)
+        self._deferred_general_logs.clear()
+
+    def _handle_display_toggle(self, checked: bool) -> None:
+        self._ui_display_enabled = bool(checked)
+        if hasattr(self, 'minimap_view_label'):
+            self.minimap_view_label.set_display_enabled(self._ui_display_enabled)
+
+        if not self._ui_display_enabled:
+            if hasattr(self, 'minimap_view_label'):
+                self.minimap_view_label.setText("실시간 표시 꺼짐")
+            return
+
+        if hasattr(self, 'minimap_view_label') and not self.is_detection_running:
+            self.minimap_view_label.setText("탐지를 시작하세요.")
+
+        self._flush_deferred_general_logs()
+        if self._pending_detection_html:
+            self._render_detection_log(self._last_detection_log_body, force=True)
 
     def attach_status_monitor(self, monitor: StatusMonitorThread, data_manager) -> None:
         self.status_monitor = monitor
@@ -6352,7 +6438,7 @@ class MapTab(QWidget):
                 current = self._status_log_lines[idx]
                 if current.endswith('비활성'):
                     self._status_log_lines[idx] = f"{resource.upper()}: --%"
-        self._render_detection_log(self._last_detection_log_body)
+        self._render_detection_log(self._last_detection_log_body, force=True)
 
     def _handle_status_snapshot(self, payload: dict) -> None:
         if not self.is_detection_running:
@@ -6372,9 +6458,16 @@ class MapTab(QWidget):
             if not isinstance(value, (int, float)):
                 continue
             display = f"{resource.upper()}: {float(value):.1f}%"
-            self._status_log_lines[idx] = display
+            last_text = self._status_log_lines[idx]
+            last_ts = self._status_last_ui_update.get(resource, 0.0)
+            changed = display != last_text
+            if not changed and (timestamp - last_ts) < self._status_update_min_interval:
+                continue
+            if changed or (timestamp - last_ts) >= self._status_update_min_interval:
+                self._status_log_lines[idx] = display
+                self._status_last_ui_update[resource] = timestamp
+                updated = True
             self._maybe_trigger_status_command(resource, float(value), timestamp)
-            updated = True
         if updated:
             self._render_detection_log(self._last_detection_log_body)
 

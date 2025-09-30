@@ -37,13 +37,14 @@ class MinimapCaptureThread(QThread):
 
     def __init__(self, minimap_region, target_fps=None):
         super().__init__()
-        self.minimap_region = minimap_region
+        self.minimap_region = self._normalize_region(minimap_region)
         self.target_fps = target_fps or MapConfig["target_fps"]
         self.is_running = False
         self.latest_frame = None
         self._lock = threading.Lock()
         self._manager = get_capture_manager()
         self._consumer_name = f"minimap:{id(self)}"
+        self._roi_warn_area = 512 * 512
 
     def run(self):
         if not self.minimap_region:
@@ -52,6 +53,7 @@ class MinimapCaptureThread(QThread):
         self.is_running = True
         interval = 1.0 / max(1, self.target_fps)
         self._manager.register_region(self._consumer_name, self.minimap_region)
+        self._maybe_warn_large_roi(self.minimap_region)
         try:
             while self.is_running:
                 start_t = time.time()
@@ -90,13 +92,35 @@ class MinimapCaptureThread(QThread):
     def update_region(self, region: dict) -> None:
         if not isinstance(region, dict):
             return
-        self.minimap_region = region
+        self.minimap_region = self._normalize_region(region)
+        self._maybe_warn_large_roi(self.minimap_region)
         if self.isRunning():
             try:
-                self._manager.update_region(self._consumer_name, region)
+                if self.minimap_region:
+                    self._manager.update_region(self._consumer_name, self.minimap_region)
             except KeyError:
                 # 등록이 아직 안 된 상태라면 다음 run 루프에서 등록됨
                 pass
+
+    @staticmethod
+    def _normalize_region(region: dict | None) -> dict | None:
+        if not region:
+            return None
+        left = int(region.get('left', 0))
+        top = int(region.get('top', 0))
+        width = max(1, int(region.get('width', 0)))
+        height = max(1, int(region.get('height', 0)))
+        return {'left': left, 'top': top, 'width': width, 'height': height}
+
+    def _maybe_warn_large_roi(self, region: dict | None) -> None:
+        if not region:
+            return
+        area = int(region.get('width', 0)) * int(region.get('height', 0))
+        if area > self._roi_warn_area:
+            print(
+                f"[MinimapCaptureThread] 경고: 미니맵 ROI의 크기가 {region.get('width')}x{region.get('height')} 입니다. "
+                "맵 탭은 미니맵 영역만 캡처해야 합니다."
+            )
 
 
 def safe_read_latest_frame(capture_thread):
@@ -130,6 +154,10 @@ class AnchorDetectionThread(QThread):
         self.feature_templates = {}
         self._downscale = MapConfig["downscale"]
         self._frame_index = 0
+        self._template_runtime: dict[str, dict[str, float]] = {}
+        self._roi_failure_before_backoff = 3
+        self._roi_max_scale = 3.0
+        self._fallback_base_interval = 0.2
 
         for fid, fdata in self.all_key_features.items():
             try:
@@ -141,11 +169,24 @@ class AnchorDetectionThread(QThread):
 
                 tpl_gray = cv2.cvtColor(template, cv2.COLOR_BGR2GRAY)
                 tpl_small = cv2.resize(tpl_gray, (0, 0), fx=self._downscale, fy=self._downscale, interpolation=cv2.INTER_AREA)
+                t_h, t_w = tpl_small.shape
 
                 self.feature_templates[fid] = {
                     "template_gray_small": tpl_small,
                     "threshold": fdata.get('threshold', MapConfig["detection_threshold_default"]),
                     "size": QSize(template.shape[1], template.shape[0]),
+                }
+
+                base_radius = max(int(max(t_w, t_h) * 1.2), 16)
+                max_radius = max(int(base_radius * self._roi_max_scale), base_radius + 40)
+                self._template_runtime[fid] = {
+                    'base_radius': base_radius,
+                    'roi_radius': base_radius,
+                    'max_radius': max_radius,
+                    'failure_count': 0,
+                    'skip_until_ts': 0.0,
+                    'next_fallback_ts': 0.0,
+                    'last_success_ts': 0.0,
                 }
             except Exception as e:
                 print(f"[AnchorDetectionThread] 템플릿 전처리 실패 ({fid}): {e}")
@@ -215,18 +256,44 @@ class AnchorDetectionThread(QThread):
 
                 all_detected_features = []
                 feature_start = time.perf_counter()
+                perf['fallback_scan_count'] = 0
+                perf['skipped_templates'] = 0
+
                 for fid, tpl_data in self.feature_templates.items():
                     tpl_small = tpl_data["template_gray_small"]
                     t_h, t_w = tpl_small.shape
-                    search_result = None
+                    runtime = self._template_runtime.get(fid)
+                    if runtime is None:
+                        base_radius = max(int(max(t_w, t_h) * 1.2), 16)
+                        max_radius = max(int(base_radius * self._roi_max_scale), base_radius + 40)
+                        runtime = {
+                            'base_radius': base_radius,
+                            'roi_radius': base_radius,
+                            'max_radius': max_radius,
+                            'failure_count': 0,
+                            'skip_until_ts': 0.0,
+                            'next_fallback_ts': 0.0,
+                            'last_success_ts': 0.0,
+                        }
+                        self._template_runtime[fid] = runtime
 
+                    now_ts = time.time()
+                    if now_ts < runtime.get('skip_until_ts', 0.0):
+                        perf['skipped_templates'] += 1
+                        continue
+
+                    search_result = None
                     last_pos = self.last_positions.get(fid)
-                    if last_pos is not None:
+                    roi_radius = int(runtime.get('roi_radius', runtime.get('base_radius', 24)))
+
+                    if last_pos is not None and roi_radius > 0:
                         lx = int(last_pos.x() * self._downscale)
                         ly = int(last_pos.y() * self._downscale)
-                        radius = max(int(max(t_w, t_h) * 1.5), 30)
-                        x1, y1 = max(0, lx - radius), max(0, ly - radius)
-                        x2, y2 = min(frame_gray_small.shape[1], lx + radius), min(frame_gray_small.shape[0], ly + radius)
+                        x1, y1 = max(0, lx - roi_radius), max(0, ly - roi_radius)
+                        x2, y2 = (
+                            min(frame_gray_small.shape[1], lx + roi_radius),
+                            min(frame_gray_small.shape[0], ly + roi_radius),
+                        )
                         roi = frame_gray_small[y1:y2, x1:x2]
 
                         if roi.shape[0] >= t_h and roi.shape[1] >= t_w:
@@ -241,23 +308,70 @@ class AnchorDetectionThread(QThread):
                                     'conf': max_val,
                                     'size': tpl_data['size'],
                                 }
+                                runtime['failure_count'] = 0
+                                runtime['roi_radius'] = runtime.get('base_radius', roi_radius)
+                                runtime['skip_until_ts'] = 0.0
+                                runtime['next_fallback_ts'] = now_ts + self._fallback_base_interval
+                                runtime['last_success_ts'] = now_ts
+                            else:
+                                runtime['failure_count'] = runtime.get('failure_count', 0) + 1
+                                runtime['roi_radius'] = min(
+                                    runtime.get('roi_radius', roi_radius) + runtime.get('base_radius', roi_radius),
+                                    runtime.get('max_radius', roi_radius * 2),
+                                )
+                        else:
+                            runtime['failure_count'] = runtime.get('failure_count', 0) + 1
+                    else:
+                        runtime['roi_radius'] = runtime.get('base_radius', max(int(max(t_w, t_h) * 1.2), 16))
 
+                    fallback_attempted = False
                     if search_result is None:
-                        res = cv2.matchTemplate(frame_gray_small, tpl_small, cv2.TM_CCOEFF_NORMED)
-                        _, max_val, _, max_loc = cv2.minMaxLoc(res)
-                        if max_val >= tpl_data["threshold"]:
-                            found_x = max_loc[0] / self._downscale
-                            found_y = max_loc[1] / self._downscale
-                            search_result = {
-                                'id': fid,
-                                'local_pos': QPointF(found_x, found_y),
-                                'conf': max_val,
-                                'size': tpl_data['size'],
-                            }
+                        failure_count = runtime.get('failure_count', 0)
+                        should_attempt_fallback = True
+
+                        if failure_count >= self._roi_failure_before_backoff:
+                            next_allowed = runtime.get('next_fallback_ts', 0.0)
+                            if now_ts < next_allowed:
+                                should_attempt_fallback = False
+                            else:
+                                runtime['next_fallback_ts'] = now_ts + min(1.5, self._fallback_base_interval * max(1, failure_count))
+
+                        if should_attempt_fallback:
+                            fallback_attempted = True
+                            res = cv2.matchTemplate(frame_gray_small, tpl_small, cv2.TM_CCOEFF_NORMED)
+                            _, max_val, _, max_loc = cv2.minMaxLoc(res)
+                            if max_val >= tpl_data["threshold"]:
+                                found_x = max_loc[0] / self._downscale
+                                found_y = max_loc[1] / self._downscale
+                                search_result = {
+                                    'id': fid,
+                                    'local_pos': QPointF(found_x, found_y),
+                                    'conf': max_val,
+                                    'size': tpl_data['size'],
+                                }
+                                runtime['failure_count'] = 0
+                                runtime['roi_radius'] = runtime.get('base_radius', roi_radius)
+                                runtime['skip_until_ts'] = 0.0
+                                ts_now = time.time()
+                                runtime['last_success_ts'] = ts_now
+                                runtime['next_fallback_ts'] = ts_now + self._fallback_base_interval
+                            else:
+                                runtime['failure_count'] = max(runtime.get('failure_count', 0), 1)
+                                if runtime['failure_count'] >= self._roi_failure_before_backoff:
+                                    cooldown = min(1.5, self._fallback_base_interval * runtime['failure_count'])
+                                    runtime['skip_until_ts'] = time.time() + cooldown
+                                self.last_positions[fid] = None
+                        else:
+                            perf['skipped_templates'] += 1
+
+                    if fallback_attempted:
+                        perf['fallback_scan_count'] += 1
 
                     if search_result:
                         all_detected_features.append(search_result)
                         self.last_positions[fid] = search_result['local_pos']
+                    elif runtime.get('failure_count', 0) >= self._roi_failure_before_backoff:
+                        self.last_positions[fid] = None
 
                 perf['feature_match_ms'] = (time.perf_counter() - feature_start) * 1000.0
                 perf['features_detected'] = len(all_detected_features)
@@ -302,6 +416,8 @@ class AnchorDetectionThread(QThread):
                 perf.setdefault('feature_match_ms', 0.0)
                 perf.setdefault('emit_ms', 0.0)
                 perf.setdefault('features_detected', 0)
+                perf.setdefault('fallback_scan_count', 0)
+                perf.setdefault('skipped_templates', 0)
                 perf.setdefault('player_icon_count', 0)
                 perf.setdefault('other_player_icon_count', 0)
                 perf.setdefault('frame_width', 0)

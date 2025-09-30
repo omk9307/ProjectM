@@ -97,6 +97,12 @@ class CaptureManager:
                 "seq": -1,
                 "consumed_seq": -1,
             }
+            if name.startswith("minimap:"):
+                area = int(norm_region["width"]) * int(norm_region["height"])  # type: ignore[index]
+                if area > 512 * 512:
+                    print(
+                        f"[CaptureManager] 경고: {name} 소비자가 등록한 ROI 크기 {norm_region['width']}x{norm_region['height']}가 큽니다."
+                    )
             self._recompute_base_region_locked()
         self._wake_event.set()
 

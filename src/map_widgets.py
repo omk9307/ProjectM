@@ -415,6 +415,13 @@ class RealtimeMinimapView(QLabel):
         self._cached_geometry = {}
         self._cached_key_features = {}
         self._cached_global_positions = {}
+        self._display_enabled = True
+        self._pending_update = False
+        self._cached_static_pixmap = None
+        self._cached_static_opts_signature: tuple = ()
+        self._cached_static_bounds = QRectF()
+        self._cached_static_dirty = True
+        self._cached_feature_pixmaps: dict[str, QPixmap] = {}
     
     def wheelEvent(self, event):
         """마우스 휠 스크롤로 줌 레벨을 조절합니다."""
@@ -456,13 +463,38 @@ class RealtimeMinimapView(QLabel):
         if global_positions is not None:
             self._cached_global_positions = global_positions
 
+        self._cached_static_dirty = True
+        self._build_feature_pixmap_cache()
+
+        if self.parent_tab and hasattr(self.parent_tab, 'full_map_bounding_rect'):
+            bounding_rect = self.parent_tab.full_map_bounding_rect
+            if bounding_rect and not bounding_rect.isNull():
+                self.rebuild_static_overlay_now()
+
         # 프로필이 초기화될 때 기존 렌더링 잔상을 지우기 위한 기본 리셋
         if not geometry_data:
             self.active_features = []
             self.my_player_rects = []
             self.other_player_rects = []
             self.final_player_pos_global = None
-        self.update()
+        if self._display_enabled:
+            self.update()
+        else:
+            self._pending_update = True
+
+    def _build_feature_pixmap_cache(self) -> None:
+        self._cached_feature_pixmaps.clear()
+        for feature_id, feature_data in self._cached_key_features.items():
+            image_b64 = feature_data.get('image_base64') if isinstance(feature_data, dict) else None
+            if not image_b64:
+                continue
+            try:
+                pixmap = QPixmap()
+                pixmap.loadFromData(base64.b64decode(image_b64))
+            except Exception:
+                continue
+            if not pixmap.isNull():
+                self._cached_feature_pixmaps[feature_id] = pixmap
 
     def update_view_data(self, camera_center, active_features, my_players, other_players, target_wp_id, reached_wp_id, final_player_pos, is_forward, intermediate_pos, intermediate_type, nav_action, intermediate_node_type):
         """MapTab으로부터 렌더링에 필요한 최신 데이터를 받습니다."""
@@ -478,7 +510,212 @@ class RealtimeMinimapView(QLabel):
         self.intermediate_target_type = intermediate_type
         self.navigation_action = nav_action
         self.intermediate_node_type = intermediate_node_type
-        self.update()
+        if self._display_enabled:
+            self.update()
+        else:
+            self._pending_update = True
+
+    def set_display_enabled(self, enabled: bool) -> None:
+        self._display_enabled = bool(enabled)
+        if self._display_enabled and self._pending_update:
+            self._pending_update = False
+            self.update()
+
+    def _make_render_opts_signature(self, render_opts: dict) -> tuple:
+        keys = ('terrain', 'objects', 'jump_links', 'forbidden_walls')
+        return tuple((key, bool(render_opts.get(key, True))) for key in keys)
+
+    def _ensure_static_overlay(self, render_opts: dict, bounding_rect: QRectF) -> None:
+        opts_sig = self._make_render_opts_signature(render_opts)
+        if (
+            self._cached_static_dirty
+            or self._cached_static_pixmap is None
+            or self._cached_static_pixmap.isNull()
+            or self._cached_static_bounds != bounding_rect
+            or self._cached_static_opts_signature != opts_sig
+        ):
+            self._build_static_overlay(render_opts, bounding_rect, opts_sig)
+
+    def _build_static_overlay(self, render_opts: dict, bounding_rect: QRectF, opts_sig: tuple) -> None:
+        self._cached_static_dirty = False
+        self._cached_static_bounds = QRectF(bounding_rect)
+        self._cached_static_opts_signature = opts_sig
+        self._cached_static_pixmap = None
+
+        if bounding_rect.isNull():
+            return
+
+        size = bounding_rect.size().toSize()
+        if size.isEmpty():
+            return
+
+        pixmap = QPixmap(size)
+        pixmap.fill(Qt.GlobalColor.transparent)
+
+        painter = QPainter(pixmap)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.translate(-bounding_rect.topLeft())
+
+        geometry_data = self._cached_geometry if isinstance(self._cached_geometry, dict) else {}
+
+        # 지형선 및 그룹 이름을 캐싱된 레이어에 그리기
+        if render_opts.get('terrain', True):
+            terrain_lines = geometry_data.get("terrain_lines", [])
+            if terrain_lines:
+                from collections import defaultdict, deque
+
+                adj = defaultdict(list)
+                lines_by_id = {line['id']: line for line in terrain_lines if 'id' in line}
+
+                point_to_lines = defaultdict(list)
+                for line in terrain_lines:
+                    for p in line.get('points', []):
+                        point_to_lines[tuple(p)].append(line.get('id'))
+
+                for ids in point_to_lines.values():
+                    for i in range(len(ids)):
+                        for j in range(i + 1, len(ids)):
+                            a_id, b_id = ids[i], ids[j]
+                            if a_id is None or b_id is None:
+                                continue
+                            adj[a_id].append(b_id)
+                            adj[b_id].append(a_id)
+
+                visited = set()
+                all_groups = []
+                for line_id in lines_by_id:
+                    if line_id in visited:
+                        continue
+                    current_group = []
+                    q = deque([line_id])
+                    visited.add(line_id)
+                    while q:
+                        current_id = q.popleft()
+                        current_group.append(lines_by_id[current_id])
+                        for neighbor_id in adj[current_id]:
+                            if neighbor_id not in visited:
+                                visited.add(neighbor_id)
+                                q.append(neighbor_id)
+                    if current_group:
+                        all_groups.append(current_group)
+
+                groups_by_floor = defaultdict(list)
+                for group in all_groups:
+                    floor = group[0].get('floor', 0)
+                    groups_by_floor[floor].append(group)
+
+                dynamic_group_names = {}
+                for floor, groups in groups_by_floor.items():
+                    sorted_groups = sorted(
+                        groups,
+                        key=lambda g: sum(p[0] for line in g for p in line.get('points', []))
+                        / max(1, sum(len(line.get('points', [])) for line in g))
+                    )
+                    for i, group in enumerate(sorted_groups):
+                        first_line = group[0]
+                        dynamic_group_names[first_line['id']] = f"{floor}층_{chr(ord('A') + i)}"
+
+                painter.save()
+                for group in all_groups:
+                    pen = QPen(Qt.GlobalColor.magenta, 2)
+                    painter.setPen(pen)
+
+                    group_polygon_global = QPolygonF()
+                    for line_data in group:
+                        points = [QPointF(float(p[0]), float(p[1])) for p in line_data.get("points", [])]
+                        if len(points) < 2:
+                            continue
+                        painter.drawPolyline(QPolygonF(points))
+                        group_polygon_global += QPolygonF(points)
+
+                    first_line = group[0]
+                    group_name = dynamic_group_names.get(first_line['id'], f"{first_line.get('floor', 'N/A')}층")
+                    group_rect_global = group_polygon_global.boundingRect()
+                    if group_rect_global.isNull():
+                        continue
+                    font = QFont("맑은 고딕", 10, QFont.Weight.Bold)
+                    text_pos_global = QPointF(group_rect_global.center().x(), group_rect_global.bottom() + 4)
+                    tm = QFontMetrics(font)
+                    text_rect = tm.boundingRect(group_name)
+                    overlay_center = (text_pos_global - bounding_rect.topLeft()).toPoint()
+                    text_rect.moveCenter(overlay_center)
+                    self._draw_text_with_outline(
+                        painter,
+                        text_rect,
+                        Qt.AlignmentFlag.AlignCenter,
+                        group_name,
+                        font,
+                        Qt.GlobalColor.white,
+                        Qt.GlobalColor.black,
+                    )
+                painter.restore()
+
+        if render_opts.get('objects', True):
+            painter.save()
+            painter.setPen(QPen(QColor(255, 165, 0), 3))
+            for obj_data in geometry_data.get("transition_objects", []):
+                points = obj_data.get("points", [])
+                if len(points) != 2:
+                    continue
+                start = QPointF(float(points[0][0]), float(points[0][1]))
+                end = QPointF(float(points[1][0]), float(points[1][1]))
+                painter.drawLine(start, end)
+            painter.restore()
+
+        if render_opts.get('jump_links', True):
+            painter.save()
+            pen = QPen(QColor(0, 255, 0, 200), 2, Qt.PenStyle.DashLine)
+            painter.setPen(pen)
+            for jump_data in geometry_data.get("jump_links", []):
+                start = jump_data.get('start_vertex_pos')
+                end = jump_data.get('end_vertex_pos')
+                if not start or not end:
+                    continue
+                p1 = QPointF(float(start[0]), float(start[1]))
+                p2 = QPointF(float(end[0]), float(end[1]))
+                painter.drawLine(p1, p2)
+            painter.restore()
+
+        if render_opts.get('forbidden_walls', True):
+            painter.save()
+            for wall_data in geometry_data.get("forbidden_walls", []):
+                pos = wall_data.get('pos')
+                if not pos or len(pos) < 2:
+                    continue
+                global_point = QPointF(float(pos[0]), float(pos[1]))
+                color = QColor(220, 50, 50) if wall_data.get('enabled') else QColor(150, 90, 90)
+                outline = color.darker(150)
+
+                range_left = max(0.0, float(wall_data.get('range_left', 0.0)))
+                range_right = max(0.0, float(wall_data.get('range_right', 0.0)))
+                range_pen = QPen(QColor(70, 160, 255, 230), 2.0, Qt.PenStyle.SolidLine)
+                range_pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+                painter.setPen(range_pen)
+
+                if range_left > 0.0:
+                    left_global = QPointF(global_point.x() - range_left, global_point.y())
+                    painter.drawLine(left_global, global_point)
+
+                if range_right > 0.0:
+                    right_global = QPointF(global_point.x() + range_right, global_point.y())
+                    painter.drawLine(global_point, right_global)
+
+                dot_radius = 3.0
+                painter.setPen(QPen(outline, 1.5))
+                painter.setBrush(QBrush(color))
+                painter.drawEllipse(global_point, dot_radius, dot_radius)
+            painter.restore()
+
+        painter.end()
+        self._cached_static_pixmap = pixmap
+
+    def rebuild_static_overlay_now(self) -> None:
+        bounding_rect = self.parent_tab.full_map_bounding_rect
+        if not isinstance(bounding_rect, QRectF) or bounding_rect.isNull():
+            return
+        render_opts = self.parent_tab.render_options
+        opts_sig = self._make_render_opts_signature(render_opts)
+        self._build_static_overlay(render_opts, bounding_rect, opts_sig)
 
     def paintEvent(self, event):
         """
@@ -487,9 +724,12 @@ class RealtimeMinimapView(QLabel):
         배경 지도 위에 보기 옵션에 따라 모든 요소를 동적으로 렌더링합니다.
         """
         super().paintEvent(event)
+        if not self._display_enabled:
+            return
+
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        
+
         map_bg = self.parent_tab.full_map_pixmap
         bounding_rect = self.parent_tab.full_map_bounding_rect
 
@@ -514,166 +754,91 @@ class RealtimeMinimapView(QLabel):
         target_rect = QRectF(self.rect())
         painter.drawPixmap(target_rect, map_bg, image_source_rect)
 
+        render_opts = self.parent_tab.render_options
+        self._ensure_static_overlay(render_opts, bounding_rect)
+        if self._cached_static_pixmap and not self._cached_static_pixmap.isNull():
+            painter.drawPixmap(target_rect, self._cached_static_pixmap, image_source_rect)
+
         def global_to_local(global_pos):
             relative_pos = global_pos - source_rect.topLeft()
             return relative_pos * self.zoom_level
-
-        render_opts = self.parent_tab.render_options
-        
-        # ---  지형선 및 그룹 이름 렌더링 로직 전체 교체 ---
-        if render_opts.get('terrain', True):
-            painter.save()
-            
-            # 1. 지형 그룹화 로직 (FullMinimapEditorDialog에서 가져옴)
-            from collections import defaultdict, deque
-            terrain_lines = self.parent_tab.geometry_data.get("terrain_lines", [])
-            if terrain_lines:
-                adj = defaultdict(list)
-                lines_by_id = {line['id']: line for line in terrain_lines}
-                
-                point_to_lines = defaultdict(list)
-                for line in terrain_lines:
-                    for p in line['points']:
-                        point_to_lines[tuple(p)].append(line['id'])
-                
-                for p, ids in point_to_lines.items():
-                    for i in range(len(ids)):
-                        for j in range(i + 1, len(ids)):
-                            adj[ids[i]].append(ids[j])
-                            adj[ids[j]].append(ids[i])
-
-                visited = set()
-                all_groups = []
-                for line_id in lines_by_id:
-                    if line_id not in visited:
-                        current_group = []
-                        q = deque([line_id])
-                        visited.add(line_id)
-                        while q:
-                            current_id = q.popleft()
-                            current_group.append(lines_by_id[current_id])
-                            for neighbor_id in adj[current_id]:
-                                if neighbor_id not in visited:
-                                    visited.add(neighbor_id)
-                                    q.append(neighbor_id)
-                        all_groups.append(current_group)
-                
-                # 2. 층별 그룹 정렬 및 동적 이름 부여
-                groups_by_floor = defaultdict(list)
-                for group in all_groups:
-                    if group:
-                        floor = group[0].get('floor', 0)
-                        groups_by_floor[floor].append(group)
-                
-                dynamic_group_names = {} # key: 첫번째 line_id, value: "n층_A"
-                for floor, groups in groups_by_floor.items():
-                    # 각 그룹의 중심 x좌표 계산하여 정렬
-                    sorted_groups = sorted(groups, key=lambda g: sum(p[0] for line in g for p in line['points']) / sum(len(line['points']) for line in g if line.get('points')))
-                    for i, group in enumerate(sorted_groups):
-                        group_name = f"{floor}층_{chr(ord('A') + i)}"
-                        if group:
-                            first_line_id = group[0]['id']
-                            dynamic_group_names[first_line_id] = group_name
-
-                # 3. 그룹별로 지형선 및 이름 그리기
-                for group in all_groups:
-                    if not group: continue
-                    
-                    pen = QPen(Qt.GlobalColor.magenta, 2)
-                    painter.setPen(pen)
-                    
-                    group_polygon_global = QPolygonF()
-                    for line_data in group:
-                        points_global = [QPointF(p[0], p[1]) for p in line_data.get("points", [])]
-                        if len(points_global) >= 2:
-                            points_local = [global_to_local(p) for p in points_global]
-                            painter.drawPolyline(QPolygonF(points_local))
-                            group_polygon_global += QPolygonF(points_global)
-
-                    # 그룹의 동적 이름 표시
-                    first_line_id = group[0]['id']
-                    group_name_text = dynamic_group_names.get(first_line_id, f"{group[0].get('floor', 'N/A')}층")
-                    
-                    group_rect_global = group_polygon_global.boundingRect()
-                    font = QFont("맑은 고딕", 10, QFont.Weight.Bold) #실시간 미니맵 뷰 지형층 이름 폰트 크기
-                    
-                    # 이름 위치 계산 (글로벌 좌표 기준)
-                    text_pos_global = QPointF(group_rect_global.center().x(), group_rect_global.bottom() + 4)
-                    
-                    # 로컬 좌표로 변환하여 그리기
-                    text_pos_local = global_to_local(text_pos_global)
-                    
-                    # 텍스트가 화면 밖으로 나가는 것 방지 (간단한 클리핑)
-                    if self.rect().contains(text_pos_local.toPoint()):
-                        tm = QFontMetrics(font)
-                        text_rect_local = tm.boundingRect(group_name_text)
-                        text_rect_local.moveCenter(text_pos_local.toPoint())
-                        self._draw_text_with_outline(painter, text_rect_local, Qt.AlignmentFlag.AlignCenter, group_name_text, font, Qt.GlobalColor.white, Qt.GlobalColor.black)
-
-            painter.restore()
-
-        if render_opts.get('objects', True):
-            painter.save()
-            painter.setPen(QPen(QColor(255, 165, 0), 3))
-            for obj_data in self.parent_tab.geometry_data.get("transition_objects", []):
-                points = [global_to_local(QPointF(p[0], p[1])) for p in obj_data.get("points", [])]
-                if len(points) == 2:
-                    painter.drawLine(points[0], points[1])
-            painter.restore()
-        
-        if render_opts.get('jump_links', True):
-            painter.save()
-            pen = QPen(QColor(0, 255, 0, 200), 2, Qt.PenStyle.DashLine)
-            painter.setPen(pen)
-            for jump_data in self.parent_tab.geometry_data.get("jump_links", []):
-                p1 = global_to_local(QPointF(jump_data['start_vertex_pos'][0], jump_data['start_vertex_pos'][1]))
-                p2 = global_to_local(QPointF(jump_data['end_vertex_pos'][0], jump_data['end_vertex_pos'][1]))
-                painter.drawLine(p1, p2)
-            painter.restore()
 
         #핵심 지형 렌더링 (텍스트 스타일 변경) ---
         if render_opts.get('features', True):
             painter.save()
             realtime_conf_map = {f['id']: f['conf'] for f in self.active_features}
 
+            global_positions = self._cached_global_positions if isinstance(self._cached_global_positions, dict) else self.parent_tab.global_positions
+
             for feature_id, feature_data in self.parent_tab.key_features.items():
-                if feature_id in self.parent_tab.global_positions:
-                    global_pos = self.parent_tab.global_positions[feature_id]
-                    img_data = base64.b64decode(feature_data['image_base64'])
-                    pixmap = QPixmap(); pixmap.loadFromData(img_data)
-                    if pixmap.isNull(): continue
+                global_pos = global_positions.get(feature_id) if isinstance(global_positions, dict) else None
+                if global_pos is None:
+                    continue
 
-                    global_rect = QRectF(global_pos, QSizeF(pixmap.size()))
-                    local_top_left = global_to_local(global_rect.topLeft())
-                    local_rect = QRectF(local_top_left, global_rect.size() * self.zoom_level)
-                    painter.setBrush(Qt.BrushStyle.NoBrush)
-                    
-                    realtime_conf = realtime_conf_map.get(feature_id, 0.0)
-                    threshold = feature_data.get('threshold', 0.85)
-                    is_detected = realtime_conf >= threshold
+                pixmap = self._cached_feature_pixmaps.get(feature_id)
+                if not pixmap or pixmap.isNull():
+                    continue
 
-                    font_name = QFont("맑은 고딕", 9, QFont.Weight.Bold) # 실시간 뷰의 핵심 지형 이름 폰트 크기
-                    
-                    if is_detected:
-                        painter.setPen(QPen(QColor(0, 180, 255), 2, Qt.PenStyle.SolidLine))
-                        self._draw_text_with_outline(painter, local_rect.toRect(), Qt.AlignmentFlag.AlignCenter, feature_id, font_name, Qt.GlobalColor.white, Qt.GlobalColor.black)
-                    else:
-                        painter.setPen(QPen(QColor("gray"), 2, Qt.PenStyle.DashLine))
-                        self._draw_text_with_outline(painter, local_rect.toRect(), Qt.AlignmentFlag.AlignCenter, feature_id, font_name, QColor("#AAAAAA"), Qt.GlobalColor.black)
-                    
-                    #  미감지 시에도 realtime_conf를 사용하도록 수정 ---
-                    conf_text = f"{realtime_conf:.2f}"
-                    font_conf = QFont("맑은 고딕", 10)
-                    
-                    tm_conf = QFontMetrics(font_conf)
-                    conf_rect = tm_conf.boundingRect(conf_text)
-                    conf_rect.moveCenter(local_rect.center().toPoint())
-                    conf_rect.moveTop(int(local_rect.top()) - conf_rect.height() - 2)
-                    
-                    color = Qt.GlobalColor.yellow if is_detected else QColor("#AAAAAA")
-                    self._draw_text_with_outline(painter, conf_rect, Qt.AlignmentFlag.AlignCenter, conf_text, font_conf, color, Qt.GlobalColor.black)
-                    
-                    painter.drawRect(local_rect)
+                if not isinstance(global_pos, QPointF):
+                    try:
+                        global_pos = QPointF(float(global_pos[0]), float(global_pos[1]))
+                    except Exception:
+                        continue
+
+                global_rect = QRectF(global_pos, QSizeF(pixmap.size()))
+                local_top_left = global_to_local(global_rect.topLeft())
+                local_rect = QRectF(local_top_left, global_rect.size() * self.zoom_level)
+                painter.setBrush(Qt.BrushStyle.NoBrush)
+
+                realtime_conf = realtime_conf_map.get(feature_id, 0.0)
+                threshold = feature_data.get('threshold', 0.85)
+                is_detected = realtime_conf >= threshold
+
+                font_name = QFont("맑은 고딕", 9, QFont.Weight.Bold)
+
+                if is_detected:
+                    painter.setPen(QPen(QColor(0, 180, 255), 2, Qt.PenStyle.SolidLine))
+                    self._draw_text_with_outline(
+                        painter,
+                        local_rect.toRect(),
+                        Qt.AlignmentFlag.AlignCenter,
+                        feature_id,
+                        font_name,
+                        Qt.GlobalColor.white,
+                        Qt.GlobalColor.black,
+                    )
+                else:
+                    painter.setPen(QPen(QColor("gray"), 2, Qt.PenStyle.DashLine))
+                    self._draw_text_with_outline(
+                        painter,
+                        local_rect.toRect(),
+                        Qt.AlignmentFlag.AlignCenter,
+                        feature_id,
+                        font_name,
+                        QColor("#AAAAAA"),
+                        Qt.GlobalColor.black,
+                    )
+
+                conf_text = f"{realtime_conf:.2f}"
+                font_conf = QFont("맑은 고딕", 10)
+
+                tm_conf = QFontMetrics(font_conf)
+                conf_rect = tm_conf.boundingRect(conf_text)
+                conf_rect.moveCenter(local_rect.center().toPoint())
+                conf_rect.moveTop(int(local_rect.top()) - conf_rect.height() - 2)
+
+                color = Qt.GlobalColor.yellow if is_detected else QColor("#AAAAAA")
+                self._draw_text_with_outline(
+                    painter,
+                    conf_rect,
+                    Qt.AlignmentFlag.AlignCenter,
+                    conf_text,
+                    font_conf,
+                    color,
+                    Qt.GlobalColor.black,
+                )
+
+                painter.drawRect(local_rect)
             painter.restore()
 
             
@@ -788,40 +953,6 @@ class RealtimeMinimapView(QLabel):
                     
                     self._draw_text_with_outline(painter, arrival_rect, Qt.AlignmentFlag.AlignCenter, "도착", font_arrival, Qt.GlobalColor.yellow, Qt.GlobalColor.black)
 
-            painter.restore()
-
-        if render_opts.get('forbidden_walls', True):
-            painter.save()
-            for wall_data in self.parent_tab.geometry_data.get("forbidden_walls", []):
-                pos = wall_data.get('pos')
-                if not pos or len(pos) < 2:
-                    continue
-
-                global_point = QPointF(float(pos[0]), float(pos[1]))
-                local_point = global_to_local(global_point)
-
-                color = QColor(220, 50, 50) if wall_data.get('enabled') else QColor(150, 90, 90)
-                outline = color.darker(150)
-
-                range_left = max(0.0, float(wall_data.get('range_left', 0.0)))
-                range_right = max(0.0, float(wall_data.get('range_right', 0.0)))
-                range_pen = QPen(QColor(70, 160, 255, 230), max(1.5, self.zoom_level), Qt.PenStyle.SolidLine)
-                range_pen.setCapStyle(Qt.PenCapStyle.RoundCap)
-                painter.setPen(range_pen)
-
-                if range_left > 0.0:
-                    left_global = QPointF(global_point.x() - range_left, global_point.y())
-                    painter.drawLine(global_to_local(left_global), local_point)
-
-                if range_right > 0.0:
-                    right_global = QPointF(global_point.x() + range_right, global_point.y())
-                    painter.drawLine(local_point, global_to_local(right_global))
-
-                dot_radius = max(2.5, 2.5 * self.zoom_level * 0.6)
-                dot_rect = QRectF(local_point.x() - dot_radius, local_point.y() - dot_radius, dot_radius * 2, dot_radius * 2)
-                painter.setPen(QPen(outline, max(1.0, 0.9 * self.zoom_level)))
-                painter.setBrush(QBrush(color))
-                painter.drawEllipse(dot_rect)
             painter.restore()
 
         # ==================== v11.6.2 시각적 보정 로직 추가 시작 ====================
