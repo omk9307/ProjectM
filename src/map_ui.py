@@ -380,6 +380,11 @@ class MapTab(QWidget):
             self._player_icon_roi: QRect | None = None
             self._player_icon_roi_fail_streak = 0
             self._player_icon_roi_margin = 24
+            self._other_player_icon_roi: QRect | None = None
+            self._other_player_icon_fail_streak = 0
+            self._other_player_icon_roi_margin = 32
+            self._other_player_icon_roi_frames = 0
+            self._other_player_icon_fullscan_interval = 12
             self._ui_update_called_pending = False
             self._static_rebuild_ms_pending = 0.0
 
@@ -3032,6 +3037,22 @@ class MapTab(QWidget):
             return full_rect
         return expanded
 
+    def _expand_other_player_roi(self, rects: list[QRect], frame_w: int, frame_h: int) -> QRect:
+        if not rects:
+            return QRect(0, 0, frame_w, frame_h)
+
+        combined = QRect(rects[0])
+        for rect in rects[1:]:
+            combined = combined.united(rect)
+
+        margin = self._other_player_icon_roi_margin
+        expanded = combined.adjusted(-margin, -margin, margin, margin)
+        full_rect = QRect(0, 0, frame_w, frame_h)
+        expanded = expanded.intersected(full_rect)
+        if expanded.width() <= 0 or expanded.height() <= 0:
+            return combined.intersected(full_rect) if combined.intersects(full_rect) else full_rect
+        return expanded
+
     def find_player_icon(self, frame_bgr, frame_hsv=None):
         if frame_hsv is None:
             frame_hsv = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2HSV)
@@ -3071,11 +3092,71 @@ class MapTab(QWidget):
         if frame_hsv is None:
             frame_hsv = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2HSV)
 
-        mask1 = cv2.inRange(frame_hsv, OTHER_PLAYER_ICON_LOWER1, OTHER_PLAYER_ICON_UPPER1)
-        mask2 = cv2.inRange(frame_hsv, OTHER_PLAYER_ICON_LOWER2, OTHER_PLAYER_ICON_UPPER2)
-        mask = cv2.bitwise_or(mask1, mask2)
+        frame_h, frame_w = frame_bgr.shape[:2]
 
-        return self._extract_player_icon_rects_from_mask(mask)
+        def detect_in_region(x: int, y: int, w: int, h: int):
+            roi_hsv = frame_hsv[y:y + h, x:x + w]
+            if roi_hsv.size == 0:
+                return []
+            mask1 = cv2.inRange(roi_hsv, OTHER_PLAYER_ICON_LOWER1, OTHER_PLAYER_ICON_UPPER1)
+            mask2 = cv2.inRange(roi_hsv, OTHER_PLAYER_ICON_LOWER2, OTHER_PLAYER_ICON_UPPER2)
+            mask = cv2.bitwise_or(mask1, mask2)
+            return self._extract_player_icon_rects_from_mask(mask, offset_x=x, offset_y=y)
+
+        roi_rects: list[QRect] = []
+
+        if self._other_player_icon_roi is not None:
+            roi = self._other_player_icon_roi.intersected(QRect(0, 0, frame_w, frame_h))
+            if roi.width() > 0 and roi.height() > 0:
+                roi_rects = detect_in_region(roi.left(), roi.top(), roi.width(), roi.height())
+                if roi_rects:
+                    self._other_player_icon_fail_streak = 0
+                    self._other_player_icon_roi = self._expand_other_player_roi(roi_rects, frame_w, frame_h)
+                    self._other_player_icon_roi_frames += 1
+                else:
+                    self._other_player_icon_fail_streak += 1
+                    if self._other_player_icon_fail_streak >= 3:
+                        self._other_player_icon_roi = None
+                    self._other_player_icon_roi_frames = self._other_player_icon_fullscan_interval
+            else:
+                self._other_player_icon_roi = None
+                self._other_player_icon_roi_frames = self._other_player_icon_fullscan_interval
+        else:
+            self._other_player_icon_roi_frames = self._other_player_icon_fullscan_interval
+
+        need_full_scan = (
+            not roi_rects
+            or self._other_player_icon_roi_frames >= self._other_player_icon_fullscan_interval
+        )
+
+        full_rects: list[QRect] = []
+        if need_full_scan:
+            full_rects = detect_in_region(0, 0, frame_w, frame_h)
+            if full_rects:
+                self._other_player_icon_fail_streak = 0
+                self._other_player_icon_roi = self._expand_other_player_roi(full_rects, frame_w, frame_h)
+                self._other_player_icon_roi_frames = 0
+            else:
+                self._other_player_icon_fail_streak += 1
+                if self._other_player_icon_fail_streak >= 8:
+                    self._other_player_icon_roi = None
+                elif self._other_player_icon_fail_streak >= 4:
+                    self._other_player_icon_roi_frames = self._other_player_icon_fullscan_interval
+
+        if full_rects:
+            if roi_rects:
+                seen = set()
+                merged: list[QRect] = []
+                for rect in full_rects + roi_rects:
+                    key = (rect.left(), rect.top(), rect.width(), rect.height())
+                    if key in seen:
+                        continue
+                    seen.add(key)
+                    merged.append(rect)
+                return merged
+            return full_rects
+
+        return roi_rects
 
     def force_stop_detection(self) -> bool:
         stopped = False
@@ -3654,28 +3735,18 @@ class MapTab(QWidget):
         self.is_measuring_jump_time = True
         self.jump_measure_start_time = 0.0
 
-    def _on_detection_ready_impl(self, frame_bgr, found_features, my_player_rects, other_player_rects):
-        """
-        [MODIFIED] v14.3.1: UnboundLocalError 수정을 위해 로직 실행 순서 정상화.
-        - 1. final_player_pos를 가장 먼저 계산.
-        - 2. player_state를 최신화.
-        - 3. 계산된 위치/상태 값을 사용하는 부가 기능(프로파일링, 데이터 수집)을 마지막에 실행.
-        """
-        # [핵심 수정] 탐지 상태 플래그를 확인하여 경쟁 조건을 방지
-        if not self.is_detection_running:
-            return
+    def _estimate_player_alignment(self, found_features, my_player_rects):
+        """탐지된 특징과 플레이어 아이콘으로 전역 위치와 관련 정보를 계산합니다."""
+        reliable_features = [
+            f
+            for f in found_features
+            if f['id'] in self.key_features and f['conf'] >= self.key_features[f['id']].get('threshold', 0.85)
+        ]
 
-        if not my_player_rects:
-            self.update_detection_log_message("플레이어 아이콘 탐지 실패", "red")
-            if self.debug_dialog and self.debug_dialog.isVisible():
-                self.debug_dialog.update_debug_info(frame_bgr, {'all_features': found_features, 'inlier_ids': set(), 'player_pos_local': None})
-            return
+        valid_features_map = {
+            f['id']: f for f in reliable_features if f['id'] in self.global_positions
+        }
 
-        # --- [PATCH] 1. 위치 추정 로직을 가장 먼저 실행 ---
-        # 이 블록에서 final_player_pos가 계산되고 할당됩니다.
-        reliable_features = [f for f in found_features if f['id'] in self.key_features and f['conf'] >= self.key_features[f['id']].get('threshold', 0.85)]
-        
-        valid_features_map = {f['id']: f for f in reliable_features if f['id'] in self.global_positions}
         source_points = []
         dest_points = []
         feature_ids = []
@@ -3684,7 +3755,7 @@ class MapTab(QWidget):
             size = feature['size']
             local_pos = feature['local_pos']
             global_pos = self.global_positions[fid]
-            
+
             src_cx = local_pos.x() + size.width() / 2
             src_cy = local_pos.y() + size.height() / 2
             dst_cx = global_pos.x() + size.width() / 2
@@ -3693,30 +3764,45 @@ class MapTab(QWidget):
             dest_points.append([dst_cx, dst_cy])
             feature_ids.append(fid)
 
-        player_anchor_local = QPointF(my_player_rects[0].center().x(), float(my_player_rects[0].bottom()) + PLAYER_Y_OFFSET)
+        player_anchor_local = QPointF(
+            my_player_rects[0].center().x(),
+            float(my_player_rects[0].bottom()) + PLAYER_Y_OFFSET,
+        )
 
         avg_player_global_pos = None
         inlier_ids = set()
         transform_matrix = None
-        
+
         if len(source_points) >= 3:
             src_pts, dst_pts = np.float32(source_points), np.float32(dest_points)
-            matrix, inliers_mask = cv2.estimateAffinePartial2D(src_pts, dst_pts, method=cv2.RANSAC, ransacReprojThreshold=5.0)
+            matrix, inliers_mask = cv2.estimateAffinePartial2D(
+                src_pts,
+                dst_pts,
+                method=cv2.RANSAC,
+                ransacReprojThreshold=5.0,
+            )
 
             if matrix is not None and inliers_mask is not None and np.sum(inliers_mask) >= 3:
-                sx = np.sqrt(matrix[0,0]**2 + matrix[1,0]**2)
-                sy = np.sqrt(matrix[0,1]**2 + matrix[1,1]**2)
-                if (0.8 < sx < 1.2 and 0.8 < sy < 1.2 and 
-                    abs(matrix[0,1]) < 0.5 and abs(matrix[1,0]) < 0.5 and
-                    abs(matrix[0,2]) < 10000 and abs(matrix[1,2]) < 10000):
+                sx = np.sqrt(matrix[0, 0] ** 2 + matrix[1, 0] ** 2)
+                sy = np.sqrt(matrix[0, 1] ** 2 + matrix[1, 1] ** 2)
+                if (
+                    0.8 < sx < 1.2
+                    and 0.8 < sy < 1.2
+                    and abs(matrix[0, 1]) < 0.5
+                    and abs(matrix[1, 0]) < 0.5
+                    and abs(matrix[0, 2]) < 10000
+                    and abs(matrix[1, 2]) < 10000
+                ):
                     transform_matrix = matrix
                     inliers_mask = inliers_mask.flatten()
                     for i, fid in enumerate(feature_ids):
                         if inliers_mask[i]:
                             inlier_ids.add(fid)
-        
-        inlier_features = [valid_features_map[fid] for fid in inlier_ids] if inlier_ids else list(valid_features_map.values())
-        
+
+        inlier_features = [
+            valid_features_map[fid] for fid in inlier_ids
+        ] if inlier_ids else list(valid_features_map.values())
+
         if transform_matrix is not None:
             px, py = player_anchor_local.x(), player_anchor_local.y()
             transformed = (transform_matrix[:, :2] @ np.array([px, py])) + transform_matrix[:, 2]
@@ -3724,10 +3810,15 @@ class MapTab(QWidget):
         elif inlier_features:
             total_conf = sum(f['conf'] for f in inlier_features)
             if total_conf > 0:
-                w_sum_x, w_sum_y = 0, 0
+                w_sum_x, w_sum_y = 0.0, 0.0
                 for f in inlier_features:
-                    offset = player_anchor_local - (f['local_pos'] + QPointF(f['size'].width()/2, f['size'].height()/2))
-                    global_center = self.global_positions[f['id']] + QPointF(f['size'].width()/2, f['size'].height()/2)
+                    offset = player_anchor_local - (
+                        f['local_pos'] + QPointF(f['size'].width() / 2, f['size'].height() / 2)
+                    )
+                    global_center = self.global_positions[f['id']] + QPointF(
+                        f['size'].width() / 2,
+                        f['size'].height() / 2,
+                    )
                     pos = global_center + offset
                     w_sum_x += pos.x() * f['conf']
                     w_sum_y += pos.y() * f['conf']
@@ -3738,21 +3829,66 @@ class MapTab(QWidget):
                 avg_player_global_pos = self.smoothed_player_pos
             else:
                 self.update_detection_log_message("플레이어 전역 위치 추정 실패", "red")
-                return
+                return None
 
         alpha = 0.3
         if self.smoothed_player_pos is None:
             self.smoothed_player_pos = avg_player_global_pos
         else:
-            self.smoothed_player_pos = (avg_player_global_pos * alpha) + (self.smoothed_player_pos * (1 - alpha))
-        final_player_pos = self.smoothed_player_pos # <<< 여기서 final_player_pos가 할당됨
+            self.smoothed_player_pos = (
+                avg_player_global_pos * alpha
+                + self.smoothed_player_pos * (1 - alpha)
+            )
 
-        # --- [PATCH] 2. 상태 업데이트를 두 번째로 실행 ---
-        # 이 호출을 통해 self.player_state가 최신화됩니다.
+        final_player_pos = self.smoothed_player_pos
+        self.active_feature_info = inlier_features
+
+        return {
+            'final_player_pos': final_player_pos,
+            'player_anchor_local': player_anchor_local,
+            'inlier_ids': inlier_ids,
+            'inlier_features': inlier_features,
+            'reliable_features': reliable_features,
+            'transform_matrix': transform_matrix,
+        }
+
+    def _on_detection_ready_impl(self, frame_bgr, found_features, my_player_rects, other_player_rects):
+        """
+        [MODIFIED] v14.3.1: UnboundLocalError 수정을 위해 로직 실행 순서 정상화.
+        - 1. final_player_pos를 가장 먼저 계산.
+        - 2. player_state를 최신화.
+        - 3. 계산된 위치/상태 값을 사용하는 부가 기능(프로파일링, 데이터 수집)을 마지막에 실행.
+        """
+        if not self.is_detection_running:
+            return
+
+        if not my_player_rects:
+            self.update_detection_log_message("플레이어 아이콘 탐지 실패", "red")
+            if self.debug_dialog and self.debug_dialog.isVisible():
+                self.debug_dialog.update_debug_info(
+                    frame_bgr,
+                    {'all_features': found_features, 'inlier_ids': set(), 'player_pos_local': None},
+                )
+            return
+
+        alignment = self._estimate_player_alignment(found_features, my_player_rects)
+        if alignment is None:
+            if self.debug_dialog and self.debug_dialog.isVisible():
+                self.debug_dialog.update_debug_info(
+                    frame_bgr,
+                    {'all_features': found_features, 'inlier_ids': set(), 'player_pos_local': None},
+                )
+            return
+
+        final_player_pos = alignment['final_player_pos']
+        player_anchor_local = alignment['player_anchor_local']
+        inlier_ids = alignment['inlier_ids']
+        inlier_features = alignment['inlier_features']
+        reliable_features = alignment['reliable_features']
+        transform_matrix = alignment['transform_matrix']
+
         self._update_player_state_and_navigation(final_player_pos)
 
-        # --- [PATCH] 3. 부가 기능(프로파일링, 데이터 수집)을 마지막에 실행 ---
-        # 이제 final_player_pos와 최신 self.player_state를 안전하게 사용할 수 있습니다.
         if self.is_profiling_jump:
             is_in_air = self.player_state not in ['on_terrain', 'idle']
             is_on_ground = not is_in_air
@@ -3760,7 +3896,7 @@ class MapTab(QWidget):
             if is_in_air and self.jump_measure_start_time == 0:
                 self.jump_measure_start_time = time.time()
                 self.current_jump_max_y_offset = 0.0
-            
+
             elif is_in_air and self.jump_measure_start_time > 0:
                 y_above_terrain = self.last_on_terrain_y - final_player_pos.y()
                 if y_above_terrain > self.current_jump_max_y_offset:
@@ -3769,7 +3905,7 @@ class MapTab(QWidget):
             elif is_on_ground and self.jump_measure_start_time > 0:
                 duration = time.time() - self.jump_measure_start_time
                 self.jump_profile_data.append((duration, self.current_jump_max_y_offset))
-                
+
                 self.jump_measure_start_time = 0.0
                 self.current_jump_max_y_offset = 0.0
                 progress = len(self.jump_profile_data)
@@ -3778,39 +3914,46 @@ class MapTab(QWidget):
                 if progress >= 10:
                     self.is_profiling_jump = False
                     self._analyze_jump_profile()
-        
+
         if self.is_waiting_for_movement and self.smoothed_player_pos:
             if self.last_pos_before_collection:
-                dist_moved = math.hypot(self.smoothed_player_pos.x() - self.last_pos_before_collection.x(),
-                                        self.smoothed_player_pos.y() - self.last_pos_before_collection.y())
-                
+                dist_moved = math.hypot(
+                    self.smoothed_player_pos.x() - self.last_pos_before_collection.x(),
+                    self.smoothed_player_pos.y() - self.last_pos_before_collection.y(),
+                )
+
                 if dist_moved > (self.cfg_move_deadzone * 2):
                     self.is_waiting_for_movement = False
                     self.is_collecting_action_data = True
-                    self.action_data_buffer.append((self.smoothed_player_pos.x(), self.smoothed_player_pos.y()))
-                    self.collection_status_signal.emit("collecting", "데이터 수집 중... (착지 시 자동 완료)", False)
+                    self.action_data_buffer.append(
+                        (self.smoothed_player_pos.x(), self.smoothed_player_pos.y())
+                    )
+                    self.collection_status_signal.emit(
+                        "collecting",
+                        "데이터 수집 중... (착지 시 자동 완료)",
+                        False,
+                    )
             else:
                 self.last_pos_before_collection = self.smoothed_player_pos
 
         elif self.is_collecting_action_data and self.smoothed_player_pos:
-            # [PATCH] v14.3.5: 사다리 수집 종료 조건에 4px 여유 추가
-            self.action_data_buffer.append((self.smoothed_player_pos.x(), self.smoothed_player_pos.y()))
-            
+            self.action_data_buffer.append(
+                (self.smoothed_player_pos.x(), self.smoothed_player_pos.y())
+            )
+
             should_stop = False
             is_timeout = len(self.action_data_buffer) >= self.action_collection_max_frames
-            
+
             action_type = self.collection_target_info.get('type')
             current_pos = self.smoothed_player_pos
 
             if action_type == 'climb_up':
                 target_y = self.collection_target_info.get('target_y')
-                # 목표 지점(위쪽 끝)을 통과하거나 4px 이내로 근접하면 종료
                 if target_y is not None and current_pos.y() <= (target_y + 5.0):
                     should_stop = True
-            
+
             elif action_type == 'climb_down':
                 target_y = self.collection_target_info.get('target_y')
-                # 목표 지점(아래쪽 끝)을 통과하거나 4px 이내로 근접하면 종료
                 if target_y is not None and current_pos.y() >= (target_y - 8.0):
                     should_stop = True
 
@@ -3826,133 +3969,70 @@ class MapTab(QWidget):
                 if is_timeout and not should_stop:
                     print("경고: 최대 프레임에 도달하여 데이터 수집을 강제 종료합니다.")
                 self.save_action_data()
-        
+
         if self.smoothed_player_pos:
-            self.action_inference_buffer.append((self.smoothed_player_pos.x(), self.smoothed_player_pos.y()))
+            self.action_inference_buffer.append(
+                (self.smoothed_player_pos.x(), self.smoothed_player_pos.y())
+            )
 
-
-        if not my_player_rects:
-            self.update_detection_log_message("플레이어 아이콘 탐지 실패", "red")
-            if self.debug_dialog and self.debug_dialog.isVisible():
-                self.debug_dialog.update_debug_info(frame_bgr, {'all_features': found_features, 'inlier_ids': set(), 'player_pos_local': None})
-            return
-
-        # --- 이하 위치 추정 로직은 변경 없음 ---
-        reliable_features = [f for f in found_features if f['id'] in self.key_features and f['conf'] >= self.key_features[f['id']].get('threshold', 0.85)]
-        
-        valid_features_map = {f['id']: f for f in reliable_features if f['id'] in self.global_positions}
-        source_points = []
-        dest_points = []
-        feature_ids = []
-
-        for fid, feature in valid_features_map.items():
-            size = feature['size']
-            local_pos = feature['local_pos']
-            global_pos = self.global_positions[fid]
-            
-            src_cx = local_pos.x() + size.width() / 2
-            src_cy = local_pos.y() + size.height() / 2
-            dst_cx = global_pos.x() + size.width() / 2
-            dst_cy = global_pos.y() + size.height() / 2
-            source_points.append([src_cx, src_cy])
-            dest_points.append([dst_cx, dst_cy])
-            feature_ids.append(fid)
-
-        player_anchor_local = QPointF(my_player_rects[0].center().x(), float(my_player_rects[0].bottom()) + PLAYER_Y_OFFSET)
-
-        avg_player_global_pos = None
-        inlier_ids = set()
-        transform_matrix = None
-        
-        if len(source_points) >= 3:
-            src_pts, dst_pts = np.float32(source_points), np.float32(dest_points)
-            matrix, inliers_mask = cv2.estimateAffinePartial2D(src_pts, dst_pts, method=cv2.RANSAC, ransacReprojThreshold=5.0)
-
-            if matrix is not None and inliers_mask is not None and np.sum(inliers_mask) >= 3:
-                sx = np.sqrt(matrix[0,0]**2 + matrix[1,0]**2)
-                sy = np.sqrt(matrix[0,1]**2 + matrix[1,1]**2)
-                if (0.8 < sx < 1.2 and 0.8 < sy < 1.2 and 
-                    abs(matrix[0,1]) < 0.5 and abs(matrix[1,0]) < 0.5 and
-                    abs(matrix[0,2]) < 10000 and abs(matrix[1,2]) < 10000):
-                    transform_matrix = matrix
-                    inliers_mask = inliers_mask.flatten()
-                    for i, fid in enumerate(feature_ids):
-                        if inliers_mask[i]:
-                            inlier_ids.add(fid)
-        
-        inlier_features = [valid_features_map[fid] for fid in inlier_ids] if inlier_ids else list(valid_features_map.values())
-        
-        if transform_matrix is not None:
-            px, py = player_anchor_local.x(), player_anchor_local.y()
-            transformed = (transform_matrix[:, :2] @ np.array([px, py])) + transform_matrix[:, 2]
-            avg_player_global_pos = QPointF(float(transformed[0]), float(transformed[1]))
-        elif inlier_features:
-            total_conf = sum(f['conf'] for f in inlier_features)
-            if total_conf > 0:
-                w_sum_x, w_sum_y = 0, 0
-                for f in inlier_features:
-                    offset = player_anchor_local - (f['local_pos'] + QPointF(f['size'].width()/2, f['size'].height()/2))
-                    global_center = self.global_positions[f['id']] + QPointF(f['size'].width()/2, f['size'].height()/2)
-                    pos = global_center + offset
-                    w_sum_x += pos.x() * f['conf']
-                    w_sum_y += pos.y() * f['conf']
-                avg_player_global_pos = QPointF(w_sum_x / total_conf, w_sum_y / total_conf)
-
-        if avg_player_global_pos is None:
-            if self.smoothed_player_pos is not None:
-                avg_player_global_pos = self.smoothed_player_pos
-            else:
-                self.update_detection_log_message("플레이어 전역 위치 추정 실패", "red")
-                return
-
-        alpha = 0.3
-        if self.smoothed_player_pos is None:
-            self.smoothed_player_pos = avg_player_global_pos
-        else:
-            self.smoothed_player_pos = (avg_player_global_pos * alpha) + (self.smoothed_player_pos * (1 - alpha))
-        final_player_pos = self.smoothed_player_pos
-        
-        my_player_global_rects = []
-        other_player_global_rects = []
-        
         def transform_rect_safe(rect, matrix, fallback_features):
             if matrix is not None:
-                corners = np.float32([[rect.left(), rect.top()], [rect.right(), rect.bottom()]]).reshape(-1, 1, 2)
+                corners = np.float32(
+                    [[rect.left(), rect.top()], [rect.right(), rect.bottom()]]
+                ).reshape(-1, 1, 2)
                 t_corners = cv2.transform(corners, matrix).reshape(2, 2)
-                return QRectF(QPointF(t_corners[0,0], t_corners[0,1]), QPointF(t_corners[1,0], t_corners[1,1])).normalized()
-            else:
-                center_local = QPointF(rect.center())
-                sum_pos, sum_conf = QPointF(0, 0), 0
-                for f in fallback_features:
-                    offset = center_local - (f['local_pos'] + QPointF(f['size'].width()/2, f['size'].height()/2))
-                    global_center = self.global_positions[f['id']] + QPointF(f['size'].width()/2, f['size'].height()/2)
-                    pos = global_center + offset
-                    conf = f['conf']
-                    sum_pos += pos * conf
-                    sum_conf += conf
-                
-                if sum_conf > 0:
-                    center_global = sum_pos / sum_conf
-                    return QRectF(center_global - QPointF(rect.width()/2, rect.height()/2), QSizeF(rect.size()))
-                return QRectF()
+                return QRectF(
+                    QPointF(t_corners[0, 0], t_corners[0, 1]),
+                    QPointF(t_corners[1, 0], t_corners[1, 1]),
+                ).normalized()
 
-        for rect in my_player_rects:
-            my_player_global_rects.append(transform_rect_safe(rect, transform_matrix, inlier_features))
-        for rect in other_player_rects:
-            other_player_global_rects.append(transform_rect_safe(rect, transform_matrix, inlier_features))
-        
-        self.active_feature_info = inlier_features
+            center_local = QPointF(rect.center())
+            sum_pos, sum_conf = QPointF(0, 0), 0.0
+            for feature in fallback_features:
+                offset = center_local - (
+                    feature['local_pos']
+                    + QPointF(feature['size'].width() / 2, feature['size'].height() / 2)
+                )
+                global_center = self.global_positions[feature['id']] + QPointF(
+                    feature['size'].width() / 2,
+                    feature['size'].height() / 2,
+                )
+                pos = global_center + offset
+                conf = feature['conf']
+                sum_pos += pos * conf
+                sum_conf += conf
 
-        self._update_player_state_and_navigation(final_player_pos)
+            if sum_conf > 0:
+                center_global = sum_pos / sum_conf
+                return QRectF(
+                    center_global - QPointF(rect.width() / 2, rect.height() / 2),
+                    QSizeF(rect.size()),
+                )
+            return QRectF()
+
+        my_player_global_rects = [
+            transform_rect_safe(rect, transform_matrix, inlier_features)
+            for rect in my_player_rects
+        ]
+        other_player_global_rects = [
+            transform_rect_safe(rect, transform_matrix, inlier_features)
+            for rect in other_player_rects
+        ]
 
         if self.debug_dialog and self.debug_dialog.isVisible():
             debug_data = {
-                'all_features': found_features, 'inlier_ids': inlier_ids, 'player_pos_local': player_anchor_local,
+                'all_features': found_features,
+                'inlier_ids': inlier_ids,
+                'player_pos_local': player_anchor_local,
             }
             self.debug_dialog.update_debug_info(frame_bgr, debug_data)
 
-        camera_pos_to_send = final_player_pos if self.center_on_player_checkbox.isChecked() else self.minimap_view_label.camera_center_global
-        
+        camera_pos_to_send = (
+            final_player_pos
+            if self.center_on_player_checkbox.isChecked()
+            else self.minimap_view_label.camera_center_global
+        )
+
         intermediate_node_type = None
         if self.current_segment_path and self.current_segment_index < len(self.current_segment_path):
             current_node_key = self.current_segment_path[self.current_segment_index]
@@ -3970,10 +4050,10 @@ class MapTab(QWidget):
             intermediate_pos=self.intermediate_target_pos,
             intermediate_type=self.intermediate_target_type,
             nav_action=self.navigation_action,
-            intermediate_node_type=intermediate_node_type
+            intermediate_node_type=intermediate_node_type,
         )
         self.global_pos_updated.emit(final_player_pos)
-        
+
         outlier_list = [f for f in reliable_features if f['id'] not in inlier_ids]
         self.update_detection_log_from_features(inlier_features, outlier_list)
 

@@ -9,7 +9,7 @@ import time
 from typing import Optional
 
 import numpy as np
-from PyQt6.QtCore import QPoint, QPointF, QRect, QRectF, QSize, QSizeF, Qt
+from PyQt6.QtCore import QPoint, QPointF, QRect, QRectF, QSize, QSizeF, Qt, QTimer
 from PyQt6.QtGui import (QBrush, QColor, QCursor, QFont, QFontMetrics, QPainter, QImage,
                         QPen, QPixmap, QPolygonF, QGuiApplication)
 from PyQt6.QtWidgets import QLabel, QDialog, QWidget
@@ -424,6 +424,11 @@ class RealtimeMinimapView(QLabel):
         self._cached_static_dirty = True
         self._cached_feature_pixmaps: dict[str, QPixmap] = {}
         self._min_update_interval = 1.0 / 30.0
+        self._update_timer = QTimer(self)
+        self._update_timer.setInterval(int(self._min_update_interval * 1000))
+        self._update_timer.setTimerType(Qt.TimerType.PreciseTimer)
+        self._update_timer.setSingleShot(True)
+        self._update_timer.timeout.connect(self._flush_pending_update)
         self._min_camera_move_threshold = 1.5
         self._min_player_move_threshold = 1.5
         self._last_paint_time: float | None = None
@@ -486,9 +491,26 @@ class RealtimeMinimapView(QLabel):
             self.other_player_rects = []
             self.final_player_pos_global = None
         if self._display_enabled:
-            self.update()
+            self._pending_update = True
+            self._update_scheduled_since_last_check = True
+            self._schedule_view_update()
         else:
             self._pending_update = True
+
+    def _schedule_view_update(self) -> None:
+        if not self._display_enabled:
+            return
+        if not self._update_timer.isActive():
+            self._update_timer.start()
+
+    def _flush_pending_update(self) -> None:
+        if not self._display_enabled:
+            self._update_timer.stop()
+            return
+        if not (self._pending_update or self._update_scheduled_since_last_check):
+            return
+        self._pending_update = False
+        self.update()
 
     def _build_feature_pixmap_cache(self) -> None:
         self._cached_feature_pixmaps.clear()
@@ -554,9 +576,9 @@ class RealtimeMinimapView(QLabel):
                 should_update = True
 
         if should_update:
-            self._pending_update = False
+            self._pending_update = True
             self._update_scheduled_since_last_check = True
-            self.update()
+            self._schedule_view_update()
             return True
 
         self._pending_update = True
@@ -567,10 +589,10 @@ class RealtimeMinimapView(QLabel):
         self._display_enabled = bool(enabled)
         if self._display_enabled:
             if self._pending_update:
-                self._pending_update = False
                 self._update_scheduled_since_last_check = True
-                self.update()
+                self._schedule_view_update()
         else:
+            self._update_timer.stop()
             self._update_scheduled_since_last_check = False
 
     def _make_render_opts_signature(self, render_opts: dict) -> tuple:
