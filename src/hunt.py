@@ -6230,7 +6230,7 @@ class HuntTab(QWidget):
             return
 
         usage_count = self._primary_reset_current_goal or 1
-        reason_suffix = f"주스킬 사용 {usage_count}회"
+        reason_suffix = f"주 스킬 사용 {usage_count}회"
         reason = f"primary_release|{reason_suffix}"
         self._emit_control_command(command, reason=reason)
         self.append_log(f"[주 스킬] 해제 명령 실행 ({reason_suffix})", 'info')
@@ -6393,8 +6393,27 @@ class HuntTab(QWidget):
         self._clear_pending_skill()
         self._clear_pending_direction()
         self._emit_control_command("모든 키 떼기", reason=reason)
-        if reason:
-            self.append_log(f"모든 키 떼기 명령 전송 (원인: {reason})", "debug")
+        if isinstance(reason, str) and reason.strip():
+            reason_text = reason.strip()
+            if reason_text.startswith('status:'):
+                parts = reason_text.split(':')
+                resource = parts[1].strip().upper() if len(parts) >= 2 else ''
+                percent_text = ''
+                if len(parts) >= 3 and parts[2].strip():
+                    try:
+                        percent_value = int(round(float(parts[2].strip())))
+                        percent_text = f" ({percent_value}%)"
+                    except ValueError:
+                        percent_text = ''
+                label = resource or 'STATUS'
+                reason_text = f"Status: {label}{percent_text}"
+            elif reason_text.startswith('primary_release'):
+                parts = reason_text.split('|', 1)
+                reason_text = parts[1].strip() if len(parts) == 2 else ''
+            if reason_text:
+                self.append_log(f"모든 키 떼기 명령 전송 (원인: {reason_text})", "debug")
+            else:
+                self.append_log("모든 키 떼기 명령 전송", "debug")
         else:
             self.append_log("모든 키 떼기 명령 전송", "debug")
         self._release_pending = False

@@ -365,6 +365,7 @@ class AutoControlTab(QWidget):
         self.current_sequence_index = 0
         self.current_command_name = ""
         self.current_command_reason = None
+        self.current_command_reason_display = None
         self.is_test_mode = False
 
         self.is_processing_step = False                 # 중복 _process_next_step 재진입 방지 플래그
@@ -423,6 +424,7 @@ class AutoControlTab(QWidget):
             self.sequence_recovery_attempts.pop(command_name, None)
         self.current_command_name = ""
         self.current_command_reason = None
+        self.current_command_reason_display = None
         self.current_sequence = []
         self.current_sequence_index = 0
         self.is_sequence_running = False
@@ -1811,14 +1813,33 @@ class AutoControlTab(QWidget):
         self.current_sequence = sequence
         self.current_command_name = command_name
         self.current_command_reason = reason.strip() if isinstance(reason, str) and reason.strip() else None
+        raw_reason = self.current_command_reason
+        display_reason = raw_reason
+        if raw_reason:
+            if raw_reason.startswith('status:'):
+                parts = raw_reason.split(':')
+                resource = parts[1].strip().upper() if len(parts) >= 2 else ''
+                percent_text = ''
+                if len(parts) >= 3 and parts[2].strip():
+                    try:
+                        percent_value = int(round(float(parts[2].strip())))
+                        percent_text = f" ({percent_value}%)"
+                    except ValueError:
+                        percent_text = ''
+                label = resource or 'STATUS'
+                display_reason = f"Status: {label}{percent_text}"
+            elif raw_reason.startswith('primary_release'):
+                parts = raw_reason.split('|', 1)
+                display_reason = parts[1].strip() if len(parts) == 2 else ''
+        self.current_command_reason_display = display_reason or None
         self.is_test_mode = is_test
         self.current_sequence_index = 0
         self.is_sequence_running = True
         self.is_first_key_event_in_sequence = True
         self.last_command_start_time = time.time()
         
-        if self.current_command_reason:
-            start_msg = f"--- (시작) {self.current_command_name} (원인: {self.current_command_reason}) ---"
+        if self.current_command_reason_display:
+            start_msg = f"--- (시작) {self.current_command_name} (원인: {self.current_command_reason_display}) ---"
         else:
             start_msg = f"--- (시작) {self.current_command_name} ---"              # <<< (추가) UI에 '(시작)' 로그를 즉시 남기기 위해 생성
         start_color = "orange" if self._is_skill_profile(self.current_command_name) else "magenta"
@@ -1850,8 +1871,8 @@ class AutoControlTab(QWidget):
             # 완료 검사
             if self.current_sequence_index >= len(self.current_sequence):
                 self.sequence_watchdog.stop()
-                if self.current_command_reason:
-                    log_msg = f"--- (완료) {self.current_command_name} (원인: {self.current_command_reason}) ---"
+                if self.current_command_reason_display:
+                    log_msg = f"--- (완료) {self.current_command_name} (원인: {self.current_command_reason_display}) ---"
                 else:
                     log_msg = f"--- (완료) {self.current_command_name} ---"
                 completion_color = "orange" if self._is_skill_profile(self.current_command_name) else "lightgreen"
@@ -1901,8 +1922,8 @@ class AutoControlTab(QWidget):
         
             elif action_type == "release_all":
                 self._release_all_keys(force=True)
-                if self.current_command_reason:
-                    self.log_generated.emit(f"(모든 키 떼기) (원인: {self.current_command_reason})", "white")
+                if self.current_command_reason_display:
+                    self.log_generated.emit(f"(모든 키 떼기) (원인: {self.current_command_reason_display})", "white")
                 else:
                     self.log_generated.emit("(모든 키 떼기)", "white")
 
@@ -1942,6 +1963,23 @@ class AutoControlTab(QWidget):
         watchdog.timeout.connect(lambda cn=command_name: self._on_parallel_sequence_stuck(cn))
 
         clean_reason = reason.strip() if isinstance(reason, str) and reason.strip() else None
+        reason_display = clean_reason
+        if clean_reason:
+            if clean_reason.startswith('status:'):
+                parts = clean_reason.split(':')
+                resource = parts[1].strip().upper() if len(parts) >= 2 else ''
+                percent_text = ''
+                if len(parts) >= 3 and parts[2].strip():
+                    try:
+                        percent_value = int(round(float(parts[2].strip())))
+                        percent_text = f" ({percent_value}%)"
+                    except ValueError:
+                        percent_text = ''
+                label = resource or 'STATUS'
+                reason_display = f"Status: {label}{percent_text}"
+            elif clean_reason.startswith('primary_release'):
+                parts = clean_reason.split('|', 1)
+                reason_display = parts[1].strip() if len(parts) == 2 else ''
         state = {
             "command_name": command_name,
             "sequence": sequence_copy,
@@ -1949,14 +1987,16 @@ class AutoControlTab(QWidget):
             "timer": timer,
             "watchdog": watchdog,
             "reason": clean_reason,
+            "reason_display": reason_display or None,
             "owner": owner,
             "is_processing": False,
         }
         self.active_parallel_sequences[command_name] = state
 
         start_color = "orange" if self._is_skill_profile(command_name) else "cyan"
-        if clean_reason:
-            self.log_generated.emit(f"[{command_name}] (시작) (원인: {clean_reason})", start_color)
+        display_reason = reason_display or None
+        if display_reason:
+            self.log_generated.emit(f"[{command_name}] (시작) (원인: {display_reason})", start_color)
         else:
             self.log_generated.emit(f"[{command_name}] (시작)", start_color)
 
@@ -2081,8 +2121,8 @@ class AutoControlTab(QWidget):
         self.sequence_owned_keys.pop(owner, None)
         self.active_parallel_sequences.pop(command_name, None)
 
-        reason = state.get("reason")
-        suffix = f" (원인: {reason})" if reason else ""
+        display_reason = state.get("reason_display") or state.get("reason")
+        suffix = f" (원인: {display_reason})" if display_reason else ""
         if success:
             completion_color = "orange" if self._is_skill_profile(command_name) else "lightgreen"
             self.log_generated.emit(f"[{command_name}] (완료){suffix}", completion_color)
