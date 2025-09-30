@@ -18,6 +18,7 @@ from PyQt6.QtCore import Qt, QTimer, pyqtSignal, QRect, QThread, QAbstractNative
 from PyQt6.QtWidgets import (
     QApplication,
     QCheckBox,
+    QComboBox,
     QDialog,
     QDialogButtonBox,
     QFormLayout,
@@ -216,6 +217,9 @@ class AttackSkill:
     post_delay_max: float = 0.46
     completion_delay_min: float = 0.0
     completion_delay_max: float = 0.0
+    primary_reset_min: int = 0
+    primary_reset_max: int = 0
+    primary_reset_command: str = ""
 
 
 @dataclass
@@ -255,9 +259,12 @@ class AttackSkillDialog(QDialog):
         self,
         parent: Optional[QWidget] = None,
         skill: Optional[AttackSkill] = None,
+        misc_commands: Optional[List[str]] = None,
     ) -> None:
         super().__init__(parent)
         self.setWindowTitle("공격 스킬")
+
+        self._misc_command_options = sorted({str(name) for name in misc_commands or [] if isinstance(name, str)})
 
         self.name_input = QLineEdit()
         self.command_input = QLineEdit()
@@ -265,6 +272,32 @@ class AttackSkillDialog(QDialog):
         self.enabled_checkbox.setChecked(True)
         self.primary_checkbox = QCheckBox("주 공격 스킬로 설정")
         self.primary_checkbox.setChecked(False)
+
+        self.primary_reset_min_spinbox = QSpinBox()
+        self.primary_reset_min_spinbox.setRange(0, 999)
+        self.primary_reset_min_spinbox.setValue(0)
+
+        self.primary_reset_max_spinbox = QSpinBox()
+        self.primary_reset_max_spinbox.setRange(0, 999)
+        self.primary_reset_max_spinbox.setValue(0)
+
+        self.primary_reset_min_spinbox.valueChanged.connect(self._sync_primary_reset_bounds)
+        self.primary_reset_max_spinbox.valueChanged.connect(self._sync_primary_reset_bounds)
+
+        self.primary_reset_label = QLabel("주 스킬 초기화 횟수")
+        self.primary_reset_widget = QWidget()
+        reset_layout = QHBoxLayout(self.primary_reset_widget)
+        reset_layout.setContentsMargins(0, 0, 0, 0)
+        reset_layout.setSpacing(4)
+        reset_layout.addWidget(self.primary_reset_min_spinbox)
+        reset_layout.addWidget(QLabel(" ~ "))
+        reset_layout.addWidget(self.primary_reset_max_spinbox)
+
+        self.primary_release_label = QLabel("주 스킬 해제 명령")
+        self.primary_release_combo = QComboBox()
+        self.primary_release_combo.addItem("선택 안 함", "")
+        for name in self._misc_command_options:
+            self.primary_release_combo.addItem(name, name)
 
         self.min_monsters_spinbox = QSpinBox()
         self.min_monsters_spinbox.setRange(1, 50)
@@ -317,6 +350,8 @@ class AttackSkillDialog(QDialog):
         self.completion_max_spinbox.setValue(0.0)
         self.completion_max_spinbox.setSuffix(" s")
 
+        self.primary_checkbox.toggled.connect(self._update_primary_reset_controls)
+
         if skill:
             self.name_input.setText(skill.name)
             self.command_input.setText(skill.command)
@@ -330,12 +365,24 @@ class AttackSkillDialog(QDialog):
             self.delay_max_spinbox.setValue(skill.post_delay_max)
             self.completion_min_spinbox.setValue(getattr(skill, 'completion_delay_min', 0.0))
             self.completion_max_spinbox.setValue(getattr(skill, 'completion_delay_max', 0.0))
-
+            reset_min = max(0, getattr(skill, 'primary_reset_min', 0))
+            reset_max = max(0, getattr(skill, 'primary_reset_max', 0))
+            self.primary_reset_min_spinbox.setValue(reset_min)
+            self.primary_reset_max_spinbox.setValue(reset_max)
+            stored_command = str(getattr(skill, 'primary_reset_command', '') or '')
+            if stored_command and stored_command not in self._misc_command_options:
+                self.primary_release_combo.addItem(stored_command, stored_command)
+            index = self.primary_release_combo.findData(stored_command)
+            if index >= 0:
+                self.primary_release_combo.setCurrentIndex(index)
+        
         form = QFormLayout()
         form.addRow("이름", self.name_input)
         form.addRow("명령", self.command_input)
         form.addRow("사용", self.enabled_checkbox)
         form.addRow("주 스킬", self.primary_checkbox)
+        form.addRow(self.primary_reset_label, self.primary_reset_widget)
+        form.addRow(self.primary_release_label, self.primary_release_combo)
         form.addRow("사용 최소 몬스터 수", self.min_monsters_spinbox)
         form.addRow("사용 확률", self.probability_spinbox)
         form.addRow("스킬 발동 전 대기 최소", self.pre_delay_min_spinbox)
@@ -354,16 +401,29 @@ class AttackSkillDialog(QDialog):
         layout.addWidget(buttons)
         self.setLayout(layout)
 
+        self._update_primary_reset_controls(self.primary_checkbox.isChecked())
+
     def get_skill(self) -> Optional[AttackSkill]:
         name = self.name_input.text().strip()
         command = self.command_input.text().strip()
         if not name or not command:
             return None
+        is_primary = self.primary_checkbox.isChecked()
+        reset_min = self.primary_reset_min_spinbox.value() if is_primary else 0
+        reset_max = self.primary_reset_max_spinbox.value() if is_primary else 0
+        if reset_max < reset_min:
+            reset_min, reset_max = reset_max, reset_min
+        reset_command = self.primary_release_combo.currentData() if is_primary else ""
+        if reset_command is None:
+            reset_command = ""
+        reset_command = str(reset_command).strip()
+        if not is_primary or (reset_min == 0 and reset_max == 0):
+            reset_command = ""
         return AttackSkill(
             name=name,
             command=command,
             enabled=self.enabled_checkbox.isChecked(),
-            is_primary=self.primary_checkbox.isChecked(),
+            is_primary=is_primary,
             min_monsters=self.min_monsters_spinbox.value(),
             probability=self.probability_spinbox.value(),
             pre_delay_min=min(self.pre_delay_min_spinbox.value(), self.pre_delay_max_spinbox.value()),
@@ -372,7 +432,26 @@ class AttackSkillDialog(QDialog):
             post_delay_max=max(self.delay_min_spinbox.value(), self.delay_max_spinbox.value()),
             completion_delay_min=min(self.completion_min_spinbox.value(), self.completion_max_spinbox.value()),
             completion_delay_max=max(self.completion_min_spinbox.value(), self.completion_max_spinbox.value()),
+            primary_reset_min=reset_min if is_primary else 0,
+            primary_reset_max=reset_max if is_primary else 0,
+            primary_reset_command=reset_command,
         )
+
+    def _sync_primary_reset_bounds(self) -> None:
+        min_val = self.primary_reset_min_spinbox.value()
+        max_val = self.primary_reset_max_spinbox.value()
+        sender = self.sender()
+        if max_val < min_val:
+            if sender is self.primary_reset_min_spinbox:
+                self.primary_reset_max_spinbox.setValue(min_val)
+            else:
+                self.primary_reset_min_spinbox.setValue(max_val)
+
+    def _update_primary_reset_controls(self, checked: bool) -> None:
+        self.primary_reset_label.setVisible(checked)
+        self.primary_reset_widget.setVisible(checked)
+        self.primary_release_label.setVisible(checked)
+        self.primary_release_combo.setVisible(checked)
 
 
 class BuffSkillDialog(QDialog):
@@ -638,6 +717,10 @@ class HuntTab(QWidget):
             'exp': 'EXP: -- / --',
         }
         self._status_exp_records: list[dict] = []
+        self._primary_release_command: str = ""
+        self._primary_reset_range: tuple[int, int] = (0, 0)
+        self._primary_reset_remaining: Optional[int] = None
+        self._primary_reset_current_goal: Optional[int] = None
         self._status_detection_start_ts: Optional[float] = None
         self._status_exp_start_snapshot: Optional[dict] = None
         self._status_ocr_warned = False
@@ -3152,15 +3235,19 @@ class HuntTab(QWidget):
         if not normalized:
             return
 
-        is_status_command = isinstance(reason, str) and reason.startswith('status:')
+        reason_str = str(reason) if isinstance(reason, str) else ""
+        is_status_command = reason_str.startswith('status:')
+        is_primary_command = reason_str.startswith('primary:')
         allow_during_cooldown = False
         if is_status_command:
             try:
-                _, resource = str(reason).split(':', 1)
+                _, resource = reason_str.split(':', 1)
             except ValueError:
                 resource = ''
             if resource.strip().lower() == 'hp':
                 allow_during_cooldown = True
+        elif is_primary_command:
+            allow_during_cooldown = True
 
         if (
             self._get_command_delay_remaining() > 0
@@ -3182,10 +3269,13 @@ class HuntTab(QWidget):
             elif "key.right" in lower and "key.left" not in lower:
                 self._set_current_facing('right', save=False)
         self.control_command_issued.emit(command, reason)
-        if not is_status_command and normalized != "모든 키 떼기":
+        if not is_status_command and not is_primary_command and normalized != "모든 키 떼기":
             self._last_command_issued = (command, reason)
 
-        reason_text = reason.strip() if isinstance(reason, str) else ""
+        reason_text = reason_str.strip()
+        if reason_text.startswith('primary:'):
+            parts = reason_text.split('|', 1)
+            reason_text = parts[1].strip() if len(parts) == 2 else ""
         log_message = f"{normalized} (원인: {reason_text})" if reason_text else normalized
         self._append_control_log(log_message)
 
@@ -4932,6 +5022,15 @@ class HuntTab(QWidget):
                 command = item.get('command')
                 if not name or not command:
                     continue
+                try:
+                    reset_min = int(item.get('primary_reset_min', 0))
+                except (TypeError, ValueError):
+                    reset_min = 0
+                try:
+                    reset_max = int(item.get('primary_reset_max', 0))
+                except (TypeError, ValueError):
+                    reset_max = 0
+                reset_command = str(item.get('primary_reset_command', '') or '')
                 self.attack_skills.append(
                     AttackSkill(
                         name=name,
@@ -4946,6 +5045,9 @@ class HuntTab(QWidget):
                         post_delay_max=float(item.get('post_delay_max', 0.46)),
                         completion_delay_min=float(item.get('completion_delay_min', 0.0)),
                         completion_delay_max=float(item.get('completion_delay_max', 0.0)),
+                        primary_reset_min=reset_min,
+                        primary_reset_max=reset_max,
+                        primary_reset_command=reset_command,
                     )
                 )
             self._ensure_primary_skill()
@@ -5091,6 +5193,9 @@ class HuntTab(QWidget):
                     'post_delay_max': skill.post_delay_max,
                     'completion_delay_min': getattr(skill, 'completion_delay_min', 0.0),
                     'completion_delay_max': getattr(skill, 'completion_delay_max', 0.0),
+                    'primary_reset_min': getattr(skill, 'primary_reset_min', 0),
+                    'primary_reset_max': getattr(skill, 'primary_reset_max', 0),
+                    'primary_reset_command': getattr(skill, 'primary_reset_command', ''),
                 }
                 for skill in self.attack_skills
             ],
@@ -5515,6 +5620,7 @@ class HuntTab(QWidget):
                 ):
                     return
 
+        self._maybe_trigger_primary_release(skill)
         self._next_command_ready_ts = max(self._next_command_ready_ts, time.time())
         self._emit_control_command(skill.command)
         self._queue_completion_delay(skill.command, skill.completion_delay_min, skill.completion_delay_max, f"스킬 '{skill.name}'")
@@ -5524,6 +5630,7 @@ class HuntTab(QWidget):
         if post_delay > 0.0:
             self._set_command_cooldown(post_delay)
             self._log_delay_message(f"스킬 '{skill.name}'", post_delay)
+        self._decrement_primary_reset_counter(skill)
 
     def _trigger_buff_skill(self, buff: BuffSkill, *, is_test: bool = False) -> bool:
         if not buff.enabled:
@@ -5741,7 +5848,7 @@ class HuntTab(QWidget):
         self._save_settings()
 
     def add_attack_skill(self) -> None:
-        dialog = AttackSkillDialog(self)
+        dialog = AttackSkillDialog(self, misc_commands=self._get_misc_command_profiles())
         if dialog.exec() == QDialog.DialogCode.Accepted:
             skill = dialog.get_skill()
             if not skill:
@@ -5760,7 +5867,11 @@ class HuntTab(QWidget):
         index = self._get_selected_attack_index()
         if index is None:
             return
-        dialog = AttackSkillDialog(self, self.attack_skills[index])
+        dialog = AttackSkillDialog(
+            self,
+            skill=self.attack_skills[index],
+            misc_commands=self._get_misc_command_profiles(),
+        )
         if dialog.exec() == QDialog.DialogCode.Accepted:
             updated = dialog.get_skill()
             if not updated:
@@ -5768,10 +5879,10 @@ class HuntTab(QWidget):
             if updated.is_primary:
                 for existing in self.attack_skills:
                     existing.is_primary = False
-        self.attack_skills[index] = updated
-        self._ensure_primary_skill()
-        self._refresh_attack_tree()
-        self._save_settings()
+            self.attack_skills[index] = updated
+            self._ensure_primary_skill()
+            self._refresh_attack_tree()
+            self._save_settings()
 
     def remove_attack_skill(self) -> None:
         index = self._get_selected_attack_index()
@@ -5812,6 +5923,7 @@ class HuntTab(QWidget):
 
         def emit() -> None:
             exec_time = time.time()
+            self._maybe_trigger_primary_release(skill)
             self._next_command_ready_ts = max(self._next_command_ready_ts, exec_time)
             self._emit_control_command(command)
             self._queue_completion_delay(command, skill.completion_delay_min, skill.completion_delay_max, context_label)
@@ -5819,6 +5931,7 @@ class HuntTab(QWidget):
             if post_delay > 0.0:
                 self._set_command_cooldown(post_delay)
                 self._log_delay_message(context_label, post_delay)
+            self._decrement_primary_reset_counter(skill)
 
         pre_delay = self._sample_delay(getattr(skill, 'pre_delay_min', 0.0), getattr(skill, 'pre_delay_max', 0.0))
         if pre_delay > 0.0:
@@ -5910,6 +6023,19 @@ class HuntTab(QWidget):
         value = item.data(0, Qt.ItemDataRole.UserRole)
         return int(value) if value is not None else None
 
+    def _get_misc_command_profiles(self) -> List[str]:
+        if not self.data_manager or not hasattr(self.data_manager, 'list_command_profiles'):
+            return []
+        try:
+            profiles = self.data_manager.list_command_profiles(('기타',))
+        except Exception:
+            return []
+        if isinstance(profiles, dict):
+            names = profiles.get('기타', [])
+        else:
+            names = []
+        return [str(name) for name in names if isinstance(name, str) and name]
+
     def _get_selected_buff_index(self) -> Optional[int]:
         if not hasattr(self, "buff_tree"):
             return None
@@ -5931,6 +6057,43 @@ class HuntTab(QWidget):
             self.attack_skills[first].enabled = True
             for i in primary_indices[1:]:
                 self.attack_skills[i].is_primary = False
+        self._update_primary_release_settings()
+
+    def _update_primary_release_settings(self) -> None:
+        primary_skill = None
+        for skill in self.attack_skills:
+            if skill.is_primary and skill.enabled:
+                primary_skill = skill
+                break
+        if not primary_skill:
+            self._primary_release_command = ""
+            self._primary_reset_range = (0, 0)
+            self._primary_reset_remaining = None
+            self._primary_reset_current_goal = None
+            return
+
+        min_val = max(0, getattr(primary_skill, 'primary_reset_min', 0))
+        max_val = max(0, getattr(primary_skill, 'primary_reset_max', 0))
+        command = str(getattr(primary_skill, 'primary_reset_command', '') or '').strip()
+
+        if not command or (min_val <= 0 and max_val <= 0):
+            self._primary_release_command = ""
+            self._primary_reset_range = (0, 0)
+            self._primary_reset_remaining = None
+            self._primary_reset_current_goal = None
+            return
+
+        if max_val < min_val:
+            min_val, max_val = max_val, min_val
+
+        # 최소 1회 이상은 사용하도록 강제
+        min_val = max(1, min_val)
+        max_val = max(min_val, max_val)
+
+        self._primary_release_command = command
+        self._primary_reset_range = (min_val, max_val)
+        self._primary_reset_remaining = None
+        self._primary_reset_current_goal = None
 
     def _update_attack_buttons(self) -> None:
         if not hasattr(self, "add_attack_btn"):
@@ -5946,6 +6109,46 @@ class HuntTab(QWidget):
         else:
             self.set_primary_attack_btn.setEnabled(False)
             self.test_attack_btn.setEnabled(False)
+
+    def _initialize_primary_reset_counter(self) -> None:
+        command = self._primary_release_command
+        min_val, max_val = self._primary_reset_range
+        if not command or min_val <= 0 or max_val <= 0:
+            self._primary_reset_remaining = None
+            self._primary_reset_current_goal = None
+            return
+        goal = random.randint(min_val, max_val)
+        self._primary_reset_current_goal = goal
+        self._primary_reset_remaining = goal
+
+    def _maybe_trigger_primary_release(self, skill: AttackSkill) -> None:
+        if not getattr(skill, 'is_primary', False):
+            return
+        command = self._primary_release_command
+        if not command:
+            return
+        if self._primary_reset_remaining is None:
+            self._initialize_primary_reset_counter()
+        if self._primary_reset_remaining is None:
+            return
+        if self._primary_reset_remaining > 1:
+            return
+
+        usage_count = self._primary_reset_current_goal or 1
+        reason_suffix = f"주스킬 사용 {usage_count}회"
+        reason = f"primary:release|{reason_suffix}"
+        self._emit_control_command(command, reason=reason)
+        self.append_log(f"[주 스킬] 해제 명령 실행 ({reason_suffix})", 'info')
+        self._initialize_primary_reset_counter()
+
+    def _decrement_primary_reset_counter(self, skill: AttackSkill) -> None:
+        if not getattr(skill, 'is_primary', False):
+            return
+        if self._primary_reset_remaining is None:
+            return
+        if self._primary_reset_remaining <= 0:
+            return
+        self._primary_reset_remaining = max(0, self._primary_reset_remaining - 1)
 
     def _update_buff_buttons(self) -> None:
         if not hasattr(self, "add_buff_btn"):
