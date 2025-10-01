@@ -45,6 +45,14 @@ from detection_runtime import DetectionPopup, DetectionThread, ScreenSnipper
 from direction_detection import DirectionDetector
 from nickname_detection import NicknameDetector
 from status_monitor import StatusMonitorThread, StatusMonitorConfig
+from control_authority_manager import (
+    AuthorityDecisionStatus,
+    ControlAuthorityManager,
+    HuntConditionSnapshot,
+    DEFAULT_MAP_PROTECT_SEC,
+    DEFAULT_MAX_FLOOR_HOLD_SEC,
+    DEFAULT_MAX_TOTAL_HOLD_SEC,
+)
 
 if os.name == 'nt':
     MOD_ALT = 0x0001
@@ -609,7 +617,7 @@ class BuffSkillDialog(QDialog):
 class HuntTab(QWidget):
     """사냥 조건과 스킬 실행을 관리하는 임시 탭."""
 
-    CONTROL_RELEASE_TIMEOUT_SEC = 30
+    CONTROL_RELEASE_TIMEOUT_SEC = int(DEFAULT_MAX_TOTAL_HOLD_SEC)
     CONDITION_POLL_DEBOUNCE_MS = 10
     CONDITION_POLL_MIN_INTERVAL_SEC = 0.12
     CONTROL_REQUEST_TIMEOUT_MS = 5000
@@ -637,6 +645,11 @@ class HuntTab(QWidget):
         self.latest_monster_count = 0
         self.latest_primary_monster_count = 0
         self.control_release_timeout = self.CONTROL_RELEASE_TIMEOUT_SEC
+        self._authority_manager = ControlAuthorityManager.instance()
+        self._authority_manager_connected = False
+        self.map_link_enabled = False
+        self.map_protect_seconds = DEFAULT_MAP_PROTECT_SEC
+        self.floor_hold_seconds = DEFAULT_MAX_FLOOR_HOLD_SEC
         self.last_control_acquired_ts = 0.0
         self.last_release_attempt_ts = 0.0
         self.auto_hunt_enabled = True
@@ -649,6 +662,8 @@ class HuntTab(QWidget):
             'nameplate_tracking': False,
             'monster_confidence': True,
         }
+        self.map_tab = None  # 맵 탭 연동 시 탐지 토글 동기화를 위해 참조 저장
+        self._syncing_with_map = False
         self._direction_area_user_pref = True
         self._nickname_range_user_pref = True
         self._nameplate_area_user_pref = True
@@ -1448,9 +1463,25 @@ class HuntTab(QWidget):
         self.max_authority_hold_spinbox.setRange(1.0, 600.0)
         self.max_authority_hold_spinbox.setSingleStep(1.0)
         self.max_authority_hold_spinbox.setDecimals(1)
-        self.max_authority_hold_spinbox.setValue(float(self.CONTROL_RELEASE_TIMEOUT_SEC))
-        condition_form.addRow("최대 이동권한 보유 시간(초)", self.max_authority_hold_spinbox)
+        self.max_authority_hold_spinbox.setValue(float(self.control_release_timeout))
+        condition_form.addRow("전체 최대 이동권한 시간(초)", self.max_authority_hold_spinbox)
         self.max_authority_hold_spinbox.valueChanged.connect(self._handle_max_hold_changed)
+
+        self.floor_hold_spinbox = QDoubleSpinBox()
+        self.floor_hold_spinbox.setRange(10.0, 600.0)
+        self.floor_hold_spinbox.setSingleStep(5.0)
+        self.floor_hold_spinbox.setDecimals(1)
+        self.floor_hold_spinbox.setValue(float(self.floor_hold_seconds))
+        condition_form.addRow("층 최대 이동권한 시간(초)", self.floor_hold_spinbox)
+        self.floor_hold_spinbox.valueChanged.connect(self._handle_floor_hold_changed)
+
+        self.map_protect_spinbox = QDoubleSpinBox()
+        self.map_protect_spinbox.setRange(0.5, 10.0)
+        self.map_protect_spinbox.setSingleStep(0.5)
+        self.map_protect_spinbox.setDecimals(1)
+        self.map_protect_spinbox.setValue(float(self.map_protect_seconds))
+        condition_form.addRow("맵 보호 대기 시간(초)", self.map_protect_spinbox)
+        self.map_protect_spinbox.valueChanged.connect(self._handle_map_protect_changed)
 
         group.setLayout(condition_form)
         group.setSizePolicy(QSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed))
@@ -1600,6 +1631,14 @@ class HuntTab(QWidget):
 
         control_row.addWidget(self.screen_output_checkbox)
         control_row.addWidget(self.auto_request_checkbox)
+
+        self.map_link_checkbox = QCheckBox("맵 탭 연동")
+        self.map_link_checkbox.setChecked(self.map_link_enabled)
+        self.map_link_checkbox.toggled.connect(self._on_map_link_toggled)
+        self.map_link_checkbox.setSizePolicy(
+            QSizePolicy(QSizePolicy.Policy.Maximum, QSizePolicy.Policy.Fixed)
+        )
+        control_row.addWidget(self.map_link_checkbox)
 
         self.downscale_checkbox = QCheckBox("다운스케일")
         self.downscale_checkbox.setSizePolicy(
@@ -2222,6 +2261,15 @@ class HuntTab(QWidget):
 
             if self.screen_output_checkbox.isChecked() and not self.is_popup_active:
                 self._toggle_detection_popup()
+
+            if self.map_link_enabled and self.map_tab and not self._syncing_with_map:
+                self._syncing_with_map = True
+                try:
+                    if hasattr(self.map_tab, 'detect_anchor_btn') and not self.map_tab.detect_anchor_btn.isChecked():
+                        self.map_tab.detect_anchor_btn.setChecked(True)
+                        self.map_tab.toggle_anchor_detection(True)
+                finally:
+                    self._syncing_with_map = False
         else:
             thread_active = self.detection_thread is not None and self.detection_thread.isRunning()
             self._release_pending = True
@@ -2236,6 +2284,15 @@ class HuntTab(QWidget):
             self._cancel_facing_reset_timer()
             if not thread_active:
                 self._issue_all_keys_release("사냥중지")
+
+            if self.map_link_enabled and self.map_tab and not self._syncing_with_map:
+                self._syncing_with_map = True
+                try:
+                    if hasattr(self.map_tab, 'detect_anchor_btn') and self.map_tab.detect_anchor_btn.isChecked():
+                        self.map_tab.detect_anchor_btn.setChecked(False)
+                        self.map_tab.toggle_anchor_detection(False)
+                finally:
+                    self._syncing_with_map = False
 
     def _on_conf_char_changed(self, value: float) -> None:
         self._sync_nickname_threshold_from_spinbox(float(value))
@@ -3445,7 +3502,179 @@ class HuntTab(QWidget):
 
     def _handle_max_hold_changed(self, value: float) -> None:
         self.control_release_timeout = max(1.0, float(value))
+        self._apply_authority_settings_to_manager()
         self._save_settings()
+
+    def _handle_floor_hold_changed(self, value: float) -> None:
+        self.floor_hold_seconds = max(1.0, float(value))
+        self._apply_authority_settings_to_manager()
+        self._save_settings()
+
+    def _handle_map_protect_changed(self, value: float) -> None:
+        self.map_protect_seconds = max(0.1, float(value))
+        self._apply_authority_settings_to_manager()
+        self._save_settings()
+
+    def _apply_authority_settings_to_manager(self) -> None:
+        if not self.map_link_enabled or not self._authority_manager_connected:
+            return
+        try:
+            self._authority_manager.update_hunt_settings(
+                map_protect_sec=float(self.map_protect_spinbox.value()),
+                floor_hold_sec=float(self.floor_hold_spinbox.value()),
+                max_total_hold_sec=float(self.max_authority_hold_spinbox.value()),
+            )
+        except Exception as exc:
+            self.append_log(f"권한 매니저 설정 갱신 실패: {exc}", "warn")
+
+    def _connect_authority_manager(self) -> None:
+        if self._authority_manager_connected:
+            return
+        manager = self._authority_manager
+        manager.authority_changed.connect(self._on_authority_changed_from_manager)
+        manager.request_evaluated.connect(self._on_authority_request_evaluated)
+        manager.priority_event_triggered.connect(self._on_priority_event_from_manager)
+        self._authority_manager_connected = True
+
+    def _disconnect_authority_manager(self) -> None:
+        if not self._authority_manager_connected:
+            return
+        manager = self._authority_manager
+        try:
+            manager.authority_changed.disconnect(self._on_authority_changed_from_manager)
+        except TypeError:
+            pass
+        try:
+            manager.request_evaluated.disconnect(self._on_authority_request_evaluated)
+        except TypeError:
+            pass
+        try:
+            manager.priority_event_triggered.disconnect(self._on_priority_event_from_manager)
+        except TypeError:
+            pass
+        self._authority_manager_connected = False
+
+    def _activate_map_link(self, *, initial: bool = False) -> None:
+        self.map_link_enabled = True
+        self._connect_authority_manager()
+        self._apply_authority_settings_to_manager()
+        self._authority_request_connected = True
+        self._authority_release_connected = True
+        state = self._authority_manager.current_state()
+        if not initial:
+            self.append_log("맵 탭 연동 모드를 활성화했습니다.", "info")
+        self.on_map_authority_changed(state.owner, {"source": "manager", "state": state.as_payload(), "silent": initial})
+
+    def _deactivate_map_link(self, *, initial: bool = False) -> None:
+        self.map_link_enabled = False
+        self._disconnect_authority_manager()
+        self._authority_request_connected = False
+        self._authority_release_connected = False
+        self._request_pending = False
+        if not initial:
+            self.append_log("맵 탭 연동 모드를 비활성화했습니다.", "info")
+        self.on_map_authority_changed("hunt", {"source": "local", "reason": "map_link_disabled", "silent": initial})
+
+    def _on_map_link_toggled(self, checked: bool) -> None:
+        if checked:
+            self._activate_map_link(initial=False)
+        else:
+            self._deactivate_map_link(initial=False)
+        self._save_settings()
+        if checked and self.map_tab:
+            self._sync_detection_state_with_map()
+
+    def _on_authority_changed_from_manager(self, owner: str, payload: dict) -> None:
+        if not self.map_link_enabled:
+            return
+        self.on_map_authority_changed(owner, payload)
+
+    def _on_authority_request_evaluated(self, requester: str, payload: dict) -> None:
+        if requester != "hunt" or not self.map_link_enabled:
+            return
+        status = payload.get("status", "")
+        reason = payload.get("reason")
+        details = payload.get("payload") or {}
+        if status == AuthorityDecisionStatus.PENDING.value:
+            failed = details.get("failed") or []
+            if failed:
+                self.append_log(
+                    "사냥 권한 요청 대기: " + ", ".join(str(item) for item in failed),
+                    "warn",
+                )
+        elif status == AuthorityDecisionStatus.REJECTED.value:
+            message = reason or "사유 없음"
+            self.append_log(f"사냥 권한 요청 거부: {message}", "warn")
+
+    def _on_priority_event_from_manager(self, kind: str, metadata: dict) -> None:
+        if not self.map_link_enabled:
+            return
+        detail_parts = []
+        if isinstance(metadata, dict):
+            for key, value in metadata.items():
+                detail_parts.append(f"{key}={value}")
+        detail_text = f" ({', '.join(detail_parts)})" if detail_parts else ""
+        self.append_log(f"맵 탭 우선 이벤트 감지: {kind}{detail_text}", "warn")
+
+    def _build_hunt_condition_snapshot(self) -> HuntConditionSnapshot:
+        return HuntConditionSnapshot(
+            timestamp=time.time(),
+            monster_count=int(self.latest_monster_count),
+            primary_monster_count=int(self.latest_primary_monster_count),
+            monster_threshold=int(self.monster_threshold_spinbox.value()),
+            idle_release_seconds=float(self.idle_release_spinbox.value()),
+            metadata={
+                "hunting_active": bool(self.hunting_active),
+                "auto_hunt_enabled": bool(self.auto_hunt_enabled),
+            },
+        )
+
+    def _handle_map_detection_status_changed(self, running: bool) -> None:
+        if not self.map_link_enabled or self._syncing_with_map:
+            return
+        if not hasattr(self, 'detect_btn'):
+            return
+        try:
+            hunt_running = bool(self.detect_btn.isChecked())
+        except Exception:
+            hunt_running = False
+        if running == hunt_running:
+            return
+        self._syncing_with_map = True
+        try:
+            if running and not hunt_running:
+                if hasattr(self.detect_btn, 'setChecked'):
+                    self.detect_btn.setChecked(True)
+                self._toggle_detection(True)
+            elif not running and hunt_running:
+                if hasattr(self.detect_btn, 'setChecked'):
+                    self.detect_btn.setChecked(False)
+                self._toggle_detection(False)
+        finally:
+            self._syncing_with_map = False
+
+    def _sync_detection_state_with_map(self) -> None:
+        if not self.map_link_enabled or not self.map_tab:
+            return
+        try:
+            map_running = bool(self.map_tab.detect_anchor_btn.isChecked())
+        except Exception:
+            map_running = False
+        self._handle_map_detection_status_changed(map_running)
+
+    def _build_hunt_request_meta(self) -> dict:
+        return {
+            "monster_threshold": self.monster_threshold_spinbox.value(),
+            "range_px": self.enemy_range_spinbox.value(),
+            "y_band_height": self.y_band_height_spinbox.value(),
+            "y_offset": self.y_band_offset_spinbox.value(),
+            "primary_skill_range": self.primary_skill_range_spinbox.value(),
+            "model": self._get_active_model_name() or "-",
+            "attack_skill_count": len(self.attack_skills),
+            "buff_skill_count": len(self.buff_skills),
+            "latest_monster_count": self.latest_monster_count,
+            "latest_primary_monster_count": self.latest_primary_monster_count,
+        }
 
     def _handle_facing_reset_changed(self, value: float) -> None:
         min_val = self.facing_reset_min_spinbox.value()
@@ -5040,6 +5269,14 @@ class HuntTab(QWidget):
         if hasattr(monitor, 'exp_status_logged'):
             monitor.exp_status_logged.connect(self._handle_exp_status_log)
 
+    def attach_map_tab(self, map_tab) -> None:
+        self.map_tab = map_tab
+        if hasattr(map_tab, 'detection_status_changed'):
+            try:
+                map_tab.detection_status_changed.connect(self._handle_map_detection_status_changed)
+            except Exception:
+                pass
+
     def set_authority_bridge_active(self, request_connected: bool, release_connected: bool) -> None:
         self._authority_request_connected = bool(request_connected)
         self._authority_release_connected = bool(release_connected)
@@ -5085,6 +5322,34 @@ class HuntTab(QWidget):
                     self.max_authority_hold_spinbox.setValue(float(max_hold))
                 except (TypeError, ValueError):
                     pass
+            map_link_flag = conditions.get('map_link_enabled')
+            if map_link_flag is not None and hasattr(self, 'map_link_checkbox'):
+                previous = self.map_link_checkbox.blockSignals(True)
+                self.map_link_checkbox.setChecked(bool(map_link_flag))
+                self.map_link_checkbox.blockSignals(previous)
+                self.map_link_enabled = bool(map_link_flag)
+            map_protect = conditions.get('map_protect_sec')
+            if map_protect is not None and hasattr(self, 'map_protect_spinbox'):
+                prev = self.map_protect_spinbox.blockSignals(True)
+                try:
+                    value = float(map_protect)
+                    self.map_protect_spinbox.setValue(value)
+                    self.map_protect_seconds = float(self.map_protect_spinbox.value())
+                except (TypeError, ValueError):
+                    pass
+                finally:
+                    self.map_protect_spinbox.blockSignals(prev)
+            floor_hold = conditions.get('floor_hold_sec')
+            if floor_hold is not None and hasattr(self, 'floor_hold_spinbox'):
+                prev = self.floor_hold_spinbox.blockSignals(True)
+                try:
+                    value = float(floor_hold)
+                    self.floor_hold_spinbox.setValue(value)
+                    self.floor_hold_seconds = float(self.floor_hold_spinbox.value())
+                except (TypeError, ValueError):
+                    pass
+                finally:
+                    self.floor_hold_spinbox.blockSignals(prev)
 
         display = data.get('display', {})
         if display:
@@ -5403,6 +5668,11 @@ class HuntTab(QWidget):
                 if width > 0 and height > 0:
                     self.last_popup_size = (width, height)
 
+        if getattr(self, 'map_link_enabled', False):
+            self._activate_map_link(initial=True)
+        else:
+            self._deactivate_map_link(initial=True)
+
         self._suppress_settings_save = False
         self._suppress_downscale_prompt = False
         self._emit_area_overlays()
@@ -5438,6 +5708,9 @@ class HuntTab(QWidget):
                 'auto_request': self.auto_request_checkbox.isChecked(),
                 'idle_release_sec': self.idle_release_spinbox.value(),
                 'max_authority_hold_sec': self.max_authority_hold_spinbox.value(),
+                'map_link_enabled': self.map_link_checkbox.isChecked(),
+                'map_protect_sec': self.map_protect_spinbox.value(),
+                'floor_hold_sec': self.floor_hold_spinbox.value(),
             },
             'display': {
                 'show_hunt_area': self.show_hunt_area_checkbox.isChecked(),
@@ -5554,26 +5827,31 @@ class HuntTab(QWidget):
         if self._request_pending:
             return
 
+        reason_text = str(reason) if reason else "auto"
+        payload = self._build_hunt_request_meta()
+        self.control_authority_requested.emit(payload)
+        self._log_control_request(payload, reason_text)
+
+        if not self.map_link_enabled:
+            self.on_map_authority_changed("hunt", {"reason": reason_text, "source": "local"})
+            return
+
         self._request_pending = True
         if self._request_timeout_timer:
             self._request_timeout_timer.start(self.CONTROL_REQUEST_TIMEOUT_MS)
 
-        payload = {
-            "monster_threshold": self.monster_threshold_spinbox.value(),
-            "range_px": self.enemy_range_spinbox.value(),
-            "y_band_height": self.y_band_height_spinbox.value(),
-            "y_offset": self.y_band_offset_spinbox.value(),
-            "primary_skill_range": self.primary_skill_range_spinbox.value(),
-            "model": self._get_active_model_name() or "-",
-            "attack_skill_count": len(self.attack_skills),
-            "buff_skill_count": len(self.buff_skills),
-            "latest_monster_count": self.latest_monster_count,
-            "latest_primary_monster_count": self.latest_primary_monster_count,
-        }
-        self.control_authority_requested.emit(payload)
-        self._log_control_request(payload, reason)
-        if not self._authority_request_connected:
-            self.on_map_authority_changed("hunt")
+        snapshot = self._build_hunt_condition_snapshot()
+        decision = self._authority_manager.request_control(
+            "hunt",
+            reason=reason_text,
+            meta=payload,
+            hunt_snapshot=snapshot,
+        )
+
+        if decision.status != AuthorityDecisionStatus.PENDING:
+            self._request_pending = False
+        if decision.status == AuthorityDecisionStatus.REJECTED:
+            self.append_log(f"사냥 권한 요청 거부: {decision.reason}", "warn")
 
     def release_control(self, reason: str | None = None) -> None:
         if self.current_authority != "hunt":
@@ -5583,16 +5861,28 @@ class HuntTab(QWidget):
             self._request_timeout_timer.stop()
         self._request_pending = False
 
-        payload = {"reason": reason or "manual"}
+        reason_text = str(reason) if reason else "manual"
+        payload = {"reason": reason_text}
         self.control_authority_released.emit(payload)
         if reason:
             self.append_log(f"사냥 권한 반환 요청 ({reason})", "info")
         else:
             self.append_log("사냥 권한 반환 요청", "info")
-        if not self._authority_release_connected:
-            self.on_map_authority_changed("map")
 
-    def on_map_authority_changed(self, owner: str) -> None:
+        if not self.map_link_enabled:
+            self.on_map_authority_changed("map", {"reason": reason_text, "source": "local"})
+            return
+
+        decision = self._authority_manager.release_control(
+            "hunt",
+            reason=reason_text,
+            meta=payload,
+        )
+        if decision.status != AuthorityDecisionStatus.ACCEPTED:
+            self.append_log(f"사냥 권한 반환 실패: {decision.reason}", "warn")
+
+    def on_map_authority_changed(self, owner: str, payload: Optional[dict] = None) -> None:
+        payload = payload or {}
         if self._request_timeout_timer:
             self._request_timeout_timer.stop()
         self._request_pending = False
@@ -5607,12 +5897,23 @@ class HuntTab(QWidget):
             self._last_monster_seen_ts = time.time()
         self._update_authority_ui()
         self._sync_detection_thread_status()
+        reason_text = payload.get('reason')
+        silent = bool(payload.get('silent'))
         if owner == "hunt":
-            self.append_log("사냥 탭이 조작 권한을 획득했습니다.", "success")
+            if not silent:
+                message = "사냥 탭이 조작 권한을 획득했습니다."
+                if reason_text:
+                    message += f" (사유: {reason_text})"
+                self.append_log(message, "success")
         elif owner == "map":
-            self.append_log("맵 탭으로 권한이 반환되었습니다.", "info")
+            if not silent:
+                message = "맵 탭으로 권한이 반환되었습니다."
+                if reason_text:
+                    message += f" (사유: {reason_text})"
+                self.append_log(message, "info")
         else:
-            self.append_log(f"권한 소유자 변경: {owner}", "info")
+            if not silent:
+                self.append_log(f"권한 소유자 변경: {owner}", "info")
         if owner != "hunt":
             self._schedule_condition_poll()
 
@@ -5651,13 +5952,16 @@ class HuntTab(QWidget):
                 else float("inf")
             )
             should_release = False
+            release_reason_code = None
             idle_limit = self.idle_release_spinbox.value()
             if self.latest_primary_monster_count == 0 and self.latest_monster_count < threshold:
                 if idle_elapsed >= idle_limit:
                     should_release = True
+                    release_reason_code = "MONSTER_SHORTAGE"
             timeout = self.control_release_timeout or 0
             if timeout and elapsed >= timeout:
                 should_release = True
+                release_reason_code = "MAX_HOLD_EXCEEDED"
             if should_release and (time.time() - self.last_release_attempt_ts) >= 1.0:
                 self.last_release_attempt_ts = time.time()
                 reason_parts = []
@@ -5670,7 +5974,8 @@ class HuntTab(QWidget):
                     reason_parts.append(f"타임아웃 {timeout}s 초과")
                 reason_text = ", ".join(reason_parts)
                 self.append_log(f"자동 조건 해제 → 사냥 권한 반환 ({reason_text})", "info")
-                self.release_control(reason_text)
+                release_reason = release_reason_code if (self.map_link_enabled and release_reason_code) else reason_text
+                self.release_control(release_reason)
             return
 
         if (
@@ -5684,7 +5989,8 @@ class HuntTab(QWidget):
                 reason_parts.append(f"주 스킬 범위 {self.latest_primary_monster_count}마리")
             reason_text = ", ".join(reason_parts)
             self.append_log(f"자동 조건 충족 → 사냥 권한 요청 ({reason_text})", "info")
-            self.request_control(reason_text)
+            request_reason = "MONSTER_READY" if self.map_link_enabled else reason_text
+            self.request_control(request_reason)
 
     def _run_hunt_loop(self) -> None:
         if not self.auto_hunt_enabled:

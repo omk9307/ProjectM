@@ -14,6 +14,7 @@ import ctypes
 import importlib
 import traceback
 from datetime import datetime
+from typing import Optional
 
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QTabWidget, QWidget, QVBoxLayout, QLabel, QTabBar,
@@ -23,6 +24,7 @@ from PyQt6.QtCore import Qt, QSettings, QTimer, QAbstractNativeEventFilter
 from PyQt6.QtGui import QColor, QPainter
 
 from status_monitor import StatusMonitorThread
+from control_authority_manager import ControlAuthorityManager
 
 
 if os.name == 'nt':
@@ -197,6 +199,8 @@ class MainWindow(QMainWindow):
         self._tab_color_states: dict[str, str] = {}
         self._hunt_detection_active = False
         self._map_detection_active = False
+        self._authority_manager = ControlAuthorityManager.instance()
+        self._authority_manager.authority_changed.connect(self._handle_global_authority_changed)
 
         self.load_tabs()
 
@@ -217,6 +221,11 @@ class MainWindow(QMainWindow):
         # [추가] 모든 탭 로드 후 시그널-슬롯 연결
         self.connect_tabs()
         self._update_global_hotkey_state()
+        try:
+            current_state = self._authority_manager.current_state()
+            self._handle_global_authority_changed(current_state.owner, {})
+        except Exception:
+            pass
 
     def load_tab(self, module_name, class_name, tab_title):
         """
@@ -324,7 +333,45 @@ class MainWindow(QMainWindow):
         else:
             print("경고: '맵' 또는 '자동 제어' 탭을 찾을 수 없어 연결하지 못했습니다.")
 
+        hunt_tab_instance = self.loaded_tabs.get('사냥')
+        map_tab_instance = self.loaded_tabs.get('맵')
+        if hunt_tab_instance and map_tab_instance:
+            if hasattr(hunt_tab_instance, 'attach_map_tab'):
+                hunt_tab_instance.attach_map_tab(map_tab_instance)
+            if hasattr(map_tab_instance, 'attach_hunt_tab'):
+                map_tab_instance.attach_hunt_tab(hunt_tab_instance)
+
     # ... (add_error_tab, closeEvent 메서드는 기존과 동일) ...
+    def _handle_global_authority_changed(self, owner: str, payload: dict) -> None:
+        tab_bar = self.tab_widget.tabBar()
+        if not isinstance(tab_bar, ColoredTabBar):
+            return
+
+        map_index = self._find_tab_index('맵')
+        hunt_index = self._find_tab_index('사냥')
+
+        if owner == 'map':
+            if map_index is not None:
+                tab_bar.set_tab_color(map_index, '#2f6fd1')
+            if hunt_index is not None:
+                tab_bar.set_tab_color(hunt_index, None)
+        elif owner == 'hunt':
+            if hunt_index is not None:
+                tab_bar.set_tab_color(hunt_index, '#1cbb7f')
+            if map_index is not None:
+                tab_bar.set_tab_color(map_index, None)
+        else:
+            if map_index is not None:
+                tab_bar.set_tab_color(map_index, None)
+            if hunt_index is not None:
+                tab_bar.set_tab_color(hunt_index, None)
+
+    def _find_tab_index(self, title: str) -> Optional[int]:
+        for index in range(self.tab_widget.count()):
+            if self.tab_widget.tabText(index) == title:
+                return index
+        return None
+
     def add_error_tab(self, title, message):
         """
         탭 로딩 실패 시, 사용자에게 오류를 알리는 탭을 추가합니다.

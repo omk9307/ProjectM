@@ -30,6 +30,7 @@ from pathlib import Path
 from typing import Dict, Optional, TextIO
 
 from status_monitor import StatusMonitorThread, StatusMonitorConfig
+from control_authority_manager import ControlAuthorityManager, PlayerStatusSnapshot
 
 from PyQt6.QtWidgets import (
     QApplication, QWidget, QLabel, QVBoxLayout, QHBoxLayout, QPushButton, QTextEdit,
@@ -447,6 +448,16 @@ class MapTab(QWidget):
             self.forbidden_wall_touch_threshold = 2.0
             self.pending_forbidden_command = None
 
+            # 중앙 권한 매니저 연동 상태
+            self._authority_manager = ControlAuthorityManager.instance()
+            self._authority_manager.register_map_provider(self)
+            self._authority_manager.authority_changed.connect(self._handle_authority_changed)
+            self._last_authority_snapshot_ts = 0.0
+            self._authority_priority_override = False
+            self.current_authority_owner = "map"
+            self._hunt_tab = None
+            self._syncing_with_hunt = False
+
             # [v11.3.7] 설정 변수 선언만 하고 값 할당은 load_profile_data로 위임
             self.cfg_idle_time_threshold = None
             self.cfg_climbing_state_frame_threshold = None
@@ -662,7 +673,88 @@ class MapTab(QWidget):
 
             # 3. 나머지 초기화 작업을 수행합니다.
             self.perform_initial_setup()
-        
+
+    def collect_authority_snapshot(self) -> Optional[PlayerStatusSnapshot]:
+        """ControlAuthorityManager가 요구하는 맵 상태 스냅샷을 구성한다."""
+        if self._authority_manager is None:
+            return None
+
+        timestamp = time.time()
+        player_state = getattr(self, 'player_state', 'unknown') or 'unknown'
+        navigation_action = getattr(self, 'navigation_action', '') or ''
+        last_move_command = getattr(self, 'last_movement_command', None)
+        snapshot = PlayerStatusSnapshot(
+            timestamp=timestamp,
+            floor=getattr(self, 'current_player_floor', None),
+            player_state=player_state,
+            navigation_action=navigation_action,
+            horizontal_velocity=self._compute_horizontal_velocity(),
+            last_move_command=last_move_command,
+            is_forbidden_active=bool(getattr(self, 'forbidden_wall_in_progress', False)),
+            is_event_active=bool(getattr(self, 'event_in_progress', False)),
+            priority_override=bool(getattr(self, '_authority_priority_override', False)),
+            metadata={
+                "navigation_locked": bool(getattr(self, 'navigation_state_locked', False)),
+                "guidance_text": getattr(self, 'guidance_text', ''),
+                "pending_nav_reason": getattr(self, 'pending_nav_recalc_reason', None),
+            },
+        )
+        self._last_authority_snapshot_ts = snapshot.timestamp
+        return snapshot
+
+    def _compute_horizontal_velocity(self) -> float:
+        """최근 프레임 기준 가로 이동 속도를 추정한다(px/frame)."""
+        history = getattr(self, 'x_movement_history', None)
+        if not history:
+            return 0.0
+        values = [float(v) for v in list(history) if isinstance(v, (int, float))]
+        if not values:
+            return 0.0
+        window = values[-3:]
+        return sum(window) / len(window)
+
+    def _sync_authority_snapshot(self, source: str) -> None:
+        """최신 스냅샷을 중앙 매니저에 전달한다."""
+        if not self._authority_manager:
+            return
+        snapshot = self.collect_authority_snapshot()
+        if snapshot is None:
+            return
+        self._authority_manager.update_map_snapshot(snapshot, source=source)
+
+    def _handle_authority_changed(self, owner: str, payload: dict) -> None:
+        previous = getattr(self, 'current_authority_owner', None)
+        self.current_authority_owner = owner
+        if owner == 'map':
+            self._handle_map_authority_regained(payload, previous)
+        else:
+            self._handle_map_authority_lost(payload, previous)
+
+    def _handle_map_authority_lost(self, payload: dict, previous: Optional[str]) -> None:
+        friendly = "사냥 탭"
+        reason = payload.get('reason') if isinstance(payload, dict) else None
+        if reason:
+            self.update_general_log(f"[권한] 조작 권한이 {friendly}으로 위임되었습니다. (사유: {reason})", "blue")
+        else:
+            self.update_general_log(f"[권한] 조작 권한이 {friendly}으로 위임되었습니다.", "blue")
+
+    def _handle_map_authority_regained(self, payload: dict, previous: Optional[str]) -> None:
+        reason = payload.get('reason') if isinstance(payload, dict) else None
+        if reason:
+            self.update_general_log(f"[권한] 맵 탭이 조작 권한을 획득했습니다. (사유: {reason})", "green")
+        else:
+            self.update_general_log("[권한] 맵 탭이 조작 권한을 획득했습니다.", "green")
+
+        # 권한 회수 즉시 안전 키 상태를 보장
+        self._emit_control_command("모든 키 떼기", "authority:reset", allow_forbidden=True)
+
+        last_command = getattr(self, 'last_movement_command', None)
+        if last_command:
+            def _resend_last_command() -> None:
+                self._emit_control_command(last_command, "authority:resume", allow_forbidden=True)
+
+            QTimer.singleShot(120, _resend_last_command)
+
     def initUI(self):
         main_layout = QHBoxLayout(self)
         left_layout = QVBoxLayout()
@@ -965,6 +1057,40 @@ class MapTab(QWidget):
         main_layout.addLayout(right_layout, 2)
         self.update_general_log("MapTab이 초기화되었습니다. 맵 프로필을 선택해주세요.", "black")
 
+    def attach_hunt_tab(self, hunt_tab) -> None:
+        self._hunt_tab = hunt_tab
+        if hasattr(hunt_tab, 'detection_status_changed'):
+            try:
+                hunt_tab.detection_status_changed.connect(self._handle_hunt_detection_status_changed)
+            except Exception:
+                pass
+
+    def _handle_hunt_detection_status_changed(self, running: bool) -> None:
+        if not getattr(self, '_hunt_tab', None):
+            return
+        if not getattr(self._hunt_tab, 'map_link_enabled', False):
+            return
+        if getattr(self, '_syncing_with_hunt', False):
+            return
+        try:
+            map_running = bool(self.detect_anchor_btn.isChecked())
+        except Exception:
+            map_running = False
+        if running == map_running:
+            return
+        self._syncing_with_hunt = True
+        try:
+            if running and not map_running:
+                if hasattr(self.detect_anchor_btn, 'setChecked'):
+                    self.detect_anchor_btn.setChecked(True)
+                self.toggle_anchor_detection(True)
+            elif not running and map_running:
+                if hasattr(self.detect_anchor_btn, 'setChecked'):
+                    self.detect_anchor_btn.setChecked(False)
+                self.toggle_anchor_detection(False)
+        finally:
+            self._syncing_with_hunt = False
+
     def _create_empty_route_slots(self):
         return {slot: {"enabled": False, "waypoints": []} for slot in ROUTE_SLOT_IDS}
 
@@ -980,6 +1106,15 @@ class MapTab(QWidget):
             return False
 
         is_status_command = isinstance(reason, str) and reason.startswith('status:')
+
+        if (
+            getattr(self, 'current_authority_owner', 'map') != 'map'
+            and not allow_forbidden
+            and command != "모든 키 떼기"
+            and not is_status_command
+        ):
+            self.update_general_log("[권한] 맵 탭이 조작 권한을 보유하지 않아 명령을 보류합니다.", "gray")
+            return False
 
         if (
             self._status_active_resource
@@ -2476,6 +2611,15 @@ class MapTab(QWidget):
         self.event_started_at = time.time()
         self.navigation_state_locked = False
         self.state_transition_counters.clear()
+        self._authority_priority_override = True
+        if self._authority_manager:
+            self._authority_manager.notify_priority_event(
+                "WAYPOINT_EVENT",
+                metadata={
+                    "waypoint_id": self.active_event_waypoint_id,
+                    "profile": profile_name,
+                },
+            )
 
         if waypoint_id:
             state = self._get_event_waypoint_state(waypoint_id)
@@ -2496,6 +2640,8 @@ class MapTab(QWidget):
             self.active_event_profile = ""
             self.active_event_reason = ""
             self.event_started_at = 0.0
+            self._authority_priority_override = False
+            self._sync_authority_snapshot("event_aborted")
             return False
         return True
 
@@ -2527,12 +2673,14 @@ class MapTab(QWidget):
         self.active_event_profile = ""
         self.active_event_reason = ""
         self.event_started_at = 0.0
+        self._authority_priority_override = False
         self.navigation_action = 'move_to_target'
         self.guidance_text = '없음'
         self.recovery_cooldown_until = time.time() + 1.0
         self.current_segment_path = []
         self.current_segment_index = 0
         self._try_execute_pending_event()
+        self._sync_authority_snapshot("event_finished")
 
     def _refresh_forbidden_wall_states(self) -> None:
         refreshed: Dict[str, dict] = {}
@@ -2616,6 +2764,15 @@ class MapTab(QWidget):
         self.active_forbidden_wall_profile = command
         self.active_forbidden_wall_trigger = trigger_type
         self.forbidden_wall_started_at = time.time()
+        self._authority_priority_override = True
+        if self._authority_manager:
+            self._authority_manager.notify_priority_event(
+                "FORBIDDEN_WALL",
+                metadata={
+                    "wall_id": wall_id,
+                    "trigger": trigger_type,
+                },
+            )
 
         if not self._emit_control_command(command, reason, allow_forbidden=True):
             self.forbidden_wall_in_progress = False
@@ -2623,7 +2780,9 @@ class MapTab(QWidget):
             self.active_forbidden_wall_reason = ""
             self.active_forbidden_wall_profile = ""
             self.active_forbidden_wall_trigger = ""
+            self._authority_priority_override = False
             state['contact_ready'] = False
+            self._sync_authority_snapshot("forbidden_aborted")
             return False
         return True
 
@@ -2651,6 +2810,7 @@ class MapTab(QWidget):
         self.active_forbidden_wall_profile = ""
         self.active_forbidden_wall_trigger = ""
         self.forbidden_wall_started_at = 0.0
+        self._authority_priority_override = False
         
         pending = getattr(self, 'pending_forbidden_command', None)
         self.pending_forbidden_command = None
@@ -2661,6 +2821,8 @@ class MapTab(QWidget):
                     "금지벽 종료 후 보류된 명령을 재전송했습니다.",
                     "gray",
                 )
+
+        self._sync_authority_snapshot("forbidden_finished")
 
     def _update_forbidden_wall_logic(self, final_player_pos: QPointF, contact_terrain: Optional[dict]) -> None:
         walls = self.geometry_data.get("forbidden_walls", [])
@@ -3317,6 +3479,14 @@ class MapTab(QWidget):
 
                 self._reset_walk_teleport_state()
                 self.detect_anchor_btn.setText("탐지 중단")
+                if getattr(self, '_hunt_tab', None) and getattr(self._hunt_tab, 'map_link_enabled', False) and not getattr(self, '_syncing_with_hunt', False):
+                    self._syncing_with_hunt = True
+                    try:
+                        if hasattr(self._hunt_tab, 'detect_btn') and not self._hunt_tab.detect_btn.isChecked():
+                            self._hunt_tab.detect_btn.setChecked(True)
+                            self._hunt_tab._toggle_detection(True)
+                    finally:
+                        self._syncing_with_hunt = False
             else:
                 # [핵심 수정] 스레드 중단 전에 플래그를 False로 먼저 설정
                 self.is_detection_running = False
@@ -3377,6 +3547,15 @@ class MapTab(QWidget):
 
                 # [핵심 수정] 탐지 중지 시 딜레이 플래그 비활성화
                 self.initial_delay_active = False
+
+                if getattr(self, '_hunt_tab', None) and getattr(self._hunt_tab, 'map_link_enabled', False) and not getattr(self, '_syncing_with_hunt', False):
+                    self._syncing_with_hunt = True
+                    try:
+                        if hasattr(self._hunt_tab, 'detect_btn') and self._hunt_tab.detect_btn.isChecked():
+                            self._hunt_tab.detect_btn.setChecked(False)
+                            self._hunt_tab._toggle_detection(False)
+                    finally:
+                        self._syncing_with_hunt = False
 
                 self._status_active_resource = None
                 self._status_saved_command = None
@@ -3898,6 +4077,7 @@ class MapTab(QWidget):
         transform_matrix = alignment['transform_matrix']
 
         self._update_player_state_and_navigation(final_player_pos)
+        self._sync_authority_snapshot("detection_loop")
 
         if self.is_profiling_jump:
             is_in_air = self.player_state not in ['on_terrain', 'idle']
