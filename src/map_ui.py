@@ -424,10 +424,13 @@ class MapTab(QWidget):
             self._other_player_alert_active = False
             self._other_player_alert_last_time = 0.0
             self._other_player_alert_cooldown = 3.0
+            self.telegram_alert_checkbox = None
+            self.telegram_alert_enabled = False
             self.active_feature_info = []
             self.reference_anchor_id = None
             self.smoothed_player_pos = None
             self.line_id_to_floor_map = {}  # [v11.4.5] 지형선 ID <-> 층 정보 캐싱용 딕셔너리
+            self.initial_delay_ms = 2000
 
             # 이벤트 웨이포인트 실행 상태
             self.event_in_progress = False
@@ -1078,61 +1081,66 @@ class MapTab(QWidget):
         detect_groupbox = QGroupBox("7. 탐지 제어")
         detect_v_layout = QVBoxLayout()
 
-        # --- [수정] 레이아웃을 2줄로 분리 ---
-        settings_h_layout_1 = QHBoxLayout()
-        auto_control_column = QVBoxLayout()
-        auto_control_column.setSpacing(2)
-        auto_control_column.setContentsMargins(0, 0, 0, 0)
+        # --- [수정] 탐지 제어 레이아웃 정돈 ---
+        first_row_layout = QHBoxLayout()
+        first_row_layout.addWidget(QLabel("시작 딜레이:"))
+        self.initial_delay_spinbox = QSpinBox()
+        self.initial_delay_spinbox.setRange(0, 10000)
+        self.initial_delay_spinbox.setSingleStep(100)
+        self.initial_delay_spinbox.setValue(2000)
+        self.initial_delay_spinbox.setSuffix(" ms")
+        self.initial_delay_spinbox.valueChanged.connect(self._on_initial_delay_changed)
+        first_row_layout.addWidget(self.initial_delay_spinbox)
+        first_row_layout.addSpacing(12)
+        first_row_layout.addWidget(QLabel("단축키:"))
+        self.hotkey_display_label = QLabel("None")
+        self.hotkey_display_label.setStyleSheet("font-weight: bold; color: white; padding: 2px 5px; background-color: #333; border: 1px solid #555; border-radius: 3px;")
+        first_row_layout.addWidget(self.hotkey_display_label)
+        set_hotkey_btn = QPushButton("설정")
+        set_hotkey_btn.clicked.connect(self._open_hotkey_setting_dialog)
+        first_row_layout.addWidget(set_hotkey_btn)
+        first_row_layout.addStretch(1)
+
+        second_row_layout = QHBoxLayout()
         self.auto_control_checkbox = QCheckBox("자동 제어")
         self.auto_control_checkbox.setChecked(False)
         self.auto_control_checkbox.toggled.connect(self._on_auto_control_toggled)
-        auto_control_column.addWidget(self.auto_control_checkbox)
-        self.other_player_alert_checkbox = QCheckBox("다른 유저 감지")
-        self.other_player_alert_checkbox.setChecked(False)
-        self.other_player_alert_checkbox.toggled.connect(self._on_other_player_alert_toggled)
-        auto_control_column.addWidget(self.other_player_alert_checkbox)
-        auto_control_column.addStretch(1)
-        settings_h_layout_1.addLayout(auto_control_column)
+        second_row_layout.addWidget(self.auto_control_checkbox)
         self.perf_logging_checkbox = QCheckBox("CSV 기록")
         self.perf_logging_checkbox.setChecked(self._perf_logging_enabled)
         self.perf_logging_checkbox.toggled.connect(self._on_perf_logging_toggled)
-        settings_h_layout_1.addWidget(self.perf_logging_checkbox)
-        settings_h_layout_1.addStretch(1)
-        settings_h_layout_1.addWidget(QLabel("시작 딜레이:"))
-        self.initial_delay_spinbox = QSpinBox()
-        self.initial_delay_spinbox.setRange(0, 10000)
-        self.initial_delay_spinbox.setSingleStep(500)
-        self.initial_delay_spinbox.setValue(2000)
-        self.initial_delay_spinbox.setSuffix(" ms")
-        settings_h_layout_1.addWidget(self.initial_delay_spinbox)
-        settings_h_layout_2 = QHBoxLayout()
-        settings_h_layout_2.addStretch(1)
-        settings_h_layout_2.addWidget(QLabel("단축키:"))
-        self.hotkey_display_label = QLabel("None")
-        self.hotkey_display_label.setStyleSheet("font-weight: bold; color: white; padding: 2px 5px; background-color: #333; border: 1px solid #555; border-radius: 3px;")
-        set_hotkey_btn = QPushButton("설정")
-        set_hotkey_btn.clicked.connect(self._open_hotkey_setting_dialog)
-        settings_h_layout_2.addWidget(self.hotkey_display_label)
-        settings_h_layout_2.addWidget(set_hotkey_btn)
-        
-        # 하단 버튼 라인
-        buttons_h_layout = QHBoxLayout()
-        buttons_h_layout.addStretch(1)
+        second_row_layout.addWidget(self.perf_logging_checkbox)
+        second_row_layout.addStretch(1)
+
+        third_row_layout = QHBoxLayout()
+        self.other_player_alert_checkbox = QCheckBox("다른 유저 감지")
+        self.other_player_alert_checkbox.setChecked(False)
+        self.other_player_alert_checkbox.toggled.connect(self._on_other_player_alert_toggled)
+        third_row_layout.addWidget(self.other_player_alert_checkbox)
+        self.telegram_alert_checkbox = QCheckBox("텔레그램 전송")
+        self.telegram_alert_checkbox.setChecked(False)
+        self.telegram_alert_checkbox.toggled.connect(self._on_telegram_alert_toggled)
+        third_row_layout.addWidget(self.telegram_alert_checkbox)
+        third_row_layout.addStretch(1)
+
+        buttons_row_layout = QHBoxLayout()
         self.state_config_btn = QPushButton("판정 설정")
         self.state_config_btn.clicked.connect(self._open_state_config_dialog)
         self.action_learning_btn = QPushButton("동작 학습")
-        self.action_learning_btn.clicked.connect(self.open_action_learning_dialog) 
+        self.action_learning_btn.clicked.connect(self.open_action_learning_dialog)
         self.detect_anchor_btn = QPushButton("탐지 시작")
         self.detect_anchor_btn.setCheckable(True)
-        self.detect_anchor_btn.setStyleSheet("padding: 3px 72px")
+        self.detect_anchor_btn.setMinimumWidth(200)
+        self.detect_anchor_btn.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self.detect_anchor_btn.clicked.connect(self.toggle_anchor_detection)
-        buttons_h_layout.addWidget(self.state_config_btn)
-        buttons_h_layout.addWidget(self.action_learning_btn)
-        buttons_h_layout.addWidget(self.detect_anchor_btn)
-        
-        detect_v_layout.addLayout(settings_h_layout_1)
-        detect_v_layout.addLayout(settings_h_layout_2)
-        detect_v_layout.addLayout(buttons_h_layout)
+        buttons_row_layout.addWidget(self.state_config_btn)
+        buttons_row_layout.addWidget(self.action_learning_btn)
+        buttons_row_layout.addWidget(self.detect_anchor_btn, 1)
+
+        detect_v_layout.addLayout(first_row_layout)
+        detect_v_layout.addLayout(second_row_layout)
+        detect_v_layout.addLayout(third_row_layout)
+        detect_v_layout.addLayout(buttons_row_layout)
         detect_groupbox.setLayout(detect_v_layout)
         left_layout.addWidget(detect_groupbox)
 
@@ -1767,6 +1775,10 @@ class MapTab(QWidget):
             block_state = self.perf_logging_checkbox.blockSignals(True)
             self.perf_logging_checkbox.setChecked(self._perf_logging_enabled)
             self.perf_logging_checkbox.blockSignals(block_state)
+        if hasattr(self, 'initial_delay_spinbox'):
+            blocker = QSignalBlocker(self.initial_delay_spinbox)
+            self.initial_delay_spinbox.setValue(int(self.initial_delay_ms))
+            del blocker
         if self.hotkey_manager:
             try:
                 self.hotkey_manager.register_hotkey(self.current_hotkey)
@@ -1992,6 +2004,13 @@ class MapTab(QWidget):
             self.other_player_alert_enabled = other_alert_enabled
             if not other_alert_enabled:
                 self._reset_other_player_alert_state()
+
+            telegram_enabled = bool(config.get('telegram_alert_enabled', False))
+            if hasattr(self, 'telegram_alert_checkbox') and self.telegram_alert_checkbox:
+                blocker = QSignalBlocker(self.telegram_alert_checkbox)
+                self.telegram_alert_checkbox.setChecked(telegram_enabled)
+                del blocker
+            self.telegram_alert_enabled = telegram_enabled
 
             # 저장된 상태 판정 설정이 있으면 기본값을 덮어쓰기
             state_config = config.get('state_machine_config', {})
@@ -2379,6 +2398,10 @@ class MapTab(QWidget):
                     getattr(self, 'other_player_alert_checkbox', None)
                     and self.other_player_alert_checkbox.isChecked()
                 ),
+                'telegram_alert_enabled': bool(
+                    getattr(self, 'telegram_alert_checkbox', None)
+                    and self.telegram_alert_checkbox.isChecked()
+                ),
             })
             
             key_features_data = self._prepare_data_for_json(self.key_features)
@@ -2422,15 +2445,18 @@ class MapTab(QWidget):
                     self.current_hotkey = settings.get('hotkey', 'None')
                     self._perf_logging_enabled = bool(settings.get('perf_logging_enabled', False))
                     self._minimap_display_enabled = bool(settings.get('minimap_display_enabled', True))
+                    self.initial_delay_ms = int(settings.get('initial_delay_ms', self.initial_delay_ms))
                     return settings.get('active_profile')
             except json.JSONDecodeError:
                 self.current_hotkey = 'None'
                 self._perf_logging_enabled = False
                 self._minimap_display_enabled = True
+                self.initial_delay_ms = 2000
                 return None
         self.current_hotkey = 'None'
         self._perf_logging_enabled = False
         self._minimap_display_enabled = True
+        self.initial_delay_ms = 2000
         return None
 
     def save_global_settings(self):
@@ -2440,6 +2466,7 @@ class MapTab(QWidget):
                 'hotkey': self.current_hotkey, #  단축키 정보 저장
                 'perf_logging_enabled': bool(self._perf_logging_enabled),
                 'minimap_display_enabled': bool(getattr(self, '_minimap_display_enabled', True)),
+                'initial_delay_ms': int(getattr(self, 'initial_delay_ms', 2000)),
             }
             json.dump(settings, f)
 
@@ -4906,6 +4933,15 @@ class MapTab(QWidget):
     def _reset_other_player_alert_state(self) -> None:
         self._other_player_alert_active = False
         self._other_player_alert_last_time = 0.0
+
+    def _on_initial_delay_changed(self, value: int) -> None:  # noqa: ARG002
+        self.initial_delay_ms = int(value)
+        self.save_global_settings()
+
+    def _on_telegram_alert_toggled(self, checked: bool) -> None:  # noqa: ARG002
+        self.telegram_alert_enabled = bool(checked)
+        if self.active_profile_name:
+            self.save_profile_data()
 
     def _on_auto_control_toggled(self, checked: bool) -> None:  # noqa: ARG002
         if not self.active_profile_name:
