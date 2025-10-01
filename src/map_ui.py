@@ -298,6 +298,62 @@ except Exception as e:
 # --- v10.0.0: 네비게이터 위젯 클래스 ---
 
 
+class TelegramSettingsDialog(QDialog):
+    """텔레그램 전송 옵션을 설정하는 다이얼로그."""
+
+    def __init__(self, mode: str, interval_seconds: float, parent: QWidget | None = None):
+        super().__init__(parent)
+        self.setWindowTitle("텔레그램 전송 설정")
+        self.setModal(True)
+
+        self._mode = mode if mode in {"once", "continuous"} else "once"
+        self._interval_seconds = max(float(interval_seconds or 5.0), 1.0)
+
+        main_layout = QVBoxLayout(self)
+        mode_row = QHBoxLayout()
+        mode_row.addWidget(QLabel("전송 횟수:"))
+
+        self.once_radio = QRadioButton("1회")
+        self.continuous_radio = QRadioButton("지속")
+
+        self.mode_group = QButtonGroup(self)
+        self.mode_group.addButton(self.once_radio)
+        self.mode_group.addButton(self.continuous_radio)
+
+        mode_row.addWidget(self.once_radio)
+        mode_row.addWidget(self.continuous_radio)
+        mode_row.addStretch(1)
+
+        if self._mode == "continuous":
+            self.continuous_radio.setChecked(True)
+        else:
+            self.once_radio.setChecked(True)
+
+        interval_row = QHBoxLayout()
+        interval_row.addWidget(QLabel("전송 주기(초):"))
+        self.interval_spinbox = QDoubleSpinBox()
+        self.interval_spinbox.setDecimals(1)
+        self.interval_spinbox.setSingleStep(0.5)
+        self.interval_spinbox.setMinimum(1.0)
+        self.interval_spinbox.setMaximum(600.0)
+        self.interval_spinbox.setValue(self._interval_seconds)
+        interval_row.addWidget(self.interval_spinbox)
+        interval_row.addStretch(1)
+
+        main_layout.addLayout(mode_row)
+        main_layout.addLayout(interval_row)
+
+        button_box = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        button_box.accepted.connect(self.accept)
+        button_box.rejected.connect(self.reject)
+        main_layout.addWidget(button_box)
+
+    def get_mode(self) -> str:
+        return "continuous" if self.continuous_radio.isChecked() else "once"
+
+    def get_interval_seconds(self) -> float:
+        return float(self.interval_spinbox.value())
+
 
 class MapTab(QWidget):
     # control_command_issued 시그널은 명령과 선택적 원인을 전달합니다.
@@ -423,10 +479,11 @@ class MapTab(QWidget):
             self.other_player_alert_enabled = False
             self._other_player_alert_active = False
             self._other_player_alert_last_time = 0.0
-            self._other_player_alert_cooldown = 3.0
             self.telegram_alert_checkbox = None
-            self.telegram_test_btn = None
+            self.telegram_settings_btn = None
             self.telegram_alert_enabled = False
+            self.telegram_send_mode = "once"
+            self.telegram_send_interval = 5.0
             self.telegram_bot_token = ""
             self.telegram_chat_id = ""
             self._refresh_telegram_credentials()
@@ -1174,10 +1231,10 @@ class MapTab(QWidget):
         self.telegram_alert_checkbox.setChecked(False)
         self.telegram_alert_checkbox.toggled.connect(self._on_telegram_alert_toggled)
         telegram_controls_layout.addWidget(self.telegram_alert_checkbox)
-        self.telegram_test_btn = QPushButton("테스트")
-        self.telegram_test_btn.setEnabled(False)
-        self.telegram_test_btn.clicked.connect(self._on_telegram_test_clicked)
-        telegram_controls_layout.addWidget(self.telegram_test_btn)
+        self.telegram_settings_btn = QPushButton("설정")
+        self.telegram_settings_btn.setEnabled(False)
+        self.telegram_settings_btn.clicked.connect(self._open_telegram_settings_dialog)
+        telegram_controls_layout.addWidget(self.telegram_settings_btn)
         third_row_layout.addLayout(telegram_controls_layout)
         third_row_layout.addStretch(1)
         self.telegram_alert_checkbox.setEnabled(False)
@@ -2128,8 +2185,14 @@ class MapTab(QWidget):
                 self.telegram_alert_checkbox.setChecked(telegram_enabled)
                 del blocker
             self.telegram_alert_enabled = telegram_enabled
-            if hasattr(self, 'telegram_test_btn') and self.telegram_test_btn:
-                self.telegram_test_btn.setEnabled(other_alert_enabled and telegram_enabled)
+            if hasattr(self, 'telegram_settings_btn') and self.telegram_settings_btn:
+                self.telegram_settings_btn.setEnabled(other_alert_enabled and telegram_enabled)
+            self.telegram_send_mode = "continuous" if config.get("telegram_send_mode") == "continuous" else "once"
+            try:
+                interval_value = float(config.get("telegram_send_interval", self.telegram_send_interval))
+            except (TypeError, ValueError):
+                interval_value = self.telegram_send_interval
+            self.telegram_send_interval = max(interval_value, 1.0)
 
             # 저장된 상태 판정 설정이 있으면 기본값을 덮어쓰기
             state_config = config.get('state_machine_config', {})
@@ -2521,6 +2584,8 @@ class MapTab(QWidget):
                     getattr(self, 'telegram_alert_checkbox', None)
                     and self.telegram_alert_checkbox.isChecked()
                 ),
+                'telegram_send_mode': self.telegram_send_mode,
+                'telegram_send_interval': float(self.telegram_send_interval),
             })
             
             key_features_data = self._prepare_data_for_json(self.key_features)
@@ -5034,8 +5099,8 @@ class MapTab(QWidget):
                 self.telegram_alert_checkbox.setChecked(False)
                 del blocker
                 self.telegram_alert_enabled = False
-        if self.telegram_test_btn:
-            self.telegram_test_btn.setEnabled(
+        if self.telegram_settings_btn:
+            self.telegram_settings_btn.setEnabled(
                 self.other_player_alert_enabled and self.telegram_alert_enabled
             )
         if self.active_profile_name:
@@ -5066,22 +5131,34 @@ class MapTab(QWidget):
 
         now = time.time()
         has_other_player = bool(other_players)
-        if has_other_player and not self._other_player_alert_active:
-            if now >= self._other_player_alert_last_time + self._other_player_alert_cooldown:
+        if has_other_player:
+            first_detection = not self._other_player_alert_active
+            if first_detection:
                 self._play_other_player_alert_sound()
-                self._other_player_alert_last_time = now
+                self._other_player_alert_active = True
+
+            interval = max(self.telegram_send_interval, 1.0)
+            should_send = False
+            if self.telegram_send_mode == "continuous":
+                if first_detection or self._other_player_alert_last_time <= 0.0 or now >= self._other_player_alert_last_time + interval:
+                    should_send = True
+            else:
+                should_send = first_detection
+
+            if should_send:
                 detected_count = len(other_players)
                 profile_name = self.active_profile_name or "(미지정)"
                 timestamp_text = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(now))
+                count_text = f"{detected_count}명"
                 message = (
-                    f"[Project Maple] 다른 유저 감지\n"
-                    f"감지 수: {detected_count}명\n"
+                    f"[Project Maple] 다른 캐릭터 감지 알림\n"
+                    f"다른 캐릭터: {count_text}\n"
                     f"프로필: {profile_name}\n"
                     f"시각: {timestamp_text}"
                 )
                 self._send_telegram_alert(message)
-            self._other_player_alert_active = True
-        elif not has_other_player:
+                self._other_player_alert_last_time = now
+        else:
             self._other_player_alert_active = False
 
     def _reset_other_player_alert_state(self) -> None:
@@ -5168,12 +5245,36 @@ class MapTab(QWidget):
             return
 
         self.telegram_alert_enabled = bool(checked)
-        if self.telegram_test_btn:
-            self.telegram_test_btn.setEnabled(
+        if self.telegram_settings_btn:
+            self.telegram_settings_btn.setEnabled(
                 self.other_player_alert_enabled and self.telegram_alert_enabled
             )
         if self.active_profile_name:
             self.save_profile_data()
+
+    def _open_telegram_settings_dialog(self) -> None:
+        """텔레그램 전송 설정 다이얼로그를 연다."""
+        if not self.other_player_alert_enabled:
+            QMessageBox.information(self, "텔레그램 설정", "먼저 '다른 유저 감지'를 활성화해 주세요.")
+            return
+        if not self.telegram_alert_enabled:
+            QMessageBox.information(self, "텔레그램 설정", "'텔레그램 전송' 옵션을 체크한 뒤 다시 시도하세요.")
+            return
+
+        dialog = TelegramSettingsDialog(
+            mode=self.telegram_send_mode,
+            interval_seconds=self.telegram_send_interval,
+            parent=self,
+        )
+        if dialog.exec():
+            self.telegram_send_mode = dialog.get_mode()
+            self.telegram_send_interval = dialog.get_interval_seconds()
+            if self.active_profile_name:
+                self.save_profile_data()
+            self.update_general_log(
+                f"텔레그램 전송 설정이 업데이트되었습니다. 모드: {'1회' if self.telegram_send_mode == 'once' else '지속'}, 주기: {self.telegram_send_interval:.1f}초",
+                "blue",
+            )
 
     def _send_telegram_alert(self, message: str) -> None:
         if not message or not self.telegram_alert_enabled:
@@ -5224,29 +5325,6 @@ class MapTab(QWidget):
                 )
 
         threading.Thread(target=_worker, daemon=True).start()
-
-    def _on_telegram_test_clicked(self) -> None:
-        if not self.other_player_alert_enabled:
-            QMessageBox.information(self, "텔레그램 테스트", "먼저 '다른 유저 감지'를 활성화해 주세요.")
-            return
-        if not self.telegram_alert_enabled:
-            QMessageBox.information(self, "텔레그램 테스트", "'텔레그램 전송' 옵션을 체크한 뒤 다시 시도하세요.")
-            return
-
-        self._refresh_telegram_credentials()
-        token = (self.telegram_bot_token or "").strip()
-        chat_id = (self.telegram_chat_id or "").strip()
-        if not token or not chat_id:
-            QMessageBox.warning(
-                self,
-                "텔레그램 테스트",
-                "workspace/config/telegram.json 또는 환경변수에서 텔레그램 자격 정보를 찾을 수 없습니다.",
-            )
-            return
-
-        test_message = "[Project Maple] 텔레그램 테스트 메시지"
-        self._send_telegram_alert(test_message)
-        QMessageBox.information(self, "텔레그램 테스트", "테스트 메시지를 전송했습니다. 텔레그램을 확인하세요.")
 
     def _on_auto_control_toggled(self, checked: bool) -> None:  # noqa: ARG002
         if not self.active_profile_name:
