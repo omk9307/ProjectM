@@ -367,6 +367,11 @@ class MapTab(QWidget):
     jump_profile_progress_signal = pyqtSignal(int)
 
     EVENT_WAYPOINT_THRESHOLD = 8.0
+    AUTHORITY_NON_RESUMABLE_COMMANDS = {
+        "모든 키 떼기",
+        "사다리 멈춤복구",
+    }
+    AUTHORITY_NON_RESUMABLE_KEYWORDS = ("텔레포트",)
     MAP_PERF_HEADERS = [
         "timestamp",
         "frame_index",
@@ -1009,9 +1014,9 @@ class MapTab(QWidget):
     def _is_trackable_authority_command(self, command: str) -> bool:
         if not command:
             return False
-        if command == "모든 키 떼기":
+        if command in self.AUTHORITY_NON_RESUMABLE_COMMANDS:
             return False
-        return "텔레포트" not in command
+        return not any(keyword in command for keyword in self.AUTHORITY_NON_RESUMABLE_KEYWORDS)
 
     def _update_last_authority_command(self, command: str, reason: object) -> dict:
         entry = {
