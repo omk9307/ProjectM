@@ -27,7 +27,7 @@ import pygetwindow as gw
 import ctypes
 from ctypes import wintypes
 from pathlib import Path
-from typing import Dict, Optional, TextIO
+from typing import Any, Dict, Optional, TextIO
 
 from status_monitor import StatusMonitorThread, StatusMonitorConfig
 from control_authority_manager import ControlAuthorityManager, PlayerStatusSnapshot
@@ -457,6 +457,9 @@ class MapTab(QWidget):
             self.current_authority_owner = "map"
             self._hunt_tab = None
             self._syncing_with_hunt = False
+            self._authority_event_history = deque(maxlen=200)
+            self._last_authority_command_entry = None
+            self._authority_resume_candidate = None
 
             # [v11.3.7] 설정 변수 선언만 하고 값 할당은 load_profile_data로 위임
             self.cfg_idle_time_threshold = None
@@ -734,26 +737,148 @@ class MapTab(QWidget):
         friendly = "사냥 탭"
         reason = payload.get('reason') if isinstance(payload, dict) else None
         if reason:
-            self.update_general_log(f"[권한] 조작 권한이 {friendly}으로 위임되었습니다. (사유: {reason})", "blue")
-        else:
-            self.update_general_log(f"[권한] 조작 권한이 {friendly}으로 위임되었습니다.", "blue")
+            reason = str(reason)
+
+        event_extra: Dict[str, Any] = {}
+        if isinstance(payload, dict):
+            elapsed = payload.get('elapsed_since_previous')
+            if elapsed is not None:
+                event_extra['elapsed_since_previous'] = elapsed
+            meta = payload.get('meta')
+            if isinstance(meta, dict):
+                event_extra['meta'] = dict(meta)
+
+        message = f"[권한][위임] 조작 권한이 {friendly}으로 이동했습니다."
+        if reason:
+            message += f" 사유: {reason}"
+
+        self._record_authority_event(
+            "released",
+            message=message,
+            reason=reason,
+            source=payload.get('source') if isinstance(payload, dict) else None,
+            previous_owner=previous,
+            extra=event_extra or None,
+        )
+
+        if self._last_authority_command_entry:
+            self._authority_resume_candidate = dict(self._last_authority_command_entry)
 
     def _handle_map_authority_regained(self, payload: dict, previous: Optional[str]) -> None:
         reason = payload.get('reason') if isinstance(payload, dict) else None
         if reason:
-            self.update_general_log(f"[권한] 맵 탭이 조작 권한을 획득했습니다. (사유: {reason})", "green")
+            reason = str(reason)
+
+        event_extra: Dict[str, Any] = {}
+        if isinstance(payload, dict):
+            elapsed = payload.get('elapsed_since_previous')
+            if elapsed is not None:
+                event_extra['elapsed_since_previous'] = elapsed
+            meta = payload.get('meta')
+            if isinstance(meta, dict):
+                event_extra['meta'] = dict(meta)
+
+        resume_entry = self._authority_resume_candidate or self._last_authority_command_entry
+        command_to_resume = None
+        if isinstance(resume_entry, dict):
+            command_to_resume = resume_entry.get('command')
+
+        message = "[권한][획득] 맵 탭이 조작 권한을 획득했습니다."
+        if reason:
+            message += f" 사유: {reason}"
+        if command_to_resume:
+            message += f" | 재실행 예정 명령: {command_to_resume}"
         else:
-            self.update_general_log("[권한] 맵 탭이 조작 권한을 획득했습니다.", "green")
+            message += " | 재실행 명령 없음"
+
+        authority_source = payload.get('source') if isinstance(payload, dict) else None
+
+        self._record_authority_event(
+            "acquired",
+            message=message,
+            reason=reason,
+            source=authority_source,
+            previous_owner=previous,
+            command=command_to_resume,
+            extra=event_extra or None,
+        )
 
         # 권한 회수 즉시 안전 키 상태를 보장
         self._emit_control_command("모든 키 떼기", "authority:reset", allow_forbidden=True)
 
-        last_command = getattr(self, 'last_movement_command', None)
-        if last_command:
+        if command_to_resume:
             def _resend_last_command() -> None:
-                self._emit_control_command(last_command, "authority:resume", allow_forbidden=True)
+                success = self._emit_control_command(command_to_resume, "authority:resume", allow_forbidden=True)
+                result_text = "성공" if success else "보류"
+                resume_message = (
+                    f"[권한][재실행] 마지막 명령 '{command_to_resume}' 재실행 {result_text}."
+                )
+                resume_extra: Dict[str, Any] = {
+                    "attempted_at": time.time(),
+                }
+                if event_extra:
+                    resume_extra.update(event_extra)
+                self._record_authority_event(
+                    "resume",
+                    message=resume_message,
+                    reason=reason,
+                    source=authority_source,
+                    previous_owner=previous,
+                    command=command_to_resume,
+                    command_success=success,
+                    extra=resume_extra,
+                )
 
             QTimer.singleShot(120, _resend_last_command)
+
+        self._authority_resume_candidate = None
+
+    def _is_trackable_authority_command(self, command: str) -> bool:
+        if not command:
+            return False
+        if command == "모든 키 떼기":
+            return False
+        return "텔레포트" not in command
+
+    def _update_last_authority_command(self, command: str, reason: object) -> dict:
+        entry = {
+            "command": command,
+            "reason": str(reason) if isinstance(reason, str) else (str(reason) if reason is not None else None),
+            "timestamp": time.time(),
+            "executed": False,
+        }
+        self._last_authority_command_entry = entry
+        return entry
+
+    def _record_authority_event(
+        self,
+        event_type: str,
+        *,
+        message: str,
+        reason: Optional[str] = None,
+        source: Optional[str] = None,
+        previous_owner: Optional[str] = None,
+        command: Optional[str] = None,
+        command_success: Optional[bool] = None,
+        extra: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        entry: Dict[str, Any] = {
+            "timestamp": time.time(),
+            "event": event_type,
+            "owner": getattr(self, 'current_authority_owner', None),
+            "reason": reason,
+            "source": source,
+            "previous_owner": previous_owner,
+            "command": command,
+            "command_success": command_success,
+        }
+        if extra:
+            entry["meta"] = dict(extra)
+        self._authority_event_history.append(entry)
+        self.update_general_log(message, "red")
+
+    def get_authority_event_history(self) -> list[Dict[str, Any]]:
+        return list(self._authority_event_history)
 
     def initUI(self):
         main_layout = QHBoxLayout(self)
@@ -1107,13 +1232,32 @@ class MapTab(QWidget):
 
         is_status_command = isinstance(reason, str) and reason.startswith('status:')
 
+        command_entry = None
+        if not is_status_command and self._is_trackable_authority_command(command):
+            command_entry = self._update_last_authority_command(command, reason)
+
         if (
             getattr(self, 'current_authority_owner', 'map') != 'map'
             and not allow_forbidden
             and command != "모든 키 떼기"
             and not is_status_command
         ):
-            self.update_general_log("[권한] 맵 탭이 조작 권한을 보유하지 않아 명령을 보류합니다.", "gray")
+            block_message = f"[권한][보류] 조작 권한이 없어 '{command}' 명령을 보류했습니다."
+            block_extra: Dict[str, Any] = {"reason": "not_owner"}
+            if command_entry and command_entry.get('reason'):
+                block_extra['command_reason'] = command_entry['reason']
+            self._record_authority_event(
+                "blocked",
+                message=block_message,
+                reason="not_owner",
+                source="map_tab",
+                previous_owner=getattr(self, 'current_authority_owner', None),
+                command=command,
+                command_success=False,
+                extra=block_extra,
+            )
+            if command_entry:
+                self._authority_resume_candidate = dict(command_entry)
             return False
 
         if (
@@ -1133,6 +1277,8 @@ class MapTab(QWidget):
 
         if not is_status_command and command != "모든 키 떼기":
             self._last_regular_command = (command, reason)
+            if command_entry and self._last_authority_command_entry is command_entry:
+                command_entry['executed'] = True
         return True
 
     def _normalize_route_slot_dict(self, slot_dict):

@@ -1445,11 +1445,17 @@ class HuntTab(QWidget):
         group.setMinimumWidth(0)
         condition_form = QFormLayout()
 
-        self.monster_threshold_spinbox = QSpinBox()
-        self.monster_threshold_spinbox.setRange(1, 50)
-        self.monster_threshold_spinbox.setValue(3)
-        condition_form.addRow("기준 몬스터 수", self.monster_threshold_spinbox)
-        self.monster_threshold_spinbox.valueChanged.connect(self._handle_setting_changed)
+        self.hunt_monster_threshold_spinbox = QSpinBox()
+        self.hunt_monster_threshold_spinbox.setRange(1, 50)
+        self.hunt_monster_threshold_spinbox.setValue(3)
+        condition_form.addRow("사냥범위 몬스터", self.hunt_monster_threshold_spinbox)
+        self.hunt_monster_threshold_spinbox.valueChanged.connect(self._handle_setting_changed)
+
+        self.primary_monster_threshold_spinbox = QSpinBox()
+        self.primary_monster_threshold_spinbox.setRange(1, 50)
+        self.primary_monster_threshold_spinbox.setValue(1)
+        condition_form.addRow("주 스킬 범위 몬스터", self.primary_monster_threshold_spinbox)
+        self.primary_monster_threshold_spinbox.valueChanged.connect(self._handle_setting_changed)
 
         self.idle_release_spinbox = QDoubleSpinBox()
         self.idle_release_spinbox.setRange(0.5, 30.0)
@@ -3407,7 +3413,10 @@ class HuntTab(QWidget):
         self._save_settings()
 
     def _log_control_request(self, payload: dict, reason: str | None) -> None:
-        threshold = payload.get("monster_threshold")
+        hunt_threshold = payload.get("hunt_monster_threshold")
+        if hunt_threshold is None:
+            hunt_threshold = payload.get("monster_threshold")
+        primary_threshold = payload.get("primary_monster_threshold")
         range_px = payload.get("range_px")
         primary_range = payload.get("primary_skill_range")
         model = payload.get("model") or "-"
@@ -3418,7 +3427,8 @@ class HuntTab(QWidget):
 
         detail_parts = [
             f"현재 몬스터 {latest_total}마리 / 주 스킬 {latest_primary}마리",
-            f"기준 {threshold}마리, 사냥범위 ±{range_px}px, 주 스킬 범위 ±{primary_range}px",
+            f"사냥범위 기준 {hunt_threshold}마리, 주 스킬 기준 {primary_threshold}마리",
+            f"사냥범위 ±{range_px}px, 주 스킬 범위 ±{primary_range}px",
             f"모델 '{model}', 공격 스킬 {attack_count}개, 버프 스킬 {buff_count}개",
         ]
         if reason:
@@ -3430,6 +3440,137 @@ class HuntTab(QWidget):
     def _handle_setting_changed(self, *args, **kwargs) -> None:
         self._save_settings()
         self._update_detection_summary()
+
+    def _describe_authority_pending_reasons(
+        self,
+        failed_codes: Iterable[str],
+        detail_payload: dict,
+    ) -> list[str]:
+        descriptions: list[str] = []
+        map_snapshot = detail_payload.get("map_snapshot") or {}
+        hunt_snapshot = detail_payload.get("hunt_snapshot") or {}
+        request_meta = detail_payload.get("meta") or {}
+        map_protect_seconds = request_meta.get("map_protect_sec")
+        if not isinstance(map_protect_seconds, (int, float)):
+            map_protect_seconds = None
+
+        map_meta = map_snapshot.get("metadata") if isinstance(map_snapshot.get("metadata"), dict) else {}
+        monster_count = hunt_snapshot.get("monster_count")
+        primary_monster_count = hunt_snapshot.get("primary_monster_count")
+        hunt_threshold = hunt_snapshot.get("hunt_monster_threshold")
+        primary_threshold = hunt_snapshot.get("primary_monster_threshold")
+        now = time.time()
+
+        for code in failed_codes:
+            if code == "MAP_SNAPSHOT_MISSING":
+                descriptions.append(
+                    "MAP_SNAPSHOT_MISSING: 맵 탭이 최신 상태 스냅샷을 전달하지 않아 캐릭터 상태를 파악할 수 없습니다. (맵 탐지 실행 여부 확인 필요)"
+                )
+                continue
+
+            if code == "MAP_NOT_WALKING":
+                state = map_snapshot.get("player_state") or "알 수 없음"
+                descriptions.append(
+                    f"MAP_NOT_WALKING: 캐릭터가 지상(on_terrain) 또는 대기(idle) 상태가 아닙니다. 현재 상태={state}."
+                )
+                continue
+
+            if code == "MAP_STATE_ACTIVE":
+                state = map_snapshot.get("player_state") or "알 수 없음"
+                action = map_snapshot.get("navigation_action") or "-"
+                extras: list[str] = []
+                if map_snapshot.get("is_event_active"):
+                    extras.append("이벤트 처리 중")
+                if map_snapshot.get("is_forbidden_active"):
+                    extras.append("금지벽 수행 중")
+                if map_snapshot.get("priority_override"):
+                    extras.append("우선 잠금 활성")
+                if map_meta.get("navigation_locked"):
+                    extras.append("경로 잠금 상태")
+                extra_text = f" ({', '.join(extras)})" if extras else ""
+                descriptions.append(
+                    f"MAP_STATE_ACTIVE: 맵 탭 캐릭터가 아직 안정 상태가 아닙니다. 현재 상태={state}, 행동={action}{extra_text}."
+                )
+                continue
+
+            if code == "MAP_PROTECT_ACTIVE":
+                if map_protect_seconds is not None:
+                    descriptions.append(
+                        f"MAP_PROTECT_ACTIVE: 맵 탭 권한 보호 시간 {map_protect_seconds:.1f}초가 아직 끝나지 않아 대기합니다."
+                    )
+                else:
+                    descriptions.append(
+                        "MAP_PROTECT_ACTIVE: 맵 탭이 권한을 되찾은 직후 보호 시간이 아직 끝나지 않아 대기합니다."
+                    )
+                continue
+
+            if code == "MAP_PRIORITY_LOCK":
+                extras: list[str] = []
+                if map_snapshot.get("is_event_active"):
+                    extras.append("이벤트 진행 중")
+                if map_snapshot.get("is_forbidden_active"):
+                    extras.append("금지벽 처리 중")
+                if request_meta.get("priority_reason"):
+                    extras.append(f"요청 사유={request_meta.get('priority_reason')}")
+                extra_text = f" ({', '.join(extras)})" if extras else ""
+                descriptions.append(
+                    f"MAP_PRIORITY_LOCK: 맵 탭이 우선 처리 작업을 진행하고 있어 권한을 유지해야 합니다{extra_text}."
+                )
+                continue
+
+            if code == "HUNT_SNAPSHOT_OUTDATED":
+                timestamp = hunt_snapshot.get("timestamp")
+                if isinstance(timestamp, (int, float)):
+                    elapsed = now - timestamp
+                    descriptions.append(
+                        f"HUNT_SNAPSHOT_OUTDATED: 사냥 스냅샷이 {elapsed:.1f}초 동안 갱신되지 않아 안전을 위해 대기합니다."
+                    )
+                else:
+                    descriptions.append(
+                        "HUNT_SNAPSHOT_OUTDATED: 사냥 스냅샷이 최신이 아니어서 대기합니다."
+                    )
+                continue
+
+            if code == "HUNT_MONSTER_SHORTAGE":
+                shortage_bits: list[str] = []
+                if isinstance(hunt_threshold, (int, float)) and isinstance(monster_count, (int, float)):
+                    if monster_count < hunt_threshold:
+                        shortage_bits.append(
+                            f"전체 몬스터 {monster_count}마리 < 기준 {hunt_threshold}마리"
+                        )
+                if isinstance(primary_threshold, (int, float)) and isinstance(primary_monster_count, (int, float)):
+                    if primary_monster_count < primary_threshold:
+                        shortage_bits.append(
+                            f"주 스킬 대상 {primary_monster_count}마리 < 기준 {primary_threshold}마리"
+                        )
+                if not shortage_bits:
+                    shortage_bits.append("사냥 조건 미충족")
+                descriptions.append(
+                    "HUNT_MONSTER_SHORTAGE: 사냥 조건을 충족하지 못했습니다. " + ", ".join(shortage_bits) + "."
+                )
+                continue
+
+            if code == "HUNT_SNAPSHOT_MISSING":
+                descriptions.append(
+                    "HUNT_SNAPSHOT_MISSING: 사냥 탭이 최신 몬스터 정보를 전달하지 않아 요청을 보류합니다. (사냥 탐지 실행 여부 확인)"
+                )
+                continue
+
+            if code == "MAP_ALREADY_OWNER":
+                descriptions.append(
+                    "MAP_ALREADY_OWNER: 이미 맵 탭이 조작 권한을 보유 중입니다."
+                )
+                continue
+
+            if code == "HOLD_LIMIT_NOT_REACHED":
+                descriptions.append(
+                    "HOLD_LIMIT_NOT_REACHED: 설정된 권한 유지 시간에 아직 도달하지 않아 사냥 탭으로 넘길 수 없습니다."
+                )
+                continue
+
+            descriptions.append(f"{code}: 추가 정보 없이 대기 중입니다.")
+
+        return descriptions
 
     def _on_downscale_toggled(self, checked: bool) -> None:
         if self._suppress_downscale_prompt:
@@ -3598,10 +3739,13 @@ class HuntTab(QWidget):
         if status == AuthorityDecisionStatus.PENDING.value:
             failed = details.get("failed") or []
             if failed:
+                failed_codes = ", ".join(str(item) for item in failed)
                 self.append_log(
-                    "사냥 권한 요청 대기: " + ", ".join(str(item) for item in failed),
+                    f"사냥 권한 요청 대기: {failed_codes}",
                     "warn",
                 )
+                for line in self._describe_authority_pending_reasons(failed, details):
+                    self._append_log_detail(line)
         elif status == AuthorityDecisionStatus.REJECTED.value:
             message = reason or "사유 없음"
             self.append_log(f"사냥 권한 요청 거부: {message}", "warn")
@@ -3621,7 +3765,8 @@ class HuntTab(QWidget):
             timestamp=time.time(),
             monster_count=int(self.latest_monster_count),
             primary_monster_count=int(self.latest_primary_monster_count),
-            monster_threshold=int(self.monster_threshold_spinbox.value()),
+            hunt_monster_threshold=int(self.hunt_monster_threshold_spinbox.value()),
+            primary_monster_threshold=int(self.primary_monster_threshold_spinbox.value()),
             idle_release_seconds=float(self.idle_release_spinbox.value()),
             metadata={
                 "hunting_active": bool(self.hunting_active),
@@ -3663,8 +3808,12 @@ class HuntTab(QWidget):
         self._handle_map_detection_status_changed(map_running)
 
     def _build_hunt_request_meta(self) -> dict:
+        hunt_threshold = self.hunt_monster_threshold_spinbox.value()
+        primary_threshold = self.primary_monster_threshold_spinbox.value()
         return {
-            "monster_threshold": self.monster_threshold_spinbox.value(),
+            "hunt_monster_threshold": hunt_threshold,
+            "primary_monster_threshold": primary_threshold,
+            "monster_threshold": hunt_threshold,
             "range_px": self.enemy_range_spinbox.value(),
             "y_band_height": self.y_band_height_spinbox.value(),
             "y_offset": self.y_band_offset_spinbox.value(),
@@ -4692,7 +4841,15 @@ class HuntTab(QWidget):
         self.latest_monster_count = hunt_count
         self.latest_primary_monster_count = primary_count
 
-        if primary_count > 0 or self.latest_monster_count >= max(1, self.monster_threshold_spinbox.value() if hasattr(self, 'monster_threshold_spinbox') else 1):
+        hunt_threshold_widget = getattr(self, 'hunt_monster_threshold_spinbox', None)
+        primary_threshold_widget = getattr(self, 'primary_monster_threshold_spinbox', None)
+        hunt_threshold = hunt_threshold_widget.value() if hunt_threshold_widget else 1
+        primary_threshold = primary_threshold_widget.value() if primary_threshold_widget else 1
+
+        primary_ready = primary_threshold <= 0 or primary_count >= primary_threshold
+        hunt_ready = hunt_threshold <= 0 or self.latest_monster_count >= hunt_threshold
+
+        if primary_ready or hunt_ready:
             self._last_monster_seen_ts = time.time()
 
         self._update_monster_count_label()
@@ -5308,7 +5465,27 @@ class HuntTab(QWidget):
 
         conditions = data.get('conditions', {})
         if conditions:
-            self.monster_threshold_spinbox.setValue(int(conditions.get('monster_threshold', self.monster_threshold_spinbox.value())))
+            hunt_threshold_val = conditions.get('hunt_monster_threshold')
+            primary_threshold_val = conditions.get('primary_monster_threshold')
+            legacy_threshold_val = conditions.get('monster_threshold')
+
+            if hunt_threshold_val is None:
+                hunt_threshold_val = legacy_threshold_val
+            if primary_threshold_val is None:
+                primary_threshold_val = legacy_threshold_val
+
+            try:
+                if hunt_threshold_val is not None:
+                    self.hunt_monster_threshold_spinbox.setValue(int(hunt_threshold_val))
+            except (TypeError, ValueError):
+                pass
+
+            try:
+                if primary_threshold_val is not None:
+                    self.primary_monster_threshold_spinbox.setValue(int(primary_threshold_val))
+            except (TypeError, ValueError):
+                pass
+
             self.auto_request_checkbox.setChecked(bool(conditions.get('auto_request', self.auto_request_checkbox.isChecked())))
             idle_value = conditions.get('idle_release_sec')
             if idle_value is not None:
@@ -5704,7 +5881,9 @@ class HuntTab(QWidget):
                 'monster': self.conf_monster_spinbox.value(),
             },
             'conditions': {
-                'monster_threshold': self.monster_threshold_spinbox.value(),
+                'hunt_monster_threshold': self.hunt_monster_threshold_spinbox.value(),
+                'primary_monster_threshold': self.primary_monster_threshold_spinbox.value(),
+                'monster_threshold': self.hunt_monster_threshold_spinbox.value(),
                 'auto_request': self.auto_request_checkbox.isChecked(),
                 'idle_release_sec': self.idle_release_spinbox.value(),
                 'max_authority_hold_sec': self.max_authority_hold_spinbox.value(),
@@ -5936,12 +6115,19 @@ class HuntTab(QWidget):
         if not self.auto_hunt_enabled:
             return
 
-        threshold = self.monster_threshold_spinbox.value()
+        hunt_threshold = self.hunt_monster_threshold_spinbox.value()
+        primary_threshold = self.primary_monster_threshold_spinbox.value()
 
-        if (
-            self.latest_primary_monster_count > 0
-            or self.latest_monster_count >= threshold
-        ):
+        primary_ready = (
+            primary_threshold <= 0
+            or self.latest_primary_monster_count >= primary_threshold
+        )
+        hunt_ready = (
+            hunt_threshold <= 0
+            or self.latest_monster_count >= hunt_threshold
+        )
+
+        if primary_ready or hunt_ready:
             self._last_monster_seen_ts = time.time()
 
         if self.current_authority == "hunt":
@@ -5954,7 +6140,7 @@ class HuntTab(QWidget):
             should_release = False
             release_reason_code = None
             idle_limit = self.idle_release_spinbox.value()
-            if self.latest_primary_monster_count == 0 and self.latest_monster_count < threshold:
+            if not primary_ready and not hunt_ready:
                 if idle_elapsed >= idle_limit:
                     should_release = True
                     release_reason_code = "MONSTER_SHORTAGE"
@@ -5965,10 +6151,14 @@ class HuntTab(QWidget):
             if should_release and (time.time() - self.last_release_attempt_ts) >= 1.0:
                 self.last_release_attempt_ts = time.time()
                 reason_parts = []
-                if self.latest_primary_monster_count == 0:
-                    reason_parts.append("주 스킬 범위 몬스터 없음")
-                if self.latest_monster_count < threshold:
-                    reason_parts.append(f"전체 {self.latest_monster_count}마리 < 기준 {threshold}")
+                if not primary_ready and primary_threshold > 0:
+                    reason_parts.append(
+                        f"주 스킬 {self.latest_primary_monster_count}마리 < 기준 {primary_threshold}"
+                    )
+                if not hunt_ready and hunt_threshold > 0:
+                    reason_parts.append(
+                        f"사냥범위 {self.latest_monster_count}마리 < 기준 {hunt_threshold}"
+                    )
                 reason_parts.append(f"최근 몬스터 미탐지 {idle_elapsed:.1f}s (기준 {idle_limit:.1f}s)")
                 if timeout and elapsed >= timeout:
                     reason_parts.append(f"타임아웃 {timeout}s 초과")
@@ -5978,15 +6168,18 @@ class HuntTab(QWidget):
                 self.release_control(release_reason)
             return
 
-        if (
-            self.latest_monster_count >= threshold
-            or self.latest_primary_monster_count > 0
-        ):
+        if hunt_ready or primary_ready:
             reason_parts = []
-            if self.latest_monster_count >= threshold:
-                reason_parts.append(f"전체 {self.latest_monster_count}마리 ≥ 기준 {threshold}")
-            if self.latest_primary_monster_count > 0:
-                reason_parts.append(f"주 스킬 범위 {self.latest_primary_monster_count}마리")
+            if hunt_ready and hunt_threshold > 0:
+                reason_parts.append(
+                    f"사냥범위 {self.latest_monster_count}마리 ≥ 기준 {hunt_threshold}"
+                )
+            if primary_ready and primary_threshold > 0:
+                reason_parts.append(
+                    f"주 스킬 {self.latest_primary_monster_count}마리 ≥ 기준 {primary_threshold}"
+                )
+            if not reason_parts:
+                reason_parts.append("몬스터 조건 충족")
             reason_text = ", ".join(reason_parts)
             self.append_log(f"자동 조건 충족 → 사냥 권한 요청 ({reason_text})", "info")
             request_reason = "MONSTER_READY" if self.map_link_enabled else reason_text
@@ -6031,7 +6224,9 @@ class HuntTab(QWidget):
         if self.latest_monster_count == 0:
             self._ensure_idle_keys("감지 범위 몬스터 없음")
             return
-        if self.latest_primary_monster_count == 0:
+        primary_threshold_widget = getattr(self, 'primary_monster_threshold_spinbox', None)
+        primary_threshold = max(1, primary_threshold_widget.value()) if primary_threshold_widget else 1
+        if self.latest_primary_monster_count < primary_threshold:
             if self._handle_monster_approach():
                 return
             if self.latest_monster_count == 0:

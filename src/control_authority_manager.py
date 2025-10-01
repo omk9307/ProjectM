@@ -66,7 +66,8 @@ class HuntConditionSnapshot:
     timestamp: float
     monster_count: int
     primary_monster_count: int
-    monster_threshold: int
+    hunt_monster_threshold: int
+    primary_monster_threshold: int
     idle_release_seconds: float
     metadata: Dict[str, Any] = field(default_factory=dict)
 
@@ -78,7 +79,8 @@ class HuntConditionSnapshot:
             "timestamp": self.timestamp,
             "monster_count": self.monster_count,
             "primary_monster_count": self.primary_monster_count,
-            "monster_threshold": self.monster_threshold,
+            "hunt_monster_threshold": self.hunt_monster_threshold,
+            "primary_monster_threshold": self.primary_monster_threshold,
             "idle_release_seconds": self.idle_release_seconds,
             "metadata": dict(self.metadata),
         }
@@ -393,6 +395,8 @@ class ControlAuthorityManager(QObject):
         if not map_snapshot:
             failed.append("MAP_SNAPSHOT_MISSING")
         else:
+            if map_snapshot.player_state not in {"on_terrain", "idle"}:
+                failed.append("MAP_NOT_WALKING")
             if not self._is_map_idle_ready(map_snapshot):
                 failed.append("MAP_STATE_ACTIVE")
             if not self._is_map_protect_passed(now, map_snapshot):
@@ -403,7 +407,15 @@ class ControlAuthorityManager(QObject):
         if hunt_snapshot:
             if not hunt_snapshot.is_recent():
                 failed.append("HUNT_SNAPSHOT_OUTDATED")
-            if hunt_snapshot.primary_monster_count <= 0 and hunt_snapshot.monster_count < hunt_snapshot.monster_threshold:
+            primary_ready = (
+                hunt_snapshot.primary_monster_threshold <= 0
+                or hunt_snapshot.primary_monster_count >= hunt_snapshot.primary_monster_threshold
+            )
+            hunt_ready = (
+                hunt_snapshot.hunt_monster_threshold <= 0
+                or hunt_snapshot.monster_count >= hunt_snapshot.hunt_monster_threshold
+            )
+            if not primary_ready and not hunt_ready:
                 failed.append("HUNT_MONSTER_SHORTAGE")
         else:
             failed.append("HUNT_SNAPSHOT_MISSING")
@@ -462,8 +474,9 @@ class ControlAuthorityManager(QObject):
             return False
         navigation_ok = snapshot.navigation_action in {"move_to_target", "resume_after_event", "idle"}
         state_ok = snapshot.player_state in {"idle", "on_terrain"}
-        velocity_ok = abs(snapshot.horizontal_velocity) <= 0.2
-        return navigation_ok and state_ok and velocity_ok
+        # NOTE: 캐릭터가 지상에서 걷고 있는 상황에서도 사냥 탭이 권한을 얻을 수 있도록
+        # 속도 조건은 제거하고, 공중/이벤트 여부만 체크한다.
+        return navigation_ok and state_ok
 
     def _is_map_protect_passed(self, now: float, snapshot: PlayerStatusSnapshot) -> bool:
         if snapshot.priority_override:
