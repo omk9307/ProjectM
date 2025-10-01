@@ -529,16 +529,11 @@ class MainWindow(QMainWindow):
         map_index = self._find_tab_index('맵')
         hunt_index = self._find_tab_index('사냥')
 
-        map_color = None
-        hunt_color = None
+        map_color = '#1E88E5' if self._map_detection_active else None
+        hunt_color = '#D32F2F' if self._hunt_detection_active else None
 
-        if self._map_detection_active:
-            map_color = '#1E88E5'
-        elif owner == 'map':
+        if owner == 'map':
             map_color = '#1cbb7f'
-
-        if self._hunt_detection_active:
-            hunt_color = '#D32F2F'
         elif owner == 'hunt':
             hunt_color = '#1cbb7f'
 

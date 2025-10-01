@@ -40,7 +40,8 @@ from PyQt6.QtWidgets import (
 
     QGraphicsView, QGraphicsScene, QGraphicsPixmapItem, QCheckBox, QGraphicsRectItem,
     QGraphicsLineItem, QGraphicsTextItem, QGraphicsEllipseItem,
-    QGraphicsSimpleTextItem, QFormLayout, QProgressDialog, QSizePolicy
+    QGraphicsSimpleTextItem, QFormLayout, QProgressDialog, QSizePolicy,
+    QSplitter
 )
 from PyQt6.QtGui import QPixmap, QImage, QPainter, QPen, QColor, QBrush, QFont, QCursor, QIcon, QPolygonF, QFontMetrics, QFontMetricsF, QGuiApplication
 from PyQt6.QtCore import Qt, QThread, pyqtSignal, pyqtSlot, QRect, QPoint, QRectF, QPointF, QSize, QSizeF, QTimer, QSignalBlocker
@@ -460,6 +461,8 @@ class MapTab(QWidget):
             self._authority_event_history = deque(maxlen=200)
             self._last_authority_command_entry = None
             self._authority_resume_candidate = None
+            self._forbidden_takeover_context = None
+            self._forbidden_takeover_active = False
 
             # [v11.3.7] 설정 변수 선언만 하고 값 할당은 load_profile_data로 위임
             self.cfg_idle_time_threshold = None
@@ -778,6 +781,30 @@ class MapTab(QWidget):
             if isinstance(meta, dict):
                 event_extra['meta'] = dict(meta)
 
+        authority_source = payload.get('source') if isinstance(payload, dict) else None
+
+        if reason == "FORBIDDEN_WALL":
+            takeover_context = self._forbidden_takeover_context or {}
+            resume_command = takeover_context.get('resume_command') if isinstance(takeover_context, dict) else None
+            message = "[권한][획득] 금지벽 대응을 위해 조작 권한을 확보했습니다."
+            if resume_command:
+                message += f" | 금지벽 종료 후 재실행 예정: {resume_command}"
+            else:
+                message += " | 재실행 예정 명령 없음"
+            self._record_authority_event(
+                "acquired",
+                message=message,
+                reason=reason,
+                source=authority_source,
+                previous_owner=previous,
+                command=resume_command,
+                extra=event_extra or None,
+            )
+            self._emit_control_command("모든 키 떼기", "authority:reset", allow_forbidden=True)
+            self._forbidden_takeover_active = True
+            self._authority_resume_candidate = None
+            return
+
         resume_entry = self._authority_resume_candidate or self._last_authority_command_entry
         command_to_resume = None
         if isinstance(resume_entry, dict):
@@ -790,8 +817,6 @@ class MapTab(QWidget):
             message += f" | 재실행 예정 명령: {command_to_resume}"
         else:
             message += " | 재실행 명령 없음"
-
-        authority_source = payload.get('source') if isinstance(payload, dict) else None
 
         self._record_authority_event(
             "acquired",
@@ -808,14 +833,47 @@ class MapTab(QWidget):
 
         if command_to_resume:
             def _resend_last_command() -> None:
-                success = self._emit_control_command(command_to_resume, "authority:resume", allow_forbidden=True)
-                result_text = "성공" if success else "보류"
+                priority_guard_active = bool(
+                    getattr(self, '_authority_priority_override', False)
+                    or getattr(self, 'forbidden_wall_in_progress', False)
+                    or getattr(self, 'event_in_progress', False)
+                )
+                allow_forbidden = not priority_guard_active
+                emit_result = self._emit_control_command(
+                    command_to_resume,
+                    "authority:resume",
+                    allow_forbidden=allow_forbidden,
+                    return_reason=True,
+                )
+                success: bool
+                blocked_reason: Optional[str]
+                blocked_detail: Optional[Dict[str, Any]]
+                if isinstance(emit_result, tuple):
+                    success, blocked_reason, blocked_detail = emit_result
+                else:
+                    success = bool(emit_result)
+                    blocked_reason = None
+                    blocked_detail = None
+
+                if success:
+                    result_text = "성공"
+                else:
+                    reason_text = self._describe_command_block_reason(blocked_reason, blocked_detail)
+                    result_text = "보류"
+                    if reason_text:
+                        result_text += f" (사유: {reason_text})"
                 resume_message = (
                     f"[권한][재실행] 마지막 명령 '{command_to_resume}' 재실행 {result_text}."
                 )
                 resume_extra: Dict[str, Any] = {
                     "attempted_at": time.time(),
                 }
+                if priority_guard_active and not success:
+                    resume_extra['priority_guard_active'] = True
+                if blocked_reason and not success:
+                    resume_extra['blocked_reason'] = blocked_reason
+                    if blocked_detail:
+                        resume_extra['blocked_detail'] = dict(blocked_detail)
                 if event_extra:
                     resume_extra.update(event_extra)
                 self._record_authority_event(
@@ -861,6 +919,7 @@ class MapTab(QWidget):
         command: Optional[str] = None,
         command_success: Optional[bool] = None,
         extra: Optional[Dict[str, Any]] = None,
+        log_to_general: bool = True,
     ) -> None:
         entry: Dict[str, Any] = {
             "timestamp": time.time(),
@@ -875,7 +934,8 @@ class MapTab(QWidget):
         if extra:
             entry["meta"] = dict(extra)
         self._authority_event_history.append(entry)
-        self.update_general_log(message, "red")
+        if log_to_general:
+            self.update_general_log(message, "red")
 
     def get_authority_event_history(self) -> list[Dict[str, Any]]:
         return list(self._authority_event_history)
@@ -883,7 +943,10 @@ class MapTab(QWidget):
     def initUI(self):
         main_layout = QHBoxLayout(self)
         left_layout = QVBoxLayout()
-        right_layout = QVBoxLayout()
+        right_container = QWidget()
+        right_layout = QVBoxLayout(right_container)
+        right_layout.setContentsMargins(0, 0, 0, 0)
+        right_layout.setSpacing(6)
         
         # 1. 프로필 관리
         profile_groupbox = QGroupBox("1. 🗺️ 맵 프로필 관리")
@@ -1094,7 +1157,8 @@ class MapTab(QWidget):
         left_layout.addStretch(1)
         
         # 로그 뷰어
-        logs_layout = QVBoxLayout()
+        logs_container = QWidget()
+        logs_layout = QVBoxLayout(logs_container)
         logs_layout.setContentsMargins(0, 0, 0, 0)
         logs_layout.setSpacing(6)
 
@@ -1118,6 +1182,7 @@ class MapTab(QWidget):
         self.general_log_viewer.setReadOnly(True)
         self.general_log_viewer.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         self.general_log_viewer.setMinimumHeight(200)
+        self.general_log_viewer.setMinimumWidth(360)
         self.general_log_viewer.document().setDocumentMargin(6)
         logs_layout.addWidget(self.general_log_viewer, 1)
 
@@ -1140,6 +1205,7 @@ class MapTab(QWidget):
         self.detection_log_viewer = QTextEdit()
         self.detection_log_viewer.setReadOnly(True)
         self.detection_log_viewer.setFixedHeight(70)
+        self.detection_log_viewer.setMinimumWidth(360)
         self.detection_log_viewer.document().setDocumentMargin(6)
         logs_layout.addWidget(self.detection_log_viewer)
 
@@ -1163,7 +1229,7 @@ class MapTab(QWidget):
         view_header_layout = QHBoxLayout()
         view_header_layout.addWidget(QLabel("실시간 미니맵 뷰 (휠: 확대/축소, 드래그: 이동)"))
         self.display_enabled_checkbox = QCheckBox("미니맵 표시")
-        self.display_enabled_checkbox.setChecked(True)
+        self.display_enabled_checkbox.setChecked(bool(getattr(self, '_minimap_display_enabled', True)))
         self.display_enabled_checkbox.toggled.connect(self._handle_display_toggle)
         view_header_layout.addWidget(self.display_enabled_checkbox)
         self.center_on_player_checkbox = QCheckBox("캐릭터 중심")
@@ -1177,10 +1243,20 @@ class MapTab(QWidget):
         right_layout.addWidget(self.navigator_display)
         right_layout.addLayout(view_header_layout)
         right_layout.addWidget(self.minimap_view_label, 1)
-        
+
+        splitter = QSplitter(Qt.Orientation.Horizontal)
+        splitter.addWidget(logs_container)
+        splitter.addWidget(right_container)
+        splitter.setStretchFactor(0, 3)
+        splitter.setStretchFactor(1, 2)
+        splitter.setChildrenCollapsible(False)
+        logs_container.setMinimumWidth(320)
+        right_container.setMinimumWidth(280)
+        splitter.setSizes([520, 360])
+        self.log_splitter = splitter
+
         main_layout.addLayout(left_layout, 1)
-        main_layout.addLayout(logs_layout, 1)
-        main_layout.addLayout(right_layout, 2)
+        main_layout.addWidget(splitter, 3)
         self.update_general_log("MapTab이 초기화되었습니다. 맵 프로필을 선택해주세요.", "black")
 
     def attach_hunt_tab(self, hunt_tab) -> None:
@@ -1226,10 +1302,28 @@ class MapTab(QWidget):
             "backward_slots": self._create_empty_route_slots(),
         }
 
-    def _emit_control_command(self, command: str, reason: object = None, *, allow_forbidden: bool = False) -> bool:
+    def _emit_control_command(
+        self,
+        command: str,
+        reason: object = None,
+        *,
+        allow_forbidden: bool = False,
+        return_reason: bool = False,
+    ) -> bool | tuple[bool, Optional[str], Optional[Dict[str, Any]]]:
         """자동 제어 쪽으로 명령을 전달합니다."""
+
+        def _wrap_result(
+            success: bool,
+            reason_code: Optional[str] = None,
+            detail: Optional[Dict[str, Any]] = None,
+        ) -> bool | tuple[bool, Optional[str], Optional[Dict[str, Any]]]:
+            if return_reason:
+                detail_dict = dict(detail) if isinstance(detail, dict) else None
+                return success, reason_code, detail_dict
+            return success
+
         if not command:
-            return False
+            return _wrap_result(False, "empty_command", {"message": "empty_command"})
 
         is_status_command = isinstance(reason, str) and reason.startswith('status:')
 
@@ -1256,10 +1350,13 @@ class MapTab(QWidget):
                 command=command,
                 command_success=False,
                 extra=block_extra,
+                log_to_general=False,
             )
             if command_entry:
                 self._authority_resume_candidate = dict(command_entry)
-            return False
+            detail = dict(block_extra)
+            detail['current_owner'] = getattr(self, 'current_authority_owner', None)
+            return _wrap_result(False, "not_owner", detail)
 
         if (
             self._status_active_resource
@@ -1267,12 +1364,19 @@ class MapTab(QWidget):
             and command != "모든 키 떼기"
         ):
             self._status_saved_command = (command, reason)
-            return False
+            detail: Dict[str, Any] = {
+                "active_resource": self._status_active_resource,
+                "status_saved": True,
+            }
+            return _wrap_result(False, "status_command_active", detail)
 
         if self.forbidden_wall_in_progress and not allow_forbidden and reason != self.active_forbidden_wall_reason:
             self.update_general_log("[금지벽] 명령 실행 중이어서 다른 명령은 보류됩니다.", "gray")
             self.pending_forbidden_command = (command, reason)
-            return False
+            detail: Dict[str, Any] = {
+                "forbidden_wall_reason": getattr(self, 'active_forbidden_wall_reason', None),
+            }
+            return _wrap_result(False, "forbidden_wall_active", detail)
 
         self.control_command_issued.emit(command, reason)
 
@@ -1280,7 +1384,49 @@ class MapTab(QWidget):
             self._last_regular_command = (command, reason)
             if command_entry and self._last_authority_command_entry is command_entry:
                 command_entry['executed'] = True
-        return True
+        return _wrap_result(True)
+
+    def _describe_command_block_reason(
+        self,
+        reason_code: Optional[str],
+        detail: Optional[Dict[str, Any]],
+    ) -> str:
+        if not reason_code:
+            return ""
+
+        detail = detail or {}
+
+        if reason_code == "not_owner":
+            owner = detail.get('current_owner')
+            owner_text = None
+            if owner == 'hunt':
+                owner_text = "사냥 탭"
+            elif owner == 'map':
+                owner_text = "맵 탭"
+            elif isinstance(owner, str) and owner:
+                owner_text = owner
+            if owner_text:
+                return f"조작 권한이 {owner_text}에 있음"
+            return "조작 권한이 다른 탭에 있음"
+
+        if reason_code == "status_command_active":
+            resource = detail.get('active_resource')
+            if resource == 'hp':
+                return "HP 상태 회복 명령 진행 중"
+            if resource == 'mp':
+                return "MP 상태 회복 명령 진행 중"
+            if isinstance(resource, str) and resource:
+                return f"{resource.upper()} 상태 명령 진행 중"
+            return "상태 회복 명령 진행 중"
+
+        if reason_code == "forbidden_wall_active":
+            return "금지벽 대응 중"
+
+        if reason_code == "empty_command":
+            return "재실행할 명령이 비어 있음"
+
+        # 알 수 없는 사유는 디버깅 용도로 코드 그대로 노출
+        return reason_code
 
     def _normalize_route_slot_dict(self, slot_dict):
         modified = False
@@ -1598,6 +1744,11 @@ class MapTab(QWidget):
         profile_to_load = None
         last_profile = self.load_global_settings()
         self.hotkey_display_label.setText(self.current_hotkey.upper())
+        if hasattr(self, 'display_enabled_checkbox'):
+            block_state = self.display_enabled_checkbox.blockSignals(True)
+            self.display_enabled_checkbox.setChecked(bool(self._minimap_display_enabled))
+            self.display_enabled_checkbox.blockSignals(block_state)
+            self._handle_display_toggle(bool(self._minimap_display_enabled))
         if hasattr(self, 'perf_logging_checkbox'):
             block_state = self.perf_logging_checkbox.blockSignals(True)
             self.perf_logging_checkbox.setChecked(self._perf_logging_enabled)
@@ -2242,13 +2393,16 @@ class MapTab(QWidget):
                     #  단축키 정보 로드
                     self.current_hotkey = settings.get('hotkey', 'None')
                     self._perf_logging_enabled = bool(settings.get('perf_logging_enabled', False))
+                    self._minimap_display_enabled = bool(settings.get('minimap_display_enabled', True))
                     return settings.get('active_profile')
             except json.JSONDecodeError:
                 self.current_hotkey = 'None'
                 self._perf_logging_enabled = False
+                self._minimap_display_enabled = True
                 return None
         self.current_hotkey = 'None'
         self._perf_logging_enabled = False
+        self._minimap_display_enabled = True
         return None
 
     def save_global_settings(self):
@@ -2257,6 +2411,7 @@ class MapTab(QWidget):
                 'active_profile': self.active_profile_name,
                 'hotkey': self.current_hotkey, #  단축키 정보 저장
                 'perf_logging_enabled': bool(self._perf_logging_enabled),
+                'minimap_display_enabled': bool(getattr(self, '_minimap_display_enabled', True)),
             }
             json.dump(settings, f)
 
@@ -2921,6 +3076,16 @@ class MapTab(QWidget):
         state['last_triggered'] = time.time()
         state['contact_ready'] = False
 
+        takeover_context = None
+        if getattr(self, 'current_authority_owner', 'map') != 'map':
+            last_regular = getattr(self, '_last_regular_command', None)
+            takeover_context = {
+                "previous_owner": getattr(self, 'current_authority_owner', None),
+                "resume_command": last_regular[0] if last_regular else None,
+                "resume_reason": last_regular[1] if last_regular else None,
+            }
+        self._forbidden_takeover_context = takeover_context
+
         self.forbidden_wall_in_progress = True
         self.active_forbidden_wall_id = wall_id
         self.active_forbidden_wall_reason = reason
@@ -2947,6 +3112,8 @@ class MapTab(QWidget):
             state['contact_ready'] = False
             if self._authority_manager:
                 self._authority_manager.clear_priority_event("FORBIDDEN_WALL")
+            self._forbidden_takeover_context = None
+            self._forbidden_takeover_active = False
             self._sync_authority_snapshot("forbidden_aborted")
             return False
         return True
@@ -2976,6 +3143,7 @@ class MapTab(QWidget):
         self.active_forbidden_wall_trigger = ""
         self.forbidden_wall_started_at = 0.0
         self._authority_priority_override = False
+        takeover_context = self._forbidden_takeover_context if self._forbidden_takeover_active else None
         if self._authority_manager:
             self._authority_manager.clear_priority_event("FORBIDDEN_WALL")
 
@@ -2988,6 +3156,29 @@ class MapTab(QWidget):
                     "금지벽 종료 후 보류된 명령을 재전송했습니다.",
                     "gray",
                 )
+
+        if takeover_context and getattr(self, 'current_authority_owner', 'map') == 'map':
+            resume_command = takeover_context.get('resume_command')
+            resume_reason = takeover_context.get('resume_reason')
+            if resume_command:
+                success = self._emit_control_command(resume_command, resume_reason)
+                result_text = "성공" if success else "보류"
+                self.update_general_log(
+                    f"[금지벽] 이전 맵 명령 '{resume_command}' 재실행 {result_text}.",
+                    "gray" if success else "orange",
+                )
+                self._record_authority_event(
+                    "forbidden_resume",
+                    message=f"금지벽 종료 후 '{resume_command}' 재실행 {result_text}.",
+                    reason="FORBIDDEN_WALL",
+                    source="map_tab",
+                    previous_owner=getattr(self, 'current_authority_owner', None),
+                    command=resume_command,
+                    command_success=success,
+                )
+
+        self._forbidden_takeover_context = None
+        self._forbidden_takeover_active = False
 
         self._sync_authority_snapshot("forbidden_finished")
 
@@ -6979,10 +7170,12 @@ class MapTab(QWidget):
             return
 
         normalized_color = self._normalize_general_log_color(color)
+        timestamp = time.strftime("%H:%M:%S")
+        display_message = f"[{timestamp}] {message}"
         self._general_log_last_entry = (message, normalized_color)
         self._general_log_last_ts = time.time()
         self.general_log_viewer.append(
-            f'<font color="{normalized_color}">{message}</font>'
+            f'<font color="{normalized_color}">{display_message}</font>'
         )
         self.general_log_viewer.verticalScrollBar().setValue(
             self.general_log_viewer.verticalScrollBar().maximum()
@@ -7018,6 +7211,12 @@ class MapTab(QWidget):
         self._minimap_display_enabled = bool(checked)
         if hasattr(self, 'minimap_view_label'):
             self.minimap_view_label.set_display_enabled(self._minimap_display_enabled)
+
+        # 설정 파일에 즉시 반영하여 다음 실행 시 상태를 복원합니다.
+        try:
+            self.save_global_settings()
+        except Exception as exc:
+            self.update_general_log(f"미니맵 표시 상태 저장 실패: {exc}", "red")
 
         if not self._minimap_display_enabled:
             if hasattr(self, 'minimap_view_label'):
@@ -8048,6 +8247,11 @@ class MapTab(QWidget):
         # [수정] 단축키 로드 및 등록 로직
         last_profile = self.load_global_settings()
         self.hotkey_display_label.setText(self.current_hotkey.upper())
+        if hasattr(self, 'display_enabled_checkbox'):
+            block_state = self.display_enabled_checkbox.blockSignals(True)
+            self.display_enabled_checkbox.setChecked(bool(self._minimap_display_enabled))
+            self.display_enabled_checkbox.blockSignals(block_state)
+            self._handle_display_toggle(bool(self._minimap_display_enabled))
         if hasattr(self, 'perf_logging_checkbox'):
             block_state = self.perf_logging_checkbox.blockSignals(True)
             self.perf_logging_checkbox.setChecked(self._perf_logging_enabled)

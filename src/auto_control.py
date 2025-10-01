@@ -1831,6 +1831,7 @@ class AutoControlTab(QWidget):
             elif raw_reason.startswith('primary_release'):
                 parts = raw_reason.split('|', 1)
                 display_reason = parts[1].strip() if len(parts) == 2 else ''
+        display_reason = self._translate_reason_for_logging(raw_reason, display_reason)
         self.current_command_reason_display = display_reason or None
         self.is_test_mode = is_test
         self.current_sequence_index = 0
@@ -1990,6 +1991,7 @@ class AutoControlTab(QWidget):
             elif clean_reason.startswith('primary_release'):
                 parts = clean_reason.split('|', 1)
                 reason_display = parts[1].strip() if len(parts) == 2 else ''
+        friendly_reason = self._translate_reason_for_logging(clean_reason, reason_display)
         state = {
             "command_name": command_name,
             "sequence": sequence_copy,
@@ -1997,16 +1999,15 @@ class AutoControlTab(QWidget):
             "timer": timer,
             "watchdog": watchdog,
             "reason": clean_reason,
-            "reason_display": reason_display or None,
+            "reason_display": friendly_reason or None,
             "owner": owner,
             "is_processing": False,
         }
         self.active_parallel_sequences[command_name] = state
 
         start_color = "orange" if self._is_skill_profile(command_name) else "cyan"
-        display_reason = reason_display or None
-        if display_reason:
-            self.log_generated.emit(f"[{command_name}] (시작) -원인: {display_reason}", start_color)
+        if friendly_reason:
+            self.log_generated.emit(f"[{command_name}] (시작) -원인: {friendly_reason}", start_color)
         else:
             self.log_generated.emit(f"[{command_name}] (시작)", start_color)
 
@@ -2140,6 +2141,8 @@ class AutoControlTab(QWidget):
         else:
             self.log_generated.emit(f"[{command_name}] (중단){suffix}", "orange")
 
+        self._emit_parallel_sequence_completed(command_name, state, success)
+
     def _stop_parallel_sequence(self, command_name: str, forced: bool = False) -> None:
         state = self.active_parallel_sequences.pop(command_name, None)
         if not state:
@@ -2162,6 +2165,15 @@ class AutoControlTab(QWidget):
             self.log_generated.emit(f"[{command_name}] 병렬 시퀀스를 강제 종료했습니다.", "orange")
         else:
             self.log_generated.emit(f"[{command_name}] 병렬 시퀀스를 중단했습니다.", "orange")
+
+        self._emit_parallel_sequence_completed(command_name, state, success=False)
+
+    def _emit_parallel_sequence_completed(self, command_name: str, state: dict, success: bool) -> None:
+        reason = state.get("reason") if isinstance(state, dict) else None
+        try:
+            self.sequence_completed.emit(command_name, reason, success)
+        except Exception:
+            pass
 
     def _stop_all_parallel_sequences(self, forced: bool = False) -> None:
         for name in list(self.active_parallel_sequences.keys()):
@@ -2502,16 +2514,52 @@ class AutoControlTab(QWidget):
         """시퀀스 실행 로그를 타임스탬프와 함께 GUI에 추가합니다."""
         timestamp = datetime.now().strftime("%H:%M:%S:%f")[:-3]
         full_log = f"[{timestamp}] {log_message}"
-        
+
         item = QListWidgetItem(full_log)
         # 실행 로그는 다른 색상으로 구분 (예: 파란색)
         item.setForeground(Qt.GlobalColor.cyan)
         self.key_log_list.addItem(item)
-        
+
         if not self.log_persist_checkbox.isChecked() and self.key_log_list.count() > 200:
             self.key_log_list.takeItem(0)
-            
+
         self.key_log_list.scrollToBottom()
+
+    def _translate_reason_for_logging(self, raw_reason, current_display=None):
+        """내부 코드용 원인 문자열을 사용자 친화적인 문구로 변환합니다."""
+        if raw_reason is None:
+            return current_display
+
+        if isinstance(raw_reason, str):
+            reason_text = raw_reason.strip()
+        else:
+            reason_text = str(raw_reason).strip()
+
+        if not reason_text:
+            return current_display
+
+        predefined = {
+            "authority:reset": "권한 초기화",
+            "authority:resume": "권한 복구 재실행",
+            "authority:forced_release": "권한 강제 해제",
+            "authority:forced_acquire": "권한 강제 획득",
+            "esc:global_stop": "Esc 긴급 정지",
+        }
+
+        translated = predefined.get(reason_text)
+        if translated:
+            return translated
+
+        if reason_text.startswith("authority:"):
+            _, detail = reason_text.split(":", 1)
+            detail = detail.replace("_", " ").replace("-", " ")
+            detail = detail.strip()
+            return f"권한 이벤트: {detail}" if detail else "권한 이벤트"
+
+        if current_display:
+            return current_display
+
+        return reason_text
 
     def _translate_key_for_logging(self, key_str):
         translation_map = {

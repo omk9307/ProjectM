@@ -52,6 +52,7 @@ from control_authority_manager import (
     DEFAULT_MAP_PROTECT_SEC,
     DEFAULT_MAX_FLOOR_HOLD_SEC,
     DEFAULT_MAX_TOTAL_HOLD_SEC,
+    DEFAULT_HUNT_PROTECT_SEC,
 )
 
 if os.name == 'nt':
@@ -648,7 +649,9 @@ class HuntTab(QWidget):
         self._authority_manager = ControlAuthorityManager.instance()
         self._authority_manager_connected = False
         self.map_link_enabled = False
+        self._forbidden_priority_active = False
         self.map_protect_seconds = DEFAULT_MAP_PROTECT_SEC
+        self.hunt_protect_seconds = DEFAULT_HUNT_PROTECT_SEC
         self.floor_hold_seconds = DEFAULT_MAX_FLOOR_HOLD_SEC
         self.last_control_acquired_ts = 0.0
         self.last_release_attempt_ts = 0.0
@@ -1466,28 +1469,38 @@ class HuntTab(QWidget):
         self.idle_release_spinbox.valueChanged.connect(self._handle_setting_changed)
 
         self.max_authority_hold_spinbox = QDoubleSpinBox()
-        self.max_authority_hold_spinbox.setRange(1.0, 600.0)
+        self.max_authority_hold_spinbox.setRange(0.0, 600.0)
         self.max_authority_hold_spinbox.setSingleStep(1.0)
         self.max_authority_hold_spinbox.setDecimals(1)
+        self.max_authority_hold_spinbox.setSpecialValueText("사용 안 함")
         self.max_authority_hold_spinbox.setValue(float(self.control_release_timeout))
         condition_form.addRow("전체 최대 이동권한 시간(초)", self.max_authority_hold_spinbox)
         self.max_authority_hold_spinbox.valueChanged.connect(self._handle_max_hold_changed)
 
         self.floor_hold_spinbox = QDoubleSpinBox()
-        self.floor_hold_spinbox.setRange(10.0, 600.0)
+        self.floor_hold_spinbox.setRange(0.0, 600.0)
         self.floor_hold_spinbox.setSingleStep(5.0)
         self.floor_hold_spinbox.setDecimals(1)
+        self.floor_hold_spinbox.setSpecialValueText("사용 안 함")
         self.floor_hold_spinbox.setValue(float(self.floor_hold_seconds))
         condition_form.addRow("층 최대 이동권한 시간(초)", self.floor_hold_spinbox)
         self.floor_hold_spinbox.valueChanged.connect(self._handle_floor_hold_changed)
 
         self.map_protect_spinbox = QDoubleSpinBox()
-        self.map_protect_spinbox.setRange(0.5, 10.0)
-        self.map_protect_spinbox.setSingleStep(0.5)
+        self.map_protect_spinbox.setRange(0.1, 10.0)
+        self.map_protect_spinbox.setSingleStep(0.1)
         self.map_protect_spinbox.setDecimals(1)
         self.map_protect_spinbox.setValue(float(self.map_protect_seconds))
-        condition_form.addRow("맵 보호 대기 시간(초)", self.map_protect_spinbox)
+        condition_form.addRow("맵탭 조작권한 보호시간(초)", self.map_protect_spinbox)
         self.map_protect_spinbox.valueChanged.connect(self._handle_map_protect_changed)
+
+        self.hunt_protect_spinbox = QDoubleSpinBox()
+        self.hunt_protect_spinbox.setRange(0.1, 10.0)
+        self.hunt_protect_spinbox.setSingleStep(0.1)
+        self.hunt_protect_spinbox.setDecimals(1)
+        self.hunt_protect_spinbox.setValue(float(self.hunt_protect_seconds))
+        condition_form.addRow("사냥탭 조작권한 보호시간(초)", self.hunt_protect_spinbox)
+        self.hunt_protect_spinbox.valueChanged.connect(self._handle_hunt_protect_changed)
 
         group.setLayout(condition_form)
         group.setSizePolicy(QSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed))
@@ -1714,20 +1727,28 @@ class HuntTab(QWidget):
 
         self.detection_view = None
 
-        control_log_container = QVBoxLayout()
+        control_log_section = QWidget()
+        control_log_layout = QVBoxLayout()
+        control_log_layout.setContentsMargins(0, 0, 0, 0)
+        control_log_layout.setSpacing(4)
+        control_log_section.setLayout(control_log_layout)
+        control_log_section.setSizePolicy(
+            QSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.MinimumExpanding)
+        )
         control_log_header = QHBoxLayout()
         control_log_label = QLabel("입력 로그")
         self.control_log_checkbox = QCheckBox()
-        self.control_log_checkbox.setChecked(True)
+        self.control_log_checkbox.setChecked(False)
         self.control_log_checkbox.toggled.connect(self._on_log_checkbox_toggled)
         control_log_header.addWidget(control_log_label)
         control_log_header.addWidget(self.control_log_checkbox)
         control_log_header.addStretch(1)
-        control_log_container.addLayout(control_log_header)
+        control_log_layout.addLayout(control_log_header)
         self.control_log_view = QTextEdit()
         self._configure_log_view(self.control_log_view, minimum_height=160)
-        control_log_container.addWidget(self.control_log_view)
-        outer_layout.addLayout(control_log_container)
+        control_log_layout.addWidget(self.control_log_view)
+        outer_layout.addWidget(control_log_section)
+        self.control_log_section = control_log_section
 
         keyboard_log_container = QVBoxLayout()
         keyboard_log_header = QHBoxLayout()
@@ -1758,6 +1779,14 @@ class HuntTab(QWidget):
         self._configure_log_view(self.log_view, minimum_height=200)
         log_container.addWidget(self.log_view)
         outer_layout.addLayout(log_container)
+
+        self._log_base_heights = {
+            'control': self.control_log_view.minimumHeight(),
+            'keyboard': self.keyboard_log_view.minimumHeight(),
+            'main': self.log_view.minimumHeight(),
+        }
+
+        self._update_log_visibility_state()
 
         summary_group = self._create_detection_summary_group()
         outer_layout.addWidget(summary_group)
@@ -2288,7 +2317,7 @@ class HuntTab(QWidget):
                 self.detection_view.setPixmap(QPixmap())
             self.clear_detection_snapshot()
             self._cancel_facing_reset_timer()
-            if not thread_active:
+            if self._release_pending:
                 self._issue_all_keys_release("사냥중지")
 
             if self.map_link_enabled and self.map_tab and not self._syncing_with_map:
@@ -2714,7 +2743,41 @@ class HuntTab(QWidget):
         self._update_detection_summary()
         self._save_settings()
 
+    def _update_log_visibility_state(self) -> None:
+        base_heights = getattr(self, '_log_base_heights', None)
+        if not base_heights:
+            return
+
+        control_enabled = self._is_log_enabled('control_log_checkbox')
+        if hasattr(self, 'control_log_section') and self.control_log_section:
+            self.control_log_section.setVisible(control_enabled)
+        if hasattr(self, 'control_log_view') and self.control_log_view:
+            self.control_log_view.setVisible(control_enabled)
+
+        keyboard_view = getattr(self, 'keyboard_log_view', None)
+        main_view = getattr(self, 'log_view', None)
+        if not keyboard_view or not main_view:
+            return
+
+        extra_height = int(base_heights.get('control', 0))
+        keyboard_base = int(base_heights.get('keyboard', keyboard_view.minimumHeight()))
+        main_base = int(base_heights.get('main', main_view.minimumHeight()))
+
+        if control_enabled:
+            keyboard_height = keyboard_base
+            main_height = main_base
+        else:
+            keyboard_bonus = extra_height // 2
+            keyboard_height = keyboard_base + keyboard_bonus
+            main_height = main_base + (extra_height - keyboard_bonus)
+
+        keyboard_view.setMinimumHeight(keyboard_height)
+        main_view.setMinimumHeight(main_height)
+        keyboard_view.updateGeometry()
+        main_view.updateGeometry()
+
     def _on_log_checkbox_toggled(self, _checked: bool) -> None:
+        self._update_log_visibility_state()
         self._save_settings()
 
     def _on_frame_detail_toggled(self, _checked: bool) -> None:
@@ -3453,6 +3516,9 @@ class HuntTab(QWidget):
         map_protect_seconds = request_meta.get("map_protect_sec")
         if not isinstance(map_protect_seconds, (int, float)):
             map_protect_seconds = None
+        hunt_protect_seconds = request_meta.get("hunt_protect_sec")
+        if not isinstance(hunt_protect_seconds, (int, float)):
+            hunt_protect_seconds = None
 
         map_meta = map_snapshot.get("metadata") if isinstance(map_snapshot.get("metadata"), dict) else {}
         monster_count = hunt_snapshot.get("monster_count")
@@ -3471,13 +3537,12 @@ class HuntTab(QWidget):
             if code == "MAP_NOT_WALKING":
                 state = map_snapshot.get("player_state") or "알 수 없음"
                 descriptions.append(
-                    f"MAP_NOT_WALKING: 캐릭터가 지상(on_terrain) 또는 대기(idle) 상태가 아닙니다. 현재 상태={state}."
+                    f"MAP_NOT_WALKING: 캐릭터가 지상(on_terrain), 대기(idle), 점프(jumping) 상태 중 하나가 아닙니다. 현재 상태={state}."
                 )
                 continue
 
             if code == "MAP_STATE_ACTIVE":
                 state = map_snapshot.get("player_state") or "알 수 없음"
-                action = map_snapshot.get("navigation_action") or "-"
                 extras: list[str] = []
                 if map_snapshot.get("is_event_active"):
                     extras.append("이벤트 처리 중")
@@ -3489,7 +3554,7 @@ class HuntTab(QWidget):
                     extras.append("경로 잠금 상태")
                 extra_text = f" ({', '.join(extras)})" if extras else ""
                 descriptions.append(
-                    f"MAP_STATE_ACTIVE: 맵 탭 캐릭터가 아직 안정 상태가 아닙니다. 현재 상태={state}, 행동={action}{extra_text}."
+                    f"MAP_STATE_ACTIVE: 맵 탭 캐릭터가 아직 안정 상태가 아닙니다. 현재 상태={state}{extra_text}."
                 )
                 continue
 
@@ -3516,6 +3581,41 @@ class HuntTab(QWidget):
                 descriptions.append(
                     f"MAP_PRIORITY_LOCK: 맵 탭이 우선 처리 작업을 진행하고 있어 권한을 유지해야 합니다{extra_text}."
                 )
+                continue
+
+            if code == "FLOOR_CHANGE_PENDING":
+                lock_reason = request_meta.get("floor_lock_reason")
+                reason_lookup = {
+                    "MAX_TOTAL_HOLD_EXCEEDED": "전체 최대 이동권한 시간 초과",
+                    "FLOOR_HOLD_EXCEEDED": "층별 최대 이동권한 시간 초과",
+                }
+                if isinstance(lock_reason, str):
+                    lock_reason = reason_lookup.get(lock_reason, lock_reason)
+                lock_floor = request_meta.get("floor_lock_floor")
+                lock_set_at = request_meta.get("floor_lock_set_at")
+                elapsed_text = ""
+                if isinstance(lock_set_at, (int, float)):
+                    elapsed = now - float(lock_set_at)
+                    if elapsed >= 0:
+                        elapsed_text = f" (잠금 경과 {elapsed:.1f}s)"
+                floor_text = ""
+                if isinstance(lock_floor, (int, float, str)):
+                    floor_text = f", 기준 층={lock_floor}"
+                reason_text = f" (사유: {lock_reason})" if lock_reason else ""
+                descriptions.append(
+                    "FLOOR_CHANGE_PENDING: 강제 반납 이후 캐릭터가 다른 층으로 이동하기 전까지 맵 탭 권한을 유지합니다." + reason_text + floor_text + elapsed_text
+                )
+                continue
+
+            if code == "HUNT_PROTECT_ACTIVE":
+                if hunt_protect_seconds is not None:
+                    descriptions.append(
+                        f"HUNT_PROTECT_ACTIVE: 사냥 탭 권한 보호 시간 {hunt_protect_seconds:.1f}초가 지나지 않아 권한을 유지합니다."
+                    )
+                else:
+                    descriptions.append(
+                        "HUNT_PROTECT_ACTIVE: 사냥 탭이 권한을 획득한 직후 보호 시간 내에 있어 맵 탭 요청을 대기합니다."
+                    )
                 continue
 
             if code == "HUNT_SNAPSHOT_OUTDATED":
@@ -3642,12 +3742,12 @@ class HuntTab(QWidget):
             self._poll_hunt_conditions(force=True)
 
     def _handle_max_hold_changed(self, value: float) -> None:
-        self.control_release_timeout = max(1.0, float(value))
+        self.control_release_timeout = max(0.0, float(value))
         self._apply_authority_settings_to_manager()
         self._save_settings()
 
     def _handle_floor_hold_changed(self, value: float) -> None:
-        self.floor_hold_seconds = max(1.0, float(value))
+        self.floor_hold_seconds = max(0.0, float(value))
         self._apply_authority_settings_to_manager()
         self._save_settings()
 
@@ -3656,14 +3756,24 @@ class HuntTab(QWidget):
         self._apply_authority_settings_to_manager()
         self._save_settings()
 
+    def _handle_hunt_protect_changed(self, value: float) -> None:
+        self.hunt_protect_seconds = max(0.1, float(value))
+        self._apply_authority_settings_to_manager()
+        self._save_settings()
+
     def _apply_authority_settings_to_manager(self) -> None:
         if not self.map_link_enabled or not self._authority_manager_connected:
             return
         try:
+            map_protect = float(self.map_protect_spinbox.value()) if hasattr(self, 'map_protect_spinbox') else float(self.map_protect_seconds)
+            floor_hold = float(self.floor_hold_spinbox.value()) if hasattr(self, 'floor_hold_spinbox') else float(self.floor_hold_seconds)
+            max_total = float(self.max_authority_hold_spinbox.value()) if hasattr(self, 'max_authority_hold_spinbox') else float(self.control_release_timeout)
+            hunt_protect = float(self.hunt_protect_spinbox.value()) if hasattr(self, 'hunt_protect_spinbox') else float(self.hunt_protect_seconds)
             self._authority_manager.update_hunt_settings(
-                map_protect_sec=float(self.map_protect_spinbox.value()),
-                floor_hold_sec=float(self.floor_hold_spinbox.value()),
-                max_total_hold_sec=float(self.max_authority_hold_spinbox.value()),
+                map_protect_sec=map_protect,
+                floor_hold_sec=floor_hold,
+                max_total_hold_sec=max_total,
+                hunt_protect_sec=hunt_protect,
             )
         except Exception as exc:
             self.append_log(f"권한 매니저 설정 갱신 실패: {exc}", "warn")
@@ -3675,6 +3785,7 @@ class HuntTab(QWidget):
         manager.authority_changed.connect(self._on_authority_changed_from_manager)
         manager.request_evaluated.connect(self._on_authority_request_evaluated)
         manager.priority_event_triggered.connect(self._on_priority_event_from_manager)
+        manager.priority_event_cleared.connect(self._on_priority_event_cleared_from_manager)
         self._authority_manager_connected = True
 
     def _disconnect_authority_manager(self) -> None:
@@ -3691,6 +3802,10 @@ class HuntTab(QWidget):
             pass
         try:
             manager.priority_event_triggered.disconnect(self._on_priority_event_from_manager)
+        except TypeError:
+            pass
+        try:
+            manager.priority_event_cleared.disconnect(self._on_priority_event_cleared_from_manager)
         except TypeError:
             pass
         self._authority_manager_connected = False
@@ -3712,6 +3827,7 @@ class HuntTab(QWidget):
         self._authority_request_connected = False
         self._authority_release_connected = False
         self._request_pending = False
+        self._forbidden_priority_active = False
         if not initial:
             self.append_log("맵 탭 연동 모드를 비활성화했습니다.", "info")
         self.on_map_authority_changed("hunt", {"source": "local", "reason": "map_link_disabled", "silent": initial})
@@ -3753,12 +3869,23 @@ class HuntTab(QWidget):
     def _on_priority_event_from_manager(self, kind: str, metadata: dict) -> None:
         if not self.map_link_enabled:
             return
+        if kind == "FORBIDDEN_WALL":
+            self._forbidden_priority_active = True
         detail_parts = []
         if isinstance(metadata, dict):
             for key, value in metadata.items():
                 detail_parts.append(f"{key}={value}")
         detail_text = f" ({', '.join(detail_parts)})" if detail_parts else ""
         self.append_log(f"맵 탭 우선 이벤트 감지: {kind}{detail_text}", "warn")
+
+    def _on_priority_event_cleared_from_manager(self, kind: str, metadata: dict) -> None:
+        if not self.map_link_enabled:
+            return
+        if kind != "FORBIDDEN_WALL":
+            return
+        self._forbidden_priority_active = False
+        self.append_log("금지벽 우선 이벤트가 종료되었습니다.", "info")
+        self._poll_hunt_conditions(force=True)
 
     def _build_hunt_condition_snapshot(self) -> HuntConditionSnapshot:
         return HuntConditionSnapshot(
@@ -3823,6 +3950,8 @@ class HuntTab(QWidget):
             "buff_skill_count": len(self.buff_skills),
             "latest_monster_count": self.latest_monster_count,
             "latest_primary_monster_count": self.latest_primary_monster_count,
+            "map_protect_sec": float(self.map_protect_spinbox.value()) if hasattr(self, 'map_protect_spinbox') else float(self.map_protect_seconds),
+            "hunt_protect_sec": float(self.hunt_protect_spinbox.value()) if hasattr(self, 'hunt_protect_spinbox') else float(self.hunt_protect_seconds),
         }
 
     def _handle_facing_reset_changed(self, value: float) -> None:
@@ -5516,6 +5645,17 @@ class HuntTab(QWidget):
                     pass
                 finally:
                     self.map_protect_spinbox.blockSignals(prev)
+            hunt_protect = conditions.get('hunt_protect_sec')
+            if hunt_protect is not None and hasattr(self, 'hunt_protect_spinbox'):
+                prev = self.hunt_protect_spinbox.blockSignals(True)
+                try:
+                    value = float(hunt_protect)
+                    self.hunt_protect_spinbox.setValue(value)
+                    self.hunt_protect_seconds = float(self.hunt_protect_spinbox.value())
+                except (TypeError, ValueError):
+                    pass
+                finally:
+                    self.hunt_protect_spinbox.blockSignals(prev)
             floor_hold = conditions.get('floor_hold_sec')
             if floor_hold is not None and hasattr(self, 'floor_hold_spinbox'):
                 prev = self.floor_hold_spinbox.blockSignals(True)
@@ -5745,7 +5885,7 @@ class HuntTab(QWidget):
 
         facing_state = data.get('last_facing')
         self._set_current_facing(facing_state if facing_state in ('left', 'right') else None, save=False)
-        self.control_release_timeout = max(1.0, self.max_authority_hold_spinbox.value())
+        self.control_release_timeout = max(0.0, float(self.max_authority_hold_spinbox.value()))
 
         attack_skill_data = data.get('attack_skills', [])
         if attack_skill_data:
@@ -5890,6 +6030,7 @@ class HuntTab(QWidget):
                 'map_link_enabled': self.map_link_checkbox.isChecked(),
                 'map_protect_sec': self.map_protect_spinbox.value(),
                 'floor_hold_sec': self.floor_hold_spinbox.value(),
+                'hunt_protect_sec': self.hunt_protect_spinbox.value(),
             },
             'display': {
                 'show_hunt_area': self.show_hunt_area_checkbox.isChecked(),
@@ -7388,30 +7529,34 @@ class HuntTab(QWidget):
         self._clear_pending_skill()
         self._clear_pending_direction()
         self._clear_direction_confirmation()
-        self._emit_control_command("모든 키 떼기", reason=reason)
-        if isinstance(reason, str) and reason.strip():
-            reason_text = reason.strip()
-            if reason_text.startswith('status:'):
-                parts = reason_text.split(':')
-                resource = parts[1].strip().upper() if len(parts) >= 2 else ''
-                percent_text = ''
-                if len(parts) >= 3 and parts[2].strip():
-                    try:
-                        percent_value = int(round(float(parts[2].strip())))
-                        percent_text = f" ({percent_value}%)"
-                    except ValueError:
-                        percent_text = ''
-                label = resource or 'STATUS'
-                reason_text = f"Status: {label}{percent_text}"
-            elif reason_text.startswith('primary_release'):
-                parts = reason_text.split('|', 1)
-                reason_text = parts[1].strip() if len(parts) == 2 else ''
-            if reason_text:
-                self.append_log(f"모든 키 떼기 명령 전송 (원인: {reason_text})", "debug")
+        send_release = not self._forbidden_priority_active
+        if send_release:
+            self._emit_control_command("모든 키 떼기", reason=reason)
+            if isinstance(reason, str) and reason.strip():
+                reason_text = reason.strip()
+                if reason_text.startswith('status:'):
+                    parts = reason_text.split(':')
+                    resource = parts[1].strip().upper() if len(parts) >= 2 else ''
+                    percent_text = ''
+                    if len(parts) >= 3 and parts[2].strip():
+                        try:
+                            percent_value = int(round(float(parts[2].strip())))
+                            percent_text = f" ({percent_value}%)"
+                        except ValueError:
+                            percent_text = ''
+                    label = resource or 'STATUS'
+                    reason_text = f"Status: {label}{percent_text}"
+                elif reason_text.startswith('primary_release'):
+                    parts = reason_text.split('|', 1)
+                    reason_text = parts[1].strip() if len(parts) == 2 else ''
+                if reason_text:
+                    self.append_log(f"모든 키 떼기 명령 전송 (원인: {reason_text})", "debug")
+                else:
+                    self.append_log("모든 키 떼기 명령 전송", "debug")
             else:
                 self.append_log("모든 키 떼기 명령 전송", "debug")
         else:
-            self.append_log("모든 키 떼기 명령 전송", "debug")
+            self.append_log("금지벽 우선 이벤트 진행 중이라 '모든 키 떼기' 전송을 보류합니다.", "debug")
         self._release_pending = False
         self.hunting_active = False
         self._movement_mode = None
