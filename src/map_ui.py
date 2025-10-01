@@ -426,6 +426,8 @@ class MapTab(QWidget):
             self._other_player_alert_cooldown = 3.0
             self.telegram_alert_checkbox = None
             self.telegram_alert_enabled = False
+            self.telegram_bot_token = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
+            self.telegram_chat_id = os.getenv("TELEGRAM_CHAT_ID", "").strip()
             self.active_feature_info = []
             self.reference_anchor_id = None
             self.smoothed_player_pos = None
@@ -465,6 +467,8 @@ class MapTab(QWidget):
             self._authority_priority_override = False
             self.current_authority_owner = "map"
             self._hunt_tab = None
+            self._auto_control_tab = None
+            self._held_direction_keys: set[str] = set()
             self._syncing_with_hunt = False
             self._authority_event_history = deque(maxlen=200)
             self._last_authority_command_entry = None
@@ -1122,6 +1126,7 @@ class MapTab(QWidget):
         self.telegram_alert_checkbox.toggled.connect(self._on_telegram_alert_toggled)
         third_row_layout.addWidget(self.telegram_alert_checkbox)
         third_row_layout.addStretch(1)
+        self.telegram_alert_checkbox.setEnabled(False)
 
         buttons_row_layout = QHBoxLayout()
         self.state_config_btn = QPushButton("판정 설정")
@@ -1288,6 +1293,60 @@ class MapTab(QWidget):
                 hunt_tab.detection_status_changed.connect(self._handle_hunt_detection_status_changed)
             except Exception:
                 pass
+
+    def attach_auto_control_tab(self, auto_control_tab) -> None:
+        """자동 제어 탭과 키 입력 상태를 연동합니다."""
+        if self._auto_control_tab is auto_control_tab:
+            return
+
+        if self._auto_control_tab:
+            try:
+                self._auto_control_tab.keyboard_state_changed.disconnect(self._handle_auto_control_key_state)
+            except Exception:
+                pass
+            try:
+                self._auto_control_tab.keyboard_state_reset.disconnect(self._handle_auto_control_key_reset)
+            except Exception:
+                pass
+
+        self._auto_control_tab = auto_control_tab
+
+        if not auto_control_tab:
+            self._held_direction_keys.clear()
+            return
+
+        if hasattr(auto_control_tab, 'keyboard_state_changed'):
+            auto_control_tab.keyboard_state_changed.connect(self._handle_auto_control_key_state)
+        if hasattr(auto_control_tab, 'keyboard_state_reset'):
+            auto_control_tab.keyboard_state_reset.connect(self._handle_auto_control_key_reset)
+
+    @pyqtSlot(str, bool)
+    def _handle_auto_control_key_state(self, key_str: str, pressed: bool) -> None:
+        if key_str not in {"Key.left", "Key.right"}:
+            return
+
+        if pressed:
+            self._held_direction_keys.add(key_str)
+        else:
+            self._held_direction_keys.discard(key_str)
+
+    @pyqtSlot()
+    def _handle_auto_control_key_reset(self) -> None:
+        if self._held_direction_keys:
+            self._held_direction_keys.clear()
+
+    def _is_walk_direction_active(self, direction: str) -> bool:
+        if not self._auto_control_tab:
+            return True
+
+        if not self._held_direction_keys:
+            return False
+
+        if direction == "→":
+            return any(key in self._held_direction_keys for key in {"Key.right", "d", "D"})
+        if direction == "←":
+            return any(key in self._held_direction_keys for key in {"Key.left", "a", "A"})
+        return False
 
     def _handle_hunt_detection_status_changed(self, running: bool) -> None:
         if not getattr(self, '_hunt_tab', None):
@@ -2006,7 +2065,10 @@ class MapTab(QWidget):
                 self._reset_other_player_alert_state()
 
             telegram_enabled = bool(config.get('telegram_alert_enabled', False))
+            if not other_alert_enabled:
+                telegram_enabled = False
             if hasattr(self, 'telegram_alert_checkbox') and self.telegram_alert_checkbox:
+                self.telegram_alert_checkbox.setEnabled(other_alert_enabled)
                 blocker = QSignalBlocker(self.telegram_alert_checkbox)
                 self.telegram_alert_checkbox.setChecked(telegram_enabled)
                 del blocker
@@ -4904,6 +4966,13 @@ class MapTab(QWidget):
         self.other_player_alert_enabled = bool(checked)
         if not checked:
             self._reset_other_player_alert_state()
+        if self.telegram_alert_checkbox:
+            self.telegram_alert_checkbox.setEnabled(self.other_player_alert_enabled)
+            if not self.other_player_alert_enabled and self.telegram_alert_checkbox.isChecked():
+                blocker = QSignalBlocker(self.telegram_alert_checkbox)
+                self.telegram_alert_checkbox.setChecked(False)
+                del blocker
+                self.telegram_alert_enabled = False
         if self.active_profile_name:
             self.save_profile_data()
 
@@ -4918,6 +4987,7 @@ class MapTab(QWidget):
 
     def _handle_other_player_detection_alert(self, other_players: list[QRectF]) -> None:
         if not self.other_player_alert_enabled:
+            self._other_player_alert_active = False
             return
 
         now = time.time()
@@ -4926,6 +4996,16 @@ class MapTab(QWidget):
             if now >= self._other_player_alert_last_time + self._other_player_alert_cooldown:
                 self._play_other_player_alert_sound()
                 self._other_player_alert_last_time = now
+                detected_count = len(other_players)
+                profile_name = self.active_profile_name or "(미지정)"
+                timestamp_text = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(now))
+                message = (
+                    f"[Project Maple] 다른 유저 감지\n"
+                    f"감지 수: {detected_count}명\n"
+                    f"프로필: {profile_name}\n"
+                    f"시각: {timestamp_text}"
+                )
+                self._send_telegram_alert(message)
             self._other_player_alert_active = True
         elif not has_other_player:
             self._other_player_alert_active = False
@@ -4939,13 +5019,73 @@ class MapTab(QWidget):
         self.save_global_settings()
 
     def _on_telegram_alert_toggled(self, checked: bool) -> None:  # noqa: ARG002
+        # 다른 유저 감지 옵션이 비활성화된 상태에서는 강제로 해제
+        if checked and not self.other_player_alert_enabled:
+            if self.telegram_alert_checkbox:
+                blocker = QSignalBlocker(self.telegram_alert_checkbox)
+                self.telegram_alert_checkbox.setChecked(False)
+                del blocker
+            self.telegram_alert_enabled = False
+            return
+
         self.telegram_alert_enabled = bool(checked)
         if self.active_profile_name:
             self.save_profile_data()
 
+    def _send_telegram_alert(self, message: str) -> None:
+        if not message or not self.telegram_alert_enabled:
+            return
+
+        token = (self.telegram_bot_token or "").strip()
+        chat_id = (self.telegram_chat_id or "").strip()
+        if not token or not chat_id:
+            self.update_general_log(
+                "텔레그램 전송 실패: TELEGRAM_BOT_TOKEN 또는 TELEGRAM_CHAT_ID 환경변수가 설정되지 않았습니다.",
+                "orange",
+            )
+            return
+
+        def _worker() -> None:
+            try:
+                import requests  # type: ignore
+            except ImportError:
+                QTimer.singleShot(
+                    0,
+                    lambda: self.update_general_log(
+                        "텔레그램 전송 실패: requests 모듈이 필요합니다. pip install requests", "red"
+                    ),
+                )
+                return
+
+            url = f"https://api.telegram.org/bot{token}/sendMessage"
+            payload = {
+                "chat_id": chat_id,
+                "text": message,
+                "disable_web_page_preview": True,
+            }
+
+            try:
+                response = requests.post(url, data=payload, timeout=5)
+                if response.status_code >= 400:
+                    QTimer.singleShot(
+                        0,
+                        lambda: self.update_general_log(
+                            f"텔레그램 전송 실패({response.status_code}): {response.text}", "red"
+                        ),
+                    )
+            except Exception as exc:  # noqa: BLE001
+                QTimer.singleShot(
+                    0,
+                    lambda: self.update_general_log(f"텔레그램 전송 중 오류: {exc}", "red"),
+                )
+
+        threading.Thread(target=_worker, daemon=True).start()
+
     def _on_auto_control_toggled(self, checked: bool) -> None:  # noqa: ARG002
         if not self.active_profile_name:
             return
+        if not checked:
+            self._handle_auto_control_key_reset()
         self.save_profile_data()
 
     def _on_perf_logging_toggled(self, checked: bool) -> None:
@@ -5611,6 +5751,14 @@ class MapTab(QWidget):
             return
 
         self._last_walk_teleport_check_time = now
+
+        if not self._is_walk_direction_active(direction):
+            walk_command = "걷기(우)" if direction == "→" else "걷기(좌)"
+            if self.debug_auto_control_checkbox.isChecked():
+                print(f"[자동 제어 테스트] WALK-TELEPORT: 누락된 걷기 -> {walk_command}")
+            if self.auto_control_checkbox.isChecked():
+                self._emit_control_command(walk_command, "walk_teleport:ensure_walk")
+            return
 
         if random.random() >= probability:
             return
