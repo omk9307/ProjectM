@@ -3387,9 +3387,9 @@ class MapTab(QWidget):
         self.active_forbidden_wall_trigger = ""
         self.forbidden_wall_started_at = 0.0
         self._authority_priority_override = False
+
+        current_owner = getattr(self, 'current_authority_owner', 'map')
         takeover_context = self._forbidden_takeover_context if self._forbidden_takeover_active else None
-        if self._authority_manager:
-            self._authority_manager.clear_priority_event("FORBIDDEN_WALL")
 
         pending = getattr(self, 'pending_forbidden_command', None)
         self.pending_forbidden_command = None
@@ -3401,7 +3401,7 @@ class MapTab(QWidget):
                     "gray",
                 )
 
-        if takeover_context and getattr(self, 'current_authority_owner', 'map') == 'map':
+        if takeover_context and current_owner == 'map':
             resume_command = takeover_context.get('resume_command')
             resume_reason = takeover_context.get('resume_reason')
             if resume_command:
@@ -3420,6 +3420,10 @@ class MapTab(QWidget):
                     command=resume_command,
                     command_success=success,
                 )
+
+        # 우선 이벤트 해제는 재실행 시도 이후로 지연해 권한이 유지된 상태에서 명령을 보낼 수 있게 한다.
+        if self._authority_manager:
+            self._authority_manager.clear_priority_event("FORBIDDEN_WALL")
 
         self._forbidden_takeover_context = None
         self._forbidden_takeover_active = False
