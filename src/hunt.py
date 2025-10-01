@@ -8195,4 +8195,10 @@ class HuntTab(QWidget):
         self._clear_direction_confirmation()
         self._reset_walk_teleport_state()
         if self.hunting_active:
-            self._issue_all_keys_release(reason)
+            reason_text = reason.strip() if isinstance(reason, str) else ""
+            if reason_text.startswith("사냥 권한 없음") and self.map_link_enabled:
+                self._release_pending = False
+                self.hunting_active = False
+                self._movement_mode = None
+            else:
+                self._issue_all_keys_release(reason)
