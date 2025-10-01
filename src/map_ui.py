@@ -425,9 +425,11 @@ class MapTab(QWidget):
             self._other_player_alert_last_time = 0.0
             self._other_player_alert_cooldown = 3.0
             self.telegram_alert_checkbox = None
+            self.telegram_test_btn = None
             self.telegram_alert_enabled = False
-            self.telegram_bot_token = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
-            self.telegram_chat_id = os.getenv("TELEGRAM_CHAT_ID", "").strip()
+            self.telegram_bot_token = ""
+            self.telegram_chat_id = ""
+            self._refresh_telegram_credentials()
             self.active_feature_info = []
             self.reference_anchor_id = None
             self.smoothed_player_pos = None
@@ -475,6 +477,7 @@ class MapTab(QWidget):
             self._authority_resume_candidate = None
             self._forbidden_takeover_context = None
             self._forbidden_takeover_active = False
+            self._suppress_authority_resume = False  # ESC 등으로 탐지를 중단한 직후 재실행 차단 플래그
 
             # [v11.3.7] 설정 변수 선언만 하고 값 할당은 load_profile_data로 위임
             self.cfg_idle_time_threshold = None
@@ -843,6 +846,44 @@ class MapTab(QWidget):
         # 권한 회수 즉시 안전 키 상태를 보장
         self._emit_control_command("모든 키 떼기", "authority:reset", allow_forbidden=True)
 
+        skip_reason: Optional[str] = None
+        if self._suppress_authority_resume:
+            skip_reason = "forced_stop"
+        elif not getattr(self, 'is_detection_running', False):
+            skip_reason = "detection_inactive"
+
+        if skip_reason:
+            if command_to_resume:
+                if skip_reason == "forced_stop":
+                    resume_message = (
+                        f"[권한][재실행] ESC/SHIFT+ESC 강제 중지 이후라 마지막 명령 '{command_to_resume}' 재실행을 건너뜁니다."
+                    )
+                else:
+                    resume_message = (
+                        f"[권한][재실행] 탐지가 중단된 상태라 마지막 명령 '{command_to_resume}' 재실행을 건너뜁니다."
+                    )
+                self.update_general_log(resume_message, "orange")
+                resume_extra: Dict[str, Any] = dict(event_extra or {})
+                resume_extra.update(
+                    {
+                        "attempted_at": time.time(),
+                        "skip_reason": skip_reason,
+                    }
+                )
+                self._record_authority_event(
+                    "resume",
+                    message=resume_message,
+                    reason=reason,
+                    source=authority_source,
+                    previous_owner=previous,
+                    command=command_to_resume,
+                    command_success=False,
+                    extra=resume_extra,
+                    log_to_general=False,
+                )
+            self._clear_authority_resume_state()
+            return
+
         if command_to_resume:
             def _resend_last_command() -> None:
                 priority_guard_active = bool(
@@ -902,6 +943,11 @@ class MapTab(QWidget):
             QTimer.singleShot(120, _resend_last_command)
 
         self._authority_resume_candidate = None
+
+    def _clear_authority_resume_state(self) -> None:
+        """권한 재실행 후보 상태를 모두 초기화한다."""
+        self._authority_resume_candidate = None
+        self._last_authority_command_entry = None
 
     def _is_trackable_authority_command(self, command: str) -> bool:
         if not command:
@@ -1121,10 +1167,18 @@ class MapTab(QWidget):
         self.other_player_alert_checkbox.setChecked(False)
         self.other_player_alert_checkbox.toggled.connect(self._on_other_player_alert_toggled)
         third_row_layout.addWidget(self.other_player_alert_checkbox)
+        telegram_controls_layout = QHBoxLayout()
+        telegram_controls_layout.setContentsMargins(0, 0, 0, 0)
+        telegram_controls_layout.setSpacing(6)
         self.telegram_alert_checkbox = QCheckBox("텔레그램 전송")
         self.telegram_alert_checkbox.setChecked(False)
         self.telegram_alert_checkbox.toggled.connect(self._on_telegram_alert_toggled)
-        third_row_layout.addWidget(self.telegram_alert_checkbox)
+        telegram_controls_layout.addWidget(self.telegram_alert_checkbox)
+        self.telegram_test_btn = QPushButton("테스트")
+        self.telegram_test_btn.setEnabled(False)
+        self.telegram_test_btn.clicked.connect(self._on_telegram_test_clicked)
+        telegram_controls_layout.addWidget(self.telegram_test_btn)
+        third_row_layout.addLayout(telegram_controls_layout)
         third_row_layout.addStretch(1)
         self.telegram_alert_checkbox.setEnabled(False)
 
@@ -1463,6 +1517,7 @@ class MapTab(QWidget):
 
         if not is_status_command and command != "모든 키 떼기":
             self._last_regular_command = (command, reason)
+            self._suppress_authority_resume = False
             if command_entry and self._last_authority_command_entry is command_entry:
                 command_entry['executed'] = True
         return _wrap_result(True)
@@ -2073,6 +2128,8 @@ class MapTab(QWidget):
                 self.telegram_alert_checkbox.setChecked(telegram_enabled)
                 del blocker
             self.telegram_alert_enabled = telegram_enabled
+            if hasattr(self, 'telegram_test_btn') and self.telegram_test_btn:
+                self.telegram_test_btn.setEnabled(other_alert_enabled and telegram_enabled)
 
             # 저장된 상태 판정 설정이 있으면 기본값을 덮어쓰기
             state_config = config.get('state_machine_config', {})
@@ -3824,6 +3881,8 @@ class MapTab(QWidget):
 
         if stopped:
             self.update_general_log("ESC 단축키로 탐지를 강제 중단했습니다.", "orange")
+            self._clear_authority_resume_state()
+            self._suppress_authority_resume = True
         return stopped
 
     def toggle_anchor_detection(self, checked):
@@ -3876,6 +3935,7 @@ class MapTab(QWidget):
 
                 # 스레드 시작 전에 플래그를 True로 설정
                 self.is_detection_running = True
+                self._suppress_authority_resume = False
                 self._reset_other_player_alert_state()
                 self.detection_status_changed.emit(True)   # 탐지 시작 상태를 신호로 알림
                 self.update_general_log("탐지를 시작합니다...", "SaddleBrown")
@@ -3966,6 +4026,7 @@ class MapTab(QWidget):
             else:
                 # [핵심 수정] 스레드 중단 전에 플래그를 False로 먼저 설정
                 self.is_detection_running = False
+                self._clear_authority_resume_state()
                 self.detection_status_changed.emit(False)
                 if self.status_monitor:
                     self.status_monitor.set_tab_active(map_tab=False)
@@ -4964,7 +5025,7 @@ class MapTab(QWidget):
 
     def _on_other_player_alert_toggled(self, checked: bool) -> None:  # noqa: ARG002
         self.other_player_alert_enabled = bool(checked)
-        if not checked:
+        if not self.other_player_alert_enabled:
             self._reset_other_player_alert_state()
         if self.telegram_alert_checkbox:
             self.telegram_alert_checkbox.setEnabled(self.other_player_alert_enabled)
@@ -4973,6 +5034,10 @@ class MapTab(QWidget):
                 self.telegram_alert_checkbox.setChecked(False)
                 del blocker
                 self.telegram_alert_enabled = False
+        if self.telegram_test_btn:
+            self.telegram_test_btn.setEnabled(
+                self.other_player_alert_enabled and self.telegram_alert_enabled
+            )
         if self.active_profile_name:
             self.save_profile_data()
 
@@ -4980,10 +5045,19 @@ class MapTab(QWidget):
         """다른 유저 감지 시 알람 소리를 재생합니다."""
         try:
             import winsound
-
-            winsound.PlaySound("SystemExclamation", winsound.SND_ALIAS | winsound.SND_ASYNC)
         except Exception:
             QApplication.beep()
+            return
+
+        def _beep_sequence() -> None:
+            try:
+                winsound.Beep(1900, 350)
+                winsound.Beep(1500, 350)
+                winsound.Beep(2200, 450)
+            except Exception:
+                winsound.PlaySound("SystemExclamation", winsound.SND_ALIAS | winsound.SND_ASYNC)
+
+        threading.Thread(target=_beep_sequence, daemon=True).start()
 
     def _handle_other_player_detection_alert(self, other_players: list[QRectF]) -> None:
         if not self.other_player_alert_enabled:
@@ -5014,6 +5088,71 @@ class MapTab(QWidget):
         self._other_player_alert_active = False
         self._other_player_alert_last_time = 0.0
 
+    def _load_telegram_credentials(self) -> tuple[str, str]:
+        token = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
+        chat_id = os.getenv("TELEGRAM_CHAT_ID", "").strip()
+
+        candidates: list[Path] = []
+        try:
+            workspace_root_path = Path(WORKSPACE_ROOT)
+            candidates.append(workspace_root_path / "config" / "telegram.json")
+        except Exception:
+            workspace_root_path = Path()
+
+        raw_workspace = str(WORKSPACE_ROOT)
+        if ":" in raw_workspace:
+            drive, remainder = raw_workspace.split(":", 1)
+            remainder = remainder.replace("\\", "/").lstrip("/\\")
+            wsl_base = Path("/mnt") / drive.lower()
+            if remainder:
+                wsl_base = wsl_base / Path(remainder)
+            candidates.append(wsl_base / "config" / "telegram.json")
+
+        candidates.append(Path.cwd() / "workspace" / "config" / "telegram.json")
+
+        config_path: Path | None = None
+        seen: set[Path] = set()
+        for candidate in candidates:
+            try:
+                resolved = candidate.resolve()
+            except Exception:
+                resolved = candidate
+            if resolved in seen:
+                continue
+            seen.add(resolved)
+            if resolved.is_file():
+                config_path = resolved
+                break
+
+        try:
+            if config_path and config_path.is_file():
+                content = config_path.read_text(encoding="utf-8").strip()
+                if content:
+                    try:
+                        data = json.loads(content)
+                        token = str(data.get("TELEGRAM_BOT_TOKEN", token) or "").strip()
+                        chat_id = str(data.get("TELEGRAM_CHAT_ID", chat_id) or "").strip()
+                    except json.JSONDecodeError:
+                        for line in content.splitlines():
+                            if "=" not in line:
+                                continue
+                            key, value = line.split("=", 1)
+                            key = key.strip()
+                            value = value.strip().strip('"').strip("'")
+                            if key == "TELEGRAM_BOT_TOKEN" and value:
+                                token = value.strip()
+                            elif key == "TELEGRAM_CHAT_ID" and value:
+                                chat_id = value.strip()
+        except Exception as exc:  # noqa: BLE001
+            print(f"텔레그램 설정 파일 로드 중 오류: {exc}")
+
+        return token, chat_id
+
+    def _refresh_telegram_credentials(self) -> None:
+        token, chat_id = self._load_telegram_credentials()
+        self.telegram_bot_token = token
+        self.telegram_chat_id = chat_id
+
     def _on_initial_delay_changed(self, value: int) -> None:  # noqa: ARG002
         self.initial_delay_ms = int(value)
         self.save_global_settings()
@@ -5029,6 +5168,10 @@ class MapTab(QWidget):
             return
 
         self.telegram_alert_enabled = bool(checked)
+        if self.telegram_test_btn:
+            self.telegram_test_btn.setEnabled(
+                self.other_player_alert_enabled and self.telegram_alert_enabled
+            )
         if self.active_profile_name:
             self.save_profile_data()
 
@@ -5036,11 +5179,12 @@ class MapTab(QWidget):
         if not message or not self.telegram_alert_enabled:
             return
 
+        self._refresh_telegram_credentials()
         token = (self.telegram_bot_token or "").strip()
         chat_id = (self.telegram_chat_id or "").strip()
         if not token or not chat_id:
             self.update_general_log(
-                "텔레그램 전송 실패: TELEGRAM_BOT_TOKEN 또는 TELEGRAM_CHAT_ID 환경변수가 설정되지 않았습니다.",
+                "텔레그램 전송 실패: workspace/config/telegram.json 또는 환경변수에서 자격 정보를 찾을 수 없습니다.",
                 "orange",
             )
             return
@@ -5080,6 +5224,29 @@ class MapTab(QWidget):
                 )
 
         threading.Thread(target=_worker, daemon=True).start()
+
+    def _on_telegram_test_clicked(self) -> None:
+        if not self.other_player_alert_enabled:
+            QMessageBox.information(self, "텔레그램 테스트", "먼저 '다른 유저 감지'를 활성화해 주세요.")
+            return
+        if not self.telegram_alert_enabled:
+            QMessageBox.information(self, "텔레그램 테스트", "'텔레그램 전송' 옵션을 체크한 뒤 다시 시도하세요.")
+            return
+
+        self._refresh_telegram_credentials()
+        token = (self.telegram_bot_token or "").strip()
+        chat_id = (self.telegram_chat_id or "").strip()
+        if not token or not chat_id:
+            QMessageBox.warning(
+                self,
+                "텔레그램 테스트",
+                "workspace/config/telegram.json 또는 환경변수에서 텔레그램 자격 정보를 찾을 수 없습니다.",
+            )
+            return
+
+        test_message = "[Project Maple] 텔레그램 테스트 메시지"
+        self._send_telegram_alert(test_message)
+        QMessageBox.information(self, "텔레그램 테스트", "테스트 메시지를 전송했습니다. 텔레그램을 확인하세요.")
 
     def _on_auto_control_toggled(self, checked: bool) -> None:  # noqa: ARG002
         if not self.active_profile_name:
@@ -8531,6 +8698,7 @@ def cleanup_on_close(self):
         self.save_global_settings()
         # 프로그램 종료 시에도 탐지 상태 플래그를 False로 설정
         self.is_detection_running = False
+        self._clear_authority_resume_state()
 
         self._stop_perf_logging()
 
