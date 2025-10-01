@@ -419,6 +419,11 @@ class MapTab(QWidget):
             self.full_map_bounding_rect = QRectF()
             self.my_player_global_rects = []
             self.other_player_global_rects = []
+            self.other_player_alert_checkbox = None
+            self.other_player_alert_enabled = False
+            self._other_player_alert_active = False
+            self._other_player_alert_last_time = 0.0
+            self._other_player_alert_cooldown = 3.0
             self.active_feature_info = []
             self.reference_anchor_id = None
             self.smoothed_player_pos = None
@@ -1075,10 +1080,19 @@ class MapTab(QWidget):
 
         # --- [수정] 레이아웃을 2줄로 분리 ---
         settings_h_layout_1 = QHBoxLayout()
+        auto_control_column = QVBoxLayout()
+        auto_control_column.setSpacing(2)
+        auto_control_column.setContentsMargins(0, 0, 0, 0)
         self.auto_control_checkbox = QCheckBox("자동 제어")
         self.auto_control_checkbox.setChecked(False)
         self.auto_control_checkbox.toggled.connect(self._on_auto_control_toggled)
-        settings_h_layout_1.addWidget(self.auto_control_checkbox)
+        auto_control_column.addWidget(self.auto_control_checkbox)
+        self.other_player_alert_checkbox = QCheckBox("다른 유저 감지")
+        self.other_player_alert_checkbox.setChecked(False)
+        self.other_player_alert_checkbox.toggled.connect(self._on_other_player_alert_toggled)
+        auto_control_column.addWidget(self.other_player_alert_checkbox)
+        auto_control_column.addStretch(1)
+        settings_h_layout_1.addLayout(auto_control_column)
         self.perf_logging_checkbox = QCheckBox("CSV 기록")
         self.perf_logging_checkbox.setChecked(self._perf_logging_enabled)
         self.perf_logging_checkbox.toggled.connect(self._on_perf_logging_toggled)
@@ -1900,6 +1914,7 @@ class MapTab(QWidget):
         self.current_forward_slot = "1"
         self.current_backward_slot = "1"
         self.current_direction_slot_label = "-"
+        self._reset_other_player_alert_state()
 
         # 로그 초기화
         self.general_log_viewer.clear()
@@ -1968,6 +1983,15 @@ class MapTab(QWidget):
                 blocker = QSignalBlocker(self.auto_control_checkbox)
                 self.auto_control_checkbox.setChecked(auto_control_enabled)
                 del blocker
+
+            other_alert_enabled = bool(config.get('other_player_alert_enabled', False))
+            if hasattr(self, 'other_player_alert_checkbox') and self.other_player_alert_checkbox:
+                blocker = QSignalBlocker(self.other_player_alert_checkbox)
+                self.other_player_alert_checkbox.setChecked(other_alert_enabled)
+                del blocker
+            self.other_player_alert_enabled = other_alert_enabled
+            if not other_alert_enabled:
+                self._reset_other_player_alert_state()
 
             # 저장된 상태 판정 설정이 있으면 기본값을 덮어쓰기
             state_config = config.get('state_machine_config', {})
@@ -2350,6 +2374,10 @@ class MapTab(QWidget):
                 'auto_control_enabled': bool(
                     getattr(self, 'auto_control_checkbox', None)
                     and self.auto_control_checkbox.isChecked()
+                ),
+                'other_player_alert_enabled': bool(
+                    getattr(self, 'other_player_alert_checkbox', None)
+                    and self.other_player_alert_checkbox.isChecked()
                 ),
             })
             
@@ -3759,6 +3787,7 @@ class MapTab(QWidget):
 
                 # 스레드 시작 전에 플래그를 True로 설정
                 self.is_detection_running = True
+                self._reset_other_player_alert_state()
                 self.detection_status_changed.emit(True)   # 탐지 시작 상태를 신호로 알림
                 self.update_general_log("탐지를 시작합니다...", "SaddleBrown")
 
@@ -3869,6 +3898,7 @@ class MapTab(QWidget):
                 self.detect_anchor_btn.setText("탐지 시작")
                 self.update_detection_log_message("탐지 중단됨", "black")
                 self.minimap_view_label.setText("탐지 중단됨")
+                self._reset_other_player_alert_state()
 
                 if self._perf_log_writer:
                     self._stop_perf_logging()
@@ -4564,8 +4594,12 @@ class MapTab(QWidget):
         ]
         other_player_global_rects = [
             transform_rect_safe(rect, transform_matrix, inlier_features)
-            for rect in other_player_rects
+            for rect in (other_player_rects or [])
         ]
+
+        self.my_player_global_rects = my_player_global_rects
+        self.other_player_global_rects = other_player_global_rects
+        self._handle_other_player_detection_alert(self.other_player_global_rects)
 
         if self.debug_dialog and self.debug_dialog.isVisible():
             debug_data = {
@@ -4589,8 +4623,8 @@ class MapTab(QWidget):
         self.minimap_view_label.update_view_data(
             camera_center=camera_pos_to_send,
             active_features=self.active_feature_info,
-            my_players=my_player_global_rects,
-            other_players=other_player_global_rects,
+            my_players=self.my_player_global_rects,
+            other_players=self.other_player_global_rects,
             target_wp_id=self.target_waypoint_id,
             reached_wp_id=self.last_reached_wp_id,
             final_player_pos=final_player_pos,
@@ -4838,6 +4872,40 @@ class MapTab(QWidget):
         except Exception as exc:
             self.update_general_log(f"맵 성능 로그 기록 실패: {exc}", "red")
             self._stop_perf_logging()
+
+    def _on_other_player_alert_toggled(self, checked: bool) -> None:  # noqa: ARG002
+        self.other_player_alert_enabled = bool(checked)
+        if not checked:
+            self._reset_other_player_alert_state()
+        if self.active_profile_name:
+            self.save_profile_data()
+
+    def _play_other_player_alert_sound(self) -> None:
+        """다른 유저 감지 시 알람 소리를 재생합니다."""
+        try:
+            import winsound
+
+            winsound.PlaySound("SystemExclamation", winsound.SND_ALIAS | winsound.SND_ASYNC)
+        except Exception:
+            QApplication.beep()
+
+    def _handle_other_player_detection_alert(self, other_players: list[QRectF]) -> None:
+        if not self.other_player_alert_enabled:
+            return
+
+        now = time.time()
+        has_other_player = bool(other_players)
+        if has_other_player and not self._other_player_alert_active:
+            if now >= self._other_player_alert_last_time + self._other_player_alert_cooldown:
+                self._play_other_player_alert_sound()
+                self._other_player_alert_last_time = now
+            self._other_player_alert_active = True
+        elif not has_other_player:
+            self._other_player_alert_active = False
+
+    def _reset_other_player_alert_state(self) -> None:
+        self._other_player_alert_active = False
+        self._other_player_alert_last_time = 0.0
 
     def _on_auto_control_toggled(self, checked: bool) -> None:  # noqa: ARG002
         if not self.active_profile_name:
