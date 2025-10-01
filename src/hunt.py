@@ -7,6 +7,7 @@ import random
 import time
 import math
 import ctypes
+import signal
 import html
 from ctypes import wintypes
 from dataclasses import dataclass
@@ -14,7 +15,7 @@ from typing import Iterable, List, Optional, Callable, TextIO
 
 import pygetwindow as gw
 
-from PyQt6.QtCore import Qt, QTimer, pyqtSignal, QRect, QThread, QAbstractNativeEventFilter
+from PyQt6.QtCore import Qt, QTimer, pyqtSignal, QRect, QThread, QAbstractNativeEventFilter, QDateTime, QSignalBlocker
 from PyQt6.QtWidgets import (
     QApplication,
     QCheckBox,
@@ -26,6 +27,7 @@ from PyQt6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QLineEdit,
+    QDateTimeEdit,
     QDoubleSpinBox,
     QMessageBox,
     QPushButton,
@@ -841,7 +843,22 @@ class HuntTab(QWidget):
         self.hotkey_event_filter = None
         self.detection_hotkey = 'f10'
 
+        # 자동 종료 상태
+        self.shutdown_pid_value: Optional[int] = None
+        self.shutdown_datetime_target: Optional[float] = None
+        self.shutdown_delay_target: Optional[float] = None
+        self.shutdown_other_player_enabled = False
+        self.shutdown_other_player_detect_since: Optional[float] = None
+        self.shutdown_other_player_due: Optional[float] = None
+        self.shutdown_other_player_last_count: int = 0
+        self._shutdown_last_reason: Optional[str] = None
+        self.shutdown_timer = QTimer(self)
+        self.shutdown_timer.setInterval(1000)
+        self.shutdown_timer.setSingleShot(False)
+        self.shutdown_timer.timeout.connect(self._handle_shutdown_timer_tick)
+
         self._build_ui()
+        self._setup_auto_shutdown_ui()
         self._update_facing_label()
         self._load_settings()
         self._setup_timers()
@@ -1378,6 +1395,8 @@ class HuntTab(QWidget):
         config_row.addLayout(range_column, 1)
         config_row.addLayout(direction_column, 1)
         right_column.addLayout(config_row)
+        auto_shutdown_group = self._create_auto_shutdown_group()
+        right_column.addWidget(auto_shutdown_group)
         right_column.addStretch(1)
 
         main_layout.addLayout(left_column, 1)
@@ -1585,6 +1604,440 @@ class HuntTab(QWidget):
         group.setLayout(misc_form)
         group.setSizePolicy(QSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed))
         return group
+
+    def _create_auto_shutdown_group(self) -> QGroupBox:
+        group = QGroupBox("자동 종료")
+        group.setSizePolicy(
+            QSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        )
+        outer_layout = QVBoxLayout()
+        outer_layout.setContentsMargins(8, 8, 8, 8)
+        outer_layout.setSpacing(8)
+
+        pid_row = QHBoxLayout()
+        pid_row.setSpacing(6)
+        pid_row.addWidget(QLabel("PID:"))
+        self.shutdown_pid_input = QLineEdit()
+        self.shutdown_pid_input.setPlaceholderText("예: 12345")
+        self.shutdown_pid_input.setMaximumWidth(120)
+        pid_row.addWidget(self.shutdown_pid_input)
+        pid_row.addStretch(1)
+        outer_layout.addLayout(pid_row)
+
+        schedule_group = QGroupBox("특정 일시 종료")
+        schedule_layout = QHBoxLayout()
+        schedule_layout.setSpacing(6)
+        self.shutdown_datetime_edit = QDateTimeEdit()
+        self.shutdown_datetime_edit.setCalendarPopup(True)
+        self.shutdown_datetime_edit.setDisplayFormat("yyyy-MM-dd HH:mm")
+        self.shutdown_datetime_edit.setMinimumDateTime(QDateTime.currentDateTime())
+        schedule_layout.addWidget(self.shutdown_datetime_edit, 1)
+        self.shutdown_datetime_start_btn = QPushButton("예약")
+        schedule_layout.addWidget(self.shutdown_datetime_start_btn)
+        self.shutdown_datetime_cancel_btn = QPushButton("취소")
+        schedule_layout.addWidget(self.shutdown_datetime_cancel_btn)
+        self.shutdown_datetime_status = QLabel("--")
+        self.shutdown_datetime_status.setMinimumWidth(110)
+        schedule_layout.addWidget(self.shutdown_datetime_status)
+        schedule_group.setLayout(schedule_layout)
+        outer_layout.addWidget(schedule_group)
+
+        delay_group = QGroupBox("N시간 N분 후 종료")
+        delay_layout = QHBoxLayout()
+        delay_layout.setSpacing(6)
+        self.shutdown_delay_hours_spin = QSpinBox()
+        self.shutdown_delay_hours_spin.setRange(0, 72)
+        self.shutdown_delay_hours_spin.setSuffix(" 시간")
+        delay_layout.addWidget(self.shutdown_delay_hours_spin)
+        self.shutdown_delay_minutes_spin = QSpinBox()
+        self.shutdown_delay_minutes_spin.setRange(0, 59)
+        self.shutdown_delay_minutes_spin.setSuffix(" 분")
+        delay_layout.addWidget(self.shutdown_delay_minutes_spin)
+        self.shutdown_delay_start_btn = QPushButton("예약")
+        delay_layout.addWidget(self.shutdown_delay_start_btn)
+        self.shutdown_delay_cancel_btn = QPushButton("취소")
+        delay_layout.addWidget(self.shutdown_delay_cancel_btn)
+        self.shutdown_delay_status = QLabel("--")
+        self.shutdown_delay_status.setMinimumWidth(110)
+        delay_layout.addWidget(self.shutdown_delay_status)
+        delay_group.setLayout(delay_layout)
+        outer_layout.addWidget(delay_group)
+
+        other_group = QGroupBox("다른 캐릭터 감지")
+        other_layout = QHBoxLayout()
+        other_layout.setSpacing(6)
+        self.shutdown_other_player_checkbox = QCheckBox("감지 시")
+        other_layout.addWidget(self.shutdown_other_player_checkbox)
+        other_layout.addWidget(QLabel("N분 지속"))
+        self.shutdown_other_player_minutes_spin = QSpinBox()
+        self.shutdown_other_player_minutes_spin.setRange(1, 120)
+        self.shutdown_other_player_minutes_spin.setValue(5)
+        self.shutdown_other_player_minutes_spin.setSuffix(" 분")
+        other_layout.addWidget(self.shutdown_other_player_minutes_spin)
+        self.shutdown_other_player_reset_btn = QPushButton("초기화")
+        other_layout.addWidget(self.shutdown_other_player_reset_btn)
+        self.shutdown_other_player_status = QLabel("--")
+        self.shutdown_other_player_status.setMinimumWidth(140)
+        other_layout.addWidget(self.shutdown_other_player_status)
+        other_group.setLayout(other_layout)
+        outer_layout.addWidget(other_group)
+
+        status_row = QHBoxLayout()
+        status_row.setSpacing(6)
+        status_row.addWidget(QLabel("총 상태:"))
+        self.shutdown_summary_label = QLabel("대기 중")
+        status_row.addWidget(self.shutdown_summary_label, 1)
+        outer_layout.addLayout(status_row)
+
+        group.setLayout(outer_layout)
+        return group
+
+    def _setup_auto_shutdown_ui(self) -> None:
+        if not hasattr(self, 'shutdown_datetime_edit'):
+            return
+
+        try:
+            default_dt = QDateTime.currentDateTime().addSecs(600)
+            self.shutdown_datetime_edit.setDateTime(default_dt)
+        except Exception:
+            pass
+
+        self.shutdown_datetime_start_btn.clicked.connect(self._schedule_absolute_shutdown)
+        self.shutdown_datetime_cancel_btn.clicked.connect(lambda: self._cancel_shutdown_mode('absolute'))
+        self.shutdown_delay_start_btn.clicked.connect(self._schedule_delay_shutdown)
+        self.shutdown_delay_cancel_btn.clicked.connect(lambda: self._cancel_shutdown_mode('delay'))
+        self.shutdown_other_player_checkbox.toggled.connect(self._toggle_other_player_mode)
+        self.shutdown_other_player_reset_btn.clicked.connect(self._reset_other_player_progress)
+        self.shutdown_pid_input.editingFinished.connect(self._sync_shutdown_pid_from_input)
+        self.shutdown_other_player_minutes_spin.valueChanged.connect(self._handle_other_player_minutes_changed)
+
+        self._update_shutdown_labels()
+
+    def _sync_shutdown_pid_from_input(self) -> None:
+        text = self.shutdown_pid_input.text().strip() if hasattr(self, 'shutdown_pid_input') else ''
+        if not text:
+            self.shutdown_pid_value = None
+            return
+        try:
+            pid = int(text, 10)
+            if pid <= 0:
+                raise ValueError
+        except ValueError:
+            QMessageBox.warning(self, "PID 오류", "PID는 양의 정수여야 합니다.")
+            self.shutdown_pid_input.setFocus()
+            self.shutdown_pid_input.selectAll()
+            return
+        self.shutdown_pid_value = pid
+        self.shutdown_pid_input.setText(str(pid))
+
+    def _require_shutdown_pid(self) -> Optional[int]:
+        self._sync_shutdown_pid_from_input()
+        if self.shutdown_pid_value is None:
+            QMessageBox.warning(self, "PID 필요", "자동 종료를 위해 PID를 입력해주세요.")
+        return self.shutdown_pid_value
+
+    def _schedule_absolute_shutdown(self) -> None:
+        pid = self._require_shutdown_pid()
+        if pid is None:
+            return
+
+        try:
+            target_dt = self.shutdown_datetime_edit.dateTime()
+        except Exception:
+            target_dt = None
+        if target_dt is None or not target_dt.isValid():
+            QMessageBox.warning(self, "시간 오류", "유효한 종료 일시를 선택해주세요.")
+            return
+        target_ts = float(target_dt.toSecsSinceEpoch())
+        now = time.time()
+        if target_ts <= now:
+            QMessageBox.warning(self, "시간 오류", "종료 예약 시간은 현재보다 이후여야 합니다.")
+            return
+        self.shutdown_pid_value = pid
+        self.shutdown_datetime_target = target_ts
+        self._ensure_shutdown_timer_running()
+        self._update_shutdown_labels()
+
+    def _schedule_delay_shutdown(self) -> None:
+        pid = self._require_shutdown_pid()
+        if pid is None:
+            return
+        hours = int(self.shutdown_delay_hours_spin.value()) if hasattr(self, 'shutdown_delay_hours_spin') else 0
+        minutes = int(self.shutdown_delay_minutes_spin.value()) if hasattr(self, 'shutdown_delay_minutes_spin') else 0
+        total_seconds = hours * 3600 + minutes * 60
+        if total_seconds <= 0:
+            QMessageBox.warning(self, "시간 오류", "1분 이상으로 설정해주세요.")
+            return
+        self.shutdown_pid_value = pid
+        self.shutdown_delay_target = time.time() + total_seconds
+        self._ensure_shutdown_timer_running()
+        self._update_shutdown_labels()
+
+    def _cancel_shutdown_mode(self, mode: str) -> None:
+        mode = (mode or '').lower()
+        if mode == 'absolute':
+            self.shutdown_datetime_target = None
+            self.shutdown_datetime_status.setText("--")
+        elif mode == 'delay':
+            self.shutdown_delay_target = None
+            self.shutdown_delay_status.setText("--")
+        elif mode == 'other':
+            self._reset_other_player_progress()
+            if hasattr(self, 'shutdown_other_player_checkbox'):
+                blocker = QSignalBlocker(self.shutdown_other_player_checkbox)
+                self.shutdown_other_player_checkbox.setChecked(False)
+                del blocker
+        self._update_shutdown_labels()
+        self._stop_shutdown_timer_if_idle()
+
+    def _toggle_other_player_mode(self, checked: bool) -> None:
+        checked = bool(checked)
+        if checked:
+            pid = self._require_shutdown_pid()
+            if pid is None:
+                blocker = QSignalBlocker(self.shutdown_other_player_checkbox)
+                self.shutdown_other_player_checkbox.setChecked(False)
+                del blocker
+                return
+            self.shutdown_pid_value = pid
+            self.shutdown_other_player_enabled = True
+            self._ensure_shutdown_timer_running()
+        else:
+            self.shutdown_other_player_enabled = False
+            self._reset_other_player_progress()
+        self._update_shutdown_labels()
+
+    def _reset_other_player_progress(self) -> None:
+        self.shutdown_other_player_detect_since = None
+        self.shutdown_other_player_due = None
+        if hasattr(self, 'shutdown_other_player_status'):
+            self.shutdown_other_player_status.setText("--")
+        self._stop_shutdown_timer_if_idle()
+
+    def _handle_other_player_minutes_changed(self, value: int) -> None:
+        if not self.shutdown_other_player_detect_since:
+            return
+        minutes = max(1, int(value))
+        self.shutdown_other_player_due = self.shutdown_other_player_detect_since + minutes * 60
+        self._ensure_shutdown_timer_running()
+        self._update_shutdown_labels()
+
+    def _ensure_shutdown_timer_running(self) -> None:
+        if not self.shutdown_timer.isActive():
+            self.shutdown_timer.start()
+
+    def _stop_shutdown_timer_if_idle(self) -> None:
+        if (
+            self.shutdown_datetime_target is None
+            and self.shutdown_delay_target is None
+            and (not self.shutdown_other_player_enabled or self.shutdown_other_player_due is None)
+        ):
+            self.shutdown_timer.stop()
+
+    def _handle_shutdown_timer_tick(self) -> None:
+        now = time.time()
+        triggered_modes: list[str] = []
+
+        if self.shutdown_datetime_target is not None:
+            remaining = self.shutdown_datetime_target - now
+            if remaining <= 0:
+                triggered_modes.append('absolute')
+            else:
+                self.shutdown_datetime_status.setText(self._format_remaining_text(remaining))
+
+        if self.shutdown_delay_target is not None:
+            remaining = self.shutdown_delay_target - now
+            if remaining <= 0:
+                triggered_modes.append('delay')
+            else:
+                self.shutdown_delay_status.setText(self._format_remaining_text(remaining))
+
+        if self.shutdown_other_player_enabled and self.shutdown_other_player_due is not None:
+            remaining = self.shutdown_other_player_due - now
+            if remaining <= 0:
+                triggered_modes.append('other')
+            else:
+                self.shutdown_other_player_status.setText(self._format_remaining_text(remaining))
+
+        if not triggered_modes:
+            self._update_shutdown_labels()
+            self._stop_shutdown_timer_if_idle()
+            return
+
+        for mode in triggered_modes:
+            self._trigger_shutdown(mode)
+            if self.shutdown_pid_value is None:
+                break
+
+    def _format_remaining_text(self, seconds: float) -> str:
+        seconds = max(0.0, float(seconds))
+        mins, secs = divmod(int(round(seconds)), 60)
+        hours, mins = divmod(mins, 60)
+        if hours > 0:
+            return f"{hours:02d}:{mins:02d}:{secs:02d}"
+        return f"{mins:02d}:{secs:02d}"
+
+    def _update_shutdown_labels(self) -> None:
+        parts: list[str] = []
+        now = time.time()
+        if self.shutdown_datetime_target is not None:
+            parts.append("일시 예약")
+            self.shutdown_datetime_status.setText(
+                self._format_remaining_text(self.shutdown_datetime_target - now)
+            )
+        else:
+            self.shutdown_datetime_status.setText("--")
+
+        if self.shutdown_delay_target is not None:
+            parts.append("지연 예약")
+            self.shutdown_delay_status.setText(
+                self._format_remaining_text(self.shutdown_delay_target - now)
+            )
+        else:
+            self.shutdown_delay_status.setText("--")
+
+        if self.shutdown_other_player_enabled:
+            parts.append("다른 캐릭터 감시")
+            if self.shutdown_other_player_due is not None:
+                text = self._format_remaining_text(self.shutdown_other_player_due - now)
+                count = max(0, int(self.shutdown_other_player_last_count))
+                if count > 0:
+                    text = f"{text} ({count}명)"
+                self.shutdown_other_player_status.setText(text)
+            else:
+                self.shutdown_other_player_status.setText("감지 대기")
+        else:
+            self.shutdown_other_player_status.setText("--")
+
+        summary = ', '.join(parts) if parts else '대기 중'
+        self.shutdown_summary_label.setText(summary)
+
+    def _trigger_shutdown(self, mode: str) -> None:
+        mode_key = (mode or '').lower()
+        if mode_key == 'absolute':
+            self.shutdown_datetime_target = None
+        elif mode_key == 'delay':
+            self.shutdown_delay_target = None
+        elif mode_key == 'other':
+            self.shutdown_other_player_due = None
+            self.shutdown_other_player_detect_since = None
+        self._stop_shutdown_timer_if_idle()
+        self._update_shutdown_labels()
+
+        pid = self.shutdown_pid_value
+        reason_map = {
+            'absolute': '특정 일시',
+            'delay': 'N시간/N분',
+            'other': '다른 캐릭터 감지',
+        }
+        reason_label = reason_map.get(mode_key, '자동 종료')
+        self._shutdown_last_reason = reason_label
+
+        if pid is None:
+            self.append_log(f"자동 종료[{reason_label}] 시도 실패: PID가 설정되어 있지 않습니다.", 'warn')
+            self._log_map_shutdown(f"자동 종료[{reason_label}] 시도 실패: PID 입력 필요", 'orange')
+            return
+
+        success, detail, signal_used = self._perform_process_kill(pid)
+        if success:
+            signal_text = f" ({signal_used})" if signal_used else ''
+            message = f"자동 종료[{reason_label}] 조건 충족 - PID {pid} 프로세스를 종료했습니다{signal_text}."
+            self.append_log(message, 'warn')
+            self._log_map_shutdown(message, 'orange')
+            self._cancel_all_shutdown_modes()
+            self.shutdown_pid_value = None
+            if hasattr(self, 'shutdown_pid_input'):
+                self.shutdown_pid_input.setText('')
+            self._issue_all_keys_release('shutdown')
+            self.force_stop_detection()
+            if getattr(self, 'map_tab', None) and hasattr(self.map_tab, 'force_stop_detection'):
+                try:
+                    self.map_tab.force_stop_detection()
+                except Exception:
+                    pass
+        else:
+            detail_text = f": {detail}" if detail else ''
+            message = f"자동 종료[{reason_label}] PID {pid} 종료 실패{detail_text}"
+            self.append_log(message, 'warn')
+            self._log_map_shutdown(message, 'red')
+
+    def _perform_process_kill(self, pid: int) -> tuple[bool, str, str]:
+        try:
+            os.kill(pid, signal.SIGTERM)
+            return True, '', 'SIGTERM'
+        except ProcessLookupError:
+            return True, '프로세스가 이미 종료되었습니다.', 'SIGTERM'
+        except PermissionError as exc:
+            return False, str(exc), 'SIGTERM'
+        except Exception as exc:
+            term_error = str(exc)
+        else:
+            term_error = ''
+
+        if not term_error:
+            return True, '', 'SIGTERM'
+
+        sigkill = getattr(signal, 'SIGKILL', None)
+        if sigkill is None:
+            return False, term_error, 'SIGTERM'
+        try:
+            os.kill(pid, sigkill)
+            return True, '', 'SIGKILL'
+        except ProcessLookupError:
+            return True, '프로세스가 이미 종료되었습니다.', 'SIGKILL'
+        except Exception as exc:
+            return False, f"{term_error}; SIGKILL 실패: {exc}", 'SIGKILL'
+
+    def _cancel_all_shutdown_modes(self) -> None:
+        self.shutdown_datetime_target = None
+        self.shutdown_delay_target = None
+        self.shutdown_other_player_due = None
+        self.shutdown_other_player_detect_since = None
+        self.shutdown_other_player_last_count = 0
+        self.shutdown_other_player_enabled = False
+        if hasattr(self, 'shutdown_other_player_checkbox') and self.shutdown_other_player_checkbox.isChecked():
+            blocker = QSignalBlocker(self.shutdown_other_player_checkbox)
+            self.shutdown_other_player_checkbox.setChecked(False)
+            del blocker
+        if hasattr(self, 'shutdown_datetime_status'):
+            self.shutdown_datetime_status.setText("--")
+        if hasattr(self, 'shutdown_delay_status'):
+            self.shutdown_delay_status.setText("--")
+        if hasattr(self, 'shutdown_other_player_status'):
+            self.shutdown_other_player_status.setText("--")
+        self.shutdown_timer.stop()
+        self._update_shutdown_labels()
+
+    def _log_map_shutdown(self, message: str, color: str) -> None:
+        map_tab = getattr(self, 'map_tab', None)
+        if map_tab and hasattr(map_tab, 'update_general_log'):
+            try:
+                map_tab.update_general_log(message, color)
+            except Exception:
+                pass
+
+    def handle_other_player_presence(self, has_other: bool, count: int, timestamp: Optional[float] = None) -> None:
+        if not self.shutdown_other_player_enabled:
+            return
+        now = float(timestamp) if isinstance(timestamp, (int, float)) else time.time()
+        count = max(0, int(count))
+        if has_other and count > 0:
+            if self.shutdown_other_player_detect_since is None:
+                self.shutdown_other_player_detect_since = now
+            minutes = max(1, int(self.shutdown_other_player_minutes_spin.value()))
+            self.shutdown_other_player_due = self.shutdown_other_player_detect_since + minutes * 60
+            self.shutdown_other_player_last_count = count
+            remaining = self.shutdown_other_player_due - now if self.shutdown_other_player_due else None
+            if remaining is not None:
+                text = self._format_remaining_text(remaining)
+                if count > 0:
+                    text = f"{text} ({count}명)"
+                self.shutdown_other_player_status.setText(text)
+            self._ensure_shutdown_timer_running()
+        else:
+            self.shutdown_other_player_last_count = 0
+            self._reset_other_player_progress()
+        self._update_shutdown_labels()
 
     def _create_detection_group(self) -> QGroupBox:
         group = QGroupBox("탐지 실행")
@@ -5777,6 +6230,78 @@ class HuntTab(QWidget):
             except (TypeError, ValueError):
                 self.yolo_max_det = DEFAULT_YOLO_MAX_DET
 
+        auto_shutdown_cfg = data.get('auto_shutdown')
+        if isinstance(auto_shutdown_cfg, dict) and hasattr(self, 'shutdown_pid_input'):
+            pid_text = str(auto_shutdown_cfg.get('pid', '') or '').strip()
+            blocker = QSignalBlocker(self.shutdown_pid_input)
+            self.shutdown_pid_input.setText(pid_text)
+            del blocker
+            try:
+                self.shutdown_pid_value = int(pid_text) if pid_text else None
+            except ValueError:
+                self.shutdown_pid_value = None
+
+            dt_epoch = auto_shutdown_cfg.get('datetime_epoch')
+            if dt_epoch is not None:
+                try:
+                    epoch_int = int(dt_epoch)
+                    dt_value = QDateTime.fromSecsSinceEpoch(epoch_int)
+                    blocker = QSignalBlocker(self.shutdown_datetime_edit)
+                    self.shutdown_datetime_edit.setDateTime(dt_value)
+                    del blocker
+                except Exception:
+                    pass
+
+            delay_hours = auto_shutdown_cfg.get('delay_hours')
+            if delay_hours is not None and hasattr(self, 'shutdown_delay_hours_spin'):
+                try:
+                    blocker = QSignalBlocker(self.shutdown_delay_hours_spin)
+                    self.shutdown_delay_hours_spin.setValue(int(delay_hours))
+                    del blocker
+                except Exception:
+                    pass
+
+            delay_minutes = auto_shutdown_cfg.get('delay_minutes')
+            if delay_minutes is not None and hasattr(self, 'shutdown_delay_minutes_spin'):
+                try:
+                    blocker = QSignalBlocker(self.shutdown_delay_minutes_spin)
+                    self.shutdown_delay_minutes_spin.setValue(int(delay_minutes))
+                    del blocker
+                except Exception:
+                    pass
+
+            other_minutes = auto_shutdown_cfg.get('other_minutes')
+            if other_minutes is not None and hasattr(self, 'shutdown_other_player_minutes_spin'):
+                try:
+                    blocker = QSignalBlocker(self.shutdown_other_player_minutes_spin)
+                    self.shutdown_other_player_minutes_spin.setValue(int(other_minutes))
+                    del blocker
+                except Exception:
+                    pass
+
+            now = time.time()
+            datetime_target = auto_shutdown_cfg.get('datetime_target')
+            if isinstance(datetime_target, (int, float)) and float(datetime_target) > now:
+                self.shutdown_datetime_target = float(datetime_target)
+
+            delay_target = auto_shutdown_cfg.get('delay_target')
+            if isinstance(delay_target, (int, float)) and float(delay_target) > now:
+                self.shutdown_delay_target = float(delay_target)
+
+            other_enabled = bool(auto_shutdown_cfg.get('other_enabled', False))
+            if hasattr(self, 'shutdown_other_player_checkbox'):
+                blocker = QSignalBlocker(self.shutdown_other_player_checkbox)
+                self.shutdown_other_player_checkbox.setChecked(other_enabled)
+                del blocker
+            self.shutdown_other_player_enabled = other_enabled
+            self.shutdown_other_player_detect_since = None
+            self.shutdown_other_player_due = None
+            self.shutdown_other_player_last_count = 0
+            if self.shutdown_datetime_target or self.shutdown_delay_target or self.shutdown_other_player_enabled:
+                self._ensure_shutdown_timer_running()
+            self._update_shutdown_labels()
+            self._stop_shutdown_timer_if_idle()
+
         regions_data = data.get('manual_capture_regions', [])
         valid_regions: list[dict] = []
         if isinstance(regions_data, list):
@@ -6132,6 +6657,7 @@ class HuntTab(QWidget):
             'last_facing': self.last_facing,
             'last_popup_position': list(self.last_popup_position) if self.last_popup_position else None,
             'last_popup_size': list(self.last_popup_size) if self.last_popup_size else None,
+            'auto_shutdown': self._build_auto_shutdown_settings(),
         }
 
         try:
@@ -6139,6 +6665,35 @@ class HuntTab(QWidget):
                 json.dump(settings_data, f, ensure_ascii=False, indent=2)
         except Exception as exc:
             self.append_log(f"설정 저장 실패: {exc}", "warn")
+
+    def _build_auto_shutdown_settings(self) -> dict[str, object]:
+        if not hasattr(self, 'shutdown_pid_input'):
+            return {}
+        pid_text = self.shutdown_pid_input.text().strip() if self.shutdown_pid_input else ''
+        data: dict[str, object] = {
+            'pid': pid_text,
+            'datetime_target': float(self.shutdown_datetime_target) if self.shutdown_datetime_target else None,
+            'delay_target': float(self.shutdown_delay_target) if self.shutdown_delay_target else None,
+            'other_enabled': bool(self.shutdown_other_player_enabled),
+        }
+
+        if hasattr(self, 'shutdown_datetime_edit') and self.shutdown_datetime_edit:
+            try:
+                dt_value = self.shutdown_datetime_edit.dateTime()
+                data['datetime_epoch'] = int(dt_value.toSecsSinceEpoch())
+            except Exception:
+                data['datetime_epoch'] = None
+
+        if hasattr(self, 'shutdown_delay_hours_spin') and self.shutdown_delay_hours_spin:
+            data['delay_hours'] = int(self.shutdown_delay_hours_spin.value())
+
+        if hasattr(self, 'shutdown_delay_minutes_spin') and self.shutdown_delay_minutes_spin:
+            data['delay_minutes'] = int(self.shutdown_delay_minutes_spin.value())
+
+        if hasattr(self, 'shutdown_other_player_minutes_spin') and self.shutdown_other_player_minutes_spin:
+            data['other_minutes'] = int(self.shutdown_other_player_minutes_spin.value())
+
+        return data
 
     def request_control(self, reason: str | None = None) -> None:
         if self.current_authority == "hunt":

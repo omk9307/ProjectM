@@ -4815,6 +4815,7 @@ class MapTab(QWidget):
         self.my_player_global_rects = my_player_global_rects
         self.other_player_global_rects = other_player_global_rects
         self._handle_other_player_detection_alert(self.other_player_global_rects)
+        self._notify_other_player_presence(len(self.other_player_global_rects))
 
         if self.debug_dialog and self.debug_dialog.isVisible():
             debug_data = {
@@ -4853,6 +4854,16 @@ class MapTab(QWidget):
 
         outlier_list = [f for f in reliable_features if f['id'] not in inlier_ids]
         self.update_detection_log_from_features(inlier_features, outlier_list)
+
+    def _notify_other_player_presence(self, count: int) -> None:
+        has_other = count > 0
+        hunt_tab = getattr(self, '_hunt_tab', None)
+        if not hunt_tab or not hasattr(hunt_tab, 'handle_other_player_presence'):
+            return
+        try:
+            hunt_tab.handle_other_player_presence(has_other, count, time.time())
+        except Exception:
+            pass
 
     def on_detection_ready(self, frame_bgr, found_features, my_player_rects, other_player_rects):
         map_perf = {
