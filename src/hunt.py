@@ -852,6 +852,7 @@ class HuntTab(QWidget):
         self.shutdown_other_player_due: Optional[float] = None
         self.shutdown_other_player_last_count: int = 0
         self._shutdown_last_reason: Optional[str] = None
+        self.shutdown_sleep_enabled = False
         self.shutdown_timer = QTimer(self)
         self.shutdown_timer.setInterval(1000)
         self.shutdown_timer.setSingleShot(False)
@@ -1624,6 +1625,14 @@ class HuntTab(QWidget):
         pid_row.addStretch(1)
         outer_layout.addLayout(pid_row)
 
+        sleep_row = QHBoxLayout()
+        sleep_row.setSpacing(6)
+        self.shutdown_sleep_checkbox = QCheckBox("종료 성공 시 절전 모드")
+        self.shutdown_sleep_checkbox.setToolTip("PID 종료 후 Windows 절전 모드를 시도합니다.")
+        sleep_row.addWidget(self.shutdown_sleep_checkbox)
+        sleep_row.addStretch(1)
+        outer_layout.addLayout(sleep_row)
+
         schedule_group = QGroupBox("특정 일시 종료")
         schedule_layout = QHBoxLayout()
         schedule_layout.setSpacing(6)
@@ -1710,6 +1719,7 @@ class HuntTab(QWidget):
         self.shutdown_other_player_reset_btn.clicked.connect(self._reset_other_player_progress)
         self.shutdown_pid_input.editingFinished.connect(self._sync_shutdown_pid_from_input)
         self.shutdown_other_player_minutes_spin.valueChanged.connect(self._handle_other_player_minutes_changed)
+        self.shutdown_sleep_checkbox.toggled.connect(self._on_shutdown_sleep_toggled)
 
         self._update_shutdown_labels()
 
@@ -1822,6 +1832,11 @@ class HuntTab(QWidget):
         self._ensure_shutdown_timer_running()
         self._update_shutdown_labels()
 
+    def _on_shutdown_sleep_toggled(self, checked: bool) -> None:
+        self.shutdown_sleep_enabled = bool(checked)
+        self._update_shutdown_labels()
+        self._handle_setting_changed()
+
     def _ensure_shutdown_timer_running(self) -> None:
         if not self.shutdown_timer.isActive():
             self.shutdown_timer.start()
@@ -1909,8 +1924,21 @@ class HuntTab(QWidget):
         else:
             self.shutdown_other_player_status.setText("--")
 
+        if self.shutdown_sleep_enabled and (
+            self.shutdown_datetime_target is not None
+            or self.shutdown_delay_target is not None
+            or self.shutdown_other_player_enabled
+        ):
+            parts.append("절전 모드")
+
         summary = ', '.join(parts) if parts else '대기 중'
         self.shutdown_summary_label.setText(summary)
+
+        if hasattr(self, 'shutdown_sleep_checkbox'):
+            blocker = QSignalBlocker(self.shutdown_sleep_checkbox)
+            self.shutdown_sleep_checkbox.setChecked(self.shutdown_sleep_enabled)
+            del blocker
+
 
     def _trigger_shutdown(self, mode: str) -> None:
         mode_key = (mode or '').lower()
@@ -1955,6 +1983,8 @@ class HuntTab(QWidget):
                     self.map_tab.force_stop_detection()
                 except Exception:
                     pass
+            if self.shutdown_sleep_enabled:
+                self._attempt_system_sleep()
         else:
             detail_text = f": {detail}" if detail else ''
             message = f"자동 종료[{reason_label}] PID {pid} 종료 실패{detail_text}"
@@ -1987,6 +2017,40 @@ class HuntTab(QWidget):
             return True, '프로세스가 이미 종료되었습니다.', 'SIGKILL'
         except Exception as exc:
             return False, f"{term_error}; SIGKILL 실패: {exc}", 'SIGKILL'
+
+    def _attempt_system_sleep(self) -> None:
+        message: Optional[str] = None
+        if os.name != 'nt':
+            message = "절전 모드는 Windows에서만 지원되어 시도하지 않았습니다."
+            self.append_log(message, 'warn')
+            self._log_map_shutdown(message, 'orange')
+            return
+
+        try:
+            powrprof = ctypes.windll.powrprof
+        except Exception as exc:
+            message = f"절전 모드 API 접근 실패: {exc}"
+            self.append_log(message, 'warn')
+            self._log_map_shutdown(message, 'red')
+            return
+
+        try:
+            result = powrprof.SetSuspendState(False, False, False)
+        except Exception as exc:
+            message = f"절전 모드 진입 실패: {exc}"
+            self.append_log(message, 'warn')
+            self._log_map_shutdown(message, 'red')
+            return
+
+        if result == 0:
+            message = "절전 모드 진입 요청이 거부되었습니다."
+            self.append_log(message, 'warn')
+            self._log_map_shutdown(message, 'orange')
+            return
+
+        message = "절전 모드 진입을 요청했습니다."
+        self.append_log(message, 'info')
+        self._log_map_shutdown(message, 'orange')
 
     def _cancel_all_shutdown_modes(self) -> None:
         self.shutdown_datetime_target = None
@@ -6241,6 +6305,13 @@ class HuntTab(QWidget):
             except ValueError:
                 self.shutdown_pid_value = None
 
+            sleep_enabled = bool(auto_shutdown_cfg.get('sleep_enabled', False))
+            self.shutdown_sleep_enabled = sleep_enabled
+            if hasattr(self, 'shutdown_sleep_checkbox'):
+                blocker = QSignalBlocker(self.shutdown_sleep_checkbox)
+                self.shutdown_sleep_checkbox.setChecked(sleep_enabled)
+                del blocker
+
             dt_epoch = auto_shutdown_cfg.get('datetime_epoch')
             if dt_epoch is not None:
                 try:
@@ -6675,6 +6746,7 @@ class HuntTab(QWidget):
             'datetime_target': float(self.shutdown_datetime_target) if self.shutdown_datetime_target else None,
             'delay_target': float(self.shutdown_delay_target) if self.shutdown_delay_target else None,
             'other_enabled': bool(self.shutdown_other_player_enabled),
+            'sleep_enabled': bool(self.shutdown_sleep_enabled),
         }
 
         if hasattr(self, 'shutdown_datetime_edit') and self.shutdown_datetime_edit:
