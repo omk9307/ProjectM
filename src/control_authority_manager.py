@@ -307,6 +307,17 @@ class ControlAuthorityManager(QObject):
                 self._transition_to("map", source="priority", reason=kind, meta=metadata)
             self.priority_event_triggered.emit(kind, metadata)
 
+    def clear_priority_event(self, kind: Optional[str] = None) -> None:
+        with self._mutex:
+            if kind and self._state.map_priority_lock != kind:
+                return
+            if not kind and not self._state.map_priority_lock:
+                return
+
+            self._state.map_priority_lock = None
+            self._priority_lock_deadline = 0.0
+            self._evaluate_pending_requests(trigger="priority_release", source=kind or "map")
+
     # ------------------------------------------------------------------
     # 내부 헬퍼
     # ------------------------------------------------------------------

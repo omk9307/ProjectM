@@ -199,6 +199,7 @@ class MainWindow(QMainWindow):
         self._tab_color_states: dict[str, str] = {}
         self._hunt_detection_active = False
         self._map_detection_active = False
+        self._current_authority_owner: str | None = None
         self._authority_manager = ControlAuthorityManager.instance()
         self._authority_manager.authority_changed.connect(self._handle_global_authority_changed)
 
@@ -350,21 +351,8 @@ class MainWindow(QMainWindow):
         map_index = self._find_tab_index('맵')
         hunt_index = self._find_tab_index('사냥')
 
-        if owner == 'map':
-            if map_index is not None:
-                tab_bar.set_tab_color(map_index, '#2f6fd1')
-            if hunt_index is not None:
-                tab_bar.set_tab_color(hunt_index, None)
-        elif owner == 'hunt':
-            if hunt_index is not None:
-                tab_bar.set_tab_color(hunt_index, '#1cbb7f')
-            if map_index is not None:
-                tab_bar.set_tab_color(map_index, None)
-        else:
-            if map_index is not None:
-                tab_bar.set_tab_color(map_index, None)
-            if hunt_index is not None:
-                tab_bar.set_tab_color(hunt_index, None)
+        self._current_authority_owner = owner
+        self._refresh_tab_colors()
 
     def _find_tab_index(self, title: str) -> Optional[int]:
         for index in range(self.tab_widget.count()):
@@ -524,15 +512,40 @@ class MainWindow(QMainWindow):
 
     def _on_hunt_detection_status_changed(self, active: bool) -> None:
         self._hunt_detection_active = bool(active)
-        color = "#D32F2F" if active else None
-        self._set_tab_color('사냥', color)
         self._update_global_hotkey_state()
+        self._refresh_tab_colors()
 
     def _on_map_detection_status_changed(self, active: bool) -> None:
         self._map_detection_active = bool(active)
-        color = "#1E88E5" if active else None
-        self._set_tab_color('맵', color)
         self._update_global_hotkey_state()
+        self._refresh_tab_colors()
+
+    def _refresh_tab_colors(self) -> None:
+        tab_bar = self.tab_widget.tabBar()
+        if not isinstance(tab_bar, ColoredTabBar):
+            return
+
+        owner = self._current_authority_owner
+        map_index = self._find_tab_index('맵')
+        hunt_index = self._find_tab_index('사냥')
+
+        map_color = None
+        hunt_color = None
+
+        if self._map_detection_active:
+            map_color = '#1E88E5'
+        elif owner == 'map':
+            map_color = '#1cbb7f'
+
+        if self._hunt_detection_active:
+            hunt_color = '#D32F2F'
+        elif owner == 'hunt':
+            hunt_color = '#1cbb7f'
+
+        if map_index is not None:
+            self._set_tab_color('맵', map_color)
+        if hunt_index is not None:
+            self._set_tab_color('사냥', hunt_color)
 
 
 if __name__ == '__main__':

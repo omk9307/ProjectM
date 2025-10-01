@@ -43,7 +43,7 @@ from PyQt6.QtWidgets import (
     QGraphicsSimpleTextItem, QFormLayout, QProgressDialog, QSizePolicy
 )
 from PyQt6.QtGui import QPixmap, QImage, QPainter, QPen, QColor, QBrush, QFont, QCursor, QIcon, QPolygonF, QFontMetrics, QFontMetricsF, QGuiApplication
-from PyQt6.QtCore import Qt, QThread, pyqtSignal, pyqtSlot, QRect, QPoint, QRectF, QPointF, QSize, QSizeF, QTimer
+from PyQt6.QtCore import Qt, QThread, pyqtSignal, pyqtSlot, QRect, QPoint, QRectF, QPointF, QSize, QSizeF, QTimer, QSignalBlocker
 
 try:
     from sklearn.ensemble import RandomForestClassifier
@@ -1014,6 +1014,7 @@ class MapTab(QWidget):
         settings_h_layout_1 = QHBoxLayout()
         self.auto_control_checkbox = QCheckBox("자동 제어")
         self.auto_control_checkbox.setChecked(False)
+        self.auto_control_checkbox.toggled.connect(self._on_auto_control_toggled)
         settings_h_layout_1.addWidget(self.auto_control_checkbox)
         self.perf_logging_checkbox = QCheckBox("CSV 기록")
         self.perf_logging_checkbox.setChecked(self._perf_logging_enabled)
@@ -1811,6 +1812,12 @@ class MapTab(QWidget):
 
             self.reference_anchor_id = config.get('reference_anchor_id')
 
+            auto_control_enabled = bool(config.get('auto_control_enabled', False))
+            if hasattr(self, 'auto_control_checkbox'):
+                blocker = QSignalBlocker(self.auto_control_checkbox)
+                self.auto_control_checkbox.setChecked(auto_control_enabled)
+                del blocker
+
             # 저장된 상태 판정 설정이 있으면 기본값을 덮어쓰기
             state_config = config.get('state_machine_config', {})
             if state_config:
@@ -2188,7 +2195,11 @@ class MapTab(QWidget):
                 'route_profiles': self.route_profiles,
                 'render_options': self.render_options,
                 'reference_anchor_id': self.reference_anchor_id,
-                'state_machine_config': state_machine_config # <<< 추가
+                'state_machine_config': state_machine_config, # <<< 추가
+                'auto_control_enabled': bool(
+                    getattr(self, 'auto_control_checkbox', None)
+                    and self.auto_control_checkbox.isChecked()
+                ),
             })
             
             key_features_data = self._prepare_data_for_json(self.key_features)
@@ -2787,6 +2798,8 @@ class MapTab(QWidget):
             self.active_event_reason = ""
             self.event_started_at = 0.0
             self._authority_priority_override = False
+            if self._authority_manager:
+                self._authority_manager.clear_priority_event("WAYPOINT_EVENT")
             self._sync_authority_snapshot("event_aborted")
             return False
         return True
@@ -2820,6 +2833,8 @@ class MapTab(QWidget):
         self.active_event_reason = ""
         self.event_started_at = 0.0
         self._authority_priority_override = False
+        if self._authority_manager:
+            self._authority_manager.clear_priority_event("WAYPOINT_EVENT")
         self.navigation_action = 'move_to_target'
         self.guidance_text = '없음'
         self.recovery_cooldown_until = time.time() + 1.0
@@ -2849,6 +2864,8 @@ class MapTab(QWidget):
             self.active_forbidden_wall_profile = ""
             self.active_forbidden_wall_trigger = ""
             self.forbidden_wall_started_at = 0.0
+            if self._authority_manager:
+                self._authority_manager.clear_priority_event("FORBIDDEN_WALL")
 
     def _get_forbidden_wall_state(self, wall_id: str) -> dict:
         if wall_id not in self.forbidden_wall_states:
@@ -2928,6 +2945,8 @@ class MapTab(QWidget):
             self.active_forbidden_wall_trigger = ""
             self._authority_priority_override = False
             state['contact_ready'] = False
+            if self._authority_manager:
+                self._authority_manager.clear_priority_event("FORBIDDEN_WALL")
             self._sync_authority_snapshot("forbidden_aborted")
             return False
         return True
@@ -2957,7 +2976,9 @@ class MapTab(QWidget):
         self.active_forbidden_wall_trigger = ""
         self.forbidden_wall_started_at = 0.0
         self._authority_priority_override = False
-        
+        if self._authority_manager:
+            self._authority_manager.clear_priority_event("FORBIDDEN_WALL")
+
         pending = getattr(self, 'pending_forbidden_command', None)
         self.pending_forbidden_command = None
         if pending and not self.event_in_progress:
@@ -4627,6 +4648,11 @@ class MapTab(QWidget):
             self.update_general_log(f"맵 성능 로그 기록 실패: {exc}", "red")
             self._stop_perf_logging()
 
+    def _on_auto_control_toggled(self, checked: bool) -> None:  # noqa: ARG002
+        if not self.active_profile_name:
+            return
+        self.save_profile_data()
+
     def _on_perf_logging_toggled(self, checked: bool) -> None:
         self._perf_logging_enabled = bool(checked)
         if self._perf_logging_enabled:
@@ -5706,7 +5732,7 @@ class MapTab(QWidget):
         # --- 로직 끝 ---
 
         # Phase 2: 행동 완료/실패 판정 (유지)
-        if self.navigation_state_locked and self.player_state == 'on_terrain':
+        if self.navigation_state_locked and self.player_state in {'on_terrain', 'idle'}:
             self._process_action_completion(final_player_pos, contact_terrain)
 
         # --- [새로운 경로 관리 로직] ---
