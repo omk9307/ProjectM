@@ -3704,7 +3704,13 @@ class StateConfigDialog(QDialog):
             
             spinbox.setRange(min_val, max_val)
             spinbox.setSingleStep(step)
-            spinbox.setValue(self.config.get(key, default_val))
+            value = self.config.get(key, default_val)
+            if value is None:
+                value = default_val
+            try:
+                spinbox.setValue(value)
+            except TypeError:
+                spinbox.setValue(default_val)
             self.spinboxes[key] = spinbox
             form_layout.addRow(label, spinbox)
 
@@ -3735,9 +3741,13 @@ class StateConfigDialog(QDialog):
         add_spinbox("waypoint_arrival_x_threshold_max", "웨이포인트 도착 X오차 최대값(px):", 0.0, 20.0, 0.1)
         add_spinbox("ladder_arrival_x_threshold", "사다리 도착 X오차(px):", 0.0, 20.0, 0.1)
         add_spinbox("ladder_arrival_short_threshold", "사다리 도착 짧은 X오차(px):", 0.0, 20.0, 0.1)
-        self.spinboxes["ladder_arrival_short_threshold"].setValue(
-            self.config.get("ladder_arrival_short_threshold", LADDER_ARRIVAL_SHORT_THRESHOLD)
-        )
+        short_default = self.config.get("ladder_arrival_short_threshold", LADDER_ARRIVAL_SHORT_THRESHOLD)
+        if short_default is None:
+            short_default = LADDER_ARRIVAL_SHORT_THRESHOLD
+        try:
+            self.spinboxes["ladder_arrival_short_threshold"].setValue(short_default)
+        except TypeError:
+            self.spinboxes["ladder_arrival_short_threshold"].setValue(LADDER_ARRIVAL_SHORT_THRESHOLD)
         add_spinbox("jump_link_arrival_x_threshold", "점프/낭떠러지 도착 X오차(px):", 0.0, 20.0, 0.1)
         form_layout.addRow(QLabel("---"))
         add_spinbox("arrival_frame_threshold", "도착 판정 프레임:", 1, 10, 1, is_double=False)
