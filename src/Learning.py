@@ -108,6 +108,8 @@ CHARACTER_CLASS_NAME = "캐릭터"
 NEGATIVE_SAMPLES_NAME = "학습 방해 요소 (네거티브)"
 # 클래스 관리의 최상위 카테고리 목록을 정의합니다. '캐릭터'는 항상 최상단에 위치합니다.
 CATEGORIES = [CHARACTER_CLASS_NAME, "몬스터", "오브젝트", "기타"]
+# 편집기에서는 추후 확장을 위해 남겨둔 '캐릭터' 카테고리를 노출하지 않습니다.
+SELECTABLE_CATEGORIES = [category for category in CATEGORIES if category != CHARACTER_CLASS_NAME]
 
 STATUS_RESOURCE_LABELS = {
     'hp': 'HP',
@@ -1154,7 +1156,8 @@ class BaseCanvasLabel(QLabel):
         super().__init__()
         self.pixmap = pixmap
         self.parent_dialog = parent_dialog
-        self.zoom_factor = 1.0
+        # 초기 확대 배율 적용이 무시되지 않도록 0에서 시작한다.
+        self.zoom_factor = 0.0
         self._min_zoom = 0.25
         self._max_zoom = 4.0
         self.polygons = []
@@ -1163,6 +1166,23 @@ class BaseCanvasLabel(QLabel):
         self.setMouseTracking(True)
         self.set_zoom(1.0)
 
+    def _scaled_pixmap_size(self) -> QSize:
+        """현재 확대 배율을 반영한 픽스맵 크기를 반환합니다."""
+        if self.pixmap.isNull():
+            return QSize()
+        factor = self.zoom_factor if self.zoom_factor > 0 else 1.0
+        width = max(1, int(round(self.pixmap.width() * factor)))
+        height = max(1, int(round(self.pixmap.height() * factor)))
+        return QSize(width, height)
+
+    def sizeHint(self) -> QSize:
+        scaled = self._scaled_pixmap_size()
+        return scaled if scaled.isValid() else super().sizeHint()
+
+    def minimumSizeHint(self) -> QSize:
+        scaled = self._scaled_pixmap_size()
+        return scaled if scaled.isValid() else super().minimumSizeHint()
+
     def set_zoom(self, factor, focal_point: QPoint | QPointF | None = None):
         previous_factor = self.zoom_factor
         factor = max(self._min_zoom, min(self._max_zoom, factor))
@@ -1170,7 +1190,8 @@ class BaseCanvasLabel(QLabel):
             return
 
         self.zoom_factor = factor
-        self.setFixedSize(self.pixmap.size() * self.zoom_factor)
+        self.setFixedSize(self._scaled_pixmap_size())
+        self.updateGeometry()
         self.update()
 
         if focal_point is None:
@@ -1349,7 +1370,8 @@ class PolygonAnnotationEditor(QDialog):
         self.canvas = CanvasLabel(pixmap, initial_polygons, self)
         self.scroll_area = QScrollArea()
         self.scroll_area.setWidget(self.canvas)
-        self.scroll_area.setWidgetResizable(True)
+        self.scroll_area.setWidgetResizable(False)
+        self.scroll_area.setAlignment(Qt.AlignmentFlag.AlignCenter)
         main_layout = QVBoxLayout()
         top_controls_layout = QHBoxLayout()
 
@@ -1390,7 +1412,7 @@ class PolygonAnnotationEditor(QDialog):
         class_selection_layout = QHBoxLayout()
         class_selection_layout.addWidget(QLabel("카테고리:"))
         self.category_selector = QComboBox()
-        self.category_selector.addItems(CATEGORIES)
+        self.category_selector.addItems(SELECTABLE_CATEGORIES)
         self.category_selector.currentIndexChanged.connect(self.update_class_selector)
         class_selection_layout.addWidget(self.category_selector)
 
@@ -1423,11 +1445,9 @@ class PolygonAnnotationEditor(QDialog):
         main_layout.addWidget(self.status_bar)
         main_layout.addWidget(self.button_box)
         self.setLayout(main_layout)
+        self._preferred_size = self._compute_preferred_size(pixmap)
         if not self._embedded:
-            screen_geometry = QApplication.primaryScreen().availableGeometry()
-            new_width = min(pixmap.width() + 50, int(screen_geometry.width() * 0.9))
-            new_height = min(pixmap.height() + 150, int(screen_geometry.height() * 0.9))
-            self.resize(new_width, new_height)
+            self.resize(self._preferred_size)
         else:
             self.setWindowFlags(Qt.WindowType.Widget)
 
@@ -1435,6 +1455,23 @@ class PolygonAnnotationEditor(QDialog):
         self.create_local_color_map()
         self.set_initial_selection(initial_class_name)
         self.setFocus()
+
+    def _compute_preferred_size(self, pixmap: QPixmap) -> QSize:
+        screen_geometry = QApplication.primaryScreen().availableGeometry()
+        extra_width, extra_height = 80, 200
+        raw_width = pixmap.width() + extra_width
+        raw_height = pixmap.height() + extra_height
+        max_width = int(screen_geometry.width() * 0.9)
+        max_height = int(screen_geometry.height() * 0.9)
+        scale = min(max_width / raw_width if raw_width else 1.0, max_height / raw_height if raw_height else 1.0, 1.0)
+        preferred_width = max(int(raw_width * scale), 800)
+        preferred_height = max(int(raw_height * scale), 600)
+        return QSize(preferred_width, preferred_height)
+
+    def sizeHint(self) -> QSize:
+        if self._embedded:
+            return self._preferred_size
+        return super().sizeHint()
 
     # v1.3: 방해 요소 저장 슬롯
     def on_save_distractor(self):
@@ -1513,11 +1550,12 @@ class PolygonAnnotationEditor(QDialog):
         """편집기 시작 시 전달받은 클래스 이름으로 선택자를 설정합니다."""
         if class_name:
             category = self.learning_tab.data_manager.get_class_category(class_name)
-            if category:
+            if category and category != CHARACTER_CLASS_NAME:
                 self.category_selector.setCurrentText(category)
                 self.update_class_selector(new_class_to_select=class_name)
-        else:
-            self.update_class_selector()
+                return
+        self.category_selector.setCurrentIndex(0 if self.category_selector.count() else -1)
+        self.update_class_selector()
 
     def handle_class_selection(self, index):
         """'[새 클래스 추가...]'가 선택되면 새 클래스 추가 로직을 실행합니다."""
@@ -1566,7 +1604,10 @@ class PolygonAnnotationEditor(QDialog):
 
     def on_save(self):
         self.commit_current_polygon()
-        self.accept()
+        if self._embedded:
+            self.saved.emit()
+        else:
+            self.accept()
 
     def get_all_polygons(self): return self.canvas.polygons
 
@@ -1700,7 +1741,9 @@ class SAMAnnotationEditor(QDialog):
         self.canvas = SAMCanvasLabel(pixmap, self)
         self.canvas.polygons = initial_polygons if initial_polygons else []
         self.scroll_area = QScrollArea()
-        self.scroll_area.setWidget(self.canvas); self.scroll_area.setWidgetResizable(True)
+        self.scroll_area.setWidget(self.canvas)
+        self.scroll_area.setWidgetResizable(False)
+        self.scroll_area.setAlignment(Qt.AlignmentFlag.AlignCenter)
         main_layout = QVBoxLayout()
         top_controls_layout = QHBoxLayout()
 
@@ -1734,7 +1777,7 @@ class SAMAnnotationEditor(QDialog):
         class_selection_layout = QHBoxLayout()
         class_selection_layout.addWidget(QLabel("카테고리:"))
         self.category_selector = QComboBox()
-        self.category_selector.addItems(CATEGORIES)
+        self.category_selector.addItems(SELECTABLE_CATEGORIES)
         self.category_selector.currentIndexChanged.connect(self.update_class_selector)
         class_selection_layout.addWidget(self.category_selector)
 
@@ -1766,11 +1809,9 @@ class SAMAnnotationEditor(QDialog):
         main_layout.addWidget(self.status_bar)
         main_layout.addWidget(self.button_box)
         self.setLayout(main_layout)
+        self._preferred_size = self._compute_preferred_size(pixmap)
         if not self._embedded:
-            screen_geometry = QApplication.primaryScreen().availableGeometry()
-            new_width = min(pixmap.width() + 50, int(screen_geometry.width() * 0.9))
-            new_height = min(pixmap.height() + 150, int(screen_geometry.height() * 0.9))
-            self.resize(new_width, new_height)
+            self.resize(self._preferred_size)
         else:
             self.setWindowFlags(Qt.WindowType.Widget)
 
@@ -1778,6 +1819,23 @@ class SAMAnnotationEditor(QDialog):
         self.create_local_color_map()
         self.set_initial_selection(initial_class_name)
         self.setFocus()
+
+    def _compute_preferred_size(self, pixmap: QPixmap) -> QSize:
+        screen_geometry = QApplication.primaryScreen().availableGeometry()
+        extra_width, extra_height = 80, 220
+        raw_width = pixmap.width() + extra_width
+        raw_height = pixmap.height() + extra_height
+        max_width = int(screen_geometry.width() * 0.9)
+        max_height = int(screen_geometry.height() * 0.9)
+        scale = min(max_width / raw_width if raw_width else 1.0, max_height / raw_height if raw_height else 1.0, 1.0)
+        preferred_width = max(int(raw_width * scale), 800)
+        preferred_height = max(int(raw_height * scale), 600)
+        return QSize(preferred_width, preferred_height)
+
+    def sizeHint(self) -> QSize:
+        if self._embedded:
+            return self._preferred_size
+        return super().sizeHint()
 
     # v1.3: 방해 요소 저장 슬롯
     def on_save_distractor(self):
@@ -1860,11 +1918,12 @@ class SAMAnnotationEditor(QDialog):
         """편집기 시작 시 전달받은 클래스 이름으로 선택자를 설정합니다."""
         if class_name:
             category = self.learning_tab.data_manager.get_class_category(class_name)
-            if category:
+            if category and category != CHARACTER_CLASS_NAME:
                 self.category_selector.setCurrentText(category)
                 self.update_class_selector(new_class_to_select=class_name)
-        else:
-            self.update_class_selector()
+                return
+        self.category_selector.setCurrentIndex(0 if self.category_selector.count() else -1)
+        self.update_class_selector()
 
     def handle_class_selection(self, index):
         """'[새 클래스 추가...]'가 선택되면 새 클래스 추가 로직을 실행합니다."""
@@ -2074,12 +2133,18 @@ class AnnotationEditorDialog(QDialog):
             self.ai_editor = None
 
         self.stack = QStackedLayout()
+        self.stack.setContentsMargins(0, 0, 0, 0)
         self.stack.addWidget(self.manual_editor)
         if self.ai_editor is not None:
             self.stack.addWidget(self.ai_editor)
 
         main_layout = QVBoxLayout(self)
+        main_layout.setContentsMargins(0, 0, 0, 0)
+        main_layout.setSpacing(0)
         main_layout.addLayout(self.stack)
+
+        self.setSizeGripEnabled(True)
+        self.setMinimumSize(QSize(640, 480))
 
         if initial_mode == EditModeDialog.AI_ASSIST and self.ai_editor is not None:
             self._switch_mode(EditModeDialog.AI_ASSIST, initialize=True)
@@ -2140,7 +2205,12 @@ class AnnotationEditorDialog(QDialog):
 
         current_widget = self.stack.currentWidget()
         if current_widget is not None:
-            self.resize(current_widget.sizeHint())
+            desired_size = current_widget.sizeHint()
+            new_width = max(self.width(), desired_size.width())
+            new_height = max(self.height(), desired_size.height())
+            self.resize(new_width, new_height)
+            self.setMinimumSize(QSize(640, 480))
+            current_widget.setFocus()
 
     def _finalize(self, result_code, editor):
         self._result_polygons = self._clone_polygons(editor.get_all_polygons())
@@ -6327,7 +6397,7 @@ class LearningTab(QWidget):
         # v1.3: 편집기에서 반환된 결과에 따라 분기 처리
         # 시나리오 1: 일반 저장
         if editor_result == QDialog.DialogCode.Accepted:
-            previously_selected_class = initial_class_name
+            previously_selected_class = editor_dialog.result_class_name() or initial_class_name
 
             self.populate_class_list() # 새 클래스가 추가되었을 수 있으므로 목록 갱신
 
