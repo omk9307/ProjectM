@@ -819,6 +819,13 @@ class HuntTab(QWidget):
         self._last_command_issued: Optional[tuple[str, object]] = None
         self._status_mp_saved_command: Optional[tuple[str, object]] = None
 
+        # HP 긴급모드/회복검사 상태
+        self._hp_recovery_pending: bool = False
+        self._hp_recovery_fail_streak: int = 0
+        self._hp_emergency_active: bool = False
+        self._hp_emergency_started_at: float = 0.0
+        self._hp_emergency_telegram_sent: bool = False
+
         self.teleport_settings = TeleportSettings()
         self.teleport_command_left = "텔레포트(좌)"
         self.teleport_command_right = "텔레포트(우)"
@@ -5159,6 +5166,12 @@ class HuntTab(QWidget):
         elif is_primary_release_command:
             allow_during_cooldown = True
 
+        # HP 긴급모드 보호: HP 상태 명령과 '모든 키 떼기' 외 차단
+        if getattr(self, '_hp_emergency_active', False):
+            if not (is_status_command and status_resource == 'hp') and normalized != '모든 키 떼기':
+                self.append_log("[HP] 긴급 회복 보호로 다른 명령을 차단합니다.", "warn")
+                return
+
         if (
             self._get_command_delay_remaining() > 0
             and normalized != "모든 키 떼기"
@@ -5179,6 +5192,9 @@ class HuntTab(QWidget):
             elif "key.right" in lower and "key.left" not in lower:
                 self._set_current_facing('right', save=False)
         self.control_command_issued.emit(command, reason)
+        # HP 회복 시도 후 다음 탐지 주기에서 회복여부 판단
+        if is_status_command and status_resource == 'hp':
+            self._hp_recovery_pending = True
         if not is_status_command and not is_primary_release_command and normalized != "모든 키 떼기":
             self._last_command_issued = (command, reason)
 
@@ -5272,6 +5288,53 @@ class HuntTab(QWidget):
                 if isinstance(hp_value, (int, float)):
                     self._status_display_values['hp'] = float(hp_value)
                     self._maybe_trigger_status_command('hp', float(hp_value), timestamp)
+                    # HP 회복여부 판단 및 긴급모드 제어
+                    try:
+                        threshold = getattr(hp_cfg, 'recovery_threshold', None)
+                        if isinstance(threshold, int):
+                            current = float(hp_value)
+                            # 회복여부 판단은 HP 명령 직후 다음 주기 한 번만
+                            if self._hp_recovery_pending:
+                                self._hp_recovery_pending = False
+                                if current >= float(threshold):
+                                    # 성공
+                                    self._hp_recovery_fail_streak = 0
+                                    if self._hp_emergency_active:
+                                        self._hp_emergency_active = False
+                                        self._hp_emergency_started_at = 0.0
+                                        self._hp_emergency_telegram_sent = False
+                                        self.append_log("[HP] 긴급 회복 모드 해제", 'info')
+                                else:
+                                    # 실패
+                                    self._hp_recovery_fail_streak = int(self._hp_recovery_fail_streak) + 1
+                                    if (
+                                        getattr(hp_cfg, 'emergency_enabled', False)
+                                        and not self._hp_emergency_active
+                                        and self._hp_recovery_fail_streak >= int(getattr(hp_cfg, 'emergency_trigger_failures', 3) or 3)
+                                    ):
+                                        self._enter_hp_emergency_mode()
+                        # 긴급모드 시간 초과 검사
+                        if self._hp_emergency_active:
+                            max_dur = float(getattr(hp_cfg, 'emergency_max_duration_sec', 10.0) or 10.0)
+                            if max_dur >= 1.0 and (time.time() - self._hp_emergency_started_at) >= max_dur and not self._hp_emergency_telegram_sent:
+                                if bool(getattr(hp_cfg, 'emergency_timeout_telegram', False)):
+                                    # 맵탭을 통해 텔레그램 전송 시도
+                                    map_tab = getattr(self, 'map_tab', None)
+                                    message = "[HP] 긴급 회복 모드 시간이 초과되었습니다. (자동 전송)"
+                                    sent = False
+                                    if map_tab and hasattr(map_tab, 'send_emergency_telegram'):
+                                        try:
+                                            map_tab.send_emergency_telegram(message)
+                                            sent = True
+                                        except Exception:
+                                            sent = False
+                                    if not sent:
+                                        self.append_log("텔레그램 전송 실패 또는 비활성화 상태입니다.", 'warn')
+                                else:
+                                    self.append_log("[HP] 긴급 회복 모드 시간이 초과되었습니다.", 'warn')
+                                self._hp_emergency_telegram_sent = True
+                    except Exception:
+                        pass
         else:
             self._status_display_values['hp'] = None
 
@@ -5417,6 +5480,16 @@ class HuntTab(QWidget):
 
     def _clear_hp_guard(self) -> None:
         self._hp_guard_active = False
+
+    def _enter_hp_emergency_mode(self) -> None:
+        if self._hp_emergency_active:
+            return
+        self._hp_emergency_active = True
+        self._hp_emergency_started_at = time.time()
+        self._hp_emergency_telegram_sent = False
+        # 즉시 모든 키 해제 (원인 로그 포함)
+        self._issue_all_keys_release(reason="HP회복 긴급모드 진입")
+        self.append_log("[HP] 긴급 회복 모드에 진입했습니다.", 'warn')
 
     def _update_status_summary_cache(self) -> None:
         hp_cfg = getattr(self._status_config, 'hp', None)

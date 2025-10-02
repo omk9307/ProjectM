@@ -524,6 +524,13 @@ class MapTab(QWidget):
             self._suppress_hunt_sync_once = False
             self._suppress_hunt_sync_reason: Optional[str] = None
 
+            # HP 긴급모드/회복검사 상태 (맵탭에서도 동일 적용)
+            self._hp_recovery_pending: bool = False
+            self._hp_recovery_fail_streak: int = 0
+            self._hp_emergency_active: bool = False
+            self._hp_emergency_started_at: float = 0.0
+            self._hp_emergency_telegram_sent: bool = False
+
             self.latest_perf_stats: dict[str, object] = {}
             self._latest_thread_perf: dict[str, object] = {}
             self._map_perf_queue: deque[dict] = deque()
@@ -1740,6 +1747,21 @@ class MapTab(QWidget):
             return _wrap_result(False, "empty_command", {"message": "empty_command"})
 
         is_status_command = isinstance(reason, str) and reason.startswith('status:')
+        status_resource = ''
+        if is_status_command:
+            try:
+                parts = str(reason).split(':')
+                if len(parts) >= 2:
+                    status_resource = parts[1].strip().lower()
+            except Exception:
+                status_resource = ''
+
+        # HP 긴급모드 보호: HP 상태 명령과 '모든 키 떼기' 외 차단
+        if getattr(self, '_hp_emergency_active', False):
+            if not (is_status_command and status_resource == 'hp') and command != '모든 키 떼기':
+                self.update_general_log("[HP] 긴급 회복 보호로 다른 명령을 차단합니다.", "orange")
+                detail = {"command": command, "hp_emergency": True}
+                return _wrap_result(False, "hp_emergency_active", detail)
 
         wait_mode_active = self._is_other_player_wait_active()
         wait_context: Dict[str, Any] = self.other_player_wait_context if wait_mode_active else {}
@@ -1857,6 +1879,9 @@ class MapTab(QWidget):
             if isinstance(resource, str) and resource:
                 return f"{resource.upper()} 상태 명령 진행 중"
             return "상태 회복 명령 진행 중"
+
+        if reason_code == "hp_emergency_active":
+            return "HP 긴급 회복 모드"
 
         if reason_code == "forbidden_wall_active":
             return "금지벽 대응 중"
@@ -9627,6 +9652,42 @@ class MapTab(QWidget):
                 self._status_last_ui_update[resource] = timestamp
                 updated = True
             self._maybe_trigger_status_command(resource, float(value), timestamp)
+            # HP 회복여부 판단 및 긴급모드 제어
+            if resource == 'hp':
+                try:
+                    hp_cfg = getattr(self._status_config, 'hp', None)
+                    if hp_cfg and getattr(hp_cfg, 'enabled', True):
+                        threshold = getattr(hp_cfg, 'recovery_threshold', None)
+                        if isinstance(threshold, int):
+                            current = float(value)
+                            if self._hp_recovery_pending:
+                                self._hp_recovery_pending = False
+                                if current >= float(threshold):
+                                    self._hp_recovery_fail_streak = 0
+                                    if self._hp_emergency_active:
+                                        self._hp_emergency_active = False
+                                        self._hp_emergency_started_at = 0.0
+                                        self._hp_emergency_telegram_sent = False
+                                        self.update_general_log("[HP] 긴급 회복 모드 해제", "gray")
+                                else:
+                                    self._hp_recovery_fail_streak = int(self._hp_recovery_fail_streak) + 1
+                                    if (
+                                        getattr(hp_cfg, 'emergency_enabled', False)
+                                        and not self._hp_emergency_active
+                                        and self._hp_recovery_fail_streak >= int(getattr(hp_cfg, 'emergency_trigger_failures', 3) or 3)
+                                    ):
+                                        self._enter_hp_emergency_mode()
+                        # 긴급모드 시간 초과 검사
+                        if self._hp_emergency_active:
+                            max_dur = float(getattr(hp_cfg, 'emergency_max_duration_sec', 10.0) or 10.0)
+                            if max_dur >= 1.0 and (time.time() - self._hp_emergency_started_at) >= max_dur and not self._hp_emergency_telegram_sent:
+                                if bool(getattr(hp_cfg, 'emergency_timeout_telegram', False)):
+                                    self.send_emergency_telegram("[HP] 긴급 회복 모드 시간이 초과되었습니다. (자동 전송)")
+                                else:
+                                    self.update_general_log("[HP] 긴급 회복 모드 시간이 초과되었습니다.", "orange")
+                                self._hp_emergency_telegram_sent = True
+                except Exception:
+                    pass
         if updated:
             self._render_detection_log(self._last_detection_log_body)
 
@@ -9674,8 +9735,55 @@ class MapTab(QWidget):
 
     def _issue_status_command(self, resource: str, command_name: str) -> None:
         reason = f'status:{resource}'
-        self._emit_control_command(command_name, reason=reason)
+        ok = self._emit_control_command(command_name, reason=reason)
+        if ok and resource == 'hp':
+            # 다음 탐지 주기에 회복여부 판단
+            self._hp_recovery_pending = True
         self.update_general_log(f"[상태] {resource.upper()} 명령 '{command_name}' 실행", "purple")
+
+    def _enter_hp_emergency_mode(self) -> None:
+        if self._hp_emergency_active:
+            return
+        self._hp_emergency_active = True
+        self._hp_emergency_started_at = time.time()
+        self._hp_emergency_telegram_sent = False
+        # 즉시 모든 키 해제 (원인 로그 포함)
+        self._emit_control_command("모든 키 떼기", reason="HP회복 긴급모드 진입", allow_forbidden=True)
+        self.update_general_log("[HP] 긴급 회복 모드에 진입했습니다.", "orange")
+
+    def send_emergency_telegram(self, message: str) -> None:
+        """HP 긴급모드 전용 텔레그램 전송 (학습탭 독립 설정용, 토글 무시)."""
+        if not message:
+            return
+        # 자격정보 갱신
+        try:
+            self._refresh_telegram_credentials()
+        except Exception:
+            pass
+        token = (getattr(self, 'telegram_bot_token', '') or '').strip()
+        chat_id = (getattr(self, 'telegram_chat_id', '') or '').strip()
+        if not token or not chat_id:
+            # 일반 로그만 남김
+            self.update_general_log("텔레그램 전송 실패: 자격 정보를 찾을 수 없습니다.", "red")
+            return
+        try:
+            import requests  # type: ignore
+        except Exception:
+            self.update_general_log("텔레그램 전송 실패: requests 모듈 필요", "red")
+            return
+        url = f"https://api.telegram.org/bot{token}/sendMessage"
+        try:
+            response = requests.post(url, data={
+                'chat_id': chat_id,
+                'text': message,
+                'disable_web_page_preview': True,
+            }, timeout=5)
+            if response.status_code != 200:
+                self.update_general_log(f"텔레그램 전송 실패({response.status_code}): {response.text}", "red")
+            else:
+                self.update_general_log("(텔레그램) 긴급모드 경고 전송 완료", "gray")
+        except Exception as exc:
+            self.update_general_log(f"텔레그램 전송 중 오류: {exc}", "red")
 
     def _ensure_mapleland_foreground(self) -> None:
         """Mapleland 창을 전면으로 가져옵니다."""

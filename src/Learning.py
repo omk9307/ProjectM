@@ -3509,6 +3509,31 @@ class DataManager:
                     else:
                         if max_val > 0:
                             target.maximum_value = max_val
+            # 긴급모드 설정 적용 (hp 중심, 다른 리소스도 키가 있으면 수용)
+            if 'emergency_enabled' in payload:
+                try:
+                    target.emergency_enabled = bool(payload.get('emergency_enabled'))
+                except Exception:
+                    pass
+            if 'emergency_trigger_failures' in payload:
+                try:
+                    val = int(payload.get('emergency_trigger_failures'))
+                except (TypeError, ValueError):
+                    val = None
+                if val is not None and val >= 1:
+                    target.emergency_trigger_failures = val
+            if 'emergency_max_duration_sec' in payload:
+                try:
+                    val = float(payload.get('emergency_max_duration_sec'))
+                except (TypeError, ValueError):
+                    val = None
+                if val is not None and val >= 1.0:
+                    target.emergency_max_duration_sec = val
+            if 'emergency_timeout_telegram' in payload:
+                try:
+                    target.emergency_timeout_telegram = bool(payload.get('emergency_timeout_telegram'))
+                except Exception:
+                    pass
 
         apply_resource('hp', config.hp, updates.get('hp'), allow_threshold=True)
         apply_resource('mp', config.mp, updates.get('mp'), allow_threshold=True)
@@ -5055,6 +5080,11 @@ class LearningTab(QWidget):
         preview_button.setToolTip(f'현재 {title} 탐지 범위를 캡처하여 분석합니다.')
         preview_button.clicked.connect(lambda _, key=resource: self._handle_status_preview(key))
         roi_button_layout.addWidget(preview_button)
+        if resource == 'hp':
+            emergency_btn = QPushButton('긴급모드')
+            emergency_btn.setToolTip('HP 긴급 회복 모드 설정')
+            emergency_btn.clicked.connect(self._open_hp_emergency_settings_dialog)
+            roi_button_layout.addWidget(emergency_btn)
         roi_button_layout.addStretch(1)
         vbox.addLayout(roi_button_layout)
 
@@ -5129,6 +5159,58 @@ class LearningTab(QWidget):
             self.mp_interval_input.editingFinished.connect(lambda: self._on_status_interval_changed('mp'))
 
         return box
+
+    def _open_hp_emergency_settings_dialog(self) -> None:
+        cfg = getattr(self, '_status_config', None)
+        if not cfg or not hasattr(cfg, 'hp'):
+            QMessageBox.warning(self, '긴급모드', '상태 모니터 구성이 아직 초기화되지 않았습니다.')
+            return
+        hp_cfg = cfg.hp
+
+        dialog = QDialog(self)
+        dialog.setWindowTitle('HP 긴급모드 설정')
+        form = QFormLayout(dialog)
+
+        enabled_chk = QCheckBox('긴급모드 사용')
+        enabled_chk.setChecked(bool(getattr(hp_cfg, 'emergency_enabled', False)))
+        form.addRow(enabled_chk)
+
+        n_spin = QSpinBox(dialog)
+        n_spin.setRange(1, 10)
+        n_spin.setValue(int(getattr(hp_cfg, 'emergency_trigger_failures', 3) or 3))
+        form.addRow('발동조건 N회', n_spin)
+
+        dur_spin = QDoubleSpinBox(dialog)
+        dur_spin.setRange(1.0, 3600.0)
+        dur_spin.setDecimals(1)
+        dur_spin.setSingleStep(0.5)
+        dur_spin.setValue(float(getattr(hp_cfg, 'emergency_max_duration_sec', 10.0) or 10.0))
+        dur_spin.setSuffix(' s')
+        form.addRow('최대 긴급 유지시간', dur_spin)
+
+        tg_chk = QCheckBox('시간초과 시 텔레그램 전송')
+        tg_chk.setChecked(bool(getattr(hp_cfg, 'emergency_timeout_telegram', False)))
+        form.addRow(tg_chk)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel, dialog)
+        form.addRow(buttons)
+
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+
+        updates = {
+            'hp': {
+                'emergency_enabled': bool(enabled_chk.isChecked()),
+                'emergency_trigger_failures': int(n_spin.value()),
+                'emergency_max_duration_sec': float(dur_spin.value()),
+                'emergency_timeout_telegram': bool(tg_chk.isChecked()),
+            }
+        }
+        self._status_config = self.data_manager.update_status_monitor_config(updates)
+        self._apply_status_config_to_ui()
 
     def _build_exp_status_card(self) -> QGroupBox:
         box = QGroupBox()

@@ -72,6 +72,11 @@ class ResourceConfig:
     command_profile: Optional[str] = None
     enabled: bool = True
     maximum_value: Optional[int] = None
+    # HP 전용 긴급모드 설정 (기타 리소스는 무시)
+    emergency_enabled: bool = False
+    emergency_trigger_failures: int = 3
+    emergency_max_duration_sec: float = 10.0
+    emergency_timeout_telegram: bool = False
 
     def to_dict(self) -> Dict[str, object]:
         data: Dict[str, object] = {
@@ -90,6 +95,11 @@ class ResourceConfig:
             data["recovery_threshold"] = int(self.recovery_threshold)
         if self.command_profile is not None:
             data["command_profile"] = self.command_profile
+        # 긴급모드 설정은 hp에서만 사용하지만 저장은 공통 키로 둔다
+        data["emergency_enabled"] = bool(self.emergency_enabled)
+        data["emergency_trigger_failures"] = int(max(1, self.emergency_trigger_failures))
+        data["emergency_max_duration_sec"] = float(max(1.0, self.emergency_max_duration_sec))
+        data["emergency_timeout_telegram"] = bool(self.emergency_timeout_telegram)
         return data
 
     @staticmethod
@@ -125,6 +135,19 @@ class ResourceConfig:
             else:
                 if parsed > 0:
                     max_value = parsed
+        # 긴급모드 설정 읽기 (없으면 기본값 유지)
+        emergency_enabled = bool(source.get("emergency_enabled", False))
+        try:
+            emergency_trigger_failures = int(source.get("emergency_trigger_failures", 3))
+        except (TypeError, ValueError):
+            emergency_trigger_failures = 3
+        try:
+            emergency_max_duration_sec = float(source.get("emergency_max_duration_sec", 10.0))
+        except (TypeError, ValueError):
+            emergency_max_duration_sec = 10.0
+        emergency_trigger_failures = max(1, emergency_trigger_failures)
+        emergency_max_duration_sec = max(1.0, emergency_max_duration_sec)
+        emergency_timeout_telegram = bool(source.get("emergency_timeout_telegram", False))
         return ResourceConfig(
             roi=roi,
             interval_sec=interval,
@@ -132,6 +155,10 @@ class ResourceConfig:
             command_profile=command,
             enabled=enabled,
             maximum_value=max_value,
+            emergency_enabled=emergency_enabled,
+            emergency_trigger_failures=emergency_trigger_failures,
+            emergency_max_duration_sec=emergency_max_duration_sec,
+            emergency_timeout_telegram=emergency_timeout_telegram,
         )
 
 
