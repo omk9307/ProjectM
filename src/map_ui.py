@@ -1716,6 +1716,30 @@ class MapTab(QWidget):
 
         is_status_command = isinstance(reason, str) and reason.startswith('status:')
 
+        wait_mode_active = self._is_other_player_wait_active()
+        wait_context: Dict[str, Any] = self.other_player_wait_context if wait_mode_active else {}
+        wait_navigation_allowed = bool(wait_context.get('allow_navigation'))
+        allowed_wait_commands = {"모든 키 떼기", "사다리 멈춤복구"}
+        is_authority_command = isinstance(reason, str) and str(reason).startswith('authority:')
+        if (
+            wait_mode_active
+            and not allow_forbidden
+            and not is_status_command
+            and command not in allowed_wait_commands
+        ):
+            if wait_navigation_allowed and not is_authority_command:
+                pass
+            else:
+                detail: Dict[str, Any] = {
+                    "wait_mode_active": True,
+                    "command": command,
+                }
+                self.update_general_log(
+                    f"[대기 모드] '{command}' 명령은 대기 상태에서 허용되지 않습니다.",
+                    "gray",
+                )
+                return _wrap_result(False, "wait_mode_blocked", detail)
+
         command_entry = None
         if not is_status_command and self._is_trackable_authority_command(command):
             command_entry = self._update_last_authority_command(command, reason)
@@ -5522,6 +5546,39 @@ class MapTab(QWidget):
         context = getattr(self, 'other_player_wait_context', None)
         return bool(context and context.get('active'))
 
+    def _initialize_other_player_wait_context(
+        self,
+        waypoint_id: str,
+        waypoint_name: str,
+        source: str,
+    ) -> bool:
+        try:
+            context = {
+                'active': True,
+                'phase': 'init',
+                'goal_id': waypoint_id,
+                'goal_name': waypoint_name,
+                'started_at': time.time(),
+                'hold_started_at': None,
+                'wait_route': None,
+                'route_index': 0,
+                'last_route_calc': 0.0,
+                'last_command_at': 0.0,
+                'recovery_attempts': 0,
+                'retry_cooldown_until': 0.0,
+                'source': source,
+                'holding': False,
+                'initialized': False,
+                'fail_reason': None,
+                'allow_navigation': False,
+                'resume_map_detection': bool(getattr(self, 'is_detection_running', False)),
+            }
+        except Exception:
+            return False
+
+        self.other_player_wait_context = context
+        return True
+
     def start_other_player_wait_operation(
         self,
         waypoint_id: int | str,
@@ -5542,18 +5599,26 @@ class MapTab(QWidget):
             )
             return False
 
-        context = {
-            'active': True,
-            'goal_id': waypoint_id_str,
-            'goal_name': waypoint_name,
-            'started_at': time.time(),
-            'holding': False,
-            'source': source,
-        }
-        self.other_player_wait_context = context
+        if not self._initialize_other_player_wait_context(
+            waypoint_id_str,
+            waypoint_name,
+            source or 'hunt',
+        ):
+            self.update_general_log(
+                "[대기 모드] 내부 상태 초기화에 실패했습니다.",
+                "red",
+            )
+            return False
+
+        stop_sent = self._emit_control_command("모든 키 떼기", "other_player_wait:start")
+        if not stop_sent:
+            self.update_general_log(
+                "[대기 모드] 초기 입력 해제 명령이 거부되었습니다.",
+                "red",
+            )
 
         self.update_general_log(
-            f"[대기 모드] '{waypoint_name}' 웨이포인트로 이동을 시작합니다.",
+            f"[대기 모드] '{waypoint_name}' 웨이포인트로 이동을 준비합니다.",
             "orange",
         )
 
@@ -5575,7 +5640,9 @@ class MapTab(QWidget):
         if not self._is_other_player_wait_active():
             return
 
-        goal_name = self.other_player_wait_context.get('goal_name', '')
+        context = self.other_player_wait_context
+        goal_name = context.get('goal_name', '')
+        resume_map_detection = bool(context.get('resume_map_detection', False))
         self.other_player_wait_context = {}
         self._authority_priority_override = False
         if self._authority_manager:
@@ -5601,17 +5668,280 @@ class MapTab(QWidget):
         self.navigation_action = 'move_to_target'
         self.guidance_text = '없음'
 
+        self._restart_map_detection_after_wait(resume_map_detection)
+
     def _activate_other_player_wait_goal(self, waypoint_id: str) -> None:
+        context = getattr(self, 'other_player_wait_context', {})
+        context['initialized'] = True
+        context['holding'] = False
+        context['phase'] = 'init'
+        context['wait_route'] = None
+        context['route_index'] = 0
+        context['retry_cooldown_until'] = 0.0
+        context['last_route_calc'] = 0.0
+        context['fail_reason'] = None
+        context['hold_started_at'] = None
+        context['allow_navigation'] = True
+        self.other_player_wait_context = context
+
         self.journey_plan = [waypoint_id]
         self.current_journey_index = 0
         self.current_segment_path = []
         self.current_segment_index = 0
-        self.start_waypoint_found = True
+        self.start_waypoint_found = False
         self.target_waypoint_id = waypoint_id
         self.last_reached_wp_id = None
         self.expected_terrain_group = None
-        self.other_player_wait_context['holding'] = False
-        self.other_player_wait_context['initialized'] = True
+        self.navigation_action = 'wait_init'
+        self.guidance_text = f"대기 이동 준비: {context.get('goal_name', waypoint_id)}"
+
+    def _restart_map_detection_after_wait(self, should_restart: bool) -> None:
+        if not should_restart:
+            return
+
+        try:
+            map_running = bool(self.is_detection_running)
+        except Exception:
+            map_running = False
+
+        if map_running:
+            return
+
+        try:
+            if hasattr(self, 'detect_anchor_btn'):
+                self.detect_anchor_btn.setChecked(False)
+            self.toggle_anchor_detection(True)
+        except Exception as exc:
+            self.update_general_log(
+                f"[대기 모드] 맵 탐지를 재시작하지 못했습니다: {exc}",
+                "red",
+            )
+        else:
+            self.update_general_log(
+                "[대기 모드] 맵 탐지를 재시작했습니다.",
+                "green",
+            )
+
+    def _prepare_other_player_wait_travel(
+        self,
+        context: dict,
+        final_player_pos: QPointF,
+    ) -> bool:
+        goal_id = context.get('goal_id')
+        if goal_id is None or not isinstance(final_player_pos, QPointF):
+            return False
+
+        goal_id_str = str(goal_id)
+        waypoint_name = context.get('goal_name', goal_id_str)
+
+        contact_terrain = self._get_contact_terrain(final_player_pos)
+        if contact_terrain is None:
+            if not context.get('airborne_notified'):
+                self.update_general_log(
+                    "[대기 모드] 캐릭터가 공중에 있어 착지를 기다립니다.",
+                    "gray",
+                )
+                context['airborne_notified'] = True
+            self.navigation_action = 'wait_idle'
+            self.guidance_text = f"대기 이동 준비: {waypoint_name} (착지 대기)"
+            return False
+
+        context['airborne_notified'] = False
+        context['phase'] = 'wait_travel'
+        context['retry_cooldown_until'] = 0.0
+
+        self.journey_plan = [goal_id_str]
+        self.current_journey_index = 0
+        self.current_segment_path = []
+        self.current_segment_index = 0
+        self.start_waypoint_found = True
+        self.target_waypoint_id = goal_id_str
+        self.last_reached_wp_id = None
+        self.expected_terrain_group = contact_terrain.get('dynamic_name')
+
+        self.navigation_action = 'move_to_target'
+        self.guidance_text = f"대기 이동: {waypoint_name}"
+
+        return self._recalculate_other_player_wait_route(context, final_player_pos, announce=True)
+
+    def _recalculate_other_player_wait_route(
+        self,
+        context: dict,
+        final_player_pos: QPointF,
+        *,
+        announce: bool = False,
+    ) -> bool:
+        goal_id = context.get('goal_id')
+        if goal_id is None or not isinstance(final_player_pos, QPointF):
+            return False
+
+        goal_id_str = str(goal_id)
+        waypoint_name = context.get('goal_name', goal_id_str)
+        now = time.time()
+
+        contact_terrain = self._get_contact_terrain(final_player_pos)
+        if contact_terrain is None:
+            context['phase'] = 'wait_route_pending'
+            context['wait_route'] = None
+            context['last_route_calc'] = now
+            context['retry_cooldown_until'] = max(now + 0.5, context.get('retry_cooldown_until', 0.0))
+            self.navigation_action = 'wait_idle'
+            self.guidance_text = f"대기 이동 준비: {waypoint_name} (착지 대기)"
+            return False
+
+        self.start_waypoint_found = True
+        self.expected_terrain_group = contact_terrain.get('dynamic_name')
+        self.current_segment_path = []
+        self.current_segment_index = 0
+        self.last_reached_wp_id = None
+
+        self._calculate_segment_path(final_player_pos)
+
+        if self.current_segment_path:
+            context['wait_route'] = list(self.current_segment_path)
+            context['route_index'] = 0
+            context['phase'] = 'wait_travel'
+            context['last_route_calc'] = now
+            context['retry_cooldown_until'] = now + 1.0
+            if announce:
+                self.update_general_log(
+                    f"[대기 모드] '{waypoint_name}' 웨이포인트 경로를 계산했습니다.",
+                    "DodgerBlue",
+                )
+            return True
+
+        context['wait_route'] = None
+        context['phase'] = 'wait_route_pending'
+        context['last_route_calc'] = now
+        context['retry_cooldown_until'] = now + 1.5
+        if announce or (now - context.get('last_route_fail_log', 0.0) > 5.0):
+            self.update_general_log(
+                f"[대기 모드] '{waypoint_name}' 경로 계산에 실패했습니다. 재시도 대기 중...",
+                "red",
+            )
+            context['last_route_fail_log'] = now
+
+        context['recovery_attempts'] = int(context.get('recovery_attempts', 0)) + 1
+        if context['recovery_attempts'] >= 5 and not context.get('fail_reason'):
+            context['fail_reason'] = 'path_failure'
+            context['phase'] = 'terminated'
+            self.update_general_log(
+                f"[대기 모드] 경로를 반복적으로 계산하지 못했습니다. 대기 모드를 종료합니다.",
+                "red",
+            )
+
+            hunt_tab = getattr(self, '_hunt_tab', None)
+
+            def _abort_wait_mode() -> None:
+                if hunt_tab and hasattr(hunt_tab, '_finish_other_player_wait_mode'):
+                    try:
+                        hunt_tab._finish_other_player_wait_mode(reason="path_error")
+                    except Exception:
+                        self.finish_other_player_wait_operation(reason='path_error')
+                else:
+                    self.finish_other_player_wait_operation(reason='path_error')
+
+            QTimer.singleShot(0, _abort_wait_mode)
+        return False
+
+    def _enter_other_player_wait_hold(self, context: dict) -> None:
+        goal_id = context.get('goal_id')
+        if goal_id is None:
+            return
+
+        goal_id_str = str(goal_id)
+        waypoint_name = context.get('goal_name', goal_id_str)
+        context['phase'] = 'wait_hold'
+        context['holding'] = True
+        context['hold_started_at'] = time.time()
+        context['wait_route'] = None
+
+        self.target_waypoint_id = goal_id_str
+        self.navigation_action = 'wait_hold'
+        self.guidance_text = f"대기 중: {waypoint_name}"
+        self.current_segment_path = []
+        self.current_segment_index = 0
+        self.expected_terrain_group = None
+
+        self.update_general_log(
+            f"[대기 모드] '{waypoint_name}' 웨이포인트에 도착했습니다. 대기 상태로 전환합니다.",
+            "DodgerBlue",
+        )
+        self._emit_control_command("모든 키 떼기", "other_player_wait:hold")
+
+    def _maintain_other_player_wait_travel(
+        self,
+        context: dict,
+        final_player_pos: QPointF,
+    ) -> None:
+        goal_id = context.get('goal_id')
+        if goal_id is None:
+            return
+
+        goal_id_str = str(goal_id)
+        waypoint_name = context.get('goal_name', goal_id_str)
+        now = time.time()
+
+        if self.last_reached_wp_id == goal_id_str:
+            self._enter_other_player_wait_hold(context)
+            return
+
+        if not self.current_segment_path:
+            if now >= context.get('retry_cooldown_until', 0.0):
+                self._recalculate_other_player_wait_route(context, final_player_pos, announce=False)
+            return
+
+        if self.navigation_action != 'move_to_target':
+            self.navigation_action = 'move_to_target'
+        self.guidance_text = f"대기 이동: {waypoint_name}"
+
+    def _maintain_other_player_wait_hold(
+        self,
+        context: dict,
+        final_player_pos: QPointF,
+    ) -> None:
+        goal_id = context.get('goal_id')
+        if goal_id is None:
+            return
+
+        goal_id_str = str(goal_id)
+        waypoint_node = self.nav_nodes.get(f"wp_{goal_id_str}", {})
+        waypoint_pos = waypoint_node.get('pos')
+        if not isinstance(waypoint_pos, QPointF) or not isinstance(final_player_pos, QPointF):
+            return
+
+        distance = abs(final_player_pos.x() - waypoint_pos.x())
+        threshold = max(40.0, float(getattr(self, 'cfg_waypoint_arrival_x_threshold', 20.0)))
+        if distance <= threshold:
+            return
+
+        now = time.time()
+        last_log = context.get('last_reposition_log', 0.0)
+        if now - last_log > 2.0:
+            self.update_general_log(
+                f"[대기 모드] 웨이포인트에서 {distance:.1f}px 벗어나 재이동합니다.",
+                "orange",
+            )
+            context['last_reposition_log'] = now
+
+        waypoint_name = context.get('goal_name', goal_id_str)
+        context['holding'] = False
+        context['phase'] = 'wait_travel'
+        context['wait_route'] = None
+        context['hold_started_at'] = None
+
+        self._emit_control_command("모든 키 떼기", "other_player_wait:reposition")
+        self.journey_plan = [goal_id_str]
+        self.current_journey_index = 0
+        self.current_segment_path = []
+        self.current_segment_index = 0
+        self.last_reached_wp_id = None
+        self.start_waypoint_found = True
+        self.navigation_action = 'move_to_target'
+        self.guidance_text = f"대기 이동: {waypoint_name}"
+        self.target_waypoint_id = goal_id_str
+
+        self._recalculate_other_player_wait_route(context, final_player_pos, announce=False)
 
     def _handle_other_player_wait_navigation(self, final_player_pos: QPointF) -> None:
         if not self._is_other_player_wait_active():
@@ -5627,41 +5957,28 @@ class MapTab(QWidget):
         if not context.get('initialized'):
             self._activate_other_player_wait_goal(goal_id_str)
 
-        # 경로가 비어있으면 다시 설정
         if not self.journey_plan:
             self._activate_other_player_wait_goal(goal_id_str)
 
-        if not context.get('holding'):
-            if self.journey_plan and not self.current_segment_path:
-                self._calculate_segment_path(final_player_pos)
+        phase = context.get('phase', 'init')
 
-            if self.last_reached_wp_id == goal_id_str:
-                context['holding'] = True
-                context['hold_started_at'] = time.time()
-                waypoint_name = context.get('goal_name', goal_id_str)
-                self.update_general_log(
-                    f"[대기 모드] '{waypoint_name}' 웨이포인트에 도착했습니다. 대기 상태로 전환합니다.",
-                    "DodgerBlue",
-                )
-                self._emit_control_command("모든 키 떼기", "other_player_wait")
-                self.navigation_action = 'idle'
-                self.guidance_text = f"대기 중: {waypoint_name}"
-                self.current_segment_path = []
-                self.current_segment_index = 0
-                self.target_waypoint_id = goal_id_str
-        else:
-            # 일정 거리 이상 벗어나면 다시 이동
-            waypoint_node = self.nav_nodes.get(f"wp_{goal_id_str}", {})
-            waypoint_pos = waypoint_node.get('pos')
-            if isinstance(waypoint_pos, QPointF):
-                distance = abs(final_player_pos.x() - waypoint_pos.x())
-                if distance > 40.0:
-                    self.update_general_log(
-                        f"[대기 모드] 위치가 벗어나 재이동합니다. (편차 {distance:.1f}px)",
-                        "orange",
-                    )
-                    context['holding'] = False
-                    self._activate_other_player_wait_goal(goal_id_str)
+        if phase == 'terminated':
+            return
+
+        if phase in {'init', 'wait_init'}:
+            if not self._prepare_other_player_wait_travel(context, final_player_pos):
+                return
+            phase = context.get('phase', 'wait_travel')
+
+        if phase == 'wait_route_pending':
+            if time.time() >= context.get('retry_cooldown_until', 0.0):
+                self._recalculate_other_player_wait_route(context, final_player_pos, announce=False)
+            return
+
+        if phase == 'wait_travel':
+            self._maintain_other_player_wait_travel(context, final_player_pos)
+        elif phase == 'wait_hold':
+            self._maintain_other_player_wait_hold(context, final_player_pos)
 
     def on_detection_ready(self, frame_bgr, found_features, my_player_rects, other_player_rects):
         map_perf = {
@@ -6823,6 +7140,11 @@ class MapTab(QWidget):
 
     def _maybe_trigger_walk_teleport(self, direction: str, distance_to_target: float | None) -> None:
         """걷기 중 일정 거리 이상일 때 텔레포트 명령을 확률적으로 실행합니다."""
+        if self._is_other_player_wait_active():
+            self._update_walk_teleport_probability_display(0.0)
+            self._reset_walk_teleport_state()
+            return
+
         if not (self.auto_control_checkbox.isChecked() or self.debug_auto_control_checkbox.isChecked()):
             self._update_walk_teleport_probability_display(0.0)
             self._reset_walk_teleport_state()
@@ -7196,117 +7518,128 @@ class MapTab(QWidget):
         self.player_state = self._determine_player_physical_state(final_player_pos, contact_terrain)
 
         has_map_authority = getattr(self, 'current_authority_owner', 'map') == 'map'
+        wait_mode_active = self._is_other_player_wait_active()
 
         if has_map_authority:
-            if (
-                final_player_pos is not None
-                and contact_terrain is None
-                and not self.airborne_path_warning_active
-                and self.start_waypoint_found
-                and (self.auto_control_checkbox.isChecked() or self.debug_auto_control_checkbox.isChecked())
-            ):
-                last_reference = self.last_movement_time or self.last_action_time
-                if last_reference:
-                    idle_duration = time.time() - last_reference
-                    wait_threshold = self.cfg_airborne_recovery_wait
-                    if idle_duration >= wait_threshold:
-                        self.airborne_path_warning_active = True
-                        if self.airborne_warning_started_at <= 0.0:
-                            self.airborne_warning_started_at = time.time() - wait_threshold
-
-            # 공중 경로 대기 상태 자동 복구 처리
-            self._handle_airborne_path_wait(final_player_pos, contact_terrain)
-
-            # --- [v.1819] '의도된 움직임' 감지 및 복구 로직 ---
-            is_moving_state = self.player_state not in ['idle']
-
-            # 1. 캐릭터가 움직였을 때, '의도된' 움직임인지 확인 후 처리
-            if is_moving_state:
-                if self.last_movement_time:
-                    self.last_action_time = self.last_movement_time
-                elif self.last_action_time == 0.0:
-                    self.last_action_time = time.time()
-                # [핵심 수정] 최근 명령 컨텍스트를 기반으로 의도된 움직임 여부 판정
-                is_intentional_move = self._was_recent_intentional_movement(final_player_pos)
-
-                if self.stuck_recovery_attempts > 0 and is_intentional_move:
-                    self.update_general_log("[자동 복구] 의도된 움직임 감지. 복구 상태를 초기화합니다.", "green")
+            if wait_mode_active:
+                if self.airborne_path_warning_active:
+                    self.airborne_path_warning_active = False
+                    self._reset_airborne_recovery_state()
+                if self.stuck_recovery_attempts > 0:
                     self.stuck_recovery_attempts = 0
-                    self.last_movement_command = None
-
-            # 2. 움직여야 하는데 멈춰있고, 현재 복구 쿨다운 상태가 아닐 때만 멈춤 감지
-            should_be_moving = self.navigation_action in ['move_to_target', 'prepare_to_climb', 'prepare_to_jump', 'prepare_to_down_jump', 'prepare_to_fall', 'align_for_climb'] and self.start_waypoint_found
-
-            if not self.event_in_progress:
-                now = time.time()
-                last_movement_reference = self.last_movement_time or self.last_action_time
-                if last_movement_reference:
-                    time_since_last_movement = now - last_movement_reference
-                else:
-                    time_since_last_movement = float('inf')
-
-                can_attempt_recovery = (
-                    self.last_movement_command is not None
-                    and self.last_command_sent_time > 0.0
-                    and (now - self.last_command_sent_time) >= self.cfg_stuck_detection_wait
-                )
-
+                if self.navigation_state_locked:
+                    self.navigation_state_locked = False
+                self.recovery_cooldown_until = time.time()
+            else:
                 if (
-                    should_be_moving
-                    and can_attempt_recovery
-                    and now > self.recovery_cooldown_until
+                    final_player_pos is not None
+                    and contact_terrain is None
+                    and not self.airborne_path_warning_active
+                    and self.start_waypoint_found
+                    and (self.auto_control_checkbox.isChecked() or self.debug_auto_control_checkbox.isChecked())
                 ):
+                    last_reference = self.last_movement_time or self.last_action_time
+                    if last_reference:
+                        idle_duration = time.time() - last_reference
+                        wait_threshold = self.cfg_airborne_recovery_wait
+                        if idle_duration >= wait_threshold:
+                            self.airborne_path_warning_active = True
+                            if self.airborne_warning_started_at <= 0.0:
+                                self.airborne_warning_started_at = time.time() - wait_threshold
+
+                # 공중 경로 대기 상태 자동 복구 처리
+                self._handle_airborne_path_wait(final_player_pos, contact_terrain)
+
+                # --- [v.1819] '의도된 움직임' 감지 및 복구 로직 ---
+                is_moving_state = self.player_state not in ['idle']
+
+                # 1. 캐릭터가 움직였을 때, '의도된' 움직임인지 확인 후 처리
+                if is_moving_state:
+                    if self.last_movement_time:
+                        self.last_action_time = self.last_movement_time
+                    elif self.last_action_time == 0.0:
+                        self.last_action_time = time.time()
+                    # [핵심 수정] 최근 명령 컨텍스트를 기반으로 의도된 움직임 여부 판정
+                    is_intentional_move = self._was_recent_intentional_movement(final_player_pos)
+
+                    if self.stuck_recovery_attempts > 0 and is_intentional_move:
+                        self.update_general_log("[자동 복구] 의도된 움직임 감지. 복구 상태를 초기화합니다.", "green")
+                        self.stuck_recovery_attempts = 0
+                        self.last_movement_command = None
+
+                # 2. 움직여야 하는데 멈춰있고, 현재 복구 쿨다운 상태가 아닐 때만 멈춤 감지
+                should_be_moving = self.navigation_action in ['move_to_target', 'prepare_to_climb', 'prepare_to_jump', 'prepare_to_down_jump', 'prepare_to_fall', 'align_for_climb'] and self.start_waypoint_found
+
+                if not self.event_in_progress:
+                    now = time.time()
+                    last_movement_reference = self.last_movement_time or self.last_action_time
+                    if last_movement_reference:
+                        time_since_last_movement = now - last_movement_reference
+                    else:
+                        time_since_last_movement = float('inf')
+
+                    can_attempt_recovery = (
+                        self.last_movement_command is not None
+                        and self.last_command_sent_time > 0.0
+                        and (now - self.last_command_sent_time) >= self.cfg_stuck_detection_wait
+                    )
+
                     if (
-                        time_since_last_movement > self.cfg_stuck_detection_wait
-                        and self.stuck_recovery_attempts < self.MAX_STUCK_RECOVERY_ATTEMPTS
+                        should_be_moving
+                        and can_attempt_recovery
+                        and now > self.recovery_cooldown_until
                     ):
-                        self.stuck_recovery_attempts += 1
-                        log_msg = (
-                            f"[자동 복구] 멈춤 감지 ({self.stuck_recovery_attempts}/{self.MAX_STUCK_RECOVERY_ATTEMPTS})."
-                        )
-                        self._trigger_stuck_recovery(final_player_pos, log_msg)
-                        return
+                        if (
+                            time_since_last_movement > self.cfg_stuck_detection_wait
+                            and self.stuck_recovery_attempts < self.MAX_STUCK_RECOVERY_ATTEMPTS
+                        ):
+                            self.stuck_recovery_attempts += 1
+                            log_msg = (
+                                f"[자동 복구] 멈춤 감지 ({self.stuck_recovery_attempts}/{self.MAX_STUCK_RECOVERY_ATTEMPTS})."
+                            )
+                            self._trigger_stuck_recovery(final_player_pos, log_msg)
+                            return
+
+                        elif (
+                            time_since_last_movement > self.cfg_stuck_detection_wait
+                            and self.stuck_recovery_attempts >= self.MAX_STUCK_RECOVERY_ATTEMPTS
+                        ):
+                            if now - getattr(self, '_last_stuck_log_time', 0) > 5.0:
+                                self.update_general_log(
+                                    f"[자동 복구] 실패: 최대 복구 시도({self.MAX_STUCK_RECOVERY_ATTEMPTS}회)를 초과했습니다. 수동 개입이 필요할 수 있습니다.",
+                                    "red"
+                                )
+                                setattr(self, '_last_stuck_log_time', now)
 
                     elif (
-                        time_since_last_movement > self.cfg_stuck_detection_wait
-                        and self.stuck_recovery_attempts >= self.MAX_STUCK_RECOVERY_ATTEMPTS
+                        self.player_state not in ['idle', 'on_terrain']
+                        and self.last_movement_time
+                        and can_attempt_recovery
+                        and now > self.recovery_cooldown_until
                     ):
-                        if now - getattr(self, '_last_stuck_log_time', 0) > 5.0:
-                            self.update_general_log(
-                                f"[자동 복구] 실패: 최대 복구 시도({self.MAX_STUCK_RECOVERY_ATTEMPTS}회)를 초과했습니다. 수동 개입이 필요할 수 있습니다.",
-                                "red"
+                        non_walk_time_since_move = now - self.last_movement_time
+
+                        if (
+                            non_walk_time_since_move > self.NON_WALK_STUCK_THRESHOLD_S
+                            and self.stuck_recovery_attempts < self.MAX_STUCK_RECOVERY_ATTEMPTS
+                        ):
+                            self.stuck_recovery_attempts += 1
+                            log_msg = (
+                                f"[자동 복구] 비걷기 상태 멈춤 감지 ({self.stuck_recovery_attempts}/{self.MAX_STUCK_RECOVERY_ATTEMPTS})."
                             )
-                            setattr(self, '_last_stuck_log_time', now)
+                            self._trigger_stuck_recovery(final_player_pos, log_msg)
+                            return
 
-                elif (
-                    self.player_state not in ['idle', 'on_terrain']
-                    and self.last_movement_time
-                    and can_attempt_recovery
-                    and now > self.recovery_cooldown_until
-                ):
-                    non_walk_time_since_move = now - self.last_movement_time
-
-                    if (
-                        non_walk_time_since_move > self.NON_WALK_STUCK_THRESHOLD_S
-                        and self.stuck_recovery_attempts < self.MAX_STUCK_RECOVERY_ATTEMPTS
-                    ):
-                        self.stuck_recovery_attempts += 1
-                        log_msg = (
-                            f"[자동 복구] 비걷기 상태 멈춤 감지 ({self.stuck_recovery_attempts}/{self.MAX_STUCK_RECOVERY_ATTEMPTS})."
-                        )
-                        self._trigger_stuck_recovery(final_player_pos, log_msg)
-                        return
-
-                    elif (
-                        non_walk_time_since_move > self.NON_WALK_STUCK_THRESHOLD_S
-                        and self.stuck_recovery_attempts >= self.MAX_STUCK_RECOVERY_ATTEMPTS
-                    ):
-                        if now - getattr(self, '_last_stuck_log_time', 0) > 5.0:
-                            self.update_general_log(
-                                f"[자동 복구] 실패: 최대 복구 시도({self.MAX_STUCK_RECOVERY_ATTEMPTS}회)를 초과했습니다. 수동 개입이 필요할 수 있습니다.",
-                                "red"
-                            )
-                            setattr(self, '_last_stuck_log_time', now)
+                        elif (
+                            non_walk_time_since_move > self.NON_WALK_STUCK_THRESHOLD_S
+                            and self.stuck_recovery_attempts >= self.MAX_STUCK_RECOVERY_ATTEMPTS
+                        ):
+                            if now - getattr(self, '_last_stuck_log_time', 0) > 5.0:
+                                self.update_general_log(
+                                    f"[자동 복구] 실패: 최대 복구 시도({self.MAX_STUCK_RECOVERY_ATTEMPTS}회)를 초과했습니다. 수동 개입이 필요할 수 있습니다.",
+                                    "red"
+                                )
+                                setattr(self, '_last_stuck_log_time', now)
         else:
             if self.airborne_path_warning_active:
                 # 권한이 없는 동안에는 공중 경고 상태를 초기화해 추가 로그를 막는다.

@@ -872,11 +872,13 @@ class HuntTab(QWidget):
         self.shutdown_other_player_action_triggered = False
         self.shutdown_other_player_exit_delay: int = 60
         self.shutdown_other_player_wait_delay: int = 180
+        self.shutdown_other_player_wait_clear_delay: int = 60
         self.shutdown_other_player_wait_waypoint_id: Optional[str] = None
         self.shutdown_other_player_wait_waypoint_name: str = ''
         self.shutdown_other_player_wait_active = False
         self.shutdown_other_player_wait_started_at: Optional[float] = None
         self.shutdown_other_player_wait_clear_since: Optional[float] = None
+        self.shutdown_other_player_wait_restart_required = False
         self._shutdown_last_reason: Optional[str] = None
         self.shutdown_sleep_enabled = False
         self.shutdown_timer = QTimer(self)
@@ -1398,30 +1400,34 @@ class HuntTab(QWidget):
         skill_group = self._create_skill_group()
         right_column.addWidget(skill_group, 1)
 
-        config_row = QHBoxLayout()
-        config_row.setSpacing(10)
+        config_grid = QGridLayout()
+        config_grid.setContentsMargins(0, 0, 0, 0)
+        config_grid.setHorizontalSpacing(12)
+        config_grid.setVerticalSpacing(10)
+
         range_column = QVBoxLayout()
         range_column.setSpacing(10)
-        range_group.setSizePolicy(QSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed))
-        range_group.setMaximumWidth(260)
-        range_group.setMinimumWidth(200)
-        condition_group.setSizePolicy(QSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed))
-        condition_group.setMaximumWidth(260)
-        condition_group.setMinimumWidth(200)
-        range_column.addWidget(range_group)
-        range_column.addWidget(condition_group)
+        for group in (range_group, condition_group):
+            group.setSizePolicy(QSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed))
+            range_column.addWidget(group)
 
         direction_column = QVBoxLayout()
         direction_column.setSpacing(10)
         for group in (direction_switch_group, direction_group):
-            group.setSizePolicy(QSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed))
-            group.setMaximumWidth(260)
-            group.setMinimumWidth(200)
+            group.setSizePolicy(QSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed))
             direction_column.addWidget(group)
 
-        config_row.addLayout(range_column, 1)
-        config_row.addLayout(direction_column, 1)
-        right_column.addLayout(config_row)
+        placeholder_column = QVBoxLayout()
+        placeholder_column.addStretch(1)
+
+        config_grid.addLayout(range_column, 0, 0)
+        config_grid.addLayout(direction_column, 0, 1)
+        config_grid.addLayout(placeholder_column, 0, 2)
+        config_grid.setColumnStretch(0, 1)
+        config_grid.setColumnStretch(1, 1)
+        config_grid.setColumnStretch(2, 1)
+
+        right_column.addLayout(config_grid)
         auto_shutdown_group = self._create_auto_shutdown_group()
         right_column.addWidget(auto_shutdown_group)
         right_column.addStretch(1)
@@ -1728,7 +1734,7 @@ class HuntTab(QWidget):
         self.shutdown_other_player_action_group.addButton(self.shutdown_other_player_radio_shutdown, 0)
 
         self.shutdown_other_player_shutdown_btn = QPushButton("게임 종료")
-        self.shutdown_other_player_shutdown_summary = QLabel("지연 60초")
+        self.shutdown_other_player_shutdown_summary = QLabel("감지시간 60초")
         self.shutdown_other_player_shutdown_summary.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
 
         shutdown_row = QHBoxLayout()
@@ -1744,7 +1750,7 @@ class HuntTab(QWidget):
         self.shutdown_other_player_action_group.addButton(self.shutdown_other_player_radio_wait, 1)
 
         self.shutdown_other_player_wait_btn = QPushButton("대기 모드")
-        self.shutdown_other_player_wait_summary = QLabel("지연 180초 / 웨이포인트 미설정")
+        self.shutdown_other_player_wait_summary = QLabel("감지시간 180초 / 대기종료 60초 / 웨이포인트 미설정")
         self.shutdown_other_player_wait_summary.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
 
         wait_row = QHBoxLayout()
@@ -1978,7 +1984,7 @@ class HuntTab(QWidget):
         time_row_layout.addWidget(minutes_spin)
         time_row_layout.addWidget(seconds_spin)
 
-        layout.addRow("지연 시간", time_row_widget)
+        layout.addRow("감지 시간", time_row_widget)
 
         button_box = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel, dialog)
         button_box.accepted.connect(dialog.accept)
@@ -2018,6 +2024,30 @@ class HuntTab(QWidget):
         seconds_spin.setValue(self.shutdown_other_player_wait_delay % 60)
         seconds_spin.setSuffix(" 초")
 
+        detect_row_widget = QWidget(dialog)
+        detect_row_layout = QHBoxLayout(detect_row_widget)
+        detect_row_layout.setContentsMargins(0, 0, 0, 0)
+        detect_row_layout.setSpacing(8)
+        detect_row_layout.addWidget(minutes_spin)
+        detect_row_layout.addWidget(seconds_spin)
+
+        clear_minutes_spin = QSpinBox(dialog)
+        clear_minutes_spin.setRange(0, 180)
+        clear_minutes_spin.setValue(self.shutdown_other_player_wait_clear_delay // 60)
+        clear_minutes_spin.setSuffix(" 분")
+
+        clear_seconds_spin = QSpinBox(dialog)
+        clear_seconds_spin.setRange(0, 59)
+        clear_seconds_spin.setValue(self.shutdown_other_player_wait_clear_delay % 60)
+        clear_seconds_spin.setSuffix(" 초")
+
+        clear_row_widget = QWidget(dialog)
+        clear_row_layout = QHBoxLayout(clear_row_widget)
+        clear_row_layout.setContentsMargins(0, 0, 0, 0)
+        clear_row_layout.setSpacing(8)
+        clear_row_layout.addWidget(clear_minutes_spin)
+        clear_row_layout.addWidget(clear_seconds_spin)
+
         waypoint_combo = QComboBox(dialog)
         for name, wp_id in waypoint_options:
             waypoint_combo.addItem(name, wp_id)
@@ -2026,8 +2056,8 @@ class HuntTab(QWidget):
             if index >= 0:
                 waypoint_combo.setCurrentIndex(index)
 
-        layout.addRow("분", minutes_spin)
-        layout.addRow("초", seconds_spin)
+        layout.addRow("감지 시간", detect_row_widget)
+        layout.addRow("대기 종료", clear_row_widget)
         layout.addRow("웨이포인트", waypoint_combo)
 
         button_box = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel, dialog)
@@ -2041,6 +2071,11 @@ class HuntTab(QWidget):
         total_seconds = minutes_spin.value() * 60 + seconds_spin.value()
         if total_seconds <= 0:
             QMessageBox.warning(self, "시간 오류", "1초 이상으로 설정해주세요.")
+            return
+
+        clear_total_seconds = clear_minutes_spin.value() * 60 + clear_seconds_spin.value()
+        if clear_total_seconds <= 0:
+            QMessageBox.warning(self, "시간 오류", "대기 종료 시간은 1초 이상으로 설정해주세요.")
             return
 
         selected_index = waypoint_combo.currentIndex()
@@ -2057,6 +2092,7 @@ class HuntTab(QWidget):
         waypoint_name = waypoint_combo.currentText()
 
         self.shutdown_other_player_wait_delay = total_seconds
+        self.shutdown_other_player_wait_clear_delay = clear_total_seconds
         self.shutdown_other_player_wait_waypoint_id = waypoint_id
         self.shutdown_other_player_wait_waypoint_name = waypoint_name
         self.shutdown_other_player_radio_wait.setChecked(True)
@@ -2085,11 +2121,14 @@ class HuntTab(QWidget):
 
     def _update_other_player_action_summary(self) -> None:
         exit_delay_text = self._format_duration_text(self.shutdown_other_player_exit_delay)
-        self.shutdown_other_player_shutdown_summary.setText(f"지연 {exit_delay_text}")
+        self.shutdown_other_player_shutdown_summary.setText(f"감지시간 {exit_delay_text}")
 
         wait_delay_text = self._format_duration_text(self.shutdown_other_player_wait_delay)
+        clear_delay_text = self._format_duration_text(self.shutdown_other_player_wait_clear_delay)
         waypoint_text = self.shutdown_other_player_wait_waypoint_name or "웨이포인트 미설정"
-        self.shutdown_other_player_wait_summary.setText(f"지연 {wait_delay_text} / {waypoint_text}")
+        self.shutdown_other_player_wait_summary.setText(
+            f"감지시간 {wait_delay_text} / 대기종료 {clear_delay_text} / {waypoint_text}"
+        )
 
         if self.shutdown_other_player_action == 'town_return':
             self.shutdown_other_player_town_summary.setText("준비 중")
@@ -2097,7 +2136,11 @@ class HuntTab(QWidget):
             self.shutdown_other_player_town_summary.setText("준비 중")
 
     def _format_duration_text(self, total_seconds: int) -> str:
-        minutes, seconds = divmod(max(0, int(total_seconds)), 60)
+        total_seconds = max(0, int(total_seconds))
+        minutes, seconds = divmod(total_seconds, 60)
+        hours, minutes = divmod(minutes, 60)
+        if hours:
+            return f"{hours}시간 {minutes}분 {seconds}초"
         if minutes:
             return f"{minutes}분 {seconds}초"
         return f"{seconds}초"
@@ -2173,6 +2216,7 @@ class HuntTab(QWidget):
             self.shutdown_other_player_wait_active = False
             self.shutdown_other_player_wait_started_at = None
             self.shutdown_other_player_wait_clear_since = None
+            self.shutdown_other_player_wait_restart_required = False
             self.shutdown_other_player_elapsed.setText("--")
             self._stop_shutdown_timer_if_idle()
 
@@ -2457,7 +2501,7 @@ class HuntTab(QWidget):
                 if self.shutdown_other_player_wait_clear_since is None:
                     self.shutdown_other_player_wait_clear_since = now
                 clear_elapsed = now - self.shutdown_other_player_wait_clear_since
-                if clear_elapsed >= 60:
+                if clear_elapsed >= max(1, float(self.shutdown_other_player_wait_clear_delay)):
                     self._finish_other_player_wait_mode(reason="other_absent")
                     self.shutdown_other_player_detect_since = None
                     self.shutdown_other_player_action_triggered = False
@@ -2495,7 +2539,13 @@ class HuntTab(QWidget):
             self.append_log("대기 모드 요청이 거부되었습니다.", "warn")
             return False
 
-        self.force_stop_detection()
+        self.shutdown_other_player_wait_restart_required = self._is_detection_active()
+        previous_sync = bool(getattr(self, '_syncing_with_map', False))
+        self._syncing_with_map = True
+        try:
+            self.force_stop_detection()
+        finally:
+            self._syncing_with_map = previous_sync
         self.shutdown_other_player_wait_active = True
         self.shutdown_other_player_wait_started_at = started_at
         self.shutdown_other_player_elapsed.setText("대기 모드 진행 중")
@@ -2507,6 +2557,7 @@ class HuntTab(QWidget):
             return
 
         map_tab = getattr(self, 'map_tab', None)
+        restart_required = self.shutdown_other_player_wait_restart_required
         if map_tab and hasattr(map_tab, 'finish_other_player_wait_operation'):
             try:
                 map_tab.finish_other_player_wait_operation(reason=reason)
@@ -2517,7 +2568,24 @@ class HuntTab(QWidget):
         self.shutdown_other_player_wait_started_at = None
         self.shutdown_other_player_wait_clear_since = None
         self.shutdown_other_player_elapsed.setText("감지 대기")
-        self.append_log("대기 모드를 종료합니다.", "info")
+        reason_text = reason or "finished"
+        self.append_log(f"대기 모드를 종료합니다. (사유: {reason_text})", "info")
+
+        if restart_required:
+            QTimer.singleShot(500, self._restart_hunt_detection_after_wait)
+        self.shutdown_other_player_wait_restart_required = False
+
+    def _restart_hunt_detection_after_wait(self) -> None:
+        if self._is_detection_active():
+            return
+
+        try:
+            self.detect_btn.setChecked(True)
+            self._toggle_detection(True)
+        except Exception as exc:
+            self.append_log(f"대기 모드 후 탐지 재시작 실패: {exc}", "warn")
+        else:
+            self.append_log("대기 모드 종료 후 사냥 탐지를 재시작합니다.", "info")
 
     def _create_detection_group(self) -> QGroupBox:
         group = QGroupBox("탐지 실행")
@@ -6953,6 +7021,10 @@ class HuntTab(QWidget):
                 if isinstance(legacy_minutes, (int, float)) and legacy_minutes > 0:
                     self.shutdown_other_player_wait_delay = int(legacy_minutes) * 60
 
+            wait_clear_delay = auto_shutdown_cfg.get('other_wait_clear_delay')
+            if isinstance(wait_clear_delay, (int, float)) and wait_clear_delay > 0:
+                self.shutdown_other_player_wait_clear_delay = int(wait_clear_delay)
+
             wait_wp_id = auto_shutdown_cfg.get('other_wait_waypoint_id')
             wait_wp_name = auto_shutdown_cfg.get('other_wait_waypoint_name')
             if wait_wp_id is not None:
@@ -7404,6 +7476,7 @@ class HuntTab(QWidget):
             'other_action': self.shutdown_other_player_action,
             'other_exit_delay': int(self.shutdown_other_player_exit_delay),
             'other_wait_delay': int(self.shutdown_other_player_wait_delay),
+            'other_wait_clear_delay': int(self.shutdown_other_player_wait_clear_delay),
             'other_wait_waypoint_id': self.shutdown_other_player_wait_waypoint_id,
             'other_wait_waypoint_name': self.shutdown_other_player_wait_waypoint_name,
             'sleep_enabled': bool(self.shutdown_sleep_enabled),
