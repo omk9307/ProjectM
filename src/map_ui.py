@@ -301,13 +301,20 @@ except Exception as e:
 class TelegramSettingsDialog(QDialog):
     """텔레그램 전송 옵션을 설정하는 다이얼로그."""
 
-    def __init__(self, mode: str, interval_seconds: float, parent: QWidget | None = None):
+    def __init__(
+        self,
+        mode: str,
+        interval_seconds: float,
+        custom_count: int | None = None,
+        parent: QWidget | None = None,
+    ):
         super().__init__(parent)
         self.setWindowTitle("텔레그램 전송 설정")
         self.setModal(True)
 
-        self._mode = mode if mode in {"once", "continuous"} else "once"
+        self._mode = mode if mode in {"once", "continuous", "custom"} else "once"
         self._interval_seconds = max(float(interval_seconds or 5.0), 1.0)
+        self._custom_count = max(int(custom_count or 1), 1)
 
         main_layout = QVBoxLayout(self)
         mode_row = QHBoxLayout()
@@ -315,19 +322,34 @@ class TelegramSettingsDialog(QDialog):
 
         self.once_radio = QRadioButton("1회")
         self.continuous_radio = QRadioButton("지속")
+        self.custom_radio = QRadioButton("직접 입력")
 
         self.mode_group = QButtonGroup(self)
         self.mode_group.addButton(self.once_radio)
         self.mode_group.addButton(self.continuous_radio)
+        self.mode_group.addButton(self.custom_radio)
 
         mode_row.addWidget(self.once_radio)
         mode_row.addWidget(self.continuous_radio)
+        mode_row.addWidget(self.custom_radio)
+
+        self.custom_count_spinbox = QSpinBox()
+        self.custom_count_spinbox.setMinimum(1)
+        self.custom_count_spinbox.setMaximum(99)
+        self.custom_count_spinbox.setValue(self._custom_count)
+        self.custom_count_spinbox.setEnabled(False)
+        mode_row.addWidget(self.custom_count_spinbox)
         mode_row.addStretch(1)
 
         if self._mode == "continuous":
             self.continuous_radio.setChecked(True)
+        elif self._mode == "custom":
+            self.custom_radio.setChecked(True)
         else:
             self.once_radio.setChecked(True)
+
+        self.custom_radio.toggled.connect(self._handle_custom_radio_toggled)
+        self._handle_custom_radio_toggled(self.custom_radio.isChecked())
 
         interval_row = QHBoxLayout()
         interval_row.addWidget(QLabel("전송 주기(초):"))
@@ -349,10 +371,20 @@ class TelegramSettingsDialog(QDialog):
         main_layout.addWidget(button_box)
 
     def get_mode(self) -> str:
-        return "continuous" if self.continuous_radio.isChecked() else "once"
+        if self.continuous_radio.isChecked():
+            return "continuous"
+        if self.custom_radio.isChecked():
+            return "custom"
+        return "once"
 
     def get_interval_seconds(self) -> float:
         return float(self.interval_spinbox.value())
+
+    def get_custom_count(self) -> int:
+        return int(self.custom_count_spinbox.value())
+
+    def _handle_custom_radio_toggled(self, checked: bool) -> None:
+        self.custom_count_spinbox.setEnabled(checked)
 
 
 class MapTab(QWidget):
@@ -489,8 +521,10 @@ class MapTab(QWidget):
             self.telegram_alert_enabled = False
             self.telegram_send_mode = "once"
             self.telegram_send_interval = 5.0
+            self.telegram_send_custom_count = 3
             self.telegram_bot_token = ""
             self.telegram_chat_id = ""
+            self._other_player_alert_custom_remaining = 0
             self._refresh_telegram_credentials()
             self.active_feature_info = []
             self.reference_anchor_id = None
@@ -2192,12 +2226,22 @@ class MapTab(QWidget):
             self.telegram_alert_enabled = telegram_enabled
             if hasattr(self, 'telegram_settings_btn') and self.telegram_settings_btn:
                 self.telegram_settings_btn.setEnabled(other_alert_enabled and telegram_enabled)
-            self.telegram_send_mode = "continuous" if config.get("telegram_send_mode") == "continuous" else "once"
+            saved_mode_raw = config.get("telegram_send_mode", self.telegram_send_mode)
+            saved_mode = str(saved_mode_raw).lower()
+            if saved_mode in {"continuous", "custom"}:
+                self.telegram_send_mode = saved_mode
+            else:
+                self.telegram_send_mode = "once"
             try:
                 interval_value = float(config.get("telegram_send_interval", self.telegram_send_interval))
             except (TypeError, ValueError):
                 interval_value = self.telegram_send_interval
             self.telegram_send_interval = max(interval_value, 1.0)
+            custom_count_raw = config.get("telegram_send_custom_count", self.telegram_send_custom_count)
+            try:
+                self.telegram_send_custom_count = max(int(custom_count_raw), 1)
+            except (TypeError, ValueError):
+                self.telegram_send_custom_count = max(self.telegram_send_custom_count, 1)
 
             # 저장된 상태 판정 설정이 있으면 기본값을 덮어쓰기
             state_config = config.get('state_machine_config', {})
@@ -2591,6 +2635,7 @@ class MapTab(QWidget):
                 ),
                 'telegram_send_mode': self.telegram_send_mode,
                 'telegram_send_interval': float(self.telegram_send_interval),
+                'telegram_send_custom_count': int(self.telegram_send_custom_count),
             })
             
             key_features_data = self._prepare_data_for_json(self.key_features)
@@ -5159,8 +5204,25 @@ class MapTab(QWidget):
 
             interval = max(self.telegram_send_interval, 1.0)
             should_send = False
-            if self.telegram_send_mode == "continuous":
-                if first_detection or self._other_player_alert_last_time <= 0.0 or now >= self._other_player_alert_last_time + interval:
+            mode = self.telegram_send_mode
+            if mode == "continuous":
+                if (
+                    first_detection
+                    or self._other_player_alert_last_time <= 0.0
+                    or now >= self._other_player_alert_last_time + interval
+                ):
+                    should_send = True
+            elif mode == "custom":
+                if first_detection:
+                    self._other_player_alert_custom_remaining = max(
+                        int(self.telegram_send_custom_count),
+                        1,
+                    )
+                if self._other_player_alert_custom_remaining > 0 and (
+                    first_detection
+                    or self._other_player_alert_last_time <= 0.0
+                    or now >= self._other_player_alert_last_time + interval
+                ):
                     should_send = True
             else:
                 should_send = first_detection
@@ -5178,12 +5240,16 @@ class MapTab(QWidget):
                 )
                 self._send_telegram_alert(message)
                 self._other_player_alert_last_time = now
+                if mode == "custom" and self._other_player_alert_custom_remaining > 0:
+                    self._other_player_alert_custom_remaining -= 1
         else:
             self._other_player_alert_active = False
+            self._other_player_alert_custom_remaining = 0
 
     def _reset_other_player_alert_state(self) -> None:
         self._other_player_alert_active = False
         self._other_player_alert_last_time = 0.0
+        self._other_player_alert_custom_remaining = 0
 
     def _load_telegram_credentials(self) -> tuple[str, str]:
         token = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
@@ -5284,15 +5350,23 @@ class MapTab(QWidget):
         dialog = TelegramSettingsDialog(
             mode=self.telegram_send_mode,
             interval_seconds=self.telegram_send_interval,
+            custom_count=self.telegram_send_custom_count,
             parent=self,
         )
         if dialog.exec():
             self.telegram_send_mode = dialog.get_mode()
             self.telegram_send_interval = dialog.get_interval_seconds()
+            self.telegram_send_custom_count = max(dialog.get_custom_count(), 1)
             if self.active_profile_name:
                 self.save_profile_data()
+            mode_label_map = {
+                "once": "1회",
+                "continuous": "지속",
+                "custom": f"직접 입력({self.telegram_send_custom_count}회)",
+            }
+            mode_label = mode_label_map.get(self.telegram_send_mode, "1회")
             self.update_general_log(
-                f"텔레그램 전송 설정이 업데이트되었습니다. 모드: {'1회' if self.telegram_send_mode == 'once' else '지속'}, 주기: {self.telegram_send_interval:.1f}초",
+                f"텔레그램 전송 설정이 업데이트되었습니다. 모드: {mode_label}, 주기: {self.telegram_send_interval:.1f}초",
                 "blue",
             )
 
