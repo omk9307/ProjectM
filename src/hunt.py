@@ -11,7 +11,7 @@ import signal
 import html
 from ctypes import wintypes
 from dataclasses import dataclass
-from typing import Iterable, List, Optional, Callable, TextIO
+from typing import Any, Callable, Dict, Iterable, List, Optional, TextIO
 
 import pygetwindow as gw
 
@@ -47,6 +47,7 @@ from detection_runtime import DetectionPopup, DetectionThread, ScreenSnipper
 from direction_detection import DirectionDetector
 from nickname_detection import NicknameDetector
 from status_monitor import StatusMonitorThread, StatusMonitorConfig
+from authority_reason_formatter import format_authority_reason
 from control_authority_manager import (
     AuthorityDecisionStatus,
     ControlAuthorityManager,
@@ -4012,7 +4013,8 @@ class HuntTab(QWidget):
             f"모델 '{model}', 공격 스킬 {attack_count}개, 버프 스킬 {buff_count}개",
         ]
         if reason:
-            detail_parts.append(f"요청 사유: {reason}")
+            friendly_reason = format_authority_reason(reason, payload)
+            detail_parts.append(f"요청 사유: {friendly_reason}")
         self.append_log("사냥 권한 요청", "info")
         for line in detail_parts:
             self._append_log_detail(line)
@@ -6800,7 +6802,7 @@ class HuntTab(QWidget):
         if decision.status == AuthorityDecisionStatus.REJECTED:
             self.append_log(f"사냥 권한 요청 거부: {decision.reason}", "warn")
 
-    def release_control(self, reason: str | None = None) -> None:
+    def release_control(self, reason: str | None = None, *, meta: Optional[Dict[str, Any]] = None) -> None:
         if self.current_authority != "hunt":
             self.append_log("현재 사냥 권한이 없습니다.", "warn")
             return
@@ -6809,21 +6811,32 @@ class HuntTab(QWidget):
         self._request_pending = False
 
         reason_text = str(reason) if reason else "manual"
+        meta_payload: Dict[str, Any] = dict(meta) if isinstance(meta, dict) else {}
+        if reason:
+            meta_payload.setdefault("reason", reason_text)
+
         payload = {"reason": reason_text}
+        if meta_payload:
+            payload["meta"] = meta_payload
+
         self.control_authority_released.emit(payload)
         if reason:
-            self.append_log(f"사냥 권한 반환 요청 ({reason})", "info")
+            friendly_reason = format_authority_reason(reason_text, meta_payload)
+            self.append_log(f"사냥 권한 반환 요청 ({friendly_reason})", "info")
         else:
             self.append_log("사냥 권한 반환 요청", "info")
 
         if not self.map_link_enabled:
-            self.on_map_authority_changed("map", {"reason": reason_text, "source": "local"})
+            local_payload = {"reason": reason_text, "source": "local"}
+            if meta_payload:
+                local_payload["meta"] = meta_payload
+            self.on_map_authority_changed("map", local_payload)
             return
 
         decision = self._authority_manager.release_control(
             "hunt",
             reason=reason_text,
-            meta=payload,
+            meta=meta_payload,
         )
         if decision.status != AuthorityDecisionStatus.ACCEPTED:
             self.append_log(f"사냥 권한 반환 실패: {decision.reason}", "warn")
@@ -6845,18 +6858,23 @@ class HuntTab(QWidget):
         self._update_authority_ui()
         self._sync_detection_thread_status()
         reason_text = payload.get('reason')
+        raw_meta = payload.get('meta')
+        meta_payload = raw_meta if isinstance(raw_meta, dict) else {}
+        display_reason = format_authority_reason(reason_text, meta_payload)
+        if not display_reason and reason_text:
+            display_reason = str(reason_text)
         silent = bool(payload.get('silent'))
         if owner == "hunt":
             if not silent:
                 message = "사냥 탭이 조작 권한을 획득했습니다."
-                if reason_text:
-                    message += f" (사유: {reason_text})"
+                if display_reason:
+                    message += f" (사유: {display_reason})"
                 self.append_log(message, "success")
         elif owner == "map":
             if not silent:
                 message = "맵 탭으로 권한이 반환되었습니다."
-                if reason_text:
-                    message += f" (사유: {reason_text})"
+                if display_reason:
+                    message += f" (사유: {display_reason})"
                 self.append_log(message, "info")
         else:
             if not silent:
@@ -6918,6 +6936,32 @@ class HuntTab(QWidget):
                 release_reason_code = "MAX_HOLD_EXCEEDED"
             if should_release and (time.time() - self.last_release_attempt_ts) >= 1.0:
                 self.last_release_attempt_ts = time.time()
+
+                release_meta: Dict[str, Any] = {}
+                if not primary_ready and not hunt_ready:
+                    release_meta.update(
+                        {
+                            "latest_monster_count": self.latest_monster_count,
+                            "hunt_monster_threshold": hunt_threshold,
+                            "latest_primary_monster_count": self.latest_primary_monster_count,
+                            "primary_monster_threshold": primary_threshold,
+                            "idle_limit": idle_limit,
+                        }
+                    )
+                    if math.isfinite(idle_elapsed):
+                        release_meta["idle_elapsed"] = idle_elapsed
+
+                if timeout and elapsed >= timeout:
+                    release_meta.update(
+                        {
+                            "hold_elapsed": elapsed,
+                            "hold_limit": timeout,
+                        }
+                    )
+
+                if release_reason_code:
+                    release_meta.setdefault("reason", release_reason_code)
+
                 reason_parts = []
                 if not primary_ready and primary_threshold > 0:
                     reason_parts.append(
@@ -6933,7 +6977,7 @@ class HuntTab(QWidget):
                 reason_text = ", ".join(reason_parts)
                 self.append_log(f"자동 조건 해제 → 사냥 권한 반환 ({reason_text})", "info")
                 release_reason = release_reason_code if (self.map_link_enabled and release_reason_code) else reason_text
-                self.release_control(release_reason)
+                self.release_control(release_reason, meta=release_meta or None)
             return
 
         if hunt_ready or primary_ready:

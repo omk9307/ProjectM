@@ -486,6 +486,10 @@ class ControlAuthorityManager(QObject):
             "floor_elapsed": now - (self._state.floor_since or self._state.held_since),
             "floor": snapshot.floor,
         }
+        if total_limit > 0.0:
+            meta["total_limit"] = total_limit
+        if floor_limit > 0.0:
+            meta["floor_limit"] = floor_limit
 
         self._transition_to("map", source="forced", reason=reason, meta=meta)
         self._pending_hunt_request = None

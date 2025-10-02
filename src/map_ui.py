@@ -31,6 +31,7 @@ from typing import Any, Dict, Optional, TextIO
 
 from status_monitor import StatusMonitorThread, StatusMonitorConfig
 from control_authority_manager import ControlAuthorityManager, PlayerStatusSnapshot
+from authority_reason_formatter import format_authority_reason
 
 from PyQt6.QtWidgets import (
     QApplication, QWidget, QLabel, QVBoxLayout, QHBoxLayout, QPushButton, QTextEdit,
@@ -866,10 +867,19 @@ class MapTab(QWidget):
             meta = payload.get('meta')
             if isinstance(meta, dict):
                 event_extra['meta'] = dict(meta)
+                meta_for_reason = meta
+            else:
+                meta_for_reason = {}
+        else:
+            meta_for_reason = {}
+
+        display_reason = format_authority_reason(reason, meta_for_reason)
+        if not display_reason and reason:
+            display_reason = reason
 
         message = f"[권한][위임] 조작 권한이 {friendly}으로 이동했습니다."
-        if reason:
-            message += f" 사유: {reason}"
+        if display_reason:
+            message += f" 사유: {display_reason}"
 
         self._record_authority_event(
             "released",
@@ -888,6 +898,7 @@ class MapTab(QWidget):
         if reason:
             reason = str(reason)
 
+        meta_for_reason: Dict[str, Any] = {}
         event_extra: Dict[str, Any] = {}
         if isinstance(payload, dict):
             elapsed = payload.get('elapsed_since_previous')
@@ -896,8 +907,13 @@ class MapTab(QWidget):
             meta = payload.get('meta')
             if isinstance(meta, dict):
                 event_extra['meta'] = dict(meta)
+                meta_for_reason = meta
 
         authority_source = payload.get('source') if isinstance(payload, dict) else None
+
+        display_reason = format_authority_reason(reason, meta_for_reason)
+        if not display_reason and reason:
+            display_reason = reason
 
         if reason == "FORBIDDEN_WALL":
             takeover_context = self._forbidden_takeover_context or {}
@@ -927,8 +943,8 @@ class MapTab(QWidget):
             command_to_resume = resume_entry.get('command')
 
         message = "[권한][획득] 맵 탭이 조작 권한을 획득했습니다."
-        if reason:
-            message += f" 사유: {reason}"
+        if display_reason:
+            message += f" 사유: {display_reason}"
         if command_to_resume:
             message += f" | 재실행 예정 명령: {command_to_resume}"
         else:
