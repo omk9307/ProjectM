@@ -19,19 +19,23 @@ import pygetwindow as gw
 from PyQt6.QtCore import Qt, QTimer, pyqtSignal, QRect, QThread, QAbstractNativeEventFilter, QDateTime, QSignalBlocker
 from PyQt6.QtWidgets import (
     QApplication,
+    QButtonGroup,
     QCheckBox,
     QComboBox,
+    QDateTimeEdit,
     QDialog,
     QDialogButtonBox,
     QFormLayout,
+    QGridLayout,
     QGroupBox,
     QHBoxLayout,
+    QInputDialog,
     QLabel,
     QLineEdit,
-    QDateTimeEdit,
     QDoubleSpinBox,
     QMessageBox,
     QPushButton,
+    QRadioButton,
     QSpinBox,
     QTextEdit,
     QTreeWidget,
@@ -39,7 +43,6 @@ from PyQt6.QtWidgets import (
     QVBoxLayout,
     QWidget,
     QSizePolicy,
-    QInputDialog,
 )
 
 from PyQt6.QtGui import QPixmap, QPainter, QPen, QColor, QBrush, QTextCursor, QGuiApplication
@@ -856,14 +859,24 @@ class HuntTab(QWidget):
         self.hotkey_event_filter = None
         self.detection_hotkey = 'f10'
 
-        # 자동 종료 상태
+        # 자동 대응 상태
         self.shutdown_pid_value: Optional[int] = None
+        self.shutdown_pid_last_scan: Optional[float] = None
         self.shutdown_datetime_target: Optional[float] = None
-        self.shutdown_delay_target: Optional[float] = None
+        self.shutdown_reservation_enabled = False
         self.shutdown_other_player_enabled = False
         self.shutdown_other_player_detect_since: Optional[float] = None
-        self.shutdown_other_player_due: Optional[float] = None
+        self.shutdown_other_player_due_ts: Optional[float] = None
         self.shutdown_other_player_last_count: int = 0
+        self.shutdown_other_player_action: str = 'game_exit'
+        self.shutdown_other_player_action_triggered = False
+        self.shutdown_other_player_exit_delay: int = 60
+        self.shutdown_other_player_wait_delay: int = 180
+        self.shutdown_other_player_wait_waypoint_id: Optional[int] = None
+        self.shutdown_other_player_wait_waypoint_name: str = ''
+        self.shutdown_other_player_wait_active = False
+        self.shutdown_other_player_wait_started_at: Optional[float] = None
+        self.shutdown_other_player_wait_clear_since: Optional[float] = None
         self._shutdown_last_reason: Optional[str] = None
         self.shutdown_sleep_enabled = False
         self.shutdown_timer = QTimer(self)
@@ -1620,14 +1633,16 @@ class HuntTab(QWidget):
         return group
 
     def _create_auto_shutdown_group(self) -> QGroupBox:
-        group = QGroupBox("자동 종료")
+        group = QGroupBox("자동 대응")
         group.setSizePolicy(
             QSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         )
+
         outer_layout = QVBoxLayout()
         outer_layout.setContentsMargins(8, 8, 8, 8)
-        outer_layout.setSpacing(8)
+        outer_layout.setSpacing(10)
 
+        # PID 설정 및 자동 검색
         pid_row = QHBoxLayout()
         pid_row.setSpacing(6)
         pid_row.addWidget(QLabel("PID:"))
@@ -1635,8 +1650,43 @@ class HuntTab(QWidget):
         self.shutdown_pid_input.setPlaceholderText("예: 12345")
         self.shutdown_pid_input.setMaximumWidth(120)
         pid_row.addWidget(self.shutdown_pid_input)
+
+        self.shutdown_pid_find_btn = QPushButton("PID 찾기")
+        pid_row.addWidget(self.shutdown_pid_find_btn)
         pid_row.addStretch(1)
         outer_layout.addLayout(pid_row)
+
+        # 종료 예약 섹션
+        reservation_group = QGroupBox("종료 예약")
+        reservation_layout = QVBoxLayout()
+        reservation_layout.setContentsMargins(8, 6, 8, 6)
+        reservation_layout.setSpacing(6)
+
+        reservation_row = QHBoxLayout()
+        reservation_row.setSpacing(6)
+        self.shutdown_reservation_checkbox = QCheckBox("종료 예약")
+        reservation_row.addWidget(self.shutdown_reservation_checkbox)
+
+        self.shutdown_datetime_edit = QDateTimeEdit()
+        self.shutdown_datetime_edit.setCalendarPopup(True)
+        self.shutdown_datetime_edit.setDisplayFormat("yyyy-MM-dd HH:mm:ss")
+        self.shutdown_datetime_edit.setMinimumDateTime(QDateTime.currentDateTime())
+        self.shutdown_datetime_edit.setEnabled(False)
+        reservation_row.addWidget(self.shutdown_datetime_edit, 1)
+
+        self.shutdown_reservation_apply_btn = QPushButton("예약")
+        self.shutdown_reservation_apply_btn.setEnabled(False)
+        reservation_row.addWidget(self.shutdown_reservation_apply_btn)
+
+        self.shutdown_reservation_cancel_btn = QPushButton("취소")
+        self.shutdown_reservation_cancel_btn.setEnabled(False)
+        reservation_row.addWidget(self.shutdown_reservation_cancel_btn)
+
+        self.shutdown_reservation_status = QLabel("--")
+        self.shutdown_reservation_status.setMinimumWidth(120)
+        reservation_row.addWidget(self.shutdown_reservation_status)
+
+        reservation_layout.addLayout(reservation_row)
 
         sleep_row = QHBoxLayout()
         sleep_row.setSpacing(6)
@@ -1644,63 +1694,66 @@ class HuntTab(QWidget):
         self.shutdown_sleep_checkbox.setToolTip("PID 종료 후 Windows 절전 모드를 시도합니다.")
         sleep_row.addWidget(self.shutdown_sleep_checkbox)
         sleep_row.addStretch(1)
-        outer_layout.addLayout(sleep_row)
+        reservation_layout.addLayout(sleep_row)
 
-        schedule_group = QGroupBox("특정 일시 종료")
-        schedule_layout = QHBoxLayout()
-        schedule_layout.setSpacing(6)
-        self.shutdown_datetime_edit = QDateTimeEdit()
-        self.shutdown_datetime_edit.setCalendarPopup(True)
-        self.shutdown_datetime_edit.setDisplayFormat("yyyy-MM-dd HH:mm")
-        self.shutdown_datetime_edit.setMinimumDateTime(QDateTime.currentDateTime())
-        schedule_layout.addWidget(self.shutdown_datetime_edit, 1)
-        self.shutdown_datetime_start_btn = QPushButton("예약")
-        schedule_layout.addWidget(self.shutdown_datetime_start_btn)
-        self.shutdown_datetime_cancel_btn = QPushButton("취소")
-        schedule_layout.addWidget(self.shutdown_datetime_cancel_btn)
-        self.shutdown_datetime_status = QLabel("--")
-        self.shutdown_datetime_status.setMinimumWidth(110)
-        schedule_layout.addWidget(self.shutdown_datetime_status)
-        schedule_group.setLayout(schedule_layout)
-        outer_layout.addWidget(schedule_group)
+        reservation_group.setLayout(reservation_layout)
+        outer_layout.addWidget(reservation_group)
 
-        delay_group = QGroupBox("N시간 N분 후 종료")
-        delay_layout = QHBoxLayout()
-        delay_layout.setSpacing(6)
-        self.shutdown_delay_hours_spin = QSpinBox()
-        self.shutdown_delay_hours_spin.setRange(0, 72)
-        self.shutdown_delay_hours_spin.setSuffix(" 시간")
-        delay_layout.addWidget(self.shutdown_delay_hours_spin)
-        self.shutdown_delay_minutes_spin = QSpinBox()
-        self.shutdown_delay_minutes_spin.setRange(0, 59)
-        self.shutdown_delay_minutes_spin.setSuffix(" 분")
-        delay_layout.addWidget(self.shutdown_delay_minutes_spin)
-        self.shutdown_delay_start_btn = QPushButton("예약")
-        delay_layout.addWidget(self.shutdown_delay_start_btn)
-        self.shutdown_delay_cancel_btn = QPushButton("취소")
-        delay_layout.addWidget(self.shutdown_delay_cancel_btn)
-        self.shutdown_delay_status = QLabel("--")
-        self.shutdown_delay_status.setMinimumWidth(110)
-        delay_layout.addWidget(self.shutdown_delay_status)
-        delay_group.setLayout(delay_layout)
-        outer_layout.addWidget(delay_group)
-
+        # 다른 캐릭터 감지 섹션
         other_group = QGroupBox("다른 캐릭터 감지")
-        other_layout = QHBoxLayout()
+        other_layout = QVBoxLayout()
+        other_layout.setContentsMargins(8, 6, 8, 6)
         other_layout.setSpacing(6)
-        self.shutdown_other_player_checkbox = QCheckBox("감지 시")
-        other_layout.addWidget(self.shutdown_other_player_checkbox)
-        other_layout.addWidget(QLabel("N분 지속"))
-        self.shutdown_other_player_minutes_spin = QSpinBox()
-        self.shutdown_other_player_minutes_spin.setRange(1, 120)
-        self.shutdown_other_player_minutes_spin.setValue(5)
-        self.shutdown_other_player_minutes_spin.setSuffix(" 분")
-        other_layout.addWidget(self.shutdown_other_player_minutes_spin)
-        self.shutdown_other_player_reset_btn = QPushButton("초기화")
-        other_layout.addWidget(self.shutdown_other_player_reset_btn)
-        self.shutdown_other_player_status = QLabel("--")
-        self.shutdown_other_player_status.setMinimumWidth(140)
-        other_layout.addWidget(self.shutdown_other_player_status)
+
+        other_header = QHBoxLayout()
+        other_header.setSpacing(6)
+        self.shutdown_other_player_checkbox = QCheckBox("다른 캐릭터 감지")
+        other_header.addWidget(self.shutdown_other_player_checkbox)
+        other_header.addStretch(1)
+        self.shutdown_other_player_elapsed = QLabel("--")
+        self.shutdown_other_player_elapsed.setMinimumWidth(140)
+        other_header.addWidget(self.shutdown_other_player_elapsed)
+        other_layout.addLayout(other_header)
+
+        self.shutdown_other_player_action_group = QButtonGroup(self)
+        actions_layout = QGridLayout()
+        actions_layout.setHorizontalSpacing(6)
+        actions_layout.setVerticalSpacing(4)
+
+        # 게임 종료 액션
+        self.shutdown_other_player_radio_shutdown = QRadioButton()
+        self.shutdown_other_player_action_group.addButton(self.shutdown_other_player_radio_shutdown, 0)
+        actions_layout.addWidget(self.shutdown_other_player_radio_shutdown, 0, 0)
+
+        self.shutdown_other_player_shutdown_btn = QPushButton("게임 종료")
+        actions_layout.addWidget(self.shutdown_other_player_shutdown_btn, 0, 1)
+
+        self.shutdown_other_player_shutdown_summary = QLabel("지연 60초")
+        actions_layout.addWidget(self.shutdown_other_player_shutdown_summary, 0, 2)
+
+        # 대기 모드 액션
+        self.shutdown_other_player_radio_wait = QRadioButton()
+        self.shutdown_other_player_action_group.addButton(self.shutdown_other_player_radio_wait, 1)
+        actions_layout.addWidget(self.shutdown_other_player_radio_wait, 1, 0)
+
+        self.shutdown_other_player_wait_btn = QPushButton("대기 모드")
+        actions_layout.addWidget(self.shutdown_other_player_wait_btn, 1, 1)
+
+        self.shutdown_other_player_wait_summary = QLabel("지연 180초 / 웨이포인트 미설정")
+        actions_layout.addWidget(self.shutdown_other_player_wait_summary, 1, 2)
+
+        # 마을 귀환 액션 (미구현)
+        self.shutdown_other_player_radio_town = QRadioButton()
+        self.shutdown_other_player_action_group.addButton(self.shutdown_other_player_radio_town, 2)
+        actions_layout.addWidget(self.shutdown_other_player_radio_town, 2, 0)
+
+        self.shutdown_other_player_town_btn = QPushButton("마을 귀환 (미구현)")
+        actions_layout.addWidget(self.shutdown_other_player_town_btn, 2, 1)
+
+        self.shutdown_other_player_town_summary = QLabel("준비 중")
+        actions_layout.addWidget(self.shutdown_other_player_town_summary, 2, 2)
+
+        other_layout.addLayout(actions_layout)
         other_group.setLayout(other_layout)
         outer_layout.addWidget(other_group)
 
@@ -1715,7 +1768,7 @@ class HuntTab(QWidget):
         return group
 
     def _setup_auto_shutdown_ui(self) -> None:
-        if not hasattr(self, 'shutdown_datetime_edit'):
+        if not hasattr(self, 'shutdown_reservation_checkbox'):
             return
 
         try:
@@ -1724,17 +1777,298 @@ class HuntTab(QWidget):
         except Exception:
             pass
 
-        self.shutdown_datetime_start_btn.clicked.connect(self._schedule_absolute_shutdown)
-        self.shutdown_datetime_cancel_btn.clicked.connect(lambda: self._cancel_shutdown_mode('absolute'))
-        self.shutdown_delay_start_btn.clicked.connect(self._schedule_delay_shutdown)
-        self.shutdown_delay_cancel_btn.clicked.connect(lambda: self._cancel_shutdown_mode('delay'))
-        self.shutdown_other_player_checkbox.toggled.connect(self._toggle_other_player_mode)
-        self.shutdown_other_player_reset_btn.clicked.connect(self._reset_other_player_progress)
+        self.shutdown_reservation_checkbox.toggled.connect(self._on_shutdown_reservation_toggled)
+        self.shutdown_reservation_apply_btn.clicked.connect(self._apply_shutdown_reservation)
+        self.shutdown_reservation_cancel_btn.clicked.connect(self._cancel_shutdown_reservation)
+
         self.shutdown_pid_input.editingFinished.connect(self._sync_shutdown_pid_from_input)
-        self.shutdown_other_player_minutes_spin.valueChanged.connect(self._handle_other_player_minutes_changed)
+        self.shutdown_pid_find_btn.clicked.connect(lambda: self._auto_detect_mapleland_pid(manual=True))
+
         self.shutdown_sleep_checkbox.toggled.connect(self._on_shutdown_sleep_toggled)
 
+        self.shutdown_other_player_checkbox.toggled.connect(self._toggle_other_player_mode)
+        self.shutdown_other_player_action_group.idClicked.connect(self._on_other_player_action_changed)
+        self.shutdown_other_player_shutdown_btn.clicked.connect(self._configure_other_player_game_exit)
+        self.shutdown_other_player_wait_btn.clicked.connect(self._configure_other_player_wait_mode)
+        self.shutdown_other_player_town_btn.clicked.connect(self._configure_other_player_town_mode)
+        self.shutdown_other_player_radio_shutdown.setChecked(True)
+
+        self._update_other_player_action_summary()
         self._update_shutdown_labels()
+
+    def _on_shutdown_reservation_toggled(self, checked: bool) -> None:
+        checked = bool(checked)
+        self.shutdown_reservation_enabled = checked
+        for widget in (
+            self.shutdown_datetime_edit,
+            self.shutdown_reservation_apply_btn,
+            self.shutdown_reservation_cancel_btn,
+        ):
+            widget.setEnabled(checked)
+
+        if checked and self.shutdown_pid_value is None:
+            self._auto_detect_mapleland_pid(auto_trigger=True)
+
+        if not checked:
+            self.shutdown_datetime_target = None
+            self.shutdown_reservation_status.setText("--")
+
+        self._ensure_shutdown_timer_running()
+        self._update_shutdown_labels()
+
+    def _apply_shutdown_reservation(self) -> None:
+        if not self.shutdown_reservation_checkbox.isChecked():
+            QMessageBox.warning(self, "예약 필요", "종료 예약을 먼저 활성화해주세요.")
+            return
+
+        pid = self._require_shutdown_pid()
+        if pid is None:
+            return
+
+        try:
+            target_dt = self.shutdown_datetime_edit.dateTime()
+        except Exception:
+            target_dt = None
+
+        if target_dt is None or not target_dt.isValid():
+            QMessageBox.warning(self, "시간 오류", "유효한 종료 일시를 선택해주세요.")
+            return
+
+        target_ts = float(target_dt.toSecsSinceEpoch())
+        now = time.time()
+        if target_ts <= now:
+            QMessageBox.warning(self, "시간 오류", "종료 예약 시간은 현재보다 이후여야 합니다.")
+            return
+
+        self.shutdown_pid_value = pid
+        self.shutdown_datetime_target = target_ts
+        self.shutdown_reservation_checkbox.setChecked(True)
+        self.shutdown_reservation_status.setText(self._format_remaining_text(target_ts - now))
+        self._ensure_shutdown_timer_running()
+        self._update_shutdown_labels()
+        self.append_log("종료 예약이 설정되었습니다.", "info")
+
+    def _cancel_shutdown_reservation(self) -> None:
+        if self.shutdown_datetime_target is None:
+            self.shutdown_reservation_status.setText("--")
+            return
+
+        self.shutdown_datetime_target = None
+        self.shutdown_reservation_status.setText("--")
+        self._stop_shutdown_timer_if_idle()
+        self._update_shutdown_labels()
+        self.append_log("종료 예약을 취소했습니다.", "info")
+
+    def _auto_detect_mapleland_pid(self, *, manual: bool = False, auto_trigger: bool = False) -> Optional[int]:
+        candidate_pid: Optional[int] = None
+        detect_errors: list[str] = []
+
+        # 1. psutil 우선 사용
+        try:
+            import psutil  # type: ignore
+
+            for proc in psutil.process_iter(['pid', 'name', 'cmdline']):
+                name = (proc.info.get('name') or '').lower()
+                cmdline = ' '.join(proc.info.get('cmdline') or []).lower()
+                if 'mapleland' in name or 'mapleland' in cmdline:
+                    candidate_pid = int(proc.info['pid'])
+                    break
+        except ImportError:
+            detect_errors.append('psutil 미설치')
+        except Exception as exc:  # pragma: no cover - 진단 로그
+            detect_errors.append(f'psutil 오류: {exc}')
+
+        # 2. Windows tasklist fallback
+        if candidate_pid is None and os.name == 'nt':
+            import subprocess
+            import locale
+
+            try:
+                encoding = locale.getpreferredencoding(False) or 'cp949'
+                output = subprocess.check_output(
+                    ['tasklist', '/FI', 'IMAGENAME eq Mapleland.exe'],
+                    stderr=subprocess.STDOUT,
+                )
+                text = output.decode(encoding, errors='ignore')
+                for line in text.splitlines():
+                    if 'Mapleland' not in line:
+                        continue
+                    parts = [p for p in line.split() if p.isdigit()]
+                    if parts:
+                        candidate_pid = int(parts[0])
+                        break
+            except FileNotFoundError:
+                detect_errors.append('tasklist 미지원 환경')
+            except Exception as exc:  # pragma: no cover - 진단 로그
+                detect_errors.append(f'tasklist 오류: {exc}')
+
+        if candidate_pid is None:
+            if manual:
+                detail = '\n'.join(detect_errors) if detect_errors else 'Mapleland 프로세스를 찾지 못했습니다.'
+                QMessageBox.warning(self, "PID 검색 실패", detail)
+            elif not auto_trigger:
+                self.append_log("Mapleland PID 자동 검색에 실패했습니다.", "warn")
+            return None
+
+        self.shutdown_pid_value = candidate_pid
+        self.shutdown_pid_last_scan = time.time()
+        if hasattr(self, 'shutdown_pid_input'):
+            blocker = QSignalBlocker(self.shutdown_pid_input)
+            self.shutdown_pid_input.setText(str(candidate_pid))
+            del blocker
+
+        if manual:
+            self.append_log(f"Mapleland PID 자동 검색 성공: {candidate_pid}", "info")
+        elif not auto_trigger:
+            self.append_log(f"PID {candidate_pid} 자동 감지", "info")
+
+        return candidate_pid
+
+    def _on_other_player_action_changed(self, action_id: int) -> None:
+        mapping = {
+            0: 'game_exit',
+            1: 'wait_mode',
+            2: 'town_return',
+        }
+        self.shutdown_other_player_action = mapping.get(action_id, 'game_exit')
+        if self.shutdown_other_player_action == 'town_return':
+            self.append_log("마을 귀환 기능은 아직 구현되지 않았습니다.", "warn")
+        self._update_other_player_action_summary()
+
+    def _configure_other_player_game_exit(self) -> None:
+        dialog = QDialog(self)
+        dialog.setWindowTitle("게임 종료 대기 시간")
+        layout = QFormLayout(dialog)
+
+        minutes_spin = QSpinBox(dialog)
+        minutes_spin.setRange(0, 180)
+        minutes_spin.setValue(self.shutdown_other_player_exit_delay // 60)
+        minutes_spin.setSuffix(" 분")
+
+        seconds_spin = QSpinBox(dialog)
+        seconds_spin.setRange(0, 59)
+        seconds_spin.setValue(self.shutdown_other_player_exit_delay % 60)
+        seconds_spin.setSuffix(" 초")
+
+        layout.addRow("분", minutes_spin)
+        layout.addRow("초", seconds_spin)
+
+        button_box = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel, dialog)
+        button_box.accepted.connect(dialog.accept)
+        button_box.rejected.connect(dialog.reject)
+        layout.addWidget(button_box)
+
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+
+        total_seconds = minutes_spin.value() * 60 + seconds_spin.value()
+        if total_seconds <= 0:
+            QMessageBox.warning(self, "시간 오류", "1초 이상으로 설정해주세요.")
+            return
+
+        self.shutdown_other_player_exit_delay = total_seconds
+        self.shutdown_other_player_radio_shutdown.setChecked(True)
+        self.shutdown_other_player_action = 'game_exit'
+        self._update_other_player_action_summary()
+
+    def _configure_other_player_wait_mode(self) -> None:
+        waypoint_options = self._collect_waypoint_options()
+        if not waypoint_options:
+            QMessageBox.warning(self, "웨이포인트 없음", "맵 탭에서 웨이포인트 정보를 불러오지 못했습니다.")
+            return
+
+        dialog = QDialog(self)
+        dialog.setWindowTitle("대기 모드 설정")
+        layout = QFormLayout(dialog)
+
+        minutes_spin = QSpinBox(dialog)
+        minutes_spin.setRange(0, 180)
+        minutes_spin.setValue(self.shutdown_other_player_wait_delay // 60)
+        minutes_spin.setSuffix(" 분")
+
+        seconds_spin = QSpinBox(dialog)
+        seconds_spin.setRange(0, 59)
+        seconds_spin.setValue(self.shutdown_other_player_wait_delay % 60)
+        seconds_spin.setSuffix(" 초")
+
+        waypoint_combo = QComboBox(dialog)
+        for name, wp_id in waypoint_options:
+            waypoint_combo.addItem(name, wp_id)
+        if self.shutdown_other_player_wait_waypoint_name:
+            index = waypoint_combo.findText(self.shutdown_other_player_wait_waypoint_name)
+            if index >= 0:
+                waypoint_combo.setCurrentIndex(index)
+
+        layout.addRow("분", minutes_spin)
+        layout.addRow("초", seconds_spin)
+        layout.addRow("웨이포인트", waypoint_combo)
+
+        button_box = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel, dialog)
+        button_box.accepted.connect(dialog.accept)
+        button_box.rejected.connect(dialog.reject)
+        layout.addWidget(button_box)
+
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+
+        total_seconds = minutes_spin.value() * 60 + seconds_spin.value()
+        if total_seconds <= 0:
+            QMessageBox.warning(self, "시간 오류", "1초 이상으로 설정해주세요.")
+            return
+
+        selected_index = waypoint_combo.currentIndex()
+        if selected_index < 0:
+            QMessageBox.warning(self, "웨이포인트 선택", "대기할 웨이포인트를 선택해주세요.")
+            return
+
+        waypoint_id = int(waypoint_combo.currentData())
+        waypoint_name = waypoint_combo.currentText()
+
+        self.shutdown_other_player_wait_delay = total_seconds
+        self.shutdown_other_player_wait_waypoint_id = waypoint_id
+        self.shutdown_other_player_wait_waypoint_name = waypoint_name
+        self.shutdown_other_player_radio_wait.setChecked(True)
+        self.shutdown_other_player_action = 'wait_mode'
+        self._update_other_player_action_summary()
+
+    def _configure_other_player_town_mode(self) -> None:
+        QMessageBox.information(self, "마을 귀환", "마을 귀환 기능은 아직 구현되지 않았습니다.")
+        self.shutdown_other_player_radio_town.setChecked(True)
+        self.shutdown_other_player_action = 'town_return'
+        self._update_other_player_action_summary()
+
+    def _collect_waypoint_options(self) -> list[tuple[str, int]]:
+        map_tab = getattr(self, 'map_tab', None)
+        geometry = getattr(map_tab, 'geometry_data', None)
+        waypoints = []
+        if isinstance(geometry, dict):
+            for item in geometry.get('waypoints', []) or []:
+                name = item.get('name') or ''
+                wp_id = item.get('id')
+                if not name or wp_id is None:
+                    continue
+                waypoints.append((str(name), int(wp_id)))
+        waypoints.sort(key=lambda x: x[0].lower())
+        return waypoints
+
+    def _update_other_player_action_summary(self) -> None:
+        exit_delay_text = self._format_duration_text(self.shutdown_other_player_exit_delay)
+        self.shutdown_other_player_shutdown_summary.setText(f"지연 {exit_delay_text}")
+
+        wait_delay_text = self._format_duration_text(self.shutdown_other_player_wait_delay)
+        waypoint_text = self.shutdown_other_player_wait_waypoint_name or "웨이포인트 미설정"
+        self.shutdown_other_player_wait_summary.setText(f"지연 {wait_delay_text} / {waypoint_text}")
+
+        if self.shutdown_other_player_action == 'town_return':
+            self.shutdown_other_player_town_summary.setText("준비 중")
+        else:
+            self.shutdown_other_player_town_summary.setText("준비 중")
+
+    def _format_duration_text(self, total_seconds: int) -> str:
+        minutes, seconds = divmod(max(0, int(total_seconds)), 60)
+        if minutes:
+            return f"{minutes}분 {seconds}초"
+        return f"{seconds}초"
 
     def _sync_shutdown_pid_from_input(self) -> None:
         text = self.shutdown_pid_input.text().strip() if hasattr(self, 'shutdown_pid_input') else ''
@@ -1781,69 +2115,34 @@ class HuntTab(QWidget):
         self._ensure_shutdown_timer_running()
         self._update_shutdown_labels()
 
-    def _schedule_delay_shutdown(self) -> None:
-        pid = self._require_shutdown_pid()
-        if pid is None:
-            return
-        hours = int(self.shutdown_delay_hours_spin.value()) if hasattr(self, 'shutdown_delay_hours_spin') else 0
-        minutes = int(self.shutdown_delay_minutes_spin.value()) if hasattr(self, 'shutdown_delay_minutes_spin') else 0
-        total_seconds = hours * 3600 + minutes * 60
-        if total_seconds <= 0:
-            QMessageBox.warning(self, "시간 오류", "1분 이상으로 설정해주세요.")
-            return
-        self.shutdown_pid_value = pid
-        self.shutdown_delay_target = time.time() + total_seconds
-        self._ensure_shutdown_timer_running()
-        self._update_shutdown_labels()
-
-    def _cancel_shutdown_mode(self, mode: str) -> None:
-        mode = (mode or '').lower()
-        if mode == 'absolute':
-            self.shutdown_datetime_target = None
-            self.shutdown_datetime_status.setText("--")
-        elif mode == 'delay':
-            self.shutdown_delay_target = None
-            self.shutdown_delay_status.setText("--")
-        elif mode == 'other':
-            self._reset_other_player_progress()
-            if hasattr(self, 'shutdown_other_player_checkbox'):
-                blocker = QSignalBlocker(self.shutdown_other_player_checkbox)
-                self.shutdown_other_player_checkbox.setChecked(False)
-                del blocker
-        self._update_shutdown_labels()
-        self._stop_shutdown_timer_if_idle()
-
     def _toggle_other_player_mode(self, checked: bool) -> None:
         checked = bool(checked)
+        self.shutdown_other_player_enabled = checked
+
         if checked:
-            pid = self._require_shutdown_pid()
-            if pid is None:
-                blocker = QSignalBlocker(self.shutdown_other_player_checkbox)
-                self.shutdown_other_player_checkbox.setChecked(False)
-                del blocker
-                return
-            self.shutdown_pid_value = pid
-            self.shutdown_other_player_enabled = True
+            if self.shutdown_other_player_action == 'game_exit' and self.shutdown_pid_value is None:
+                self._auto_detect_mapleland_pid(auto_trigger=True)
+            self._reset_other_player_progress(reset_state_only=True)
+            self.shutdown_other_player_elapsed.setText("감지 대기")
             self._ensure_shutdown_timer_running()
         else:
-            self.shutdown_other_player_enabled = False
             self._reset_other_player_progress()
         self._update_shutdown_labels()
 
-    def _reset_other_player_progress(self) -> None:
-        self.shutdown_other_player_detect_since = None
-        self.shutdown_other_player_due = None
-        if hasattr(self, 'shutdown_other_player_status'):
-            self.shutdown_other_player_status.setText("--")
-        self._stop_shutdown_timer_if_idle()
+    def _reset_other_player_progress(self, *, reset_state_only: bool = False) -> None:
+        if not reset_state_only and self.shutdown_other_player_wait_active:
+            self._finish_other_player_wait_mode(reason="reset")
 
-    def _handle_other_player_minutes_changed(self, value: int) -> None:
-        if not self.shutdown_other_player_detect_since:
-            return
-        minutes = max(1, int(value))
-        self.shutdown_other_player_due = self.shutdown_other_player_detect_since + minutes * 60
-        self._ensure_shutdown_timer_running()
-        self._update_shutdown_labels()
+        self.shutdown_other_player_detect_since = None
+        self.shutdown_other_player_due_ts = None
+        self.shutdown_other_player_last_count = 0
+        self.shutdown_other_player_action_triggered = False
+        if not reset_state_only:
+            self.shutdown_other_player_wait_active = False
+            self.shutdown_other_player_wait_started_at = None
+            self.shutdown_other_player_wait_clear_since = None
+            self.shutdown_other_player_elapsed.setText("--")
+            self._stop_shutdown_timer_if_idle()
 
     def _on_shutdown_sleep_toggled(self, checked: bool) -> None:
         self.shutdown_sleep_enabled = bool(checked)
@@ -1851,51 +2150,41 @@ class HuntTab(QWidget):
         self._handle_setting_changed()
 
     def _ensure_shutdown_timer_running(self) -> None:
-        if not self.shutdown_timer.isActive():
+        needs_timer = (
+            (self.shutdown_reservation_enabled and self.shutdown_datetime_target is not None)
+            or self.shutdown_other_player_enabled
+        )
+        if needs_timer and not self.shutdown_timer.isActive():
             self.shutdown_timer.start()
+        elif not needs_timer and self.shutdown_timer.isActive():
+            self.shutdown_timer.stop()
 
     def _stop_shutdown_timer_if_idle(self) -> None:
-        if (
-            self.shutdown_datetime_target is None
-            and self.shutdown_delay_target is None
-            and (not self.shutdown_other_player_enabled or self.shutdown_other_player_due is None)
+        if not (
+            (self.shutdown_reservation_enabled and self.shutdown_datetime_target is not None)
+            or self.shutdown_other_player_enabled
         ):
             self.shutdown_timer.stop()
 
     def _handle_shutdown_timer_tick(self) -> None:
         now = time.time()
-        triggered_modes: list[str] = []
+        triggered = False
 
-        if self.shutdown_datetime_target is not None:
+        if self.shutdown_reservation_enabled and self.shutdown_datetime_target is not None:
             remaining = self.shutdown_datetime_target - now
             if remaining <= 0:
-                triggered_modes.append('absolute')
+                self._trigger_shutdown('reservation')
+                triggered = True
             else:
-                self.shutdown_datetime_status.setText(self._format_remaining_text(remaining))
+                self.shutdown_reservation_status.setText(self._format_remaining_text(remaining))
 
-        if self.shutdown_delay_target is not None:
-            remaining = self.shutdown_delay_target - now
-            if remaining <= 0:
-                triggered_modes.append('delay')
-            else:
-                self.shutdown_delay_status.setText(self._format_remaining_text(remaining))
+        if self.shutdown_other_player_enabled and self.shutdown_other_player_detect_since is not None:
+            elapsed = now - self.shutdown_other_player_detect_since
+            self.shutdown_other_player_elapsed.setText(f"감지 {self._format_remaining_text(elapsed)}")
 
-        if self.shutdown_other_player_enabled and self.shutdown_other_player_due is not None:
-            remaining = self.shutdown_other_player_due - now
-            if remaining <= 0:
-                triggered_modes.append('other')
-            else:
-                self.shutdown_other_player_status.setText(self._format_remaining_text(remaining))
-
-        if not triggered_modes:
+        if not triggered:
             self._update_shutdown_labels()
             self._stop_shutdown_timer_if_idle()
-            return
-
-        for mode in triggered_modes:
-            self._trigger_shutdown(mode)
-            if self.shutdown_pid_value is None:
-                break
 
     def _format_remaining_text(self, seconds: float) -> str:
         seconds = max(0.0, float(seconds))
@@ -1908,38 +2197,29 @@ class HuntTab(QWidget):
     def _update_shutdown_labels(self) -> None:
         parts: list[str] = []
         now = time.time()
-        if self.shutdown_datetime_target is not None:
-            parts.append("일시 예약")
-            self.shutdown_datetime_status.setText(
-                self._format_remaining_text(self.shutdown_datetime_target - now)
-            )
-        else:
-            self.shutdown_datetime_status.setText("--")
 
-        if self.shutdown_delay_target is not None:
-            parts.append("지연 예약")
-            self.shutdown_delay_status.setText(
-                self._format_remaining_text(self.shutdown_delay_target - now)
-            )
+        if self.shutdown_reservation_enabled:
+            parts.append("종료 예약")
+            if self.shutdown_datetime_target is not None:
+                remaining = self.shutdown_datetime_target - now
+                if remaining > 0:
+                    self.shutdown_reservation_status.setText(self._format_remaining_text(remaining))
+                else:
+                    self.shutdown_reservation_status.setText("--")
+            else:
+                self.shutdown_reservation_status.setText("--")
         else:
-            self.shutdown_delay_status.setText("--")
+            self.shutdown_reservation_status.setText("--")
 
         if self.shutdown_other_player_enabled:
             parts.append("다른 캐릭터 감시")
-            if self.shutdown_other_player_due is not None:
-                text = self._format_remaining_text(self.shutdown_other_player_due - now)
-                count = max(0, int(self.shutdown_other_player_last_count))
-                if count > 0:
-                    text = f"{text} ({count}명)"
-                self.shutdown_other_player_status.setText(text)
-            else:
-                self.shutdown_other_player_status.setText("감지 대기")
+            if self.shutdown_other_player_detect_since is None:
+                self.shutdown_other_player_elapsed.setText("감지 대기")
         else:
-            self.shutdown_other_player_status.setText("--")
+            self.shutdown_other_player_elapsed.setText("--")
 
         if self.shutdown_sleep_enabled and (
-            self.shutdown_datetime_target is not None
-            or self.shutdown_delay_target is not None
+            (self.shutdown_reservation_enabled and self.shutdown_datetime_target is not None)
             or self.shutdown_other_player_enabled
         ):
             parts.append("절전 모드")
@@ -1955,23 +2235,20 @@ class HuntTab(QWidget):
 
     def _trigger_shutdown(self, mode: str) -> None:
         mode_key = (mode or '').lower()
-        if mode_key == 'absolute':
+        if mode_key == 'reservation':
             self.shutdown_datetime_target = None
-        elif mode_key == 'delay':
-            self.shutdown_delay_target = None
         elif mode_key == 'other':
-            self.shutdown_other_player_due = None
             self.shutdown_other_player_detect_since = None
+            self.shutdown_other_player_due_ts = None
         self._stop_shutdown_timer_if_idle()
         self._update_shutdown_labels()
 
         pid = self.shutdown_pid_value
         reason_map = {
-            'absolute': '특정 일시',
-            'delay': 'N시간/N분',
+            'reservation': '종료 예약',
             'other': '다른 캐릭터 감지',
         }
-        reason_label = reason_map.get(mode_key, '자동 종료')
+        reason_label = reason_map.get(mode_key, '자동 대응')
         self._shutdown_last_reason = reason_label
 
         if pid is None:
@@ -2066,22 +2343,31 @@ class HuntTab(QWidget):
         self._log_map_shutdown(message, 'orange')
 
     def _cancel_all_shutdown_modes(self) -> None:
+        self.shutdown_reservation_enabled = False
         self.shutdown_datetime_target = None
-        self.shutdown_delay_target = None
-        self.shutdown_other_player_due = None
-        self.shutdown_other_player_detect_since = None
-        self.shutdown_other_player_last_count = 0
         self.shutdown_other_player_enabled = False
+        self.shutdown_other_player_detect_since = None
+        self.shutdown_other_player_due_ts = None
+        self.shutdown_other_player_last_count = 0
+        self.shutdown_other_player_action_triggered = False
+        self.shutdown_other_player_wait_active = False
+        self.shutdown_other_player_wait_started_at = None
+        self.shutdown_other_player_wait_clear_since = None
+
+        if hasattr(self, 'shutdown_reservation_checkbox') and self.shutdown_reservation_checkbox.isChecked():
+            blocker = QSignalBlocker(self.shutdown_reservation_checkbox)
+            self.shutdown_reservation_checkbox.setChecked(False)
+            del blocker
         if hasattr(self, 'shutdown_other_player_checkbox') and self.shutdown_other_player_checkbox.isChecked():
             blocker = QSignalBlocker(self.shutdown_other_player_checkbox)
             self.shutdown_other_player_checkbox.setChecked(False)
             del blocker
-        if hasattr(self, 'shutdown_datetime_status'):
-            self.shutdown_datetime_status.setText("--")
-        if hasattr(self, 'shutdown_delay_status'):
-            self.shutdown_delay_status.setText("--")
-        if hasattr(self, 'shutdown_other_player_status'):
-            self.shutdown_other_player_status.setText("--")
+
+        if hasattr(self, 'shutdown_reservation_status'):
+            self.shutdown_reservation_status.setText("--")
+        if hasattr(self, 'shutdown_other_player_elapsed'):
+            self.shutdown_other_player_elapsed.setText("--")
+
         self.shutdown_timer.stop()
         self._update_shutdown_labels()
 
@@ -2096,25 +2382,109 @@ class HuntTab(QWidget):
     def handle_other_player_presence(self, has_other: bool, count: int, timestamp: Optional[float] = None) -> None:
         if not self.shutdown_other_player_enabled:
             return
+
         now = float(timestamp) if isinstance(timestamp, (int, float)) else time.time()
         count = max(0, int(count))
+
         if has_other and count > 0:
             if self.shutdown_other_player_detect_since is None:
                 self.shutdown_other_player_detect_since = now
-            minutes = max(1, int(self.shutdown_other_player_minutes_spin.value()))
-            self.shutdown_other_player_due = self.shutdown_other_player_detect_since + minutes * 60
+                self.shutdown_other_player_action_triggered = False
+                self.shutdown_other_player_elapsed.setText("감지 00:00")
+                if self.shutdown_other_player_action == 'game_exit' and self.shutdown_pid_value is None:
+                    self._auto_detect_mapleland_pid(auto_trigger=True)
+
             self.shutdown_other_player_last_count = count
-            remaining = self.shutdown_other_player_due - now if self.shutdown_other_player_due else None
-            if remaining is not None:
-                text = self._format_remaining_text(remaining)
-                if count > 0:
-                    text = f"{text} ({count}명)"
-                self.shutdown_other_player_status.setText(text)
+            self.shutdown_other_player_wait_clear_since = None
             self._ensure_shutdown_timer_running()
+
+            if self.shutdown_other_player_action == 'game_exit':
+                due_ts = self.shutdown_other_player_detect_since + self.shutdown_other_player_exit_delay
+                self.shutdown_other_player_due_ts = due_ts
+                if not self.shutdown_other_player_action_triggered and now >= due_ts:
+                    self.shutdown_other_player_action_triggered = True
+                    self._trigger_shutdown('other')
+            elif self.shutdown_other_player_action == 'wait_mode':
+                due_ts = self.shutdown_other_player_detect_since + self.shutdown_other_player_wait_delay
+                self.shutdown_other_player_due_ts = due_ts
+                if (
+                    not self.shutdown_other_player_action_triggered
+                    and now >= due_ts
+                    and self.shutdown_other_player_wait_waypoint_id is not None
+                ):
+                    if self._start_other_player_wait_mode(now):
+                        self.shutdown_other_player_action_triggered = True
+                elif self.shutdown_other_player_wait_waypoint_id is None:
+                    self.shutdown_other_player_elapsed.setText("웨이포인트 미설정")
+            else:
+                # 미구현 상태에서는 경과만 표시
+                self.shutdown_other_player_elapsed.setText(f"감지 {self._format_remaining_text(now - self.shutdown_other_player_detect_since)}")
         else:
             self.shutdown_other_player_last_count = 0
-            self._reset_other_player_progress()
+            if self.shutdown_other_player_action == 'wait_mode' and self.shutdown_other_player_wait_active:
+                if self.shutdown_other_player_wait_clear_since is None:
+                    self.shutdown_other_player_wait_clear_since = now
+                clear_elapsed = now - self.shutdown_other_player_wait_clear_since
+                if clear_elapsed >= 60:
+                    self._finish_other_player_wait_mode(reason="other_absent")
+                    self.shutdown_other_player_detect_since = None
+                    self.shutdown_other_player_action_triggered = False
+                    self.shutdown_other_player_elapsed.setText("감지 대기")
+            else:
+                self._reset_other_player_progress()
+
         self._update_shutdown_labels()
+
+    def _start_other_player_wait_mode(self, started_at: float) -> bool:
+        waypoint_id = self.shutdown_other_player_wait_waypoint_id
+        if waypoint_id is None:
+            self.append_log("대기 모드를 실행하려면 웨이포인트를 먼저 설정해주세요.", "warn")
+            return False
+
+        map_tab = getattr(self, 'map_tab', None)
+        if not map_tab or not hasattr(map_tab, 'start_other_player_wait_operation'):
+            self.append_log("맵 탭이 대기 모드를 지원하지 않습니다.", "warn")
+            return False
+
+        waypoint_name = self.shutdown_other_player_wait_waypoint_name or str(waypoint_id)
+
+        try:
+            success = map_tab.start_other_player_wait_operation(
+                waypoint_id=int(waypoint_id),
+                waypoint_name=waypoint_name,
+                source='hunt.other_player',
+            )
+        except Exception as exc:
+            self.append_log(f"대기 모드 시작 실패: {exc}", "warn")
+            return False
+
+        if not success:
+            self.append_log("대기 모드 요청이 거부되었습니다.", "warn")
+            return False
+
+        self.force_stop_detection()
+        self.shutdown_other_player_wait_active = True
+        self.shutdown_other_player_wait_started_at = started_at
+        self.shutdown_other_player_elapsed.setText("대기 모드 진행 중")
+        self.append_log(f"대기 모드를 시작합니다. 대상 웨이포인트: {waypoint_name}", "info")
+        return True
+
+    def _finish_other_player_wait_mode(self, reason: str = "finished") -> None:
+        if not self.shutdown_other_player_wait_active:
+            return
+
+        map_tab = getattr(self, 'map_tab', None)
+        if map_tab and hasattr(map_tab, 'finish_other_player_wait_operation'):
+            try:
+                map_tab.finish_other_player_wait_operation(reason=reason)
+            except Exception as exc:
+                self.append_log(f"대기 모드 종료 중 오류: {exc}", "warn")
+
+        self.shutdown_other_player_wait_active = False
+        self.shutdown_other_player_wait_started_at = None
+        self.shutdown_other_player_wait_clear_since = None
+        self.shutdown_other_player_elapsed.setText("감지 대기")
+        self.append_log("대기 모드를 종료합니다.", "info")
 
     def _create_detection_group(self) -> QGroupBox:
         group = QGroupBox("탐지 실행")
@@ -6508,7 +6878,14 @@ class HuntTab(QWidget):
                 self.shutdown_sleep_checkbox.setChecked(sleep_enabled)
                 del blocker
 
-            dt_epoch = auto_shutdown_cfg.get('datetime_epoch')
+            reservation_enabled = bool(auto_shutdown_cfg.get('reservation_enabled', False))
+            if hasattr(self, 'shutdown_reservation_checkbox'):
+                blocker = QSignalBlocker(self.shutdown_reservation_checkbox)
+                self.shutdown_reservation_checkbox.setChecked(reservation_enabled)
+                del blocker
+            self.shutdown_reservation_enabled = reservation_enabled
+
+            dt_epoch = auto_shutdown_cfg.get('reservation_epoch') or auto_shutdown_cfg.get('datetime_epoch')
             if dt_epoch is not None:
                 try:
                     epoch_int = int(dt_epoch)
@@ -6519,41 +6896,36 @@ class HuntTab(QWidget):
                 except Exception:
                     pass
 
-            delay_hours = auto_shutdown_cfg.get('delay_hours')
-            if delay_hours is not None and hasattr(self, 'shutdown_delay_hours_spin'):
-                try:
-                    blocker = QSignalBlocker(self.shutdown_delay_hours_spin)
-                    self.shutdown_delay_hours_spin.setValue(int(delay_hours))
-                    del blocker
-                except Exception:
-                    pass
+            now_ts = time.time()
+            reservation_target = auto_shutdown_cfg.get('reservation_target')
+            if reservation_target is None:
+                reservation_target = auto_shutdown_cfg.get('datetime_target')
+            if isinstance(reservation_target, (int, float)) and float(reservation_target) > now_ts:
+                self.shutdown_datetime_target = float(reservation_target)
 
-            delay_minutes = auto_shutdown_cfg.get('delay_minutes')
-            if delay_minutes is not None and hasattr(self, 'shutdown_delay_minutes_spin'):
-                try:
-                    blocker = QSignalBlocker(self.shutdown_delay_minutes_spin)
-                    self.shutdown_delay_minutes_spin.setValue(int(delay_minutes))
-                    del blocker
-                except Exception:
-                    pass
+            action_key = str(auto_shutdown_cfg.get('other_action', 'game_exit') or 'game_exit').lower()
+            if action_key not in {'game_exit', 'wait_mode', 'town_return'}:
+                action_key = 'game_exit'
+            self.shutdown_other_player_action = action_key
 
-            other_minutes = auto_shutdown_cfg.get('other_minutes')
-            if other_minutes is not None and hasattr(self, 'shutdown_other_player_minutes_spin'):
-                try:
-                    blocker = QSignalBlocker(self.shutdown_other_player_minutes_spin)
-                    self.shutdown_other_player_minutes_spin.setValue(int(other_minutes))
-                    del blocker
-                except Exception:
-                    pass
+            exit_delay = auto_shutdown_cfg.get('other_exit_delay')
+            if isinstance(exit_delay, (int, float)) and exit_delay > 0:
+                self.shutdown_other_player_exit_delay = int(exit_delay)
 
-            now = time.time()
-            datetime_target = auto_shutdown_cfg.get('datetime_target')
-            if isinstance(datetime_target, (int, float)) and float(datetime_target) > now:
-                self.shutdown_datetime_target = float(datetime_target)
+            wait_delay = auto_shutdown_cfg.get('other_wait_delay')
+            if isinstance(wait_delay, (int, float)) and wait_delay > 0:
+                self.shutdown_other_player_wait_delay = int(wait_delay)
+            else:
+                legacy_minutes = auto_shutdown_cfg.get('other_minutes')
+                if isinstance(legacy_minutes, (int, float)) and legacy_minutes > 0:
+                    self.shutdown_other_player_wait_delay = int(legacy_minutes) * 60
 
-            delay_target = auto_shutdown_cfg.get('delay_target')
-            if isinstance(delay_target, (int, float)) and float(delay_target) > now:
-                self.shutdown_delay_target = float(delay_target)
+            wait_wp_id = auto_shutdown_cfg.get('other_wait_waypoint_id')
+            wait_wp_name = auto_shutdown_cfg.get('other_wait_waypoint_name')
+            if isinstance(wait_wp_id, int):
+                self.shutdown_other_player_wait_waypoint_id = wait_wp_id
+            if isinstance(wait_wp_name, str):
+                self.shutdown_other_player_wait_waypoint_name = wait_wp_name
 
             other_enabled = bool(auto_shutdown_cfg.get('other_enabled', False))
             if hasattr(self, 'shutdown_other_player_checkbox'):
@@ -6562,10 +6934,26 @@ class HuntTab(QWidget):
                 del blocker
             self.shutdown_other_player_enabled = other_enabled
             self.shutdown_other_player_detect_since = None
-            self.shutdown_other_player_due = None
             self.shutdown_other_player_last_count = 0
-            if self.shutdown_datetime_target or self.shutdown_delay_target or self.shutdown_other_player_enabled:
-                self._ensure_shutdown_timer_running()
+            self.shutdown_other_player_due_ts = None
+
+            # 동기화된 라디오 업데이트
+            if hasattr(self, 'shutdown_other_player_action_group'):
+                button_map = {
+                    'game_exit': getattr(self, 'shutdown_other_player_radio_shutdown', None),
+                    'wait_mode': getattr(self, 'shutdown_other_player_radio_wait', None),
+                    'town_return': getattr(self, 'shutdown_other_player_radio_town', None),
+                }
+                button = button_map.get(self.shutdown_other_player_action)
+                if button is not None:
+                    blocker = QSignalBlocker(button)
+                    button.setChecked(True)
+                    del blocker
+
+            self._update_other_player_action_summary()
+            self._on_shutdown_reservation_toggled(self.shutdown_reservation_enabled)
+            self._ensure_shutdown_timer_running()
+            self._update_shutdown_labels()
             self._update_shutdown_labels()
             self._stop_shutdown_timer_if_idle()
 
@@ -6976,27 +7364,23 @@ class HuntTab(QWidget):
         pid_text = self.shutdown_pid_input.text().strip() if self.shutdown_pid_input else ''
         data: dict[str, object] = {
             'pid': pid_text,
-            'datetime_target': float(self.shutdown_datetime_target) if self.shutdown_datetime_target else None,
-            'delay_target': float(self.shutdown_delay_target) if self.shutdown_delay_target else None,
+            'reservation_target': float(self.shutdown_datetime_target) if self.shutdown_datetime_target else None,
+            'reservation_enabled': bool(self.shutdown_reservation_enabled),
             'other_enabled': bool(self.shutdown_other_player_enabled),
+            'other_action': self.shutdown_other_player_action,
+            'other_exit_delay': int(self.shutdown_other_player_exit_delay),
+            'other_wait_delay': int(self.shutdown_other_player_wait_delay),
+            'other_wait_waypoint_id': self.shutdown_other_player_wait_waypoint_id,
+            'other_wait_waypoint_name': self.shutdown_other_player_wait_waypoint_name,
             'sleep_enabled': bool(self.shutdown_sleep_enabled),
         }
 
         if hasattr(self, 'shutdown_datetime_edit') and self.shutdown_datetime_edit:
             try:
                 dt_value = self.shutdown_datetime_edit.dateTime()
-                data['datetime_epoch'] = int(dt_value.toSecsSinceEpoch())
+                data['reservation_epoch'] = int(dt_value.toSecsSinceEpoch())
             except Exception:
-                data['datetime_epoch'] = None
-
-        if hasattr(self, 'shutdown_delay_hours_spin') and self.shutdown_delay_hours_spin:
-            data['delay_hours'] = int(self.shutdown_delay_hours_spin.value())
-
-        if hasattr(self, 'shutdown_delay_minutes_spin') and self.shutdown_delay_minutes_spin:
-            data['delay_minutes'] = int(self.shutdown_delay_minutes_spin.value())
-
-        if hasattr(self, 'shutdown_other_player_minutes_spin') and self.shutdown_other_player_minutes_spin:
-            data['other_minutes'] = int(self.shutdown_other_player_minutes_spin.value())
+                data['reservation_epoch'] = None
 
         return data
 

@@ -538,6 +538,7 @@ class MapTab(QWidget):
             self.telegram_bot_token = ""
             self.telegram_chat_id = ""
             self._other_player_alert_custom_remaining = 0
+            self.other_player_wait_context: dict[str, Any] = {}
             self._refresh_telegram_credentials()
             self.active_feature_info = []
             self.reference_anchor_id = None
@@ -5082,6 +5083,151 @@ class MapTab(QWidget):
         except Exception:
             pass
 
+    # ------------------------------------------------------------------
+    # 다른 캐릭터 대기 모드 연동
+
+    def _is_other_player_wait_active(self) -> bool:
+        context = getattr(self, 'other_player_wait_context', None)
+        return bool(context and context.get('active'))
+
+    def start_other_player_wait_operation(
+        self,
+        waypoint_id: int,
+        waypoint_name: str,
+        *,
+        source: str = '',
+    ) -> bool:
+        if not self.is_detection_running:
+            self.update_general_log("[대기 모드] 탐지 실행 중에만 사용할 수 있습니다.", "red")
+            return False
+
+        waypoint = self._find_waypoint_by_id(waypoint_id)
+        if not waypoint:
+            self.update_general_log(
+                f"[대기 모드] 웨이포인트 ID {waypoint_id}를 찾을 수 없습니다.",
+                "red",
+            )
+            return False
+
+        context = {
+            'active': True,
+            'goal_id': waypoint_id,
+            'goal_name': waypoint_name,
+            'started_at': time.time(),
+            'holding': False,
+            'source': source,
+        }
+        self.other_player_wait_context = context
+
+        self.update_general_log(
+            f"[대기 모드] '{waypoint_name}' 웨이포인트로 이동을 시작합니다.",
+            "orange",
+        )
+
+        self._activate_other_player_wait_goal(waypoint_id)
+
+        self._authority_priority_override = True
+        if self._authority_manager:
+            try:
+                self._authority_manager.notify_priority_event(
+                    "OTHER_PLAYER_WAIT",
+                    metadata={'waypoint_id': waypoint_id, 'source': source or 'hunt'},
+                )
+            except Exception:
+                pass
+
+        return True
+
+    def finish_other_player_wait_operation(self, *, reason: str = '') -> None:
+        if not self._is_other_player_wait_active():
+            return
+
+        goal_name = self.other_player_wait_context.get('goal_name', '')
+        self.other_player_wait_context = {}
+        self._authority_priority_override = False
+        if self._authority_manager:
+            try:
+                self._authority_manager.clear_priority_event("OTHER_PLAYER_WAIT")
+            except Exception:
+                pass
+
+        self.update_general_log(
+            f"[대기 모드] '{goal_name}' 웨이포인트 대기를 종료합니다. (사유: {reason or '완료'})",
+            "green",
+        )
+
+        self._emit_control_command("모든 키 떼기", "other_player_wait:end")
+
+        # 일반 경로 탐색 재개를 위해 상태 초기화
+        self.journey_plan = []
+        self.current_journey_index = 0
+        self.current_segment_path = []
+        self.current_segment_index = 0
+        self.target_waypoint_id = None
+        self.last_reached_wp_id = None
+        self.navigation_action = 'move_to_target'
+        self.guidance_text = '없음'
+
+    def _activate_other_player_wait_goal(self, waypoint_id: int) -> None:
+        self.journey_plan = [waypoint_id]
+        self.current_journey_index = 0
+        self.current_segment_path = []
+        self.current_segment_index = 0
+        self.start_waypoint_found = True
+        self.target_waypoint_id = waypoint_id
+        self.last_reached_wp_id = None
+        self.expected_terrain_group = None
+        self.other_player_wait_context['holding'] = False
+        self.other_player_wait_context['initialized'] = True
+
+    def _handle_other_player_wait_navigation(self, final_player_pos: QPointF) -> None:
+        if not self._is_other_player_wait_active():
+            return
+
+        context = self.other_player_wait_context
+        goal_id = context.get('goal_id')
+        if goal_id is None:
+            return
+
+        if not context.get('initialized'):
+            self._activate_other_player_wait_goal(int(goal_id))
+
+        # 경로가 비어있으면 다시 설정
+        if not self.journey_plan:
+            self._activate_other_player_wait_goal(int(goal_id))
+
+        if not context.get('holding'):
+            if self.journey_plan and not self.current_segment_path:
+                self._calculate_segment_path(final_player_pos)
+
+            if self.last_reached_wp_id == goal_id:
+                context['holding'] = True
+                context['hold_started_at'] = time.time()
+                waypoint_name = context.get('goal_name', str(goal_id))
+                self.update_general_log(
+                    f"[대기 모드] '{waypoint_name}' 웨이포인트에 도착했습니다. 대기 상태로 전환합니다.",
+                    "DodgerBlue",
+                )
+                self._emit_control_command("모든 키 떼기", "other_player_wait")
+                self.navigation_action = 'idle'
+                self.guidance_text = f"대기 중: {waypoint_name}"
+                self.current_segment_path = []
+                self.current_segment_index = 0
+                self.target_waypoint_id = goal_id
+        else:
+            # 일정 거리 이상 벗어나면 다시 이동
+            waypoint_node = self.nav_nodes.get(f"wp_{goal_id}", {})
+            waypoint_pos = waypoint_node.get('pos')
+            if isinstance(waypoint_pos, QPointF):
+                distance = abs(final_player_pos.x() - waypoint_pos.x())
+                if distance > 40.0:
+                    self.update_general_log(
+                        f"[대기 모드] 위치가 벗어나 재이동합니다. (편차 {distance:.1f}px)",
+                        "orange",
+                    )
+                    context['holding'] = False
+                    self._activate_other_player_wait_goal(int(goal_id))
+
     def on_detection_ready(self, frame_bgr, found_features, my_player_rects, other_player_rects):
         map_perf = {
             'timestamp': time.time(),
@@ -6810,31 +6956,41 @@ class MapTab(QWidget):
 
         # --- [새로운 경로 관리 로직] ---
         # Phase 3: 경로 계획 및 재탐색 트리거
-        active_route = self.route_profiles.get(self.active_route_profile_name)
-        if not active_route: self.last_player_pos = final_player_pos; return
+        if self._is_other_player_wait_active():
+            self._handle_other_player_wait_navigation(final_player_pos)
+        else:
+            active_route = self.route_profiles.get(self.active_route_profile_name)
+            if not active_route:
+                self.last_player_pos = final_player_pos
+                return
 
-        # 3a. 전체 여정이 없거나 끝났으면 새로 계획
-        if not self.journey_plan or self.current_journey_index >= len(self.journey_plan):
-            self._plan_next_journey(active_route)
-        
-        # 3b. (핵심 수정) 맥락(Context) 기반 재탐색 트리거
-        #    'move_to_target' 상태에서, 예상된 지형 그룹을 벗어났을 때만 재탐색
-        RECALCULATION_COOLDOWN = 1.0 # 최소 1초의 재탐색 대기시간
-        
-        if (self.navigation_action == 'move_to_target' and 
-            self.expected_terrain_group is not None and
-            contact_terrain and
-            contact_terrain.get('dynamic_name') != self.expected_terrain_group and
-            time.time() - self.last_path_recalculation_time > RECALCULATION_COOLDOWN):
-            
-            print(f"[INFO] 경로 재탐색: 예상 지형 그룹('{self.expected_terrain_group}')을 벗어났습니다. (현재: '{contact_terrain.get('dynamic_name')}')")
-            self.update_general_log("예상 경로를 벗어나 재탐색합니다.", "orange")
-            self.current_segment_path = []      # 재탐색 유도
-            self.expected_terrain_group = None  # 예상 그룹 초기화
+            # 3a. 전체 여정이 없거나 끝났으면 새로 계획
+            if not self.journey_plan or self.current_journey_index >= len(self.journey_plan):
+                self._plan_next_journey(active_route)
 
-        # 3c. 상세 구간 경로가 없으면 새로 계산
-        if self.journey_plan and self.start_waypoint_found and not self.current_segment_path:
-            self._calculate_segment_path(final_player_pos)
+            # 3b. (핵심 수정) 맥락(Context) 기반 재탐색 트리거
+            #    'move_to_target' 상태에서, 예상된 지형 그룹을 벗어났을 때만 재탐색
+            RECALCULATION_COOLDOWN = 1.0 # 최소 1초의 재탐색 대기시간
+
+            if (
+                self.navigation_action == 'move_to_target'
+                and self.expected_terrain_group is not None
+                and contact_terrain
+                and contact_terrain.get('dynamic_name') != self.expected_terrain_group
+                and time.time() - self.last_path_recalculation_time > RECALCULATION_COOLDOWN
+            ):
+
+                print(
+                    f"[INFO] 경로 재탐색: 예상 지형 그룹('{self.expected_terrain_group}')을 벗어났습니다."
+                    f" (현재: '{contact_terrain.get('dynamic_name')}')"
+                )
+                self.update_general_log("예상 경로를 벗어나 재탐색합니다.", "orange")
+                self.current_segment_path = []      # 재탐색 유도
+                self.expected_terrain_group = None  # 예상 그룹 초기화
+
+            # 3c. 상세 구간 경로가 없으면 새로 계산
+            if self.journey_plan and self.start_waypoint_found and not self.current_segment_path:
+                self._calculate_segment_path(final_player_pos)
 
         # --- [v.1812] BUGFIX: 상태 처리 로직 분리 ---
         # Phase 4: 상태에 따른 핵심 로직 처리
