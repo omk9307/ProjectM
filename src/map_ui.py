@@ -8817,13 +8817,46 @@ class MapTab(QWidget):
                         departure_floor = departure_line.get('floor')
                         ladder_hazard_zones = []
                         for obj in self.geometry_data.get("transition_objects", []):
-                            is_connected = obj.get('start_line_id') == departure_line.get('id') or obj.get('end_line_id') == departure_line.get('id')
-                            if is_connected:
-                                other_line_id = obj.get('end_line_id') if obj.get('start_line_id') == departure_line.get('id') else obj.get('start_line_id')
-                                other_line_floor = self.line_id_to_floor_map.get(other_line_id, float('inf'))
-                                if other_line_floor < departure_floor:
-                                    ladder_x = obj['points'][0][0]
-                                    ladder_hazard_zones.append((ladder_x - LADDER_AVOIDANCE_WIDTH, ladder_x + LADDER_AVOIDANCE_WIDTH))
+                            # 현재 출발 지형(departure_line)에 연결된 사다리만 고려
+                            is_connected = (
+                                obj.get('start_line_id') == departure_line.get('id')
+                                or obj.get('end_line_id') == departure_line.get('id')
+                            )
+                            if not is_connected:
+                                continue
+
+                            # [요구사항] 아래점프에 영향이 있는 것은 '사다리 출구(윗부분)'가 현재 지형에 연결된 경우만.
+                            # 1) 우선 좌표로 '출구' 포인트(더 위쪽, 즉 y가 더 작은 점)를 구하고, 해당 포인트가
+                            #    실제로 출발 지형선과 접촉하는지 확인한다.
+                            try:
+                                p1, p2 = obj.get('points', [None, None])
+                                if not (isinstance(p1, (list, tuple)) and isinstance(p2, (list, tuple))):
+                                    continue
+                                exit_pt = p1 if p1[1] < p2[1] else p2  # 더 위쪽이 '출구'
+                                exit_contact = self._get_contact_terrain(QPointF(exit_pt[0], exit_pt[1]))
+                                is_exit_on_departure = bool(exit_contact and exit_contact.get('id') == departure_line.get('id'))
+                            except Exception:
+                                is_exit_on_departure = False
+
+                            # 2) 좌표 기반 판정이 실패하면, floor 정보를 통한 폴백 로직 사용
+                            if not is_exit_on_departure:
+                                start_line_id = obj.get('start_line_id')
+                                end_line_id = obj.get('end_line_id')
+                                start_floor = self.line_id_to_floor_map.get(start_line_id)
+                                end_floor = self.line_id_to_floor_map.get(end_line_id)
+                                if isinstance(start_floor, (int, float)) and isinstance(end_floor, (int, float)):
+                                    top_line_id = start_line_id if start_floor > end_floor else end_line_id
+                                    is_exit_on_departure = (top_line_id == departure_line.get('id'))
+                                else:
+                                    is_exit_on_departure = False
+
+                            if not is_exit_on_departure:
+                                # '입구(아랫부분)'만 현재 지형에 연결된 경우: 아래점프에는 영향 없음 → 안전지대 미형성
+                                continue
+
+                            # 여기까지 왔다면, 현재 지형에 '사다리 출구'가 있음 → 위험 구간 생성
+                            ladder_x = obj['points'][0][0]
+                            ladder_hazard_zones.append((ladder_x - LADDER_AVOIDANCE_WIDTH, ladder_x + LADDER_AVOIDANCE_WIDTH))
                         
                         is_in_hazard = any(start <= player_x <= end for start, end in ladder_hazard_zones)
                         if is_in_hazard:
@@ -8844,8 +8877,37 @@ class MapTab(QWidget):
                                 departure_safe_zones = new_safe_zones
                             
                             if departure_safe_zones:
-                                closest_point_x = min([p for zone in departure_safe_zones for p in zone], key=lambda p: abs(player_x - p))
-                                self.intermediate_target_pos = QPointF(closest_point_x, final_player_pos.y())
+                                # [개선] 각 구간 내부로 player_x를 클램프하여 후보 생성 후 최단 이동 X 선택
+                                def _clamp(val, lo, hi):
+                                    return lo if val < lo else (hi if val > hi else val)
+
+                                # 출발 지형선의 X 범위 계산
+                                dep_min_x = min(p[0] for p in departure_line['points'])
+                                dep_max_x = max(p[0] for p in departure_line['points'])
+
+                                candidates = []
+                                for s_start, s_end in departure_safe_zones:
+                                    cx = _clamp(player_x, s_start, s_end)
+                                    # 출발 지형 범위로 한 번 더 제한
+                                    cx = _clamp(cx, dep_min_x, dep_max_x)
+                                    candidates.append(cx)
+
+                                if candidates:
+                                    best_x = min(candidates, key=lambda cx: abs(player_x - cx))
+                                    # 출발 지형선에서 best_x에 해당하는 Y를 보간해 지면 위로 스냅
+                                    line_y = departure_line['points'][0][1]
+                                    pts = departure_line['points']
+                                    for i in range(len(pts) - 1):
+                                        a, b = pts[i], pts[i + 1]
+                                        lx, rx = (a[0], b[0]) if a[0] <= b[0] else (b[0], a[0])
+                                        if lx <= best_x <= rx:
+                                            dy = (b[1] - a[1])
+                                            dx = (b[0] - a[0])
+                                            line_y = a[1] + (dy * ((best_x - a[0]) / dx)) if dx != 0 else a[1]
+                                            break
+                                    self.intermediate_target_pos = QPointF(best_x, line_y)
+                                else:
+                                    self.intermediate_target_pos = None
                             else:
                                 self.intermediate_target_pos = None
                             if self.navigation_action == 'prepare_to_down_jump':
@@ -8880,8 +8942,36 @@ class MapTab(QWidget):
 
                 if not any(start <= player_x <= end for start, end in safe_zones):
                     self.guidance_text = "안전 지점으로 이동"
-                    closest_point_x = min([p for zone in safe_zones for p in zone], key=lambda p: abs(player_x - p))
-                    self.intermediate_target_pos = QPointF(closest_point_x, final_player_pos.y())
+                    # [개선] 착지층 안전 구간 기준으로 X를 선택하되, 출발 지형 범위로 제한 + Y는 출발 지형선 보간
+                    def _clamp(val, lo, hi):
+                        return lo if val < lo else (hi if val > hi else val)
+
+                    # 출발 지형선 X 범위
+                    dep_min_x = min(p[0] for p in departure_line['points'])
+                    dep_max_x = max(p[0] for p in departure_line['points'])
+
+                    candidates = []
+                    for s_start, s_end in safe_zones:
+                        cx = _clamp(player_x, s_start, s_end)
+                        cx = _clamp(cx, dep_min_x, dep_max_x)
+                        candidates.append(cx)
+
+                    if candidates:
+                        best_x = min(candidates, key=lambda cx: abs(player_x - cx))
+                        # 출발 지형선에서 best_x의 Y를 보간하여 공중 목표 방지
+                        line_y = departure_line['points'][0][1]
+                        pts = departure_line['points']
+                        for i in range(len(pts) - 1):
+                            a, b = pts[i], pts[i + 1]
+                            lx, rx = (a[0], b[0]) if a[0] <= b[0] else (b[0], a[0])
+                            if lx <= best_x <= rx:
+                                dy = (b[1] - a[1])
+                                dx = (b[0] - a[0])
+                                line_y = a[1] + (dy * ((best_x - a[0]) / dx)) if dx != 0 else a[1]
+                                break
+                        self.intermediate_target_pos = QPointF(best_x, line_y)
+                    else:
+                        self.intermediate_target_pos = None
                     if self.navigation_action == 'prepare_to_down_jump':
                         self.waiting_for_safe_down_jump = True
                 else:
