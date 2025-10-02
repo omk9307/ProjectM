@@ -516,6 +516,8 @@ class MapTab(QWidget):
             self.other_player_alert_enabled = False
             self._other_player_alert_active = False
             self._other_player_alert_last_time = 0.0
+            self.map_link_checkbox = None
+            self.map_link_enabled = False
             self.telegram_alert_checkbox = None
             self.telegram_settings_btn = None
             self.telegram_alert_enabled = False
@@ -1252,6 +1254,10 @@ class MapTab(QWidget):
         self.auto_control_checkbox.setChecked(False)
         self.auto_control_checkbox.toggled.connect(self._on_auto_control_toggled)
         second_row_layout.addWidget(self.auto_control_checkbox)
+        self.map_link_checkbox = QCheckBox("사냥탭 연동")
+        self.map_link_checkbox.setChecked(False)
+        self.map_link_checkbox.toggled.connect(self._on_map_link_toggled)
+        second_row_layout.addWidget(self.map_link_checkbox)
         self.perf_logging_checkbox = QCheckBox("CSV 기록")
         self.perf_logging_checkbox.setChecked(self._perf_logging_enabled)
         self.perf_logging_checkbox.toggled.connect(self._on_perf_logging_toggled)
@@ -1437,12 +1443,28 @@ class MapTab(QWidget):
         self.update_general_log("MapTab이 초기화되었습니다. 맵 프로필을 선택해주세요.", "black")
 
     def attach_hunt_tab(self, hunt_tab) -> None:
+        if self._hunt_tab and hasattr(self._hunt_tab, 'map_link_checkbox'):
+            try:
+                self._hunt_tab.map_link_checkbox.toggled.disconnect(self._handle_hunt_map_link_toggled)
+            except Exception:
+                pass
         self._hunt_tab = hunt_tab
         if hasattr(hunt_tab, 'detection_status_changed'):
             try:
                 hunt_tab.detection_status_changed.connect(self._handle_hunt_detection_status_changed)
             except Exception:
                 pass
+        if hasattr(hunt_tab, 'map_link_checkbox'):
+            try:
+                hunt_tab.map_link_checkbox.toggled.connect(self._handle_hunt_map_link_toggled)
+            except Exception:
+                pass
+        if hasattr(hunt_tab, 'map_link_enabled'):
+            self.map_link_enabled = bool(hunt_tab.map_link_enabled)
+        if hasattr(hunt_tab, 'map_link_checkbox') and self.map_link_checkbox:
+            previous = self.map_link_checkbox.blockSignals(True)
+            self.map_link_checkbox.setChecked(bool(hunt_tab.map_link_checkbox.isChecked()))
+            self.map_link_checkbox.blockSignals(previous)
 
     def attach_auto_control_tab(self, auto_control_tab) -> None:
         """자동 제어 탭과 키 입력 상태를 연동합니다."""
@@ -1480,6 +1502,25 @@ class MapTab(QWidget):
         else:
             self._held_direction_keys.discard(key_str)
 
+    def _handle_hunt_map_link_toggled(self, checked: bool) -> None:
+        if getattr(self, '_syncing_with_hunt', False):
+            return
+        checkbox = getattr(self, 'map_link_checkbox', None)
+        if not checkbox:
+            self.map_link_enabled = bool(checked)
+            return
+        if checkbox.isChecked() == bool(checked):
+            self.map_link_enabled = bool(checked)
+            return
+        self._syncing_with_hunt = True
+        try:
+            prev = checkbox.blockSignals(True)
+            checkbox.setChecked(bool(checked))
+            checkbox.blockSignals(prev)
+            self._on_map_link_toggled(bool(checked))
+        finally:
+            self._syncing_with_hunt = False
+
     @pyqtSlot()
     def _handle_auto_control_key_reset(self) -> None:
         if self._held_direction_keys:
@@ -1501,7 +1542,7 @@ class MapTab(QWidget):
     def _handle_hunt_detection_status_changed(self, running: bool) -> None:
         if not getattr(self, '_hunt_tab', None):
             return
-        if not getattr(self._hunt_tab, 'map_link_enabled', False):
+        if not self.map_link_enabled:
             return
         if getattr(self, '_syncing_with_hunt', False):
             return
@@ -4134,7 +4175,11 @@ class MapTab(QWidget):
 
                 self._reset_walk_teleport_state()
                 self.detect_anchor_btn.setText("탐지 중단")
-                if getattr(self, '_hunt_tab', None) and getattr(self._hunt_tab, 'map_link_enabled', False) and not getattr(self, '_syncing_with_hunt', False):
+                if (
+                    getattr(self, '_hunt_tab', None)
+                    and self.map_link_enabled
+                    and not getattr(self, '_syncing_with_hunt', False)
+                ):
                     self._syncing_with_hunt = True
                     try:
                         if hasattr(self._hunt_tab, 'detect_btn') and not self._hunt_tab.detect_btn.isChecked():
@@ -4205,7 +4250,11 @@ class MapTab(QWidget):
                 # [핵심 수정] 탐지 중지 시 딜레이 플래그 비활성화
                 self.initial_delay_active = False
 
-                if getattr(self, '_hunt_tab', None) and getattr(self._hunt_tab, 'map_link_enabled', False) and not getattr(self, '_syncing_with_hunt', False):
+                if (
+                    getattr(self, '_hunt_tab', None)
+                    and self.map_link_enabled
+                    and not getattr(self, '_syncing_with_hunt', False)
+                ):
                     self._syncing_with_hunt = True
                     try:
                         if hasattr(self._hunt_tab, 'detect_btn') and self._hunt_tab.detect_btn.isChecked():
@@ -5426,6 +5475,30 @@ class MapTab(QWidget):
         if not checked:
             self._handle_auto_control_key_reset()
         self.save_profile_data()
+
+    def _on_map_link_toggled(self, checked: bool) -> None:  # noqa: ARG002
+        self.map_link_enabled = bool(checked)
+        if getattr(self, '_syncing_with_hunt', False):
+            return
+        hunt_tab = getattr(self, '_hunt_tab', None)
+        if not hunt_tab:
+            return
+        self._syncing_with_hunt = True
+        try:
+            hunt_checkbox = getattr(hunt_tab, 'map_link_checkbox', None)
+            if hunt_checkbox:
+                prev = hunt_checkbox.blockSignals(True)
+                hunt_checkbox.setChecked(bool(checked))
+                hunt_checkbox.blockSignals(prev)
+            if hasattr(hunt_tab, '_on_map_link_toggled'):
+                hunt_tab._on_map_link_toggled(bool(checked))
+            else:
+                if checked and hasattr(hunt_tab, '_activate_map_link'):
+                    hunt_tab._activate_map_link(initial=False)
+                elif not checked and hasattr(hunt_tab, '_deactivate_map_link'):
+                    hunt_tab._deactivate_map_link(initial=False)
+        finally:
+            self._syncing_with_hunt = False
 
     def _on_perf_logging_toggled(self, checked: bool) -> None:
         self._perf_logging_enabled = bool(checked)
