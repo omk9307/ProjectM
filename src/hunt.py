@@ -2560,13 +2560,21 @@ class HuntTab(QWidget):
         self.append_log(f"대기 모드를 시작합니다. 대상 웨이포인트: {waypoint_name}", "info")
         return True
 
-    def _finish_other_player_wait_mode(self, reason: str = "finished") -> None:
+    def _finish_other_player_wait_mode(self, reason: str = "finished", *, from_map: bool = False) -> None:
         if not self.shutdown_other_player_wait_active:
             return
 
         map_tab = getattr(self, 'map_tab', None)
         restart_required = self.shutdown_other_player_wait_restart_required
-        if map_tab and hasattr(map_tab, 'finish_other_player_wait_operation'):
+        if from_map:
+            restart_required = False
+            self.shutdown_other_player_wait_restart_required = False
+
+        if (
+            not from_map
+            and map_tab
+            and hasattr(map_tab, 'finish_other_player_wait_operation')
+        ):
             try:
                 map_tab.finish_other_player_wait_operation(reason=reason)
             except Exception as exc:

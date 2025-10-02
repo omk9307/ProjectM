@@ -4465,6 +4465,7 @@ class MapTab(QWidget):
                 self.is_detection_running = False
                 self._handle_detection_stopped_for_test()
                 self._clear_authority_resume_state()
+                self._cancel_other_player_wait_due_to_detection_stop()
                 self.detection_status_changed.emit(False)
                 if self.status_monitor:
                     self.status_monitor.set_tab_active(map_tab=False)
@@ -5703,6 +5704,52 @@ class MapTab(QWidget):
 
         self._restart_map_detection_after_wait(resume_map_detection)
 
+    def _cancel_other_player_wait_due_to_detection_stop(self) -> None:
+        """탐지 중단 시 대기 모드 상태를 안전하게 종료합니다."""
+        if not self._is_other_player_wait_active():
+            return
+
+        cancel_reason = "탐지 중단"
+
+        # 재탐지 재시작을 막기 위해 강제로 False로 지정
+        context = dict(getattr(self, 'other_player_wait_context', {}) or {})
+        context['resume_map_detection'] = False
+        self.other_player_wait_context = context
+
+        try:
+            self.finish_other_player_wait_operation(reason=cancel_reason)
+        except Exception as exc:
+            try:
+                self.update_general_log(
+                    f"[대기 모드] 탐지 중단 처리 중 오류가 발생했습니다: {exc}",
+                    "red",
+                )
+            except Exception:
+                pass
+
+        hunt_tab = getattr(self, '_hunt_tab', None)
+
+        if hunt_tab and hasattr(hunt_tab, '_finish_other_player_wait_mode'):
+
+            def _notify_hunt_tab() -> None:
+                try:
+                    hunt_tab._finish_other_player_wait_mode(
+                        reason=cancel_reason,
+                        from_map=True,
+                    )
+                except TypeError:
+                    hunt_tab._finish_other_player_wait_mode(reason=cancel_reason)
+                except Exception as exc:
+                    try:
+                        self.update_general_log(
+                            f"[대기 모드] 사냥 탭 동기화 중 오류가 발생했습니다: {exc}",
+                            "red",
+                        )
+                    except Exception:
+                        pass
+
+            QTimer.singleShot(0, _notify_hunt_tab)
+
     def _activate_other_player_wait_goal(self, waypoint_id: str) -> None:
         context = getattr(self, 'other_player_wait_context', {})
         context['initialized'] = True
@@ -5716,6 +5763,18 @@ class MapTab(QWidget):
         context['hold_started_at'] = None
         context['allow_navigation'] = True
         self.other_player_wait_context = context
+
+        # [대기 모드 전용] 대기 대상 웨이포인트가 현재 그래프에 포함되지 않았을 수 있으므로
+        # 활성 경로의 웨이포인트 집합에 대기 웨이포인트를 합쳐 그래프를 재구성한다.
+        try:
+            active_route = self.route_profiles.get(self.active_route_profile_name, {}) or {}
+            wp_ids = self._collect_all_route_waypoint_ids(active_route)
+            if waypoint_id not in wp_ids:
+                wp_ids = list(wp_ids) + [waypoint_id]
+            self._build_navigation_graph(wp_ids)
+        except Exception:
+            # 그래프 재구성이 실패하더라도 이후 로직이 자체적으로 실패를 처리한다.
+            pass
 
         self.journey_plan = [waypoint_id]
         self.current_journey_index = 0
@@ -8141,6 +8200,11 @@ class MapTab(QWidget):
         if final_player_pos is None:
             return False
 
+        # 지면 위에 있거나 평지에서 정지 중이라면 복구가 필요하지 않음
+        player_state = getattr(self, 'player_state', None)
+        if player_state in {'idle', 'on_terrain'}:
+            return False
+
         if getattr(self, 'current_authority_owner', 'map') != 'map':
             return False
 
@@ -10211,12 +10275,13 @@ class MapTab(QWidget):
         else:
             self.update_ui_for_no_profile()
 
-def cleanup_on_close(self):
+    def cleanup_on_close(self):
         self.save_global_settings()
         # 프로그램 종료 시에도 탐지 상태 플래그를 False로 설정
         self.is_detection_running = False
         self._handle_detection_stopped_for_test()
         self._clear_authority_resume_state()
+        self._cancel_other_player_wait_due_to_detection_stop()
 
         self._stop_perf_logging()
 
