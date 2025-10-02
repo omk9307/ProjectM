@@ -1312,17 +1312,19 @@ class PolygonAnnotationEditor(QDialog):
         self.change_class_btn.toggled.connect(self.toggle_change_mode)
         left_controls_layout.addWidget(self.change_class_btn)
 
-        self.switch_to_manual_btn = QPushButton("수동 편집으로 전환")
-        self.switch_to_manual_btn.clicked.connect(self.on_switch_to_manual)
-        left_controls_layout.addWidget(self.switch_to_manual_btn)
-
-        self.switch_to_ai_btn = QPushButton("AI 편집으로 전환")
         sam_ready = getattr(self.learning_tab, "sam_predictor", None) is not None
-        self.switch_to_ai_btn.setEnabled(sam_ready)
+
+        self.mode_ai_btn = QPushButton("AI 편집")
+        self.mode_ai_btn.setEnabled(sam_ready)
         if not sam_ready:
-            self.switch_to_ai_btn.setToolTip("SAM 모델이 준비되지 않아 전환할 수 없습니다.")
-        self.switch_to_ai_btn.clicked.connect(self.on_switch_to_ai)
-        left_controls_layout.addWidget(self.switch_to_ai_btn)
+            self.mode_ai_btn.setToolTip("SAM 모델이 준비되지 않아 전환할 수 없습니다.")
+        self.mode_ai_btn.clicked.connect(self.on_switch_to_ai)
+        left_controls_layout.addWidget(self.mode_ai_btn)
+
+        self.mode_manual_btn = QPushButton("수동 편집")
+        self.mode_manual_btn.setEnabled(False)
+        self.mode_manual_btn.setToolTip("현재 수동 편집 모드입니다.")
+        left_controls_layout.addWidget(self.mode_manual_btn)
 
         # 클래스 선택 UI
         class_selection_layout = QHBoxLayout()
@@ -1487,6 +1489,8 @@ class PolygonAnnotationEditor(QDialog):
         elif event.key() == Qt.Key.Key_Z:
             if self.canvas.polygons: self.canvas.polygons.pop(); self.canvas.update()
         elif event.key() == Qt.Key.Key_D: self.canvas.delete_hovered_polygon()
+        elif event.key() == Qt.Key.Key_T:
+            self.on_switch_to_ai()
         elif event.key() == Qt.Key.Key_C:
             self.change_class_btn.setChecked(not self.change_class_btn.isChecked())
         else: super().keyPressEvent(event)
@@ -1610,6 +1614,15 @@ class SAMAnnotationEditor(QDialog):
         self.change_class_btn.setCheckable(True)
         self.change_class_btn.toggled.connect(self.toggle_change_mode)
         left_controls_layout.addWidget(self.change_class_btn)
+
+        self.mode_ai_btn = QPushButton("AI 편집")
+        self.mode_ai_btn.setEnabled(False)
+        self.mode_ai_btn.setToolTip("현재 AI 편집 모드입니다.")
+        left_controls_layout.addWidget(self.mode_ai_btn)
+
+        self.mode_manual_btn = QPushButton("수동 편집")
+        self.mode_manual_btn.clicked.connect(self.on_switch_to_manual)
+        left_controls_layout.addWidget(self.mode_manual_btn)
 
         class_selection_layout = QHBoxLayout()
         class_selection_layout.addWidget(QLabel("카테고리:"))
@@ -1777,6 +1790,8 @@ class SAMAnnotationEditor(QDialog):
     def keyPressEvent(self, event):
         if event.key() in [Qt.Key.Key_Return, Qt.Key.Key_Enter]:
             self.commit_current_mask()
+        elif event.key() == Qt.Key.Key_T:
+            self.on_switch_to_manual()
         elif event.key() == Qt.Key.Key_R: self.reset_current_mask()
         elif event.key() == Qt.Key.Key_Z:
             if self.canvas.polygons: self.canvas.polygons.pop(); self.canvas.update()
@@ -6013,7 +6028,11 @@ class LearningTab(QWidget):
         def clone_polygons(polygons):
             if not polygons:
                 return []
-            return copy.deepcopy(polygons)
+            cloned = []
+            for poly in polygons:
+                points = [QPoint(point) for point in poly.get('points', [])]
+                cloned.append({'class_id': poly.get('class_id'), 'points': points})
+            return cloned
 
         while True:
             if current_mode == EditModeDialog.AI_ASSIST:
