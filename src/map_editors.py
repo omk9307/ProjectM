@@ -91,6 +91,7 @@ try:
         CONFIG_PATH,
         GLOBAL_ACTION_MODEL_DIR,
         LADDER_ARRIVAL_X_THRESHOLD,
+        LADDER_ARRIVAL_SHORT_THRESHOLD,
         LADDER_AVOIDANCE_WIDTH,
         LADDER_X_GRAB_THRESHOLD,
         MAPS_DIR,
@@ -3733,6 +3734,10 @@ class StateConfigDialog(QDialog):
         add_spinbox("waypoint_arrival_x_threshold_min", "웨이포인트 도착 X오차 최소값(px):", 0.0, 20.0, 0.1)
         add_spinbox("waypoint_arrival_x_threshold_max", "웨이포인트 도착 X오차 최대값(px):", 0.0, 20.0, 0.1)
         add_spinbox("ladder_arrival_x_threshold", "사다리 도착 X오차(px):", 0.0, 20.0, 0.1)
+        add_spinbox("ladder_arrival_short_threshold", "사다리 도착 짧은 X오차(px):", 0.0, 20.0, 0.1)
+        self.spinboxes["ladder_arrival_short_threshold"].setValue(
+            self.config.get("ladder_arrival_short_threshold", LADDER_ARRIVAL_SHORT_THRESHOLD)
+        )
         add_spinbox("jump_link_arrival_x_threshold", "점프/낭떠러지 도착 X오차(px):", 0.0, 20.0, 0.1)
         form_layout.addRow(QLabel("---"))
         add_spinbox("arrival_frame_threshold", "도착 판정 프레임:", 1, 10, 1, is_double=False)
@@ -3835,6 +3840,7 @@ class StateConfigDialog(QDialog):
             "waypoint_arrival_x_threshold_min": WAYPOINT_ARRIVAL_X_THRESHOLD_MIN_DEFAULT,
             "waypoint_arrival_x_threshold_max": WAYPOINT_ARRIVAL_X_THRESHOLD_MAX_DEFAULT,
             "ladder_arrival_x_threshold": LADDER_ARRIVAL_X_THRESHOLD,
+            "ladder_arrival_short_threshold": LADDER_ARRIVAL_SHORT_THRESHOLD,
             "jump_link_arrival_x_threshold": JUMP_LINK_ARRIVAL_X_THRESHOLD,
             "arrival_frame_threshold": 2,
             "action_success_frame_threshold": 2,

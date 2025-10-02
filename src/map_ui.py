@@ -83,6 +83,7 @@ try:
         JUMP_Y_MAX_THRESHOLD,
         JUMP_Y_MIN_THRESHOLD,
         LADDER_ARRIVAL_X_THRESHOLD,
+        LADDER_ARRIVAL_SHORT_THRESHOLD,
         LADDER_AVOIDANCE_WIDTH,
         LADDER_X_GRAB_THRESHOLD,
         MAPS_DIR,
@@ -596,6 +597,7 @@ class MapTab(QWidget):
             self.cfg_waypoint_arrival_x_threshold_min = None
             self.cfg_waypoint_arrival_x_threshold_max = None
             self.cfg_ladder_arrival_x_threshold = None
+            self.cfg_ladder_arrival_short_threshold = None
             self.cfg_jump_link_arrival_x_threshold = None
             self.cfg_on_ladder_enter_frame_threshold = None
             self.cfg_jump_initial_velocity_threshold = None
@@ -2240,6 +2242,7 @@ class MapTab(QWidget):
             self.cfg_waypoint_arrival_x_threshold_min = WAYPOINT_ARRIVAL_X_THRESHOLD_MIN_DEFAULT
             self.cfg_waypoint_arrival_x_threshold_max = WAYPOINT_ARRIVAL_X_THRESHOLD_MAX_DEFAULT
             self.cfg_ladder_arrival_x_threshold = LADDER_ARRIVAL_X_THRESHOLD
+            self.cfg_ladder_arrival_short_threshold = LADDER_ARRIVAL_SHORT_THRESHOLD
             self.cfg_jump_link_arrival_x_threshold = JUMP_LINK_ARRIVAL_X_THRESHOLD
             self.cfg_on_ladder_enter_frame_threshold = 1
             self.cfg_jump_initial_velocity_threshold = 1.0
@@ -2338,6 +2341,7 @@ class MapTab(QWidget):
                     self.cfg_waypoint_arrival_x_threshold_max
                 )
                 self.cfg_ladder_arrival_x_threshold = state_config.get("ladder_arrival_x_threshold", self.cfg_ladder_arrival_x_threshold)
+                self.cfg_ladder_arrival_short_threshold = state_config.get("ladder_arrival_short_threshold", self.cfg_ladder_arrival_short_threshold)
                 self.cfg_jump_link_arrival_x_threshold = state_config.get("jump_link_arrival_x_threshold", self.cfg_jump_link_arrival_x_threshold)
                 self.cfg_on_ladder_enter_frame_threshold = state_config.get("on_ladder_enter_frame_threshold", self.cfg_on_ladder_enter_frame_threshold)
                 self.cfg_jump_initial_velocity_threshold = state_config.get("jump_initial_velocity_threshold", self.cfg_jump_initial_velocity_threshold)
@@ -2662,6 +2666,7 @@ class MapTab(QWidget):
                 "waypoint_arrival_x_threshold_min": self.cfg_waypoint_arrival_x_threshold_min,
                 "waypoint_arrival_x_threshold_max": self.cfg_waypoint_arrival_x_threshold_max,
                 "ladder_arrival_x_threshold": self.cfg_ladder_arrival_x_threshold,
+                "ladder_arrival_short_threshold": self.cfg_ladder_arrival_short_threshold,
                 "jump_link_arrival_x_threshold": self.cfg_jump_link_arrival_x_threshold,
                 "on_ladder_enter_frame_threshold": self.cfg_on_ladder_enter_frame_threshold,
                 "jump_initial_velocity_threshold": self.cfg_jump_initial_velocity_threshold,
@@ -6224,6 +6229,48 @@ class MapTab(QWidget):
             return self._resolve_waypoint_arrival_threshold(node_key, node_data)
         return self.cfg_waypoint_arrival_x_threshold
 
+    def _get_ladder_entry_distance(self, player_pos: Optional[QPointF]) -> Optional[float]:
+        if player_pos is None:
+            return None
+        if not (self.current_segment_path and self.current_segment_index < len(self.current_segment_path)):
+            return None
+
+        entry_key = self.current_segment_path[self.current_segment_index]
+        entry_node = self.nav_nodes.get(entry_key, {})
+        entry_pos = entry_node.get('pos')
+
+        entry_x = None
+        if isinstance(entry_pos, QPointF):
+            entry_x = entry_pos.x()
+        elif isinstance(entry_pos, (list, tuple)) and len(entry_pos) >= 2:
+            try:
+                entry_x = float(entry_pos[0])
+            except (TypeError, ValueError):
+                entry_x = None
+
+        if entry_x is None:
+            return None
+
+        try:
+            return abs(player_pos.x() - entry_x)
+        except AttributeError:
+            return None
+
+    def _select_ladder_climb_command(self, direction_symbol: str, entry_distance: Optional[float]) -> str:
+        base_command = "사다리타기(우)" if direction_symbol == "→" else "사다리타기(좌)"
+
+        if direction_symbol not in ("→", "←") or entry_distance is None:
+            return base_command
+
+        short_threshold = self.cfg_ladder_arrival_short_threshold
+        if short_threshold is None:
+            short_threshold = LADDER_ARRIVAL_SHORT_THRESHOLD
+
+        if short_threshold is not None and entry_distance <= short_threshold:
+            return "사다리타기(우_짧게)" if direction_symbol == "→" else "사다리타기(좌_짧게)"
+
+        return base_command
+
     def _transition_to_action_state(self, new_action_state, prev_node_key):
         """주어진 액션 준비 상태로 전환합니다."""
         if self.navigation_action == new_action_state: return
@@ -7223,13 +7270,15 @@ class MapTab(QWidget):
                     # --- 로직 끝 ---
 
                     elif current_action_key == 'prepare_to_climb':
+                        entry_distance = self._get_ladder_entry_distance(final_player_pos)
+
                         if self.last_printed_player_state in ['jumping'] and current_player_state in ['on_terrain', 'idle'] and is_on_ground:
                             if (action_changed or not direction_changed):
-                                command_to_send = "사다리타기(우)" if current_direction == "→" else "사다리타기(좌)"
+                                command_to_send = self._select_ladder_climb_command(current_direction, entry_distance)
                                 self.last_printed_direction = current_direction
                     
                         if (action_changed or direction_changed) and is_on_ground:
-                            command_to_send = "사다리타기(우)" if current_direction == "→" else "사다리타기(좌)"
+                            command_to_send = self._select_ladder_climb_command(current_direction, entry_distance)
                             self.last_printed_direction = current_direction
 
                     elif current_action_key == 'prepare_to_down_jump':
