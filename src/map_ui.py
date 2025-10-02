@@ -990,6 +990,26 @@ class MapTab(QWidget):
                     or getattr(self, 'event_in_progress', False)
                 )
                 allow_forbidden = not priority_guard_active
+
+                movement_related_keywords = [
+                    "걷기",
+                    "점프",
+                    "오르기",
+                    "사다리타기",
+                    "정렬",
+                    "아래점프",
+                    "텔레포트",
+                ]
+                is_movement_command = (
+                    command_to_resume is not None
+                    and "텔레포트" not in command_to_resume
+                    and any(keyword in command_to_resume for keyword in movement_related_keywords)
+                )
+
+                if is_movement_command:
+                    self.last_movement_command = command_to_resume
+                    self.last_command_sent_time = time.time()
+
                 emit_result = self._emit_control_command(
                     command_to_resume,
                     "authority:resume",
@@ -1005,6 +1025,13 @@ class MapTab(QWidget):
                     success = bool(emit_result)
                     blocked_reason = None
                     blocked_detail = None
+
+                if is_movement_command:
+                    self._record_command_context(command_to_resume)
+                    context = self.last_command_context or {}
+                    sent_at = context.get("sent_at") if isinstance(context, dict) else None
+                    if sent_at is not None:
+                        self.last_command_sent_time = sent_at
 
                 if success:
                     result_text = "성공"
@@ -6442,6 +6469,22 @@ class MapTab(QWidget):
         # Phase 1: 물리적 상태 판정 (유지)
         self.player_state = self._determine_player_physical_state(final_player_pos, contact_terrain)
 
+        if (
+            final_player_pos is not None
+            and contact_terrain is None
+            and not self.airborne_path_warning_active
+            and self.start_waypoint_found
+            and (self.auto_control_checkbox.isChecked() or self.debug_auto_control_checkbox.isChecked())
+        ):
+            last_reference = self.last_movement_time or self.last_action_time
+            if last_reference:
+                idle_duration = time.time() - last_reference
+                wait_threshold = self.cfg_airborne_recovery_wait
+                if idle_duration >= wait_threshold:
+                    self.airborne_path_warning_active = True
+                    if self.airborne_warning_started_at <= 0.0:
+                        self.airborne_warning_started_at = time.time() - wait_threshold
+
         # 공중 경로 대기 상태 자동 복구 처리
         self._handle_airborne_path_wait(final_player_pos, contact_terrain)
 
@@ -6452,7 +6495,7 @@ class MapTab(QWidget):
         if is_moving_state:
             if self.last_movement_time:
                 self.last_action_time = self.last_movement_time
-            else:
+            elif self.last_action_time == 0.0:
                 self.last_action_time = time.time()
             # [핵심 수정] 최근 명령 컨텍스트를 기반으로 의도된 움직임 여부 판정
             is_intentional_move = self._was_recent_intentional_movement(final_player_pos)
@@ -6719,8 +6762,6 @@ class MapTab(QWidget):
         if self.guidance_text == "안전 지점으로 이동" and command in ["걷기(우)", "걷기(좌)", None]:
             command = "아래점프"
             self.last_movement_command = command
-            self.last_command_sent_time = time.time()
-            self._record_command_context(command)
 
         if command:
             if command in ("걷기(우)", "걷기(좌)"):
@@ -6730,6 +6771,12 @@ class MapTab(QWidget):
             elif self.auto_control_checkbox.isChecked():
                 self._emit_control_command(command, None)
             self._record_command_context(command)
+            context = self.last_command_context or {}
+            sent_at = context.get("sent_at") if isinstance(context, dict) else None
+            if sent_at is not None:
+                self.last_command_sent_time = sent_at
+            else:
+                self.last_command_sent_time = time.time()
 
     def _trigger_stuck_recovery(self, final_player_pos, log_message):
         """공통 멈춤 복구 절차를 실행합니다."""
@@ -6821,6 +6868,7 @@ class MapTab(QWidget):
             return
 
         if contact_terrain:
+            self.airborne_path_warning_active = False
             self._reset_airborne_recovery_state()
             return
 
