@@ -3657,6 +3657,7 @@ class StateConfigDialog(QDialog):
         self.config.setdefault("walk_teleport_bonus_max", WALK_TELEPORT_BONUS_MAX_DEFAULT)
         self.config.setdefault("prepare_timeout", PREPARE_TIMEOUT)
         self.config.setdefault("max_lock_duration", MAX_LOCK_DURATION)
+        self.config.setdefault("ladder_avoidance_width", LADDER_AVOIDANCE_WIDTH)
         
         main_layout = QVBoxLayout(self)
         self.spinboxes = {}
@@ -3729,6 +3730,7 @@ class StateConfigDialog(QDialog):
         add_spinbox("climb_x_movement_threshold", "등반 최대 X이동(px/f):", 0.01, 5.0, 0.01)
         add_spinbox("fall_on_ladder_x_movement_threshold", "사다리 낙하 최대 X이동(px/f):", 0.01, 5.0, 0.01)
         add_spinbox("ladder_x_grab_threshold", "사다리 근접 X오차(px):", 0.5, 20.0, 0.1)
+        add_spinbox("ladder_avoidance_width", "사다리 주변 안전거리(px):", 0.0, 30.0, 0.1)
         add_spinbox("stuck_detection_wait", "자동 복구 대기시간(초):", 0.1, 5.0, 0.1)
         add_spinbox("airborne_recovery_wait", "공중 자동복구 대기시간(초):", 0.5, 10.0, 0.1)
         add_spinbox("ladder_recovery_resend_delay", "사다리 복구 재전송 지연(초):", 0.05, 10.0, 0.05)
@@ -3844,6 +3846,7 @@ class StateConfigDialog(QDialog):
             "climb_x_movement_threshold": CLIMB_X_MOVEMENT_THRESHOLD,
             "fall_on_ladder_x_movement_threshold": FALL_ON_LADDER_X_MOVEMENT_THRESHOLD,
             "ladder_x_grab_threshold": LADDER_X_GRAB_THRESHOLD,
+            "ladder_avoidance_width": LADDER_AVOIDANCE_WIDTH,
             "on_ladder_enter_frame_threshold": 1,
             "jump_initial_velocity_threshold": 1.0,
             "climb_max_velocity": 1.0,

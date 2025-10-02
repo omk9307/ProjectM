@@ -646,6 +646,7 @@ class MapTab(QWidget):
             self.cfg_ladder_arrival_x_threshold = None
             self.cfg_ladder_arrival_short_threshold = None
             self.cfg_jump_link_arrival_x_threshold = None
+            self.cfg_ladder_avoidance_width = None
             self.cfg_on_ladder_enter_frame_threshold = None
             self.cfg_jump_initial_velocity_threshold = None
             self.cfg_climb_max_velocity = None
@@ -758,6 +759,12 @@ class MapTab(QWidget):
 
             # v14.3.4: 수집 목표(target) 정보를 저장할 변수
             self.collection_target_info = {} 
+
+            # --- [신규] 에지 낙하 모드 상태 ---
+            self.edgefall_mode_active = False           # 에지 낙하 모드 on/off
+            self.edgefall_direction = None              # 'left' 또는 'right'
+            self.edgefall_started_at = 0.0              # 모드 진입 시각
+            self.edgefall_timeout_sec = 1.0             # 타임아웃(초) - 사용자 요청 반영
 
             self.action_collection_max_frames = 200  
             self.action_model = None
@@ -2374,6 +2381,7 @@ class MapTab(QWidget):
             self.cfg_ladder_arrival_x_threshold = LADDER_ARRIVAL_X_THRESHOLD
             self.cfg_ladder_arrival_short_threshold = LADDER_ARRIVAL_SHORT_THRESHOLD
             self.cfg_jump_link_arrival_x_threshold = JUMP_LINK_ARRIVAL_X_THRESHOLD
+            self.cfg_ladder_avoidance_width = LADDER_AVOIDANCE_WIDTH
             self.cfg_on_ladder_enter_frame_threshold = 1
             self.cfg_jump_initial_velocity_threshold = 1.0
             self.cfg_climb_max_velocity = 1.0
@@ -2504,6 +2512,7 @@ class MapTab(QWidget):
                 self.cfg_ladder_arrival_x_threshold = state_config.get("ladder_arrival_x_threshold", self.cfg_ladder_arrival_x_threshold)
                 self.cfg_ladder_arrival_short_threshold = state_config.get("ladder_arrival_short_threshold", self.cfg_ladder_arrival_short_threshold)
                 self.cfg_jump_link_arrival_x_threshold = state_config.get("jump_link_arrival_x_threshold", self.cfg_jump_link_arrival_x_threshold)
+                self.cfg_ladder_avoidance_width = state_config.get("ladder_avoidance_width", self.cfg_ladder_avoidance_width)
                 self.cfg_on_ladder_enter_frame_threshold = state_config.get("on_ladder_enter_frame_threshold", self.cfg_on_ladder_enter_frame_threshold)
                 self.cfg_jump_initial_velocity_threshold = state_config.get("jump_initial_velocity_threshold", self.cfg_jump_initial_velocity_threshold)
                 self.cfg_climb_max_velocity = state_config.get("climb_max_velocity", self.cfg_climb_max_velocity)
@@ -2842,6 +2851,7 @@ class MapTab(QWidget):
                 "ladder_arrival_x_threshold": self.cfg_ladder_arrival_x_threshold,
                 "ladder_arrival_short_threshold": self.cfg_ladder_arrival_short_threshold,
                 "jump_link_arrival_x_threshold": self.cfg_jump_link_arrival_x_threshold,
+                "ladder_avoidance_width": self.cfg_ladder_avoidance_width,
                 "on_ladder_enter_frame_threshold": self.cfg_on_ladder_enter_frame_threshold,
                 "jump_initial_velocity_threshold": self.cfg_jump_initial_velocity_threshold,
                 "climb_max_velocity": self.cfg_climb_max_velocity,
@@ -4576,6 +4586,7 @@ class MapTab(QWidget):
             "waypoint_arrival_x_threshold_max": self.cfg_waypoint_arrival_x_threshold_max,
             "ladder_arrival_x_threshold": self.cfg_ladder_arrival_x_threshold,
             "jump_link_arrival_x_threshold": self.cfg_jump_link_arrival_x_threshold,
+            "ladder_avoidance_width": self.cfg_ladder_avoidance_width,
             "on_ladder_enter_frame_threshold": self.cfg_on_ladder_enter_frame_threshold,
             "jump_initial_velocity_threshold": self.cfg_jump_initial_velocity_threshold,
             "climb_max_velocity": self.cfg_climb_max_velocity,
@@ -7961,7 +7972,12 @@ class MapTab(QWidget):
         """마지막 이동 명령을 실제로 재전송하는 역할을 합니다."""
         command = self.last_movement_command
 
-        if self.guidance_text == "안전 지점으로 이동" and command in ["걷기(우)", "걷기(좌)", None]:
+        if (
+            self.guidance_text == "안전 지점으로 이동"
+            and command in ["걷기(우)", "걷기(좌)", None]
+            and not getattr(self, 'edgefall_mode_active', False)
+        ):
+            # 에지 낙하 모드가 아닐 때만 아래점프로 전환
             command = "아래점프"
             self.last_movement_command = command
 
@@ -8074,6 +8090,9 @@ class MapTab(QWidget):
 
     def _should_issue_down_jump(self, ladder_dist: Optional[float]) -> bool:
         """사다리와의 거리를 기준으로 아래점프 시도가 안전한지 판단합니다."""
+        # 에지 낙하 모드일 때는 아래점프를 시도하지 않음
+        if getattr(self, 'edgefall_mode_active', False):
+            return False
         if ladder_dist is None:
             return True
 
@@ -8803,6 +8822,20 @@ class MapTab(QWidget):
         [MODIFIED] 2025-08-27 17:47 (KST): 'climbing_up' 상태가 되었을 때 안내가 초기화되는 문제 수정
         """
         # [PATCH] v14.3.15: 플레이어 상태에 따른 로직 분기 시작
+        # --- [신규] 에지 낙하 모드 유지/종료 처리 ---
+        try:
+            if self.edgefall_mode_active:
+                ps = getattr(self, 'player_state', None)
+                if ps in ['falling', 'jumping']:
+                    # 낙하/점프 시작되면 모드 종료
+                    self.edgefall_mode_active = False
+                else:
+                    if (time.time() - float(self.edgefall_started_at)) > float(self.edgefall_timeout_sec):
+                        # 1초 내 낙하가 시작되지 않았다면 모드 종료하고 정상 로직으로 복귀
+                        self.edgefall_mode_active = False
+                        self.update_general_log("[에지 낙하] 대기 1.0초 초과 — 아래점프로 복귀합니다.", "orange")
+        except Exception:
+            pass
         
         # Case 1: 플레이어가 지상에 있을 때 (가장 일반적인 경우)
         if departure_terrain_group is not None:
@@ -8856,7 +8889,8 @@ class MapTab(QWidget):
 
                             # 여기까지 왔다면, 현재 지형에 '사다리 출구'가 있음 → 위험 구간 생성
                             ladder_x = obj['points'][0][0]
-                            ladder_hazard_zones.append((ladder_x - LADDER_AVOIDANCE_WIDTH, ladder_x + LADDER_AVOIDANCE_WIDTH))
+                            width = self.cfg_ladder_avoidance_width if self.cfg_ladder_avoidance_width is not None else LADDER_AVOIDANCE_WIDTH
+                            ladder_hazard_zones.append((ladder_x - width, ladder_x + width))
                         
                         is_in_hazard = any(start <= player_x <= end for start, end in ladder_hazard_zones)
                         if is_in_hazard:
@@ -8906,6 +8940,23 @@ class MapTab(QWidget):
                                             line_y = a[1] + (dy * ((best_x - a[0]) / dx)) if dx != 0 else a[1]
                                             break
                                     self.intermediate_target_pos = QPointF(best_x, line_y)
+
+                                    # [신규] 에지 낙하 모드 활성화 조건: 안전구간 경계와 지형 끝의 거리 <= 2px
+                                    try:
+                                        direction = 'right' if best_x >= player_x else 'left'
+                                        edge_x = dep_max_x if direction == 'right' else dep_min_x
+                                        if abs(edge_x - best_x) <= 2.0:
+                                            self.edgefall_mode_active = True
+                                            self.edgefall_direction = direction
+                                            self.edgefall_started_at = time.time()
+                                            # 목표를 지형의 끝으로 재설정 (Y는 출발 지형선 보간값 사용)
+                                            self.intermediate_target_pos = QPointF(edge_x, line_y)
+                                            self.update_general_log(
+                                                f"[에지 낙하] {('우' if direction=='right' else '좌')} 에지까지 {abs(edge_x - best_x):.1f}px — 걷기로 낙하 유도",
+                                                "gray",
+                                            )
+                                    except Exception:
+                                        pass
                                 else:
                                     self.intermediate_target_pos = None
                             else:
@@ -8970,6 +9021,22 @@ class MapTab(QWidget):
                                 line_y = a[1] + (dy * ((best_x - a[0]) / dx)) if dx != 0 else a[1]
                                 break
                         self.intermediate_target_pos = QPointF(best_x, line_y)
+
+                        # [신규] 에지 낙하 모드 활성화 조건 검사
+                        try:
+                            direction = 'right' if best_x >= player_x else 'left'
+                            edge_x = dep_max_x if direction == 'right' else dep_min_x
+                            if abs(edge_x - best_x) <= 2.0:
+                                self.edgefall_mode_active = True
+                                self.edgefall_direction = direction
+                                self.edgefall_started_at = time.time()
+                                self.intermediate_target_pos = QPointF(edge_x, line_y)
+                                self.update_general_log(
+                                    f"[에지 낙하] {('우' if direction=='right' else '좌')} 에지까지 {abs(edge_x - best_x):.1f}px — 걷기로 낙하 유도",
+                                    "gray",
+                                )
+                        except Exception:
+                            pass
                     else:
                         self.intermediate_target_pos = None
                     if self.navigation_action == 'prepare_to_down_jump':
@@ -9921,7 +9988,8 @@ class MapTab(QWidget):
                         if (start_line_id == line_above['id'] and self.line_id_to_floor_map.get(end_line_id, float('inf')) < line_above_floor) or \
                            (end_line_id == line_above['id'] and self.line_id_to_floor_map.get(start_line_id, float('inf')) < line_above_floor):
                             ladder_x = obj['points'][0][0]
-                            if abs(x_pos - ladder_x) <= LADDER_AVOIDANCE_WIDTH:
+                            width = self.cfg_ladder_avoidance_width if self.cfg_ladder_avoidance_width is not None else LADDER_AVOIDANCE_WIDTH
+                            if abs(x_pos - ladder_x) <= width:
                                 is_safe_from_ladders = False
                                 break
                     
