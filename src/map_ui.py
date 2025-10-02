@@ -66,7 +66,6 @@ from PyQt6.QtGui import (
     QFontMetrics,
     QFontMetricsF,
     QGuiApplication,
-    QIntValidator,
 )
 from PyQt6.QtCore import Qt, QThread, pyqtSignal, pyqtSlot, QRect, QPoint, QRectF, QPointF, QSize, QSizeF, QTimer, QSignalBlocker
 
@@ -552,11 +551,18 @@ class MapTab(QWidget):
             self.telegram_send_custom_count = 3
             self.telegram_bot_token = ""
             self.telegram_chat_id = ""
-            self.other_player_test_btn = None
-            self.other_player_test_duration_input = None
+            self.other_player_test_checkbox = None
+            self.other_player_test_button = None
+            self._other_player_test_trigger_pending = False
+            self.other_player_test_delay_seconds = 10
+            self.other_player_test_duration_seconds = 5
             self._other_player_alert_custom_remaining = 0
             self.other_player_wait_context: dict[str, Any] = {}
             self._other_player_test_end_time = 0.0
+            self._other_player_test_active_duration = 0
+            self._other_player_test_delay_timer = QTimer(self)
+            self._other_player_test_delay_timer.setSingleShot(True)
+            self._other_player_test_delay_timer.timeout.connect(self._activate_other_player_presence_test)
             self._other_player_test_timer = QTimer(self)
             self._other_player_test_timer.setSingleShot(True)
             self._other_player_test_timer.timeout.connect(self._finish_other_player_presence_test)
@@ -1353,21 +1359,20 @@ class MapTab(QWidget):
         self.telegram_alert_checkbox.setChecked(False)
         self.telegram_alert_checkbox.toggled.connect(self._on_telegram_alert_toggled)
         telegram_controls_layout.addWidget(self.telegram_alert_checkbox)
-        self.other_player_test_btn = QPushButton("테스트")
-        self.other_player_test_btn.setEnabled(False)
-        self.other_player_test_btn.clicked.connect(self._start_other_player_presence_test)
-        telegram_controls_layout.addWidget(self.other_player_test_btn)
         self.telegram_settings_btn = QPushButton("설정")
         self.telegram_settings_btn.setEnabled(False)
         self.telegram_settings_btn.clicked.connect(self._open_telegram_settings_dialog)
         telegram_controls_layout.addWidget(self.telegram_settings_btn)
-        self.other_player_test_duration_input = QLineEdit()
-        self.other_player_test_duration_input.setEnabled(False)
-        self.other_player_test_duration_input.setFixedWidth(60)
-        self.other_player_test_duration_input.setPlaceholderText("초")
-        self.other_player_test_duration_input.setValidator(QIntValidator(1, 3600, self))
-        self.other_player_test_duration_input.setText("5")
-        telegram_controls_layout.addWidget(self.other_player_test_duration_input)
+        self.other_player_test_checkbox = QCheckBox()
+        self.other_player_test_checkbox.setEnabled(False)
+        self.other_player_test_checkbox.setToolTip("유저 테스트 강제 감지 활성화")
+        self.other_player_test_checkbox.setFixedWidth(22)
+        self.other_player_test_checkbox.toggled.connect(self._on_other_player_test_toggled)
+        telegram_controls_layout.addWidget(self.other_player_test_checkbox)
+        self.other_player_test_button = QPushButton("유저 테스트")
+        self.other_player_test_button.setEnabled(False)
+        self.other_player_test_button.clicked.connect(self._open_other_player_test_dialog)
+        telegram_controls_layout.addWidget(self.other_player_test_button)
         third_row_layout.addLayout(telegram_controls_layout)
         third_row_layout.addStretch(1)
         self.telegram_alert_checkbox.setEnabled(False)
@@ -2344,7 +2349,15 @@ class MapTab(QWidget):
                 del blocker
             self.other_player_alert_enabled = other_alert_enabled
             if not other_alert_enabled:
-                self._finish_other_player_presence_test()
+                self._clear_other_player_presence_test(
+                    reason="유저 테스트가 감지 옵션 비활성화로 종료되었습니다.",
+                    keep_pending=False,
+                    refresh=False,
+                )
+                if self.other_player_test_checkbox and self.other_player_test_checkbox.isChecked():
+                    blocker = QSignalBlocker(self.other_player_test_checkbox)
+                    self.other_player_test_checkbox.setChecked(False)
+                    del blocker
                 self._reset_other_player_alert_state()
             self._update_other_player_test_controls_enabled()
 
@@ -2359,6 +2372,25 @@ class MapTab(QWidget):
             self.telegram_alert_enabled = telegram_enabled
             if hasattr(self, 'telegram_settings_btn') and self.telegram_settings_btn:
                 self.telegram_settings_btn.setEnabled(other_alert_enabled and telegram_enabled)
+
+            test_enabled = bool(config.get('other_player_test_enabled', False)) if other_alert_enabled else False
+            test_config = config.get('other_player_test', {})
+            try:
+                delay_value = int(test_config.get('delay_seconds', self.other_player_test_delay_seconds))
+            except (TypeError, ValueError):
+                delay_value = self.other_player_test_delay_seconds
+            try:
+                duration_value = int(test_config.get('duration_seconds', self.other_player_test_duration_seconds))
+            except (TypeError, ValueError):
+                duration_value = self.other_player_test_duration_seconds
+            self.other_player_test_delay_seconds = max(0, delay_value)
+            self.other_player_test_duration_seconds = max(1, duration_value) if duration_value else 1
+            if hasattr(self, 'other_player_test_checkbox') and self.other_player_test_checkbox:
+                blocker = QSignalBlocker(self.other_player_test_checkbox)
+                self.other_player_test_checkbox.setChecked(test_enabled)
+                del blocker
+            if test_enabled:
+                self._schedule_other_player_presence_test()
             saved_mode_raw = config.get("telegram_send_mode", self.telegram_send_mode)
             saved_mode = str(saved_mode_raw).lower()
             if saved_mode in {"continuous", "custom"}:
@@ -2784,6 +2816,14 @@ class MapTab(QWidget):
                 'telegram_send_mode': self.telegram_send_mode,
                 'telegram_send_interval': float(self.telegram_send_interval),
                 'telegram_send_custom_count': int(self.telegram_send_custom_count),
+                'other_player_test_enabled': bool(
+                    getattr(self, 'other_player_test_checkbox', None)
+                    and self.other_player_test_checkbox.isChecked()
+                ),
+                'other_player_test': {
+                    'delay_seconds': int(self.other_player_test_delay_seconds),
+                    'duration_seconds': int(self.other_player_test_duration_seconds),
+                },
             })
             
             key_features_data = self._prepare_data_for_json(self.key_features)
@@ -4329,6 +4369,7 @@ class MapTab(QWidget):
                     self._start_perf_logging()
 
                 self._reset_walk_teleport_state()
+                self._handle_detection_started_for_test()
                 self.detect_anchor_btn.setText("탐지 중단")
                 if (
                     getattr(self, '_hunt_tab', None)
@@ -4345,6 +4386,7 @@ class MapTab(QWidget):
             else:
                 # [핵심 수정] 스레드 중단 전에 플래그를 False로 먼저 설정
                 self.is_detection_running = False
+                self._handle_detection_stopped_for_test()
                 self._clear_authority_resume_state()
                 self.detection_status_changed.emit(False)
                 if self.status_monitor:
@@ -5135,55 +5177,83 @@ class MapTab(QWidget):
             return False
         return time.time() < self._other_player_test_end_time
 
+    def _get_other_player_test_duration(self) -> int:
+        return max(0, int(self.other_player_test_duration_seconds or 0))
+
     def _trigger_other_player_presence_test_refresh(self) -> None:
         self._handle_other_player_detection_alert(self.other_player_global_rects)
         effective_count = self._get_effective_other_player_count(len(self.other_player_global_rects))
         self._notify_other_player_presence(effective_count)
 
-    def _finish_other_player_presence_test(self) -> None:
-        if self._other_player_test_timer.isActive():
-            self._other_player_test_timer.stop()
-        if self._other_player_test_end_time <= 0.0:
-            return
-        self._other_player_test_end_time = 0.0
-        try:
-            self.update_general_log("테스트용 다른 유저 감지가 종료되었습니다.", "info")
-        except Exception:
-            pass
-        self._trigger_other_player_presence_test_refresh()
-
-    def _start_other_player_presence_test(self) -> None:
-        if not self.other_player_alert_enabled:
-            QMessageBox.information(self, "테스트 불가", "먼저 '다른 유저 감지'를 활성화해 주세요.")
+    def _schedule_other_player_presence_test(self, *, from_detection_start: bool = False) -> None:
+        if not (self.other_player_test_checkbox and self.other_player_test_checkbox.isChecked()):
             return
 
-        if not self.other_player_test_duration_input:
-            return
-
-        duration_text = self.other_player_test_duration_input.text().strip()
-        if not duration_text:
-            QMessageBox.information(self, "테스트 시간 필요", "테스트 유지 시간을 초 단위로 입력해 주세요.")
-            return
-
-        try:
-            duration = int(duration_text)
-        except ValueError:
-            QMessageBox.warning(self, "입력 오류", "테스트 시간은 1 이상의 정수로 입력해 주세요.")
-            return
-
+        duration = self._get_other_player_test_duration()
         if duration <= 0:
-            QMessageBox.warning(self, "입력 오류", "테스트 시간은 1초 이상이어야 합니다.")
             return
 
+        was_pending = self._other_player_test_trigger_pending
+        self._other_player_test_trigger_pending = True
+
+        if self._other_player_test_delay_timer.isActive():
+            self._other_player_test_delay_timer.stop()
         if self._other_player_test_timer.isActive():
             self._other_player_test_timer.stop()
 
+        self._other_player_test_end_time = 0.0
+        self._other_player_test_active_duration = duration
+
+        delay_seconds = max(0, int(self.other_player_test_delay_seconds or 0))
+
+        if not self.is_detection_running:
+            if not was_pending:
+                try:
+                    self.update_general_log(
+                        "유저 테스트 대기: 탐지를 시작하면 {delay}초 후 {duration}초 동안 다른 유저를 1명으로 인식합니다.".format(
+                            delay=delay_seconds,
+                            duration=duration,
+                        ),
+                        "info",
+                    )
+                except Exception:
+                    pass
+            return
+
+        if delay_seconds > 0:
+            self._other_player_test_delay_timer.start(delay_seconds * 1000)
+            if from_detection_start or not was_pending:
+                try:
+                    self.update_general_log(
+                        "유저 테스트 예약: {delay}초 후 {duration}초 동안 다른 유저를 1명으로 인식합니다.".format(
+                            delay=delay_seconds,
+                            duration=duration,
+                        ),
+                        "info",
+                    )
+                except Exception:
+                    pass
+        else:
+            self._activate_other_player_presence_test()
+
+    def _activate_other_player_presence_test(self) -> None:
+        if not self.is_detection_running:
+            return
+        if not (self.other_player_test_checkbox and self.other_player_test_checkbox.isChecked()):
+            return
+
+        duration = self._other_player_test_active_duration or self._get_other_player_test_duration()
+        if duration <= 0:
+            self._other_player_test_trigger_pending = False
+            return
+
+        self._other_player_test_trigger_pending = False
         self._other_player_test_end_time = time.time() + duration
         self._other_player_test_timer.start(duration * 1000)
 
         try:
             self.update_general_log(
-                f"테스트용 다른 유저 감지를 {duration}초 동안 활성화합니다.",
+                f"유저 테스트 시작: {duration}초 동안 다른 유저가 1명 있는 것으로 처리합니다.",
                 "info",
             )
         except Exception:
@@ -5191,12 +5261,177 @@ class MapTab(QWidget):
 
         self._trigger_other_player_presence_test_refresh()
 
+    def _clear_other_player_presence_test(
+        self,
+        *,
+        reason: str = "",
+        keep_pending: bool = False,
+        refresh: bool = True,
+    ) -> bool:
+        delay_active = self._other_player_test_delay_timer.isActive()
+        if delay_active:
+            self._other_player_test_delay_timer.stop()
+
+        active_now = self._is_other_player_test_active()
+        if self._other_player_test_timer.isActive():
+            self._other_player_test_timer.stop()
+            active_now = True
+
+        had_pending = self._other_player_test_trigger_pending
+        had_state = active_now or delay_active or had_pending
+
+        self._other_player_test_end_time = 0.0
+        self._other_player_test_active_duration = 0
+        if not keep_pending or not (self.other_player_test_checkbox and self.other_player_test_checkbox.isChecked()):
+            self._other_player_test_trigger_pending = False
+
+        if reason and had_state:
+            try:
+                self.update_general_log(reason, "info")
+            except Exception:
+                pass
+        elif (active_now or delay_active) and not reason:
+            try:
+                self.update_general_log("유저 테스트가 종료되었습니다.", "info")
+            except Exception:
+                pass
+
+        if refresh and (active_now or delay_active):
+            self._trigger_other_player_presence_test_refresh()
+
+        return had_state
+
+    def _finish_other_player_presence_test(self) -> None:
+        self._clear_other_player_presence_test(
+            reason="유저 테스트 종료: 다른 유저 감지 상태가 해제되었습니다.",
+            keep_pending=False,
+        )
+
+    def _on_other_player_test_toggled(self, checked: bool) -> None:  # noqa: ARG002
+        if not self.other_player_alert_enabled:
+            if self.other_player_test_checkbox and self.other_player_test_checkbox.isChecked():
+                blocker = QSignalBlocker(self.other_player_test_checkbox)
+                self.other_player_test_checkbox.setChecked(False)
+                del blocker
+            return
+
+        if self.other_player_test_checkbox and self.other_player_test_checkbox.isChecked():
+            self._schedule_other_player_presence_test()
+        else:
+            self._clear_other_player_presence_test(
+                reason="유저 테스트가 비활성화되었습니다.",
+                keep_pending=False,
+            )
+
+    def _handle_detection_started_for_test(self) -> None:
+        if self.other_player_test_checkbox and self.other_player_test_checkbox.isChecked():
+            self._schedule_other_player_presence_test(from_detection_start=True)
+
+    def _handle_detection_stopped_for_test(self) -> None:
+        keep_pending = bool(self.other_player_test_checkbox and self.other_player_test_checkbox.isChecked())
+        self._clear_other_player_presence_test(
+            reason="유저 테스트가 탐지 중단으로 종료되었습니다.",
+            keep_pending=keep_pending,
+        )
+
     def _update_other_player_test_controls_enabled(self) -> None:
         enabled = bool(self.other_player_alert_enabled)
-        if self.other_player_test_btn is not None:
-            self.other_player_test_btn.setEnabled(enabled)
-        if self.other_player_test_duration_input is not None:
-            self.other_player_test_duration_input.setEnabled(enabled)
+        if self.other_player_test_checkbox is not None:
+            self.other_player_test_checkbox.setEnabled(enabled)
+        if self.other_player_test_button is not None:
+            self.other_player_test_button.setEnabled(enabled)
+
+    def _open_other_player_test_dialog(self) -> None:
+        if not self.other_player_alert_enabled:
+            QMessageBox.information(self, "유저 테스트", "먼저 '다른 유저 감지'를 활성화해 주세요.")
+            return
+
+        dialog = QDialog(self)
+        dialog.setWindowTitle("유저 테스트 설정")
+
+        main_layout = QVBoxLayout(dialog)
+        main_layout.setContentsMargins(16, 16, 16, 16)
+        main_layout.setSpacing(12)
+
+        delay_title = QLabel("유저 테스트 시작 타이머")
+        delay_title.setStyleSheet("font-weight: bold;")
+        main_layout.addWidget(delay_title)
+
+        delay_spin = QSpinBox(dialog)
+        delay_spin.setRange(0, 3600)
+        delay_spin.setSuffix(" 초")
+        delay_spin.setValue(max(0, int(self.other_player_test_delay_seconds)))
+        main_layout.addWidget(delay_spin)
+
+        duration_title = QLabel("유저 지속시간")
+        duration_title.setStyleSheet("font-weight: bold;")
+        main_layout.addWidget(duration_title)
+
+        duration_layout = QHBoxLayout()
+        duration_layout.setSpacing(8)
+
+        duration_minutes_spin = QSpinBox(dialog)
+        duration_minutes_spin.setRange(0, 720)
+        duration_minutes_spin.setSuffix(" 분")
+        duration_seconds_spin = QSpinBox(dialog)
+        duration_seconds_spin.setRange(0, 59)
+        duration_seconds_spin.setSuffix(" 초")
+
+        total_duration = max(0, int(self.other_player_test_duration_seconds))
+        max_minutes = duration_minutes_spin.maximum()
+        minutes_value = min(total_duration // 60, max_minutes)
+        seconds_value = total_duration - minutes_value * 60
+        if minutes_value == max_minutes:
+            seconds_value = min(seconds_value, duration_seconds_spin.maximum())
+        duration_minutes_spin.setValue(minutes_value)
+        duration_seconds_spin.setValue(seconds_value % 60)
+
+        duration_layout.addWidget(duration_minutes_spin)
+        duration_layout.addWidget(duration_seconds_spin)
+        duration_layout.addStretch(1)
+        main_layout.addLayout(duration_layout)
+
+        button_box = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel, parent=dialog)
+        main_layout.addWidget(button_box)
+
+        def _accept() -> None:
+            delay_value = int(delay_spin.value())
+            minutes_value = int(duration_minutes_spin.value())
+            seconds_value = int(duration_seconds_spin.value())
+            total_value = minutes_value * 60 + seconds_value
+            if total_value <= 0:
+                QMessageBox.warning(dialog, "입력 오류", "유저 지속시간은 1초 이상이어야 합니다.")
+                return
+
+            self.other_player_test_delay_seconds = delay_value
+            self.other_player_test_duration_seconds = total_value
+            dialog.accept()
+
+        button_box.accepted.connect(_accept)
+        button_box.rejected.connect(dialog.reject)
+
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            was_checked = bool(self.other_player_test_checkbox and self.other_player_test_checkbox.isChecked())
+            if was_checked:
+                self._clear_other_player_presence_test(keep_pending=False, refresh=False)
+                self._schedule_other_player_presence_test()
+
+            try:
+                self.update_general_log(
+                    "유저 테스트 설정이 저장되었습니다. 시작 지연: {delay}초, 지속시간: {duration}초".format(
+                        delay=int(self.other_player_test_delay_seconds),
+                        duration=int(self.other_player_test_duration_seconds),
+                    ),
+                    "info",
+                )
+            except Exception:
+                pass
+
+            if self.active_profile_name:
+                try:
+                    self.save_profile_data()
+                except Exception:
+                    pass
 
     # ------------------------------------------------------------------
     # 다른 캐릭터 대기 모드 연동
@@ -5583,7 +5818,14 @@ class MapTab(QWidget):
     def _on_other_player_alert_toggled(self, checked: bool) -> None:  # noqa: ARG002
         self.other_player_alert_enabled = bool(checked)
         if not self.other_player_alert_enabled:
-            self._finish_other_player_presence_test()
+            self._clear_other_player_presence_test(
+                reason="유저 테스트가 감지 옵션 비활성화로 종료되었습니다.",
+                keep_pending=False,
+            )
+            if self.other_player_test_checkbox and self.other_player_test_checkbox.isChecked():
+                blocker = QSignalBlocker(self.other_player_test_checkbox)
+                self.other_player_test_checkbox.setChecked(False)
+                del blocker
             self._reset_other_player_alert_state()
         self._update_other_player_test_controls_enabled()
         if self.telegram_alert_checkbox:
@@ -9524,6 +9766,7 @@ def cleanup_on_close(self):
         self.save_global_settings()
         # 프로그램 종료 시에도 탐지 상태 플래그를 False로 설정
         self.is_detection_running = False
+        self._handle_detection_stopped_for_test()
         self._clear_authority_resume_state()
 
         self._stop_perf_logging()
