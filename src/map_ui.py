@@ -9377,24 +9377,6 @@ class MapTab(QWidget):
             return
 
         if resource == 'hp':
-            current_pos = getattr(self, 'last_player_pos', None)
-            ladders = self.geometry_data.get("transition_objects", []) if hasattr(self, 'geometry_data') else []
-            if current_pos is not None and ladders:
-                is_near_ladder, _, dist_x = self._check_near_ladder(
-                    current_pos,
-                    ladders,
-                    8.0,
-                    return_dist=True,
-                    current_floor=getattr(self, 'current_player_floor', None)
-                )
-                if is_near_ladder:
-                    self.update_general_log(
-                        "[상태] HP 명령 보류: 사다리 8px 이내 접근 중", "gray"
-                    )
-                    self._status_last_command_ts[resource] = timestamp
-                    return
-
-        if resource == 'hp':
             # HP 명령은 병렬 수행을 전제로 하므로 기존 명령 보관/차단 로직을 우회한다.
             self._status_saved_command = None
             if percentage < 20.0:
