@@ -93,6 +93,12 @@ NEGATIVE_SAMPLES_NAME = "학습 방해 요소 (네거티브)"
 # 클래스 관리의 최상위 카테고리 목록을 정의합니다. '캐릭터'는 항상 최상단에 위치합니다.
 CATEGORIES = [CHARACTER_CLASS_NAME, "몬스터", "오브젝트", "기타"]
 
+STATUS_RESOURCE_LABELS = {
+    'hp': 'HP',
+    'mp': 'MP',
+    'exp': 'EXP',
+}
+
 
 # 편집기에서 클래스별로 다른 색상의 다각형을 그리기 위한 색상 목록입니다.
 CLASS_COLORS = [
@@ -481,19 +487,22 @@ class StatusRegionSelector(QDialog):
         self.end = QPoint(new_x, new_y)
 
 
-class ExpRecognitionPreviewDialog(QDialog):
-    """EXP 탐지 ROI 캡처와 OCR 결과를 시각적으로 확인하기 위한 대화상자."""
+class StatusRecognitionPreviewDialog(QDialog):
+    """탐지 ROI 캡처와 분석 결과를 시각적으로 확인하기 위한 대화상자."""
 
     def __init__(
         self,
         parent: Optional[QWidget],
+        window_title: str,
         roi_description: str,
-        original_bgr: Optional[np.ndarray],
-        processed_gray: Optional[np.ndarray],
+        original_image: Optional[np.ndarray],
+        processed_image: Optional[np.ndarray],
         summary_lines: list[str],
+        *,
+        processed_title: Optional[str] = None,
     ) -> None:
         super().__init__(parent)
-        self.setWindowTitle('EXP 인식 확인')
+        self.setWindowTitle(window_title)
         self.setModal(True)
         self.setMinimumWidth(520)
 
@@ -512,21 +521,23 @@ class ExpRecognitionPreviewDialog(QDialog):
         original_column.addWidget(original_title)
         original_view = QLabel()
         original_view.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        original_pixmap = self._create_color_pixmap(original_bgr)
+        original_pixmap = self._create_pixmap(original_image)
         original_view.setPixmap(self._scaled_pixmap(original_pixmap))
         original_column.addWidget(original_view)
         image_layout.addLayout(original_column)
 
-        processed_column = QVBoxLayout()
-        processed_title = QLabel('전처리(Threshold)')
-        processed_title.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        processed_column.addWidget(processed_title)
-        processed_view = QLabel()
-        processed_view.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        processed_pixmap = self._create_gray_pixmap(processed_gray)
-        processed_view.setPixmap(self._scaled_pixmap(processed_pixmap))
-        processed_column.addWidget(processed_view)
-        image_layout.addLayout(processed_column)
+        processed_pixmap = self._create_pixmap(processed_image)
+        if not processed_pixmap.isNull():
+            processed_column = QVBoxLayout()
+            title_text = processed_title or '분석 이미지'
+            processed_title_label = QLabel(title_text)
+            processed_title_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            processed_column.addWidget(processed_title_label)
+            processed_view = QLabel()
+            processed_view.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            processed_view.setPixmap(self._scaled_pixmap(processed_pixmap))
+            processed_column.addWidget(processed_view)
+            image_layout.addLayout(processed_column)
 
         layout.addLayout(image_layout)
 
@@ -543,24 +554,31 @@ class ExpRecognitionPreviewDialog(QDialog):
 
         self.setLayout(layout)
 
-    def _create_color_pixmap(self, image_bgr: Optional[np.ndarray]) -> QPixmap:
-        if image_bgr is None or image_bgr.size == 0:
+    def _create_pixmap(self, image: Optional[np.ndarray]) -> QPixmap:
+        if image is None:
             return QPixmap()
-        buffer = np.ascontiguousarray(image_bgr)
-        self._buffers.append(buffer)
-        height, width, channels = buffer.shape
-        bytes_per_line = channels * width
-        qimage = QImage(buffer.data, width, height, bytes_per_line, QImage.Format.Format_BGR888)
-        return QPixmap.fromImage(qimage)
-
-    def _create_gray_pixmap(self, image_gray: Optional[np.ndarray]) -> QPixmap:
-        if image_gray is None:
+        if not hasattr(image, 'size') or image.size == 0:
             return QPixmap()
-        buffer = np.ascontiguousarray(image_gray)
+        buffer = np.ascontiguousarray(image)
         self._buffers.append(buffer)
-        height, width = buffer.shape[:2]
-        bytes_per_line = width
-        qimage = QImage(buffer.data, width, height, bytes_per_line, QImage.Format.Format_Grayscale8)
+        if buffer.ndim == 2:
+            height, width = buffer.shape
+            bytes_per_line = width
+            fmt = QImage.Format.Format_Grayscale8
+        else:
+            height, width, channels = buffer.shape
+            if channels == 1:
+                bytes_per_line = width
+                fmt = QImage.Format.Format_Grayscale8
+            elif channels == 3:
+                bytes_per_line = channels * width
+                fmt = QImage.Format.Format_BGR888
+            elif channels == 4:
+                bytes_per_line = channels * width
+                fmt = QImage.Format.Format_RGBA8888
+            else:
+                return QPixmap()
+        qimage = QImage(buffer.data, width, height, bytes_per_line, fmt)
         return QPixmap.fromImage(qimage)
 
     @staticmethod
@@ -4313,9 +4331,16 @@ class LearningTab(QWidget):
         header_layout.addStretch(1)
         vbox.addLayout(header_layout)
 
-        button = QPushButton('탐지 범위 설정')
-        button.clicked.connect(lambda _, key=resource: self._select_status_roi(key))
-        vbox.addWidget(button)
+        roi_button_layout = QHBoxLayout()
+        roi_button = QPushButton('탐지 범위 설정')
+        roi_button.clicked.connect(lambda _, key=resource: self._select_status_roi(key))
+        roi_button_layout.addWidget(roi_button)
+        preview_button = QPushButton('인식 확인')
+        preview_button.setToolTip(f'현재 {title} 탐지 범위를 캡처하여 분석합니다.')
+        preview_button.clicked.connect(lambda _, key=resource: self._handle_status_preview(key))
+        roi_button_layout.addWidget(preview_button)
+        roi_button_layout.addStretch(1)
+        vbox.addLayout(roi_button_layout)
 
         roi_label = QLabel('범위가 설정되지 않았습니다.')
         roi_label.setWordWrap(True)
@@ -4360,12 +4385,13 @@ class LearningTab(QWidget):
 
         if resource == 'hp':
             self.hp_enabled_checkbox = enabled_checkbox
-            self.hp_roi_button = button
+            self.hp_roi_button = roi_button
             self.hp_roi_label = roi_label
             self.hp_max_input = max_input
             self.hp_threshold_input = input_field
             self.hp_command_combo = combo
             self.hp_interval_input = interval_input
+            self.hp_preview_button = preview_button
             self.hp_enabled_checkbox.toggled.connect(lambda checked: self._on_status_enabled_changed('hp', checked))
             self.hp_max_input.editingFinished.connect(lambda: self._on_status_max_changed('hp'))
             self.hp_threshold_input.editingFinished.connect(lambda: self._on_status_threshold_changed('hp'))
@@ -4373,12 +4399,13 @@ class LearningTab(QWidget):
             self.hp_interval_input.editingFinished.connect(lambda: self._on_status_interval_changed('hp'))
         else:
             self.mp_enabled_checkbox = enabled_checkbox
-            self.mp_roi_button = button
+            self.mp_roi_button = roi_button
             self.mp_roi_label = roi_label
             self.mp_max_input = max_input
             self.mp_threshold_input = input_field
             self.mp_command_combo = combo
             self.mp_interval_input = interval_input
+            self.mp_preview_button = preview_button
             self.mp_enabled_checkbox.toggled.connect(lambda checked: self._on_status_enabled_changed('mp', checked))
             self.mp_max_input.editingFinished.connect(lambda: self._on_status_max_changed('mp'))
             self.mp_threshold_input.editingFinished.connect(lambda: self._on_status_threshold_changed('mp'))
@@ -4398,9 +4425,17 @@ class LearningTab(QWidget):
         header_layout.addWidget(self.exp_enabled_checkbox)
         header_layout.addStretch(1)
         vbox.addLayout(header_layout)
+        roi_button_layout = QHBoxLayout()
         self.exp_roi_button = QPushButton('탐지 범위 설정')
         self.exp_roi_button.clicked.connect(lambda: self._select_status_roi('exp'))
-        vbox.addWidget(self.exp_roi_button)
+        roi_button_layout.addWidget(self.exp_roi_button)
+
+        self.exp_preview_button = QPushButton('인식 확인')
+        self.exp_preview_button.setToolTip('현재 EXP 탐지 범위에서 캡처한 화면과 OCR 결과를 확인합니다.')
+        self.exp_preview_button.clicked.connect(self._handle_exp_preview)
+        roi_button_layout.addWidget(self.exp_preview_button)
+        roi_button_layout.addStretch(1)
+        vbox.addLayout(roi_button_layout)
 
         self.exp_roi_label = QLabel('범위가 설정되지 않았습니다.')
         self.exp_roi_label.setWordWrap(True)
@@ -4409,11 +4444,6 @@ class LearningTab(QWidget):
         info_label = QLabel('탐지 주기: 60초 (고정)')
         self.exp_interval_label = info_label
         vbox.addWidget(info_label)
-
-        self.exp_preview_button = QPushButton('인식 확인')
-        self.exp_preview_button.setToolTip('현재 EXP 탐지 범위에서 캡처한 화면과 OCR 결과를 확인합니다.')
-        self.exp_preview_button.clicked.connect(self._handle_exp_preview)
-        vbox.addWidget(self.exp_preview_button)
 
         vbox.addStretch(1)
         box.setLayout(vbox)
@@ -4489,6 +4519,7 @@ class LearningTab(QWidget):
         if resource == 'hp':
             controls = [
                 getattr(self, 'hp_roi_button', None),
+                getattr(self, 'hp_preview_button', None),
                 getattr(self, 'hp_max_input', None),
                 getattr(self, 'hp_threshold_input', None),
                 getattr(self, 'hp_command_combo', None),
@@ -4497,6 +4528,7 @@ class LearningTab(QWidget):
         elif resource == 'mp':
             controls = [
                 getattr(self, 'mp_roi_button', None),
+                getattr(self, 'mp_preview_button', None),
                 getattr(self, 'mp_max_input', None),
                 getattr(self, 'mp_threshold_input', None),
                 getattr(self, 'mp_command_combo', None),
@@ -4517,19 +4549,25 @@ class LearningTab(QWidget):
             if control is not None:
                 control.setEnabled(enabled)
 
-    def _handle_exp_preview(self) -> None:
+    def _capture_status_frame(self, resource: str, title: str) -> tuple[Optional[np.ndarray], StatusRoi]:
+        window_title = f'{title} 인식 확인'
         if not hasattr(self, '_status_config') or self._status_config is None:
-            QMessageBox.warning(self, 'EXP 인식 확인', '상태 모니터 구성이 아직 초기화되지 않았습니다.')
-            return
+            QMessageBox.warning(self, window_title, '상태 모니터 구성이 아직 초기화되지 않았습니다.')
+            return None, StatusRoi()
 
-        roi = getattr(self._status_config.exp, 'roi', StatusRoi())
+        cfg = getattr(self._status_config, resource, None)
+        roi = getattr(cfg, 'roi', StatusRoi()) if cfg else StatusRoi()
         if not roi.is_valid():
-            QMessageBox.information(self, 'EXP 인식 확인', '탐지 범위가 설정되지 않아 확인할 수 없습니다. 먼저 ROI를 지정해주세요.')
-            return
+            QMessageBox.information(
+                self,
+                window_title,
+                '탐지 범위가 설정되지 않아 확인할 수 없습니다. 먼저 ROI를 지정해주세요.',
+            )
+            return None, roi
 
         monitor_dict = roi.to_monitor_dict()
         manager = get_capture_manager()
-        consumer_name = f"learning:exp_preview:{id(self)}:{int(time.time()*1000)}"
+        consumer_name = f"learning:{resource}_preview:{id(self)}:{int(time.time()*1000)}"
         frame_bgr: Optional[np.ndarray] = None
         try:
             manager.register_region(consumer_name, monitor_dict)
@@ -4547,27 +4585,76 @@ class LearningTab(QWidget):
                 with mss.mss() as sct:
                     raw = np.array(sct.grab(monitor_dict))
             except Exception as exc:  # pragma: no cover - 시스템 환경에 따라 다름
-                QMessageBox.warning(self, 'EXP 인식 확인', f'화면 캡처에 실패했습니다.\n{exc}')
-                return
+                QMessageBox.warning(self, window_title, f'화면 캡처에 실패했습니다.\n{exc}')
+                return None, roi
 
             if raw.size == 0:
-                QMessageBox.warning(self, 'EXP 인식 확인', '캡처 결과가 비어 있습니다. ROI 범위를 다시 확인해주세요.')
-                return
+                QMessageBox.warning(self, window_title, '캡처 결과가 비어 있습니다. ROI 범위를 다시 확인해주세요.')
+                return None, roi
 
             try:
                 frame_bgr = cv2.cvtColor(raw, cv2.COLOR_BGRA2BGR)
             except cv2.error as exc:  # pragma: no cover - OpenCV 내부 오류 대비
-                QMessageBox.warning(self, 'EXP 인식 확인', f'이미지 변환 중 오류가 발생했습니다.\n{exc}')
-                return
+                QMessageBox.warning(self, window_title, f'이미지 변환 중 오류가 발생했습니다.\n{exc}')
+                return None, roi
+
+        return frame_bgr, roi
+
+    def _prepare_bar_preview(self, title: str, image_bgr: np.ndarray) -> dict:
+        result: dict = {
+            'processed': None,
+            'summary_lines': [],
+        }
+
+        if image_bgr is None or image_bgr.size == 0:
+            result['summary_lines'].append('상태: 캡처 이미지가 비어 있습니다.')
+            return result
+
+        height, width = image_bgr.shape[:2]
+        result['summary_lines'].append(f'이미지 크기: {width}×{height}px')
+        percent = StatusMonitorThread._analyze_bar(image_bgr)
+        if percent is None:
+            result['summary_lines'].append('상태: 막대 비율을 계산하지 못했습니다.')
+        else:
+            result['summary_lines'].append('상태: 막대 비율 계산 성공')
+            result['summary_lines'].append(f'추정 {title} 비율: {percent:.2f}%')
+
+        return result
+
+    def _handle_status_preview(self, resource: str) -> None:
+        title = STATUS_RESOURCE_LABELS.get(resource, resource.upper())
+        frame_bgr, roi = self._capture_status_frame(resource, title)
+        if frame_bgr is None:
+            return
+
+        preview = self._prepare_bar_preview(title, frame_bgr)
+        roi_text = self._format_status_roi(roi)
+        dialog = StatusRecognitionPreviewDialog(
+            self,
+            f'{title} 인식 확인',
+            f'탐지 범위: {roi_text}',
+            frame_bgr,
+            None,
+            preview.get('summary_lines', []),
+        )
+        dialog.exec()
+
+    def _handle_exp_preview(self) -> None:
+        title = STATUS_RESOURCE_LABELS.get('exp', 'EXP')
+        frame_bgr, roi = self._capture_status_frame('exp', title)
+        if frame_bgr is None:
+            return
 
         preview = self._prepare_exp_preview(frame_bgr)
         roi_text = self._format_status_roi(roi)
-        dialog = ExpRecognitionPreviewDialog(
+        dialog = StatusRecognitionPreviewDialog(
             self,
+            f'{title} 인식 확인',
             f'탐지 범위: {roi_text}',
             frame_bgr,
             preview.get('processed'),
             preview.get('summary_lines', []),
+            processed_title='전처리(Threshold)',
         )
         dialog.exec()
 
