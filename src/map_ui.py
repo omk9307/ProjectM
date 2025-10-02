@@ -650,6 +650,7 @@ class MapTab(QWidget):
             self.cfg_on_ladder_enter_frame_threshold = None
             self.cfg_jump_initial_velocity_threshold = None
             self.cfg_climb_max_velocity = None
+            self.cfg_edgefall_timeout_sec = None
             self.cfg_walk_teleport_probability = None
             self.cfg_walk_teleport_interval = None
             self.cfg_walk_teleport_bonus_delay = None
@@ -760,11 +761,11 @@ class MapTab(QWidget):
             # v14.3.4: 수집 목표(target) 정보를 저장할 변수
             self.collection_target_info = {} 
 
-            # --- [신규] 에지 낙하 모드 상태 ---
-            self.edgefall_mode_active = False           # 에지 낙하 모드 on/off
+            # --- [신규] 낭떠러지 낙하 모드 상태 ---
+            self.edgefall_mode_active = False           # 낭떠러지 낙하 모드 on/off
             self.edgefall_direction = None              # 'left' 또는 'right'
             self.edgefall_started_at = 0.0              # 모드 진입 시각
-            self.edgefall_timeout_sec = 1.0             # 타임아웃(초) - 사용자 요청 반영
+            self.edgefall_timeout_sec = 3.0             # 타임아웃(초) - 기본 3초
 
             self.action_collection_max_frames = 200  
             self.action_model = None
@@ -2513,6 +2514,11 @@ class MapTab(QWidget):
                 self.cfg_ladder_arrival_short_threshold = state_config.get("ladder_arrival_short_threshold", self.cfg_ladder_arrival_short_threshold)
                 self.cfg_jump_link_arrival_x_threshold = state_config.get("jump_link_arrival_x_threshold", self.cfg_jump_link_arrival_x_threshold)
                 self.cfg_ladder_avoidance_width = state_config.get("ladder_avoidance_width", self.cfg_ladder_avoidance_width)
+                # [신규] 아래점프 최소 사다리 거리(px) 설정 로드
+                self.ladder_down_jump_min_distance = state_config.get(
+                    "ladder_down_jump_min_distance",
+                    getattr(self, 'ladder_down_jump_min_distance', 2.0),
+                )
                 self.cfg_on_ladder_enter_frame_threshold = state_config.get("on_ladder_enter_frame_threshold", self.cfg_on_ladder_enter_frame_threshold)
                 self.cfg_jump_initial_velocity_threshold = state_config.get("jump_initial_velocity_threshold", self.cfg_jump_initial_velocity_threshold)
                 self.cfg_climb_max_velocity = state_config.get("climb_max_velocity", self.cfg_climb_max_velocity)
@@ -2523,6 +2529,8 @@ class MapTab(QWidget):
                 self.cfg_stuck_detection_wait = state_config.get("stuck_detection_wait", self.cfg_stuck_detection_wait)
                 self.cfg_airborne_recovery_wait = state_config.get("airborne_recovery_wait", self.cfg_airborne_recovery_wait)
                 self.cfg_ladder_recovery_resend_delay = state_config.get("ladder_recovery_resend_delay", self.cfg_ladder_recovery_resend_delay)
+                # 낭떠러지 낙하 대기시간(초)
+                self.cfg_edgefall_timeout_sec = state_config.get("edgefall_timeout_sec", self.cfg_edgefall_timeout_sec)
                 probability_percent = state_config.get(
                     "walk_teleport_probability",
                     self.cfg_walk_teleport_probability,
@@ -2852,6 +2860,8 @@ class MapTab(QWidget):
                 "ladder_arrival_short_threshold": self.cfg_ladder_arrival_short_threshold,
                 "jump_link_arrival_x_threshold": self.cfg_jump_link_arrival_x_threshold,
                 "ladder_avoidance_width": self.cfg_ladder_avoidance_width,
+                # [신규 저장] 아래점프 최소 사다리 거리(px)
+                "ladder_down_jump_min_distance": getattr(self, 'ladder_down_jump_min_distance', 2.0),
                 "on_ladder_enter_frame_threshold": self.cfg_on_ladder_enter_frame_threshold,
                 "jump_initial_velocity_threshold": self.cfg_jump_initial_velocity_threshold,
                 "climb_max_velocity": self.cfg_climb_max_velocity,
@@ -2862,6 +2872,7 @@ class MapTab(QWidget):
                 "stuck_detection_wait": self.cfg_stuck_detection_wait,
                 "airborne_recovery_wait": self.cfg_airborne_recovery_wait,
                 "ladder_recovery_resend_delay": self.cfg_ladder_recovery_resend_delay,
+                "edgefall_timeout_sec": self.cfg_edgefall_timeout_sec if self.cfg_edgefall_timeout_sec is not None else 3.0,
                 "prepare_timeout": self.cfg_prepare_timeout if self.cfg_prepare_timeout is not None else PREPARE_TIMEOUT,
                 "max_lock_duration": self.cfg_max_lock_duration if self.cfg_max_lock_duration is not None else MAX_LOCK_DURATION,
                 "walk_teleport_probability": self.cfg_walk_teleport_probability,
@@ -4587,6 +4598,8 @@ class MapTab(QWidget):
             "ladder_arrival_x_threshold": self.cfg_ladder_arrival_x_threshold,
             "jump_link_arrival_x_threshold": self.cfg_jump_link_arrival_x_threshold,
             "ladder_avoidance_width": self.cfg_ladder_avoidance_width,
+            # [신규] 아래점프 최소 사다리 거리(px) - 비 cfg 속성이므로 직접 주입/회수
+            "ladder_down_jump_min_distance": getattr(self, 'ladder_down_jump_min_distance', 2.0),
             "on_ladder_enter_frame_threshold": self.cfg_on_ladder_enter_frame_threshold,
             "jump_initial_velocity_threshold": self.cfg_jump_initial_velocity_threshold,
             "climb_max_velocity": self.cfg_climb_max_velocity,
@@ -4597,6 +4610,7 @@ class MapTab(QWidget):
             "ladder_recovery_resend_delay": self.cfg_ladder_recovery_resend_delay,
             "prepare_timeout": self.cfg_prepare_timeout if self.cfg_prepare_timeout is not None else PREPARE_TIMEOUT,
             "max_lock_duration": self.cfg_max_lock_duration if self.cfg_max_lock_duration is not None else MAX_LOCK_DURATION,
+            "edgefall_timeout_sec": self.cfg_edgefall_timeout_sec if self.cfg_edgefall_timeout_sec is not None else 3.0,
             "walk_teleport_probability": self.cfg_walk_teleport_probability,
             "walk_teleport_interval": self.cfg_walk_teleport_interval,
             "walk_teleport_bonus_delay": self.cfg_walk_teleport_bonus_delay,
@@ -4614,6 +4628,12 @@ class MapTab(QWidget):
                 attr_name = f"cfg_{key}"
                 if hasattr(self, attr_name):
                     setattr(self, attr_name, value)
+            # [신규] cfg_로 매핑되지 않는 전송 게이트 설정 직접 반영
+            if 'ladder_down_jump_min_distance' in updated_config:
+                try:
+                    self.ladder_down_jump_min_distance = float(updated_config['ladder_down_jump_min_distance'])
+                except Exception:
+                    pass
 
             if self.cfg_waypoint_arrival_x_threshold_min > self.cfg_waypoint_arrival_x_threshold_max:
                 self.cfg_waypoint_arrival_x_threshold_min, self.cfg_waypoint_arrival_x_threshold_max = (
@@ -7977,7 +7997,7 @@ class MapTab(QWidget):
             and command in ["걷기(우)", "걷기(좌)", None]
             and not getattr(self, 'edgefall_mode_active', False)
         ):
-            # 에지 낙하 모드가 아닐 때만 아래점프로 전환
+            # 낭떠러지 낙하 모드가 아닐 때만 아래점프로 전환
             command = "아래점프"
             self.last_movement_command = command
 
@@ -8006,7 +8026,7 @@ class MapTab(QWidget):
 
         if (
             final_player_pos is not None
-            and self.player_state != 'on_terrain'
+            and self.player_state not in {'on_terrain', 'idle'}
         ):
             transition_objects = self.geometry_data.get("transition_objects", [])
             if transition_objects:
@@ -8090,7 +8110,7 @@ class MapTab(QWidget):
 
     def _should_issue_down_jump(self, ladder_dist: Optional[float]) -> bool:
         """사다리와의 거리를 기준으로 아래점프 시도가 안전한지 판단합니다."""
-        # 에지 낙하 모드일 때는 아래점프를 시도하지 않음
+        # 낭떠러지 낙하 모드일 때는 아래점프를 시도하지 않음
         if getattr(self, 'edgefall_mode_active', False):
             return False
         if ladder_dist is None:
@@ -8485,15 +8505,36 @@ class MapTab(QWidget):
                             self.last_printed_direction = current_direction
 
                     elif current_action_key == 'prepare_to_down_jump':
+                        # [수정안1] 안전지점 이동 필요 또는 안전검증 대기 중이면 아래점프 전송 금지
                         if needs_safe_move:
                             self.waiting_for_safe_down_jump = True
-                        elif (
-                            (self.waiting_for_safe_down_jump or action_changed)
-                            and is_on_ground
-                            and self.guidance_text not in ["점프 불가: 안전 지대 없음", "이동할 안전 지대 없음"]
-                        ):
-                            command_to_send = "아래점프"
-                            self.waiting_for_safe_down_jump = False
+                        else:
+                            can_send = (
+                                (not self.waiting_for_safe_down_jump)
+                                and is_on_ground
+                                and self.guidance_text not in ["점프 불가: 안전 지대 없음", "이동할 안전 지대 없음"]
+                            )
+                            if can_send:
+                                # 사다리 근접 시 아래점프 차단
+                                try:
+                                    transition_objects = self.geometry_data.get("transition_objects", [])
+                                    is_near_ladder, _, dist = self._check_near_ladder(
+                                        final_player_pos,
+                                        transition_objects,
+                                        self.cfg_ladder_arrival_x_threshold,
+                                        return_dist=True,
+                                        current_floor=self.current_player_floor,
+                                    )
+                                except Exception:
+                                    dist = None
+
+                                if self._should_issue_down_jump(dist):
+                                    command_to_send = "아래점프"
+                                    self.waiting_for_safe_down_jump = False
+                                else:
+                                    # 너무 사다리와 가까움 → 안전지점 재유도
+                                    self.guidance_text = "안전 지점으로 이동"
+                                    self.waiting_for_safe_down_jump = True
                         self.last_printed_direction = None
 
                     elif action_changed:
@@ -8653,9 +8694,115 @@ class MapTab(QWidget):
                 if node_type in ['fall_start', 'djump_area']:
                     if node_type == 'fall_start':
                         self._transition_to_action_state('prepare_to_fall', current_node_key)
+                        return
                     elif node_type == 'djump_area':
-                        self._transition_to_action_state('prepare_to_down_jump', current_node_key)
-                    return
+                        # [수정안2] 아래점프 준비 전에 출발 안전지점으로 이동을 완료하도록 전환을 지연
+                        try:
+                            contact_terrain = self._get_contact_terrain(final_player_pos)
+                            departure_line = None
+                            if contact_terrain:
+                                departure_line = contact_terrain
+                            elif self.last_known_terrain_group_name:
+                                departure_line = next((line for line in self.geometry_data.get("terrain_lines", []) if line.get('dynamic_name') == self.last_known_terrain_group_name), None)
+
+                            if not departure_line:
+                                # 출발 지형을 알 수 없으면 기존 동작으로 폴백
+                                self._transition_to_action_state('prepare_to_down_jump', current_node_key)
+                                return
+
+                            # 1) 사다리 출구 기반 위험구간을 제외한 출발 안전구간 계산
+                            dep_points = departure_line.get('points', [])
+                            dep_min_x = min(p[0] for p in dep_points)
+                            dep_max_x = max(p[0] for p in dep_points)
+
+                            ladder_hazard_zones = []
+                            for obj in self.geometry_data.get("transition_objects", []):
+                                # 현재 출발 지형(departure_line)에 연결된 사다리 중 '출구(윗부분)'만 고려
+                                try:
+                                    p1, p2 = obj.get('points', [None, None])
+                                    if not (isinstance(p1, (list, tuple)) and isinstance(p2, (list, tuple))):
+                                        continue
+                                    exit_pt = p1 if p1[1] < p2[1] else p2
+                                    exit_contact = self._get_contact_terrain(QPointF(exit_pt[0], exit_pt[1]))
+                                    is_exit_on_departure = bool(exit_contact and exit_contact.get('id') == departure_line.get('id'))
+                                except Exception:
+                                    is_exit_on_departure = False
+
+                                if not is_exit_on_departure:
+                                    start_line_id = obj.get('start_line_id')
+                                    end_line_id = obj.get('end_line_id')
+                                    start_floor = self.line_id_to_floor_map.get(start_line_id)
+                                    end_floor = self.line_id_to_floor_map.get(end_line_id)
+                                    if isinstance(start_floor, (int, float)) and isinstance(end_floor, (int, float)):
+                                        top_line_id = start_line_id if start_floor > end_floor else end_line_id
+                                        is_exit_on_departure = (top_line_id == departure_line.get('id'))
+                                    else:
+                                        is_exit_on_departure = False
+
+                                if not is_exit_on_departure:
+                                    continue
+
+                                ladder_x = obj['points'][0][0]
+                                width = self.cfg_ladder_avoidance_width if self.cfg_ladder_avoidance_width is not None else LADDER_AVOIDANCE_WIDTH
+                                ladder_hazard_zones.append((ladder_x - width, ladder_x + width))
+
+                            # 2) 출발 라인의 전체 구간에서 위험구간 제외 → 안전구간 도출
+                            departure_safe_zones = [(dep_min_x, dep_max_x)]
+                            for h_start, h_end in ladder_hazard_zones:
+                                new_safe = []
+                                for sz_start, sz_end in departure_safe_zones:
+                                    overlap_start = max(sz_start, h_start)
+                                    overlap_end = min(sz_end, h_end)
+                                    if overlap_start < overlap_end:
+                                        if sz_start < overlap_start:
+                                            new_safe.append((sz_start, overlap_start))
+                                        if overlap_end < sz_end:
+                                            new_safe.append((overlap_end, sz_end))
+                                    else:
+                                        new_safe.append((sz_start, sz_end))
+                                departure_safe_zones = new_safe
+
+                            player_x = final_player_pos.x()
+                            # 3) 플레이어가 이미 안전구간에 있으면 즉시 전환
+                            is_in_safe = any(start <= player_x <= end for start, end in departure_safe_zones)
+                            if is_in_safe:
+                                self._transition_to_action_state('prepare_to_down_jump', current_node_key)
+                                return
+
+                            # 4) 가장 가까운 안전구간의 점으로 유도 (Y는 출발 라인 보간)
+                            def _clamp(val, lo, hi):
+                                return lo if val < lo else (hi if val > hi else val)
+
+                            candidates = []
+                            for s_start, s_end in departure_safe_zones:
+                                cx = _clamp(player_x, s_start, s_end)
+                                cx = _clamp(cx, dep_min_x, dep_max_x)
+                                candidates.append(cx)
+
+                            if candidates:
+                                best_x = min(candidates, key=lambda cx: abs(player_x - cx))
+                                line_y = dep_points[0][1]
+                                for i in range(len(dep_points) - 1):
+                                    a, b = dep_points[i], dep_points[i + 1]
+                                    lx, rx = (a[0], b[0]) if a[0] <= b[0] else (b[0], a[0])
+                                    if lx <= best_x <= rx:
+                                        dy = (b[1] - a[1])
+                                        dx = (b[0] - a[0])
+                                        line_y = a[1] + (dy * ((best_x - a[0]) / dx)) if dx != 0 else a[1]
+                                        break
+                                self.guidance_text = "안전 지점으로 이동"
+                                self.intermediate_target_pos = QPointF(best_x, line_y)
+                                # djump 준비 전, 안전 이동 유도. 상태는 유지하고 반환
+                                return
+                            else:
+                                # 안전 구간이 없으면 점프 불가로 표시
+                                self.guidance_text = "이동할 안전 지대 없음"
+                                self.intermediate_target_pos = None
+                                return
+                        except Exception:
+                            # 예외 시 기존 동작으로 폴백
+                            self._transition_to_action_state('prepare_to_down_jump', current_node_key)
+                            return
                 
                 next_index = self.current_segment_index + 1
                 if next_index >= len(self.current_segment_path):
@@ -8822,7 +8969,7 @@ class MapTab(QWidget):
         [MODIFIED] 2025-08-27 17:47 (KST): 'climbing_up' 상태가 되었을 때 안내가 초기화되는 문제 수정
         """
         # [PATCH] v14.3.15: 플레이어 상태에 따른 로직 분기 시작
-        # --- [신규] 에지 낙하 모드 유지/종료 처리 ---
+        # --- [신규] 낭떠러지 낙하 모드 유지/종료 처리 ---
         try:
             if self.edgefall_mode_active:
                 ps = getattr(self, 'player_state', None)
@@ -8830,10 +8977,12 @@ class MapTab(QWidget):
                     # 낙하/점프 시작되면 모드 종료
                     self.edgefall_mode_active = False
                 else:
-                    if (time.time() - float(self.edgefall_started_at)) > float(self.edgefall_timeout_sec):
-                        # 1초 내 낙하가 시작되지 않았다면 모드 종료하고 정상 로직으로 복귀
+                    # 설정값 우선 적용 (없으면 기본값 사용)
+                    timeout_sec = float(self.cfg_edgefall_timeout_sec) if getattr(self, 'cfg_edgefall_timeout_sec', None) is not None else float(self.edgefall_timeout_sec)
+                    if (time.time() - float(self.edgefall_started_at)) > timeout_sec:
+                        # 설정 시간 내 낙하가 시작되지 않았다면 모드 종료하고 정상 로직으로 복귀
                         self.edgefall_mode_active = False
-                        self.update_general_log("[에지 낙하] 대기 1.0초 초과 — 아래점프로 복귀합니다.", "orange")
+                        self.update_general_log(f"[낭떠러지 낙하] 대기 {timeout_sec:.1f}초 초과 — 아래점프로 복귀합니다.", "orange")
         except Exception:
             pass
         
@@ -8941,7 +9090,7 @@ class MapTab(QWidget):
                                             break
                                     self.intermediate_target_pos = QPointF(best_x, line_y)
 
-                                    # [신규] 에지 낙하 모드 활성화 조건: 안전구간 경계와 지형 끝의 거리 <= 2px
+                                    # [신규] 낭떠러지 낙하 모드 활성화 조건: 안전구간 경계와 지형 끝의 거리 <= 2px
                                     try:
                                         direction = 'right' if best_x >= player_x else 'left'
                                         edge_x = dep_max_x if direction == 'right' else dep_min_x
@@ -8952,7 +9101,7 @@ class MapTab(QWidget):
                                             # 목표를 지형의 끝으로 재설정 (Y는 출발 지형선 보간값 사용)
                                             self.intermediate_target_pos = QPointF(edge_x, line_y)
                                             self.update_general_log(
-                                                f"[에지 낙하] {('우' if direction=='right' else '좌')} 에지까지 {abs(edge_x - best_x):.1f}px — 걷기로 낙하 유도",
+                                                f"[낭떠러지 낙하] {('우' if direction=='right' else '좌')} 에지까지 {abs(edge_x - best_x):.1f}px — 걷기로 낙하 유도",
                                                 "gray",
                                             )
                                     except Exception:
@@ -9022,7 +9171,7 @@ class MapTab(QWidget):
                                 break
                         self.intermediate_target_pos = QPointF(best_x, line_y)
 
-                        # [신규] 에지 낙하 모드 활성화 조건 검사
+                        # [신규] 낭떠러지 낙하 모드 활성화 조건 검사
                         try:
                             direction = 'right' if best_x >= player_x else 'left'
                             edge_x = dep_max_x if direction == 'right' else dep_min_x
@@ -9032,7 +9181,7 @@ class MapTab(QWidget):
                                 self.edgefall_started_at = time.time()
                                 self.intermediate_target_pos = QPointF(edge_x, line_y)
                                 self.update_general_log(
-                                    f"[에지 낙하] {('우' if direction=='right' else '좌')} 에지까지 {abs(edge_x - best_x):.1f}px — 걷기로 낙하 유도",
+                                    f"[낭떠러지 낙하] {('우' if direction=='right' else '좌')} 에지까지 {abs(edge_x - best_x):.1f}px — 걷기로 낙하 유도",
                                     "gray",
                                 )
                         except Exception:

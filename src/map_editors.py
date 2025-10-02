@@ -3658,6 +3658,7 @@ class StateConfigDialog(QDialog):
         self.config.setdefault("prepare_timeout", PREPARE_TIMEOUT)
         self.config.setdefault("max_lock_duration", MAX_LOCK_DURATION)
         self.config.setdefault("ladder_avoidance_width", LADDER_AVOIDANCE_WIDTH)
+        self.config.setdefault("edgefall_timeout_sec", 3.0)
         
         main_layout = QVBoxLayout(self)
         self.spinboxes = {}
@@ -3731,10 +3732,13 @@ class StateConfigDialog(QDialog):
         add_spinbox("fall_on_ladder_x_movement_threshold", "사다리 낙하 최대 X이동(px/f):", 0.01, 5.0, 0.01)
         add_spinbox("ladder_x_grab_threshold", "사다리 근접 X오차(px):", 0.5, 20.0, 0.1)
         add_spinbox("ladder_avoidance_width", "사다리 주변 안전거리(px):", 0.0, 30.0, 0.1)
+        # [신규] 사다리 주변 아래점프 안전거리(px): 아래점프 키 전송 허용 최소 거리
+        add_spinbox("ladder_down_jump_min_distance", "사다리 주변 아래점프 안전거리(px):", 0.0, 30.0, 0.1)
         add_spinbox("stuck_detection_wait", "자동 복구 대기시간(초):", 0.1, 5.0, 0.1)
         add_spinbox("airborne_recovery_wait", "공중 자동복구 대기시간(초):", 0.5, 10.0, 0.1)
         add_spinbox("ladder_recovery_resend_delay", "사다리 복구 재전송 지연(초):", 0.05, 10.0, 0.05)
         add_spinbox("prepare_timeout", "행동 준비 시간 제한(초):", 0.5, 30.0, 0.5)
+        add_spinbox("edgefall_timeout_sec", "낭떠러지 낙하 대기시간(초):", 0.5, 10.0, 0.1)
         add_spinbox("max_lock_duration", "행동 진행 잠금 시간(초):", 0.5, 30.0, 0.5)
         add_spinbox("on_ladder_enter_frame_threshold", "사다리 탑승 판정 프레임:", 1, 10, 1, is_double=False)
         add_spinbox("jump_initial_velocity_threshold", "점프 초기 속도 임계값(px/f):", 1.0, 10.0, 0.1)
@@ -3847,6 +3851,8 @@ class StateConfigDialog(QDialog):
             "fall_on_ladder_x_movement_threshold": FALL_ON_LADDER_X_MOVEMENT_THRESHOLD,
             "ladder_x_grab_threshold": LADDER_X_GRAB_THRESHOLD,
             "ladder_avoidance_width": LADDER_AVOIDANCE_WIDTH,
+            # [신규 기본값] 아래점프 허용 최소 사다리 거리(px)
+            "ladder_down_jump_min_distance": 2.0,
             "on_ladder_enter_frame_threshold": 1,
             "jump_initial_velocity_threshold": 1.0,
             "climb_max_velocity": 1.0,
@@ -3868,6 +3874,7 @@ class StateConfigDialog(QDialog):
             "walk_teleport_bonus_delay": WALK_TELEPORT_BONUS_DELAY_DEFAULT,
             "walk_teleport_bonus_step": WALK_TELEPORT_BONUS_STEP_DEFAULT,
             "walk_teleport_bonus_max": WALK_TELEPORT_BONUS_MAX_DEFAULT,
+            "edgefall_timeout_sec": 3.0,
         }
         for key, spinbox in self.spinboxes.items():
             if key in defaults:
