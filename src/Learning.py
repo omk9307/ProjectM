@@ -29,6 +29,7 @@ import time
 import uuid
 import hashlib
 import requests
+import copy
 from pathlib import Path
 from collections import OrderedDict
 from typing import Optional, ClassVar
@@ -83,6 +84,8 @@ from window_anchors import (
     restore_maple_window,
     save_window_anchor,
     set_last_used_anchor,
+    ensure_relative_roi,
+    resolve_roi_to_absolute,
     WindowGeometry,
 )
 

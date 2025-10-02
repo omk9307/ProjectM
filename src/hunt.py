@@ -745,6 +745,9 @@ class HuntTab(QWidget):
         self.last_popup_size: Optional[tuple[int, int]] = None
         self.manual_capture_region: Optional[dict] = None
         self.manual_capture_regions: list[dict] = []
+        self.manual_area_profiles: dict[str, list[dict]] = {}
+        self.active_area_profile: Optional[str] = None
+        self._area_settings_dialog = None
         self.last_used_model: Optional[str] = None
         self._model_listener_registered = False
         self._authority_request_connected = False
@@ -2127,10 +2130,6 @@ class HuntTab(QWidget):
         control_layout.setContentsMargins(0, 0, 0, 0)
         control_layout.setSpacing(8)
 
-        self.set_area_btn = QPushButton("영역 지정")
-        self.set_area_btn.setEnabled(True)
-        self.set_area_btn.clicked.connect(self._set_manual_area)
-
         control_row = QHBoxLayout()
         control_row.setSpacing(12)
 
@@ -2140,13 +2139,9 @@ class HuntTab(QWidget):
         self.detect_btn.clicked.connect(self._toggle_detection)
         control_row.addWidget(self.detect_btn)
 
-        control_row.addWidget(self.set_area_btn)
-
-        self.add_area_btn = QPushButton("+")
-        self.add_area_btn.setEnabled(False)
-        self.add_area_btn.setFixedWidth(28)
-        self.add_area_btn.clicked.connect(self._add_manual_area)
-        control_row.addWidget(self.add_area_btn)
+        self.area_settings_btn = QPushButton("영역 설정")
+        self.area_settings_btn.clicked.connect(self._open_area_settings_dialog)
+        control_row.addWidget(self.area_settings_btn)
 
         control_row.addWidget(QLabel(f"{CHARACTER_CLASS_NAME} 신뢰도:"))
         self.conf_char_spinbox = QDoubleSpinBox()
@@ -2417,11 +2412,11 @@ class HuntTab(QWidget):
 
             self.manual_capture_region = copy.deepcopy(relative_region)
             self.manual_capture_regions = [copy.deepcopy(relative_region)]
-            if hasattr(self, 'add_area_btn'):
-                self.add_area_btn.setEnabled(True)
+            self.active_area_profile = None
             display_region = resolve_roi_to_absolute(relative_region, window=window_geometry) or new_region
             self.append_log(f"수동 탐지 영역 초기화: {display_region}")
             self._update_manual_area_summary()
+            self._notify_area_settings_changed()
             self._save_settings()
         else:
             # 취소(우클릭) 시 기존 영역 유지
@@ -2452,11 +2447,11 @@ class HuntTab(QWidget):
 
             self.manual_capture_regions.append(copy.deepcopy(relative_region))
             self.manual_capture_region = self._merge_manual_capture_regions()
-            if hasattr(self, 'add_area_btn') and not self.add_area_btn.isEnabled():
-                self.add_area_btn.setEnabled(True)
+            self.active_area_profile = None
             display_region = resolve_roi_to_absolute(self.manual_capture_region, window=window_geometry) or new_region
             self.append_log(f"영역 추가 완료. 합성 영역: {display_region}")
             self._update_manual_area_summary()
+            self._notify_area_settings_changed()
             self._save_settings()
         else:
             self.append_log('영역 추가가 취소되었습니다.', 'info')
@@ -2571,6 +2566,95 @@ class HuntTab(QWidget):
             f"추가된 영역 수: {count}, 합성 캡처 범위: {display_region or self.manual_capture_region}."
             " 합성 범위 내부에서도 지정된 영역만 탐지에 사용됩니다."
         )
+
+    def _notify_area_settings_changed(self) -> None:
+        dialog = getattr(self, '_area_settings_dialog', None)
+        if dialog:
+            dialog.update_state()
+        button = getattr(self, 'area_settings_btn', None)
+        if button:
+            if self.manual_capture_region:
+                profile_line = (
+                    f"현재 프로필: {self.active_area_profile}"
+                    if self.active_area_profile
+                    else "현재 프로필: (저장되지 않음)"
+                )
+                button.setToolTip(
+                    profile_line
+                    + "\n"
+                    + f"합성 영역: {self.manual_capture_region}"
+                )
+            else:
+                button.setToolTip("설정된 탐지 영역이 없습니다.")
+
+    def _open_area_settings_dialog(self) -> None:
+        if self._area_settings_dialog is None:
+            self._area_settings_dialog = _AreaSettingsDialog(self)
+        self._area_settings_dialog.update_state()
+        self._area_settings_dialog.show()
+        self._area_settings_dialog.raise_()
+        self._area_settings_dialog.activateWindow()
+
+    def _save_area_profile(self, name: str) -> bool:
+        normalized = name.strip()
+        if not normalized:
+            return False
+        if not self.manual_capture_regions:
+            return False
+        stored_regions = [copy.deepcopy(region) for region in self.manual_capture_regions]
+        replaced = normalized in self.manual_area_profiles
+        self.manual_area_profiles[normalized] = stored_regions
+        self.manual_capture_region = self._merge_manual_capture_regions()
+        self.active_area_profile = normalized
+        action = "갱신" if replaced else "저장"
+        self.append_log(f"사냥 영역 프로필 {action}: '{normalized}'", "info")
+        self._notify_area_settings_changed()
+        self._save_settings()
+        return True
+
+    def _apply_area_profile(
+        self,
+        name: str,
+        *,
+        emit_log: bool = True,
+        auto_save: bool = True,
+    ) -> bool:
+        normalized = name.strip()
+        if not normalized:
+            return False
+        regions = self.manual_area_profiles.get(normalized)
+        if not regions:
+            if emit_log:
+                self.append_log(f"사냥 영역 프로필을 찾을 수 없습니다: '{normalized}'", "warn")
+            return False
+
+        self.manual_capture_regions = [copy.deepcopy(region) for region in regions]
+        self.manual_capture_region = self._merge_manual_capture_regions()
+        if not self.manual_capture_region:
+            if emit_log:
+                self.append_log(
+                    f"사냥 영역 프로필 '{normalized}'의 데이터가 유효하지 않습니다.",
+                    "warn",
+                )
+            return False
+
+        self.active_area_profile = normalized
+
+        if emit_log:
+            resolved = self._resolve_manual_capture_region()
+            display_region = resolved or self.manual_capture_region
+            self.append_log(
+                f"사냥 영역 프로필 불러오기: '{normalized}' → {display_region}",
+                "info",
+            )
+            self._update_manual_area_summary()
+
+        self._notify_area_settings_changed()
+
+        if auto_save:
+            self._save_settings()
+
+        return True
 
     def _activate_maple_window(self) -> Optional[object]:
         try:
@@ -6509,11 +6593,51 @@ class HuntTab(QWidget):
         else:
             self.manual_capture_region = None
 
-        self.set_area_btn.setEnabled(True)
-        if hasattr(self, 'add_area_btn'):
-            self.add_area_btn.setEnabled(bool(self.manual_capture_region))
+        profiles_payload = data.get('manual_area_profiles')
+        parsed_profiles: dict[str, list[dict]] = {}
+        active_profile_name: Optional[str] = None
+
+        if isinstance(profiles_payload, dict):
+            raw_profiles = profiles_payload.get('profiles')
+            if isinstance(raw_profiles, dict):
+                for raw_name, payload in raw_profiles.items():
+                    if not isinstance(raw_name, str):
+                        continue
+                    normalized_name = raw_name.strip()
+                    if not normalized_name or not isinstance(payload, list):
+                        continue
+                    converted_regions: list[dict] = []
+                    for region_payload in payload:
+                        if not isinstance(region_payload, dict):
+                            continue
+                        converted_region = ensure_relative_roi(
+                            region_payload,
+                            window_geometry,
+                            anchor_name=last_used_anchor_name(),
+                        )
+                        if converted_region is None:
+                            continue
+                        converted_regions.append(copy.deepcopy(converted_region))
+                    if converted_regions:
+                        parsed_profiles[normalized_name] = converted_regions
+            profile_candidate = profiles_payload.get('active')
+            if isinstance(profile_candidate, str) and profile_candidate.strip():
+                active_profile_name = profile_candidate.strip()
+
+        self.manual_area_profiles = parsed_profiles
+        self.active_area_profile = None
+
+        if active_profile_name and active_profile_name in self.manual_area_profiles:
+            applied = self._apply_area_profile(
+                active_profile_name,
+                emit_log=False,
+                auto_save=False,
+            )
+            if applied:
+                self.active_area_profile = active_profile_name
 
         self._update_manual_area_summary()
+        self._notify_area_settings_changed()
 
         self.overlay_preferences['hunt_area'] = self.show_hunt_area_checkbox.isChecked()
         self.overlay_preferences['primary_area'] = self.show_primary_skill_checkbox.isChecked()
@@ -6822,6 +6946,13 @@ class HuntTab(QWidget):
                 }
                 for skill in self.buff_skills
             ],
+            'manual_area_profiles': {
+                'active': self.active_area_profile,
+                'profiles': {
+                    name: [copy.deepcopy(region) for region in regions]
+                    for name, regions in self.manual_area_profiles.items()
+                },
+            },
             'manual_capture_region': self.manual_capture_region,
             'manual_capture_regions': self.manual_capture_regions,
             'auto_hunt_enabled': self.auto_hunt_enabled,
@@ -8346,3 +8477,129 @@ class HuntTab(QWidget):
                 self._movement_mode = None
             else:
                 self._issue_all_keys_release(reason)
+
+
+class _AreaSettingsDialog(QDialog):
+    def __init__(self, hunt_tab: HuntTab) -> None:
+        super().__init__(hunt_tab)
+        self._hunt_tab = hunt_tab
+        self.setWindowTitle("사냥 영역 설정")
+        self.setModal(False)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(12, 12, 12, 12)
+        layout.setSpacing(12)
+
+        area_row = QHBoxLayout()
+        area_row.setSpacing(8)
+        self.set_area_btn = QPushButton("영역 지정", self)
+        self.set_area_btn.clicked.connect(self._hunt_tab._set_manual_area)
+        area_row.addWidget(self.set_area_btn)
+
+        self.add_area_btn = QPushButton("+", self)
+        self.add_area_btn.setFixedWidth(28)
+        self.add_area_btn.clicked.connect(self._hunt_tab._add_manual_area)
+        area_row.addWidget(self.add_area_btn)
+        area_row.addStretch(1)
+        layout.addLayout(area_row)
+
+        profile_row = QHBoxLayout()
+        profile_row.setSpacing(8)
+        self.save_btn = QPushButton("저장", self)
+        self.save_btn.clicked.connect(self._handle_save)
+        profile_row.addWidget(self.save_btn)
+
+        self.load_btn = QPushButton("불러오기", self)
+        self.load_btn.clicked.connect(self._handle_load)
+        profile_row.addWidget(self.load_btn)
+
+        self.profile_combo = QComboBox(self)
+        self.profile_combo.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToContents)
+        profile_row.addWidget(self.profile_combo, 1)
+        layout.addLayout(profile_row)
+
+        self.active_label = QLabel(self)
+        self.active_label.setWordWrap(True)
+        layout.addWidget(self.active_label)
+
+        self.summary_label = QLabel(self)
+        self.summary_label.setWordWrap(True)
+        layout.addWidget(self.summary_label)
+
+        button_box = QDialogButtonBox(QDialogButtonBox.StandardButton.Close, self)
+        button_box.rejected.connect(self.reject)
+        layout.addWidget(button_box)
+
+        self.resize(420, self.sizeHint().height())
+
+    def update_state(self) -> None:
+        has_area = bool(self._hunt_tab.manual_capture_region)
+        self.add_area_btn.setEnabled(has_area)
+        self.save_btn.setEnabled(has_area)
+
+        names = sorted(self._hunt_tab.manual_area_profiles.keys())
+        previous_text = self.profile_combo.currentText()
+        self.profile_combo.blockSignals(True)
+        self.profile_combo.clear()
+        self.profile_combo.addItems(names)
+
+        target_name = self._hunt_tab.active_area_profile or previous_text
+        if target_name and target_name in names:
+            index = self.profile_combo.findText(target_name)
+            if index >= 0:
+                self.profile_combo.setCurrentIndex(index)
+        elif names:
+            self.profile_combo.setCurrentIndex(0)
+        self.profile_combo.blockSignals(False)
+
+        has_profiles = bool(names)
+        self.load_btn.setEnabled(has_profiles)
+        self.profile_combo.setEnabled(has_profiles)
+
+        active_text = self._hunt_tab.active_area_profile or "(저장되지 않음)"
+        self.active_label.setText(f"현재 프로필: {active_text}")
+        self.summary_label.setText(self._build_summary_text())
+
+    def _build_summary_text(self) -> str:
+        if not self._hunt_tab.manual_capture_region:
+            return "설정된 탐지 영역이 없습니다."
+        region = self._hunt_tab.manual_capture_region
+        count = len(self._hunt_tab.manual_capture_regions)
+        if count > 1:
+            return f"합성 영역: {region} (영역 {count}개)"
+        return f"합성 영역: {region}"
+
+    def _handle_save(self) -> None:
+        if not self._hunt_tab.manual_capture_regions:
+            QMessageBox.warning(self, "오류", "저장할 탐지 영역이 없습니다.")
+            return
+        default_name = self._hunt_tab.active_area_profile or ""
+        name, ok = QInputDialog.getText(self, "프로필 저장", "프로필 이름을 입력하세요:", text=default_name)
+        if not ok:
+            return
+        normalized = name.strip()
+        if not normalized:
+            QMessageBox.warning(self, "오류", "프로필 이름을 입력해주세요.")
+            return
+        if normalized in self._hunt_tab.manual_area_profiles:
+            reply = QMessageBox.question(
+                self,
+                "덮어쓰기 확인",
+                f"'{normalized}' 프로필을 덮어쓰시겠습니까?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            )
+            if reply != QMessageBox.StandardButton.Yes:
+                return
+        if self._hunt_tab._save_area_profile(normalized):
+            self.update_state()
+
+    def _handle_load(self) -> None:
+        if not self._hunt_tab.manual_area_profiles:
+            QMessageBox.warning(self, "오류", "불러올 프로필이 없습니다.")
+            return
+        name = self.profile_combo.currentText().strip()
+        if not name:
+            QMessageBox.warning(self, "오류", "불러올 프로필을 선택하세요.")
+            return
+        if self._hunt_tab._apply_area_profile(name):
+            self.update_state()
