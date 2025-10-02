@@ -753,6 +753,7 @@ class MapTab(QWidget):
             self.cfg_airborne_recovery_wait = AIRBORNE_RECOVERY_WAIT_DEFAULT  # 공중 자동복구 대기시간 (초)
             self.cfg_ladder_recovery_resend_delay = LADDER_RECOVERY_RESEND_DELAY_DEFAULT  # 사다리 복구 재전송 대기시간 (초)
             self.ladder_float_recovery_cooldown_until = 0.0  # 탐지 직후 밧줄 매달림 복구 쿨다운
+            self.ladder_down_jump_min_distance = 0.75  # 아래점프를 허용할 최소 사다리 거리(px)
             self.cfg_walk_teleport_probability = WALK_TELEPORT_PROBABILITY_DEFAULT
             self.cfg_walk_teleport_interval = WALK_TELEPORT_INTERVAL_DEFAULT
             self._last_walk_teleport_check_time = 0.0
@@ -6489,18 +6490,23 @@ class MapTab(QWidget):
         # [수정 시작] current_terrain_name 변수 초기화 위치 변경 및 로직 수정
         contact_terrain = self._get_contact_terrain(final_player_pos)
         
+        should_attempt_float_recovery = (
+            final_player_pos is not None and contact_terrain is None
+        )
+
         if contact_terrain:
             self.current_player_floor = contact_terrain.get('floor')
             # 땅에 있을 때만 마지막 지형 그룹 이름 갱신
             self.last_known_terrain_group_name = contact_terrain.get('dynamic_name', '')
-        
+
         # UI에 표시될 이름은 last_known_terrain_group_name을 사용
         current_terrain_name = self.last_known_terrain_group_name
         # [수정 끝]
-        
+
+        if should_attempt_float_recovery:
+            self._attempt_ladder_float_recovery(final_player_pos)
+
         if final_player_pos is None or self.current_player_floor is None:
-            if final_player_pos is not None and contact_terrain is None:
-                self._attempt_ladder_float_recovery(final_player_pos)
             self.navigator_display.update_data(
                 floor="N/A", terrain_name="", target_name="없음",
                 prev_name="", next_name="", direction="-", distance=0,
@@ -6889,6 +6895,7 @@ class MapTab(QWidget):
         self.recovery_cooldown_until = now + 1.5
 
         should_send_ladder_recovery = False
+        ladder_dist = None
 
         if (
             final_player_pos is not None
@@ -6903,10 +6910,16 @@ class MapTab(QWidget):
                     return_dist=True,
                     current_floor=self.current_player_floor,
                 )
+                ladder_dist = dist if isinstance(dist, (int, float)) else None
                 if is_near_ladder and dist is not None and 0.0 <= dist <= 1.0:
                     should_send_ladder_recovery = True
 
         command_name = self.last_movement_command
+        if command_name == "아래점프" and not self._should_issue_down_jump(ladder_dist):
+            command_name = None
+            self.last_movement_command = None
+            self.last_command_context = None
+
         command_label = f"'{command_name}'" if command_name else None
 
         if should_send_ladder_recovery:
@@ -6962,6 +6975,22 @@ class MapTab(QWidget):
         self.airborne_recovery_cooldown_until = 0.0
         self._last_airborne_recovery_log_time = 0.0
         setattr(self, '_last_airborne_fail_log_time', 0.0)
+
+    def _should_issue_down_jump(self, ladder_dist: Optional[float]) -> bool:
+        """사다리와의 거리를 기준으로 아래점프 시도가 안전한지 판단합니다."""
+        if ladder_dist is None:
+            return True
+
+        try:
+            numeric_dist = float(ladder_dist)
+        except (TypeError, ValueError):
+            return True
+
+        if numeric_dist < 0:
+            return True
+
+        threshold = getattr(self, 'ladder_down_jump_min_distance', 0.75)
+        return numeric_dist > threshold
 
     def _handle_airborne_path_wait(self, final_player_pos, contact_terrain):
         """공중 경로 대기 상태가 일정 시간 지속되면 복구를 시도합니다."""
@@ -7034,7 +7063,10 @@ class MapTab(QWidget):
             return
 
         self.stuck_recovery_attempts += 1
-        if not self.last_movement_command:
+        if not self._should_issue_down_jump(dist):
+            self.last_movement_command = None
+            self.last_command_context = None
+        elif not self.last_movement_command:
             self.last_movement_command = "아래점프"
 
         log_msg = (
