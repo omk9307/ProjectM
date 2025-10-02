@@ -6517,115 +6517,125 @@ class MapTab(QWidget):
         # Phase 1: 물리적 상태 판정 (유지)
         self.player_state = self._determine_player_physical_state(final_player_pos, contact_terrain)
 
-        if (
-            final_player_pos is not None
-            and contact_terrain is None
-            and not self.airborne_path_warning_active
-            and self.start_waypoint_found
-            and (self.auto_control_checkbox.isChecked() or self.debug_auto_control_checkbox.isChecked())
-        ):
-            last_reference = self.last_movement_time or self.last_action_time
-            if last_reference:
-                idle_duration = time.time() - last_reference
-                wait_threshold = self.cfg_airborne_recovery_wait
-                if idle_duration >= wait_threshold:
-                    self.airborne_path_warning_active = True
-                    if self.airborne_warning_started_at <= 0.0:
-                        self.airborne_warning_started_at = time.time() - wait_threshold
+        has_map_authority = getattr(self, 'current_authority_owner', 'map') == 'map'
 
-        # 공중 경로 대기 상태 자동 복구 처리
-        self._handle_airborne_path_wait(final_player_pos, contact_terrain)
-
-        # --- [v.1819] '의도된 움직임' 감지 및 복구 로직 ---
-        is_moving_state = self.player_state not in ['idle']
-        
-        # 1. 캐릭터가 움직였을 때, '의도된' 움직임인지 확인 후 처리
-        if is_moving_state:
-            if self.last_movement_time:
-                self.last_action_time = self.last_movement_time
-            elif self.last_action_time == 0.0:
-                self.last_action_time = time.time()
-            # [핵심 수정] 최근 명령 컨텍스트를 기반으로 의도된 움직임 여부 판정
-            is_intentional_move = self._was_recent_intentional_movement(final_player_pos)
-
-            if self.stuck_recovery_attempts > 0 and is_intentional_move:
-                self.update_general_log("[자동 복구] 의도된 움직임 감지. 복구 상태를 초기화합니다.", "green")
-                self.stuck_recovery_attempts = 0
-                self.last_movement_command = None
-        
-        # 2. 움직여야 하는데 멈춰있고, 현재 복구 쿨다운 상태가 아닐 때만 멈춤 감지
-        should_be_moving = self.navigation_action in ['move_to_target', 'prepare_to_climb', 'prepare_to_jump', 'prepare_to_down_jump', 'prepare_to_fall', 'align_for_climb'] and self.start_waypoint_found
-        
-        if not self.event_in_progress:
-            now = time.time()
-            last_movement_reference = self.last_movement_time or self.last_action_time
-            if last_movement_reference:
-                time_since_last_movement = now - last_movement_reference
-            else:
-                time_since_last_movement = float('inf')
-
-            can_attempt_recovery = (
-                self.last_movement_command is not None
-                and self.last_command_sent_time > 0.0
-                and (now - self.last_command_sent_time) >= self.cfg_stuck_detection_wait
-            )
-
+        if has_map_authority:
             if (
-                should_be_moving
-                and can_attempt_recovery
-                and now > self.recovery_cooldown_until
+                final_player_pos is not None
+                and contact_terrain is None
+                and not self.airborne_path_warning_active
+                and self.start_waypoint_found
+                and (self.auto_control_checkbox.isChecked() or self.debug_auto_control_checkbox.isChecked())
             ):
+                last_reference = self.last_movement_time or self.last_action_time
+                if last_reference:
+                    idle_duration = time.time() - last_reference
+                    wait_threshold = self.cfg_airborne_recovery_wait
+                    if idle_duration >= wait_threshold:
+                        self.airborne_path_warning_active = True
+                        if self.airborne_warning_started_at <= 0.0:
+                            self.airborne_warning_started_at = time.time() - wait_threshold
+
+            # 공중 경로 대기 상태 자동 복구 처리
+            self._handle_airborne_path_wait(final_player_pos, contact_terrain)
+
+            # --- [v.1819] '의도된 움직임' 감지 및 복구 로직 ---
+            is_moving_state = self.player_state not in ['idle']
+
+            # 1. 캐릭터가 움직였을 때, '의도된' 움직임인지 확인 후 처리
+            if is_moving_state:
+                if self.last_movement_time:
+                    self.last_action_time = self.last_movement_time
+                elif self.last_action_time == 0.0:
+                    self.last_action_time = time.time()
+                # [핵심 수정] 최근 명령 컨텍스트를 기반으로 의도된 움직임 여부 판정
+                is_intentional_move = self._was_recent_intentional_movement(final_player_pos)
+
+                if self.stuck_recovery_attempts > 0 and is_intentional_move:
+                    self.update_general_log("[자동 복구] 의도된 움직임 감지. 복구 상태를 초기화합니다.", "green")
+                    self.stuck_recovery_attempts = 0
+                    self.last_movement_command = None
+
+            # 2. 움직여야 하는데 멈춰있고, 현재 복구 쿨다운 상태가 아닐 때만 멈춤 감지
+            should_be_moving = self.navigation_action in ['move_to_target', 'prepare_to_climb', 'prepare_to_jump', 'prepare_to_down_jump', 'prepare_to_fall', 'align_for_climb'] and self.start_waypoint_found
+
+            if not self.event_in_progress:
+                now = time.time()
+                last_movement_reference = self.last_movement_time or self.last_action_time
+                if last_movement_reference:
+                    time_since_last_movement = now - last_movement_reference
+                else:
+                    time_since_last_movement = float('inf')
+
+                can_attempt_recovery = (
+                    self.last_movement_command is not None
+                    and self.last_command_sent_time > 0.0
+                    and (now - self.last_command_sent_time) >= self.cfg_stuck_detection_wait
+                )
+
                 if (
-                    time_since_last_movement > self.cfg_stuck_detection_wait
-                    and self.stuck_recovery_attempts < self.MAX_STUCK_RECOVERY_ATTEMPTS
+                    should_be_moving
+                    and can_attempt_recovery
+                    and now > self.recovery_cooldown_until
                 ):
-                    self.stuck_recovery_attempts += 1
-                    log_msg = (
-                        f"[자동 복구] 멈춤 감지 ({self.stuck_recovery_attempts}/{self.MAX_STUCK_RECOVERY_ATTEMPTS})."
-                    )
-                    self._trigger_stuck_recovery(final_player_pos, log_msg)
-                    return
+                    if (
+                        time_since_last_movement > self.cfg_stuck_detection_wait
+                        and self.stuck_recovery_attempts < self.MAX_STUCK_RECOVERY_ATTEMPTS
+                    ):
+                        self.stuck_recovery_attempts += 1
+                        log_msg = (
+                            f"[자동 복구] 멈춤 감지 ({self.stuck_recovery_attempts}/{self.MAX_STUCK_RECOVERY_ATTEMPTS})."
+                        )
+                        self._trigger_stuck_recovery(final_player_pos, log_msg)
+                        return
+
+                    elif (
+                        time_since_last_movement > self.cfg_stuck_detection_wait
+                        and self.stuck_recovery_attempts >= self.MAX_STUCK_RECOVERY_ATTEMPTS
+                    ):
+                        if now - getattr(self, '_last_stuck_log_time', 0) > 5.0:
+                            self.update_general_log(
+                                f"[자동 복구] 실패: 최대 복구 시도({self.MAX_STUCK_RECOVERY_ATTEMPTS}회)를 초과했습니다. 수동 개입이 필요할 수 있습니다.",
+                                "red"
+                            )
+                            setattr(self, '_last_stuck_log_time', now)
 
                 elif (
-                    time_since_last_movement > self.cfg_stuck_detection_wait
-                    and self.stuck_recovery_attempts >= self.MAX_STUCK_RECOVERY_ATTEMPTS
+                    self.player_state not in ['idle', 'on_terrain']
+                    and self.last_movement_time
+                    and can_attempt_recovery
+                    and now > self.recovery_cooldown_until
                 ):
-                    if now - getattr(self, '_last_stuck_log_time', 0) > 5.0:
-                        self.update_general_log(
-                            f"[자동 복구] 실패: 최대 복구 시도({self.MAX_STUCK_RECOVERY_ATTEMPTS}회)를 초과했습니다. 수동 개입이 필요할 수 있습니다.",
-                            "red"
+                    non_walk_time_since_move = now - self.last_movement_time
+
+                    if (
+                        non_walk_time_since_move > self.NON_WALK_STUCK_THRESHOLD_S
+                        and self.stuck_recovery_attempts < self.MAX_STUCK_RECOVERY_ATTEMPTS
+                    ):
+                        self.stuck_recovery_attempts += 1
+                        log_msg = (
+                            f"[자동 복구] 비걷기 상태 멈춤 감지 ({self.stuck_recovery_attempts}/{self.MAX_STUCK_RECOVERY_ATTEMPTS})."
                         )
-                        setattr(self, '_last_stuck_log_time', now)
+                        self._trigger_stuck_recovery(final_player_pos, log_msg)
+                        return
 
-            elif (
-                self.player_state not in ['idle', 'on_terrain']
-                and self.last_movement_time
-                and can_attempt_recovery
-                and now > self.recovery_cooldown_until
-            ):
-                non_walk_time_since_move = now - self.last_movement_time
-
-                if (
-                    non_walk_time_since_move > self.NON_WALK_STUCK_THRESHOLD_S
-                    and self.stuck_recovery_attempts < self.MAX_STUCK_RECOVERY_ATTEMPTS
-                ):
-                    self.stuck_recovery_attempts += 1
-                    log_msg = (
-                        f"[자동 복구] 비걷기 상태 멈춤 감지 ({self.stuck_recovery_attempts}/{self.MAX_STUCK_RECOVERY_ATTEMPTS})."
-                    )
-                    self._trigger_stuck_recovery(final_player_pos, log_msg)
-                    return
-
-                elif (
-                    non_walk_time_since_move > self.NON_WALK_STUCK_THRESHOLD_S
-                    and self.stuck_recovery_attempts >= self.MAX_STUCK_RECOVERY_ATTEMPTS
-                ):
-                    if now - getattr(self, '_last_stuck_log_time', 0) > 5.0:
-                        self.update_general_log(
-                            f"[자동 복구] 실패: 최대 복구 시도({self.MAX_STUCK_RECOVERY_ATTEMPTS}회)를 초과했습니다. 수동 개입이 필요할 수 있습니다.",
-                            "red"
-                        )
-                        setattr(self, '_last_stuck_log_time', now)
+                    elif (
+                        non_walk_time_since_move > self.NON_WALK_STUCK_THRESHOLD_S
+                        and self.stuck_recovery_attempts >= self.MAX_STUCK_RECOVERY_ATTEMPTS
+                    ):
+                        if now - getattr(self, '_last_stuck_log_time', 0) > 5.0:
+                            self.update_general_log(
+                                f"[자동 복구] 실패: 최대 복구 시도({self.MAX_STUCK_RECOVERY_ATTEMPTS}회)를 초과했습니다. 수동 개입이 필요할 수 있습니다.",
+                                "red"
+                            )
+                            setattr(self, '_last_stuck_log_time', now)
+        else:
+            if self.airborne_path_warning_active:
+                # 권한이 없는 동안에는 공중 경고 상태를 초기화해 추가 로그를 막는다.
+                self.airborne_path_warning_active = False
+                self._reset_airborne_recovery_state()
+            if self.stuck_recovery_attempts > 0:
+                self.stuck_recovery_attempts = 0
         
         # --- 로직 끝 ---
         
@@ -7023,6 +7033,9 @@ class MapTab(QWidget):
     def _attempt_ladder_float_recovery(self, final_player_pos):
         """탐지 직후 밧줄 매달림 상태에서 사다리 복구를 시도합니다."""
         if final_player_pos is None:
+            return False
+
+        if getattr(self, 'current_authority_owner', 'map') != 'map':
             return False
 
         if not (self.auto_control_checkbox.isChecked() or self.debug_auto_control_checkbox.isChecked()):
