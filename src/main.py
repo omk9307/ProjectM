@@ -535,9 +535,9 @@ class MainWindow(QMainWindow):
         map_color = '#1E88E5' if self._map_detection_active else None
         hunt_color = '#D32F2F' if self._hunt_detection_active else None
 
-        if owner == 'map':
+        if owner == 'map' and self._map_detection_active:
             map_color = '#1cbb7f'
-        elif owner == 'hunt':
+        elif owner == 'hunt' and self._hunt_detection_active:
             hunt_color = '#1cbb7f'
 
         if map_index is not None:
