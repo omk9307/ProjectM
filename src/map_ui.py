@@ -753,7 +753,7 @@ class MapTab(QWidget):
             self.cfg_airborne_recovery_wait = AIRBORNE_RECOVERY_WAIT_DEFAULT  # 공중 자동복구 대기시간 (초)
             self.cfg_ladder_recovery_resend_delay = LADDER_RECOVERY_RESEND_DELAY_DEFAULT  # 사다리 복구 재전송 대기시간 (초)
             self.ladder_float_recovery_cooldown_until = 0.0  # 탐지 직후 밧줄 매달림 복구 쿨다운
-            self.ladder_down_jump_min_distance = 0.75  # 아래점프를 허용할 최소 사다리 거리(px)
+            self.ladder_down_jump_min_distance = 2.0  # 아래점프를 허용할 최소 사다리 거리(px)
             self.cfg_walk_teleport_probability = WALK_TELEPORT_PROBABILITY_DEFAULT
             self.cfg_walk_teleport_interval = WALK_TELEPORT_INTERVAL_DEFAULT
             self._last_walk_teleport_check_time = 0.0
@@ -6921,17 +6921,18 @@ class MapTab(QWidget):
             self.last_command_context = None
 
         command_label = f"'{command_name}'" if command_name else None
+        distance_suffix = f" (사다리 거리: {self._format_ladder_distance(ladder_dist)})"
 
         if should_send_ladder_recovery:
             if command_label:
-                final_log_message = f"{log_message} '사다리 멈춤복구' 후 {command_label} 재시도."
+                final_log_message = f"{log_message} '사다리 멈춤복구' 후 {command_label} 재시도.{distance_suffix}"
             else:
-                final_log_message = f"{log_message} '사다리 멈춤복구' 후 재시도할 명령이 없습니다."
+                final_log_message = f"{log_message} '사다리 멈춤복구' 후 재시도할 명령이 없습니다.{distance_suffix}"
         else:
             if command_label:
-                final_log_message = f"{log_message} 이전 명령 {command_label} 재시도."
+                final_log_message = f"{log_message} 이전 명령 {command_label} 재시도.{distance_suffix}"
             else:
-                final_log_message = f"{log_message} 재시도할 명령이 없습니다."
+                final_log_message = f"{log_message} 재시도할 명령이 없습니다.{distance_suffix}"
 
         self.update_general_log(final_log_message, "orange")
 
@@ -6942,9 +6943,13 @@ class MapTab(QWidget):
                 self._emit_control_command("사다리 멈춤복구", None)
         else:
             if command_label:
-                skip_message = f"[자동 복구] 사다리 조건 미충족: 이전 명령 {command_label} 재전송만 수행합니다."
+                skip_message = (
+                    f"[자동 복구] 사다리 조건 미충족: 이전 명령 {command_label} 재전송만 수행합니다.{distance_suffix}"
+                )
             else:
-                skip_message = "[자동 복구] 사다리 조건 미충족: 재전송할 명령이 없습니다."
+                skip_message = (
+                    f"[자동 복구] 사다리 조건 미충족: 재전송할 명령이 없습니다.{distance_suffix}"
+                )
             self.update_general_log(skip_message, "gray")
 
         resend_delay_ms = max(int(round(self.cfg_ladder_recovery_resend_delay * 1000)), 0)
@@ -6992,6 +6997,20 @@ class MapTab(QWidget):
         threshold = getattr(self, 'ladder_down_jump_min_distance', 0.75)
         return numeric_dist > threshold
 
+    def _format_ladder_distance(self, ladder_dist: Optional[float]) -> str:
+        """사다리 거리 정보를 로그에 표시하기 위한 문자열로 변환합니다."""
+        try:
+            if ladder_dist is None:
+                return "알 수 없음"
+            numeric_dist = float(ladder_dist)
+        except (TypeError, ValueError):
+            return "알 수 없음"
+
+        if numeric_dist < 0:
+            return "알 수 없음"
+
+        return f"{numeric_dist:.2f}px"
+
     def _handle_airborne_path_wait(self, final_player_pos, contact_terrain):
         """공중 경로 대기 상태가 일정 시간 지속되면 복구를 시도합니다."""
         if not self.airborne_path_warning_active:
@@ -7037,8 +7056,12 @@ class MapTab(QWidget):
         )
 
         if is_near_ladder and dist >= 0 and dist <= 1.0:
+            distance_text = self._format_ladder_distance(dist)
             if now - self._last_airborne_recovery_log_time > 1.0:
-                self.update_general_log("[자동 복구] 공중 경로 대기 상태 - 사다리 복구를 시도합니다.", "orange")
+                self.update_general_log(
+                    f"[자동 복구] 공중 경로 대기 상태 - 사다리 복구를 시도합니다. (사다리 거리: {distance_text})",
+                    "orange",
+                )
                 self._last_airborne_recovery_log_time = now
 
             if self.debug_auto_control_checkbox.isChecked():
@@ -7069,8 +7092,11 @@ class MapTab(QWidget):
         elif not self.last_movement_command:
             self.last_movement_command = "아래점프"
 
+        distance_text = self._format_ladder_distance(dist)
+
         log_msg = (
             f"[자동 복구] 공중 경로 대기 상태 감지 ({self.stuck_recovery_attempts}/{self.MAX_STUCK_RECOVERY_ATTEMPTS})."
+            f" (사다리 거리: {distance_text})"
         )
         self._trigger_stuck_recovery(final_player_pos, log_msg)
         self._last_airborne_recovery_log_time = now
