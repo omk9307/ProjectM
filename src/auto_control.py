@@ -15,10 +15,11 @@ from PyQt6.QtWidgets import (
     QListWidgetItem, QInputDialog, QAbstractItemView, QTabWidget, QFileDialog,
     QGridLayout, QSizePolicy
 )
-from PyQt6.QtCore import pyqtSlot, Qt, QTimer, pyqtSignal, QMimeData, QSize, QSettings
+from PyQt6.QtCore import pyqtSlot, Qt, QTimer, pyqtSignal, QMimeData, QSize, QSettings, QThread
 from PyQt6.QtGui import QIcon, QColor
 from pynput.keyboard import Key, Listener
 from datetime import datetime
+import pygetwindow as gw
 
 # --- 설정 및 상수 ---
 SERIAL_PORT = 'COM6'
@@ -1127,6 +1128,53 @@ class AutoControlTab(QWidget):
         item = self._current_command_item()
         return item.text() if item else None
 
+    def _activate_mapleland_window(self) -> bool:
+        try:
+            candidate_windows = gw.getWindowsWithTitle('Mapleland')
+        except Exception as exc:
+            QMessageBox.warning(self, "창 탐색 오류", f"게임 창 목록을 가져오는 중 오류가 발생했습니다:\n{exc}")
+            return False
+
+        target_window = None
+        for window in candidate_windows:
+            if not window:
+                continue
+            title = (getattr(window, 'title', '') or '').strip()
+            if 'mapleland' in title.lower():
+                target_window = window
+                break
+
+        if target_window is None:
+            QMessageBox.warning(
+                self,
+                "오류",
+                "'Mapleland' 문자열을 포함한 게임 창을 찾을 수 없습니다.\n게임이 실행 중인지 확인하고 다시 시도하세요.",
+            )
+            return False
+
+        try:
+            if target_window.isMinimized:
+                target_window.restore()
+                QThread.msleep(120)
+            if not target_window.isActive:
+                target_window.activate()
+                QThread.msleep(120)
+            if not target_window.isActive:
+                target_window.minimize()
+                target_window.restore()
+                QThread.msleep(120)
+        except Exception as exc:
+            QMessageBox.warning(self, "창 활성화 오류", f"게임 창을 활성화하는 중 오류가 발생했습니다:\n{exc}")
+            return False
+
+        if not target_window.isActive:
+            QMessageBox.warning(self, "창 활성화 실패", "게임 창을 전면으로 가져오지 못했습니다. 수동으로 활성화한 뒤 다시 시도하세요.")
+            return False
+
+        if getattr(self, 'status_label', None):
+            self.status_label.setText(f"게임 창 활성화: '{target_window.title}'")
+        return True
+
     def _is_skill_profile(self, command_name: str) -> bool:
         """현재 명령이 스킬 탭에 속하는지 여부를 반환합니다."""
         if not isinstance(command_name, str):
@@ -1865,6 +1913,9 @@ class AutoControlTab(QWidget):
         sequence = self.mappings.get(command_text)
         if sequence is None:
             QMessageBox.warning(self, "오류", "선택된 명령에 대한 시퀀스를 찾을 수 없습니다.")
+            return
+
+        if not self._activate_mapleland_window():
             return
         
         self.status_label.setText("2초 후 테스트를 시작합니다...")
