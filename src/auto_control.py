@@ -13,7 +13,7 @@ from PyQt6.QtWidgets import (
     QApplication, QWidget, QVBoxLayout, QHBoxLayout, QLabel, QListWidget, QPushButton,
     QGroupBox, QFormLayout, QComboBox, QSpinBox, QMessageBox, QFrame, QCheckBox,
     QListWidgetItem, QInputDialog, QAbstractItemView, QTabWidget, QFileDialog,
-    QGridLayout
+    QGridLayout, QSizePolicy
 )
 from PyQt6.QtCore import pyqtSlot, Qt, QTimer, pyqtSignal, QMimeData, QSize, QSettings
 from PyQt6.QtGui import QIcon, QColor
@@ -467,7 +467,12 @@ class AutoControlTab(QWidget):
             self.command_tab_widget.addTab(list_widget, category)
 
         self.command_list = self.category_lists[self.active_category]
+        self.command_tab_widget.setMinimumHeight(360)
+        self.command_tab_widget.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Expanding)
         cmd_group_layout.addWidget(self.command_tab_widget)
+        cmd_group_layout.setStretch(0, 0)
+        cmd_group_layout.setStretch(1, 1)
+        cmd_group_layout.setStretch(2, 0)
 
         cmd_buttons_layout = QHBoxLayout()
         add_cmd_btn = QPushButton(QIcon.fromTheme("list-add"), "추가"); add_cmd_btn.clicked.connect(self.add_command_profile)
@@ -504,8 +509,14 @@ class AutoControlTab(QWidget):
         seq_group_layout.addLayout(seq_title_layout)
         
         self.action_sequence_list = QListWidget()
-        self.action_sequence_list.currentItemChanged.connect(self.on_action_step_selected)
+        self.action_sequence_list.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
+        self.action_sequence_list.itemSelectionChanged.connect(self.on_action_step_selected)
+        self.action_sequence_list.setMinimumHeight(360)
+        self.action_sequence_list.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Expanding)
         seq_group_layout.addWidget(self.action_sequence_list)
+        seq_group_layout.setStretch(0, 0)
+        seq_group_layout.setStretch(1, 1)
+        seq_group_layout.setStretch(2, 0)
 
         seq_buttons_layout = QHBoxLayout()
         self.record_btn = QPushButton(QIcon.fromTheme("media-record"), " 녹화")
@@ -536,7 +547,7 @@ class AutoControlTab(QWidget):
         self.keyboard_visual_group = self._create_keyboard_visual_panel()
         main_v_layout.addWidget(self.keyboard_visual_group)
         main_v_layout.addStretch()
-        
+
         bottom_layout = QVBoxLayout()
         save_buttons_layout = QHBoxLayout()
         save_btn = QPushButton(QIcon.fromTheme("document-save"), " 매핑 저장"); save_btn.clicked.connect(self.save_mappings)
@@ -556,7 +567,14 @@ class AutoControlTab(QWidget):
         bottom_layout.addLayout(save_buttons_layout)
         bottom_layout.addLayout(status_layout)
         main_v_layout.addLayout(bottom_layout)
-        
+
+        main_v_layout.setStretch(0, 6)
+        main_v_layout.setStretch(1, 2)
+        main_v_layout.setStretch(2, 1)
+        main_v_layout.setStretch(3, 1)
+        main_v_layout.setStretch(4, 1)
+        main_v_layout.setStretch(5, 1)
+
         return left_widget
 
     def _create_editor_panel(self):
@@ -1284,18 +1302,42 @@ class AutoControlTab(QWidget):
         command_text = current_item.text()
         self._populate_action_sequence_list(command_text)
 
-    def on_action_step_selected(self, current_item, previous_item):
-        if not current_item:
+    def _selected_action_rows(self) -> list[int]:
+        items = self.action_sequence_list.selectedItems()
+        if not items:
+            return []
+        rows = [self.action_sequence_list.row(item) for item in items]
+        return sorted(index for index in rows if index >= 0)
+
+    def _select_action_rows(self, rows: list[int]) -> None:
+        self.action_sequence_list.blockSignals(True)
+        self.action_sequence_list.clearSelection()
+        for row in rows:
+            item = self.action_sequence_list.item(row)
+            if item:
+                item.setSelected(True)
+        if rows:
+            self.action_sequence_list.setCurrentRow(rows[-1])
+        self.action_sequence_list.blockSignals(False)
+        self.on_action_step_selected()
+
+    def on_action_step_selected(self):
+        selected_rows = self._selected_action_rows()
+        if len(selected_rows) != 1:
             self.editor_group.setEnabled(False)
             return
-            
+        row = selected_rows[0]
+        item = self.action_sequence_list.item(row)
+        if not item:
+            self.editor_group.setEnabled(False)
+            return
+
         command_item = self._current_command_item()
         if not command_item: return
-        
+
         command_text = command_item.text()
-        row = self.action_sequence_list.currentRow()
         sequence = self.mappings.get(command_text, [])
-        
+
         if 0 <= row < len(sequence):
             action_data = sequence[row]
             self._update_editor_panel(action_data)
@@ -1346,9 +1388,17 @@ class AutoControlTab(QWidget):
         self.action_type_combo.blockSignals(False); self.key_combo.blockSignals(False); self.min_delay_spin.blockSignals(False); self.max_delay_spin.blockSignals(False)
 
     def _update_action_from_editor(self, _=None):
-        command_item = self._current_command_item(); action_item = self.action_sequence_list.currentItem()
-        if not command_item or not action_item: return
-        command_text = command_item.text(); row = self.action_sequence_list.currentRow()
+        command_item = self._current_command_item()
+        if not command_item:
+            return
+        selected_rows = self._selected_action_rows()
+        if len(selected_rows) != 1:
+            return
+        row = selected_rows[0]
+        action_item = self.action_sequence_list.item(row)
+        if not action_item:
+            return
+        command_text = command_item.text()
         action_type = self.action_type_combo.currentText()
         new_action_data = {"type": action_type}
         if action_type in ['press', 'release', 'release_specific']:
@@ -1464,14 +1514,29 @@ class AutoControlTab(QWidget):
         new_action = {"type": "press", "key_str": "Key.space"}
         self.mappings[command_text].append(new_action)
         self._populate_action_sequence_list(command_text)
-        self.action_sequence_list.setCurrentRow(self.action_sequence_list.count() - 1)
+        new_index = self.action_sequence_list.count() - 1
+        if new_index >= 0:
+            self._select_action_rows([new_index])
 
     def remove_action_step(self):
-        command_item = self._current_command_item(); row = self.action_sequence_list.currentRow()
-        if not command_item or row < 0: return
+        command_item = self._current_command_item()
+        if not command_item:
+            return
+        selected_rows = self._selected_action_rows()
+        if not selected_rows:
+            return
         command_text = command_item.text()
-        del self.mappings[command_text][row]
+        sequence = self.mappings.get(command_text, [])
+        for row in reversed(selected_rows):
+            if 0 <= row < len(sequence):
+                del sequence[row]
         self._populate_action_sequence_list(command_text)
+        if sequence:
+            next_row = min(selected_rows[0], len(sequence) - 1)
+            self._select_action_rows([next_row])
+        else:
+            self.action_sequence_list.clearSelection()
+            self.editor_group.setEnabled(False)
 
     def randomize_delays(self):
         """선택된 명령 프로필의 모든 delay 액션에 랜덤성을 부여합니다."""
@@ -1505,16 +1570,30 @@ class AutoControlTab(QWidget):
             QMessageBox.information(self, "알림", "선택된 프로필에 지연(delay) 액션이 없습니다.")
 
     def move_action_step(self, direction):
-        command_item = self._current_command_item(); row = self.action_sequence_list.currentRow()
-        if not command_item or row < 0: return
-        new_row = row + direction
-        if not (0 <= new_row < self.action_sequence_list.count()): return
+        command_item = self._current_command_item()
+        if not command_item:
+            return
+        selected_rows = self._selected_action_rows()
+        if not selected_rows:
+            return
         command_text = command_item.text()
         sequence = self.mappings[command_text]
-        item = sequence.pop(row)
-        sequence.insert(new_row, item)
+        if direction < 0:
+            if selected_rows[0] == 0:
+                return
+            for row in selected_rows:
+                sequence[row - 1], sequence[row] = sequence[row], sequence[row - 1]
+            new_rows = [row - 1 for row in selected_rows]
+        elif direction > 0:
+            if selected_rows[-1] == len(sequence) - 1:
+                return
+            for row in reversed(selected_rows):
+                sequence[row], sequence[row + 1] = sequence[row + 1], sequence[row]
+            new_rows = [row + 1 for row in selected_rows]
+        else:
+            return
         self._populate_action_sequence_list(command_text)
-        self.action_sequence_list.setCurrentRow(new_row)
+        self._select_action_rows(new_rows)
 
     def copy_sequence_to_clipboard(self):
         """현재 선택된 명령 프로필의 액션 시퀀스를 JSON 문자열로 클립보드에 복사합니다."""
@@ -1524,10 +1603,15 @@ class AutoControlTab(QWidget):
             return
 
         command_text = command_item.text()
-        sequence = self.mappings.get(command_text, [])
+        full_sequence = self.mappings.get(command_text, [])
+        selected_rows = self._selected_action_rows()
+        if selected_rows:
+            sequence = [copy.deepcopy(full_sequence[row]) for row in selected_rows if 0 <= row < len(full_sequence)]
+        else:
+            sequence = copy.deepcopy(full_sequence)
 
         if not sequence:
-            QMessageBox.information(self, "알림", "선택된 프로필에 복사할 액션이 없습니다.")
+            QMessageBox.information(self, "알림", "복사할 액션이 선택되지 않았습니다.")
             return
 
         try:
@@ -1537,9 +1621,13 @@ class AutoControlTab(QWidget):
             # PyQt의 클립보드 기능 사용
             clipboard = QApplication.clipboard()
             clipboard.setText(sequence_text)
-            self._sequence_clipboard_cache = copy.deepcopy(sequence)
+            self._sequence_clipboard_cache = sequence
             
-            self.status_label.setText(f"'{command_text}' 시퀀스가 클립보드에 복사되었습니다.")
+            copied_count = len(sequence)
+            if selected_rows:
+                self.status_label.setText(f"'{command_text}' 시퀀스에서 선택한 {copied_count}개 액션을 복사했습니다.")
+            else:
+                self.status_label.setText(f"'{command_text}' 시퀀스 전체 {copied_count}개 액션을 복사했습니다.")
             print(f"--- 클립보드에 복사된 내용 ---\n{sequence_text}\n--------------------------")
 
         except Exception as e:
@@ -1570,9 +1658,26 @@ class AutoControlTab(QWidget):
             return
 
         command_text = command_item.text()
-        self.mappings[command_text] = copy.deepcopy(sequence_data)
+        sequence = self.mappings.setdefault(command_text, [])
+        selected_rows = self._selected_action_rows()
+        if selected_rows:
+            insert_at = selected_rows[0]
+            for row in reversed(selected_rows):
+                if 0 <= row < len(sequence):
+                    del sequence[row]
+        else:
+            insert_at = len(sequence)
+
+        for offset, action in enumerate(sequence_data):
+            sequence.insert(insert_at + offset, copy.deepcopy(action))
+
         self._populate_action_sequence_list(command_text)
-        self.status_label.setText(f"'{command_text}' 시퀀스가 붙여넣기 되었습니다.")
+        new_rows = list(range(insert_at, insert_at + len(sequence_data)))
+        if new_rows:
+            self._select_action_rows(new_rows)
+        else:
+            self.action_sequence_list.clearSelection()
+        self.status_label.setText(f"'{command_text}' 시퀀스에 {len(sequence_data)}개 액션을 붙여넣었습니다.")
 
     # --- 시리얼 통신 및 명령 실행 ---
     def connect_to_pi(self):
