@@ -45,13 +45,14 @@ from PyQt6.QtWidgets import (
     QListWidgetItem, QTextEdit, QDialogButtonBox, QCheckBox,
     QComboBox, QDoubleSpinBox, QGroupBox, QScrollArea, QSpinBox,
     QProgressBar, QStatusBar, QAbstractItemView, QTreeWidget, QTreeWidgetItem,
-    QHeaderView, QLineEdit, QFormLayout, QGridLayout, QSizePolicy, QInputDialog
+    QHeaderView, QLineEdit, QFormLayout, QGridLayout, QSizePolicy, QInputDialog,
+    QStackedLayout
 )
 from PyQt6.QtGui import (
     QPixmap, QImage, QIcon, QPainter, QPen, QColor, QBrush, QCursor, QPolygon,
     QDropEvent, QGuiApplication, QIntValidator, QDoubleValidator, QFont
 )
-from PyQt6.QtCore import Qt, QThread, pyqtSignal, QSize, QRect, QPoint, QObject, QMimeData
+from PyQt6.QtCore import Qt, QThread, pyqtSignal, QSize, QRect, QPoint, QPointF, QObject, QMimeData
 
 from capture_manager import get_capture_manager
 
@@ -1154,22 +1155,72 @@ class BaseCanvasLabel(QLabel):
         self.pixmap = pixmap
         self.parent_dialog = parent_dialog
         self.zoom_factor = 1.0
+        self._min_zoom = 0.25
+        self._max_zoom = 4.0
         self.polygons = []
         self.hovered_polygon_idx = -1
         self.panning, self.pan_start_pos = False, QPoint()
         self.setMouseTracking(True)
         self.set_zoom(1.0)
 
-    def set_zoom(self, factor):
+    def set_zoom(self, factor, focal_point: QPoint | QPointF | None = None):
+        previous_factor = self.zoom_factor
+        factor = max(self._min_zoom, min(self._max_zoom, factor))
+        if abs(factor - previous_factor) < 1e-6:
+            return
+
         self.zoom_factor = factor
         self.setFixedSize(self.pixmap.size() * self.zoom_factor)
         self.update()
+
+        if focal_point is None:
+            return
+
+        scroll_area = self._scroll_area()
+        if not scroll_area:
+            return
+
+        viewport_pos = QPointF(focal_point)
+        hbar = scroll_area.horizontalScrollBar()
+        vbar = scroll_area.verticalScrollBar()
+
+        if previous_factor == 0:
+            previous_factor = 1.0
+
+        anchor_x = (hbar.value() + viewport_pos.x()) / previous_factor
+        anchor_y = (vbar.value() + viewport_pos.y()) / previous_factor
+
+        hbar.setValue(int(anchor_x * self.zoom_factor - viewport_pos.x()))
+        vbar.setValue(int(anchor_y * self.zoom_factor - viewport_pos.y()))
+
+    def _scroll_area(self):
+        # self.parent() 는 QScrollArea의 뷰포트(QWidget)이므로 그 부모를 사용
+        parent = self.parent()
+        if parent is None:
+            return None
+        return parent.parent()
 
     def enterEvent(self, event):
         """마우스가 캔버스에 들어오면 부모 다이얼로그에 포커스를 줍니다."""
         self.parent_dialog.activateWindow()
         self.parent_dialog.setFocus()
         super().enterEvent(event)
+
+    def wheelEvent(self, event):
+        angle_delta = event.angleDelta().y()
+        if angle_delta == 0:
+            event.ignore()
+            return
+
+        step = 1.1 if angle_delta > 0 else 0.9
+        new_factor = self.zoom_factor * step
+        scroll_area = self._scroll_area()
+        focal = event.position() if hasattr(event, "position") else QPointF(event.pos())
+        if scroll_area:
+            self.set_zoom(new_factor, focal)
+        else:
+            self.set_zoom(new_factor)
+        event.accept()
 
     def paint_polygons(self, painter):
         """저장된 모든 다각형을 그립니다. 마우스 오버 시 하이라이트됩니다."""
@@ -1193,7 +1244,7 @@ class BaseCanvasLabel(QLabel):
         """마우스 이동 이벤트를 처리합니다. (패닝 또는 하이라이트)"""
         if self.panning:
             delta = event.pos() - self.pan_start_pos
-            scroll_area = self.parent().parent()
+            scroll_area = self._scroll_area()
             scroll_area.horizontalScrollBar().setValue(scroll_area.horizontalScrollBar().value() - delta.x())
             scroll_area.verticalScrollBar().setValue(scroll_area.verticalScrollBar().value() - delta.y())
             self.pan_start_pos = event.pos()
@@ -1284,8 +1335,14 @@ class PolygonAnnotationEditor(QDialog):
     DistractorSaved = 100
     SwitchToAI = 101
 
-    def __init__(self, pixmap, initial_polygons=None, parent=None, initial_class_name=None):
+    mode_switch_requested = pyqtSignal(int)
+    saved = pyqtSignal()
+    canceled = pyqtSignal()
+    distractor_saved = pyqtSignal()
+
+    def __init__(self, pixmap, initial_polygons=None, parent=None, initial_class_name=None, *, embedded: bool = False, sam_ready: bool | None = None):
         super().__init__(parent)
+        self._embedded = embedded
         self.setWindowTitle('수동 편집기 (변경:C, 지정삭제:D, 완성취소:Z, 초기화:R)')
         self.learning_tab = parent # LearningTab 인스턴스 저장
         self.is_change_mode = False
@@ -1312,12 +1369,15 @@ class PolygonAnnotationEditor(QDialog):
         self.change_class_btn.toggled.connect(self.toggle_change_mode)
         left_controls_layout.addWidget(self.change_class_btn)
 
-        sam_ready = getattr(self.learning_tab, "sam_predictor", None) is not None
+        if sam_ready is None:
+            sam_ready = getattr(self.learning_tab, "sam_predictor", None) is not None
 
         self.mode_ai_btn = QPushButton("AI 편집")
         self.mode_ai_btn.setEnabled(sam_ready)
         if not sam_ready:
             self.mode_ai_btn.setToolTip("SAM 모델이 준비되지 않아 전환할 수 없습니다.")
+        else:
+            self.mode_ai_btn.setToolTip("AI 편집으로 전환")
         self.mode_ai_btn.clicked.connect(self.on_switch_to_ai)
         left_controls_layout.addWidget(self.mode_ai_btn)
 
@@ -1353,17 +1413,23 @@ class PolygonAnnotationEditor(QDialog):
         self.cancel_button = self.button_box.addButton(QDialogButtonBox.StandardButton.Cancel)
         self.button_box.accepted.connect(self.on_save)
         self.distractor_button.clicked.connect(self.on_save_distractor)
-        self.button_box.rejected.connect(self.reject)
+        if self._embedded:
+            self.button_box.rejected.connect(self.on_cancel)
+        else:
+            self.button_box.rejected.connect(self.reject)
         
         main_layout.addLayout(top_controls_layout)
         main_layout.addWidget(self.scroll_area)
         main_layout.addWidget(self.status_bar)
         main_layout.addWidget(self.button_box)
         self.setLayout(main_layout)
-        screen_geometry = QApplication.primaryScreen().availableGeometry()
-        new_width = min(pixmap.width() + 50, int(screen_geometry.width() * 0.9))
-        new_height = min(pixmap.height() + 150, int(screen_geometry.height() * 0.9))
-        self.resize(new_width, new_height)
+        if not self._embedded:
+            screen_geometry = QApplication.primaryScreen().availableGeometry()
+            new_width = min(pixmap.width() + 50, int(screen_geometry.width() * 0.9))
+            new_height = min(pixmap.height() + 150, int(screen_geometry.height() * 0.9))
+            self.resize(new_width, new_height)
+        else:
+            self.setWindowFlags(Qt.WindowType.Widget)
 
         self.full_class_list = self.learning_tab.data_manager.get_class_list()
         self.create_local_color_map()
@@ -1382,7 +1448,10 @@ class PolygonAnnotationEditor(QDialog):
             QMessageBox.warning(self, "오류", "방해 요소로 지정할 다각형이 없습니다.")
             return
 
-        self.done(self.DistractorSaved)
+        if self._embedded:
+            self.distractor_saved.emit()
+        else:
+            self.done(self.DistractorSaved)
 
     def create_local_color_map(self):
         """현재 이미지에 있는 클래스 ID에 대해서만 동적으로 색상을 할당합니다."""
@@ -1518,13 +1587,45 @@ class PolygonAnnotationEditor(QDialog):
     def on_switch_to_ai(self):
         """AI 편집기로 전환합니다."""
         self.commit_current_polygon()
-        self.done(self.SwitchToAI)
+        if self._embedded:
+            self.mode_switch_requested.emit(EditModeDialog.AI_ASSIST)
+        else:
+            self.done(self.SwitchToAI)
 
     def get_current_class_name(self):
         class_name = self.class_selector.currentText()
         if class_name and class_name != "[새 클래스 추가...]":
             return class_name
         return None
+
+    def on_cancel(self):
+        if self._embedded:
+            self.canceled.emit()
+        else:
+            self.reject()
+
+    def update_mode_buttons(self, is_active: bool, sam_ready: bool):
+        if not hasattr(self, "mode_manual_btn"):
+            return
+        if is_active:
+            self.mode_manual_btn.setEnabled(False)
+            self.mode_manual_btn.setToolTip("현재 수동 편집 모드입니다.")
+            self.mode_ai_btn.setEnabled(sam_ready)
+            if sam_ready:
+                self.mode_ai_btn.setToolTip("AI 편집으로 전환")
+            else:
+                self.mode_ai_btn.setToolTip("SAM 모델이 준비되지 않아 전환할 수 없습니다.")
+        else:
+            self.mode_manual_btn.setEnabled(True)
+            self.mode_manual_btn.setToolTip("수동 편집으로 전환")
+            self.mode_ai_btn.setEnabled(False)
+            self.mode_ai_btn.setToolTip("현재 AI 편집 모드입니다.")
+
+    def set_polygons(self, polygons):
+        self.canvas.polygons = polygons if polygons else []
+        self.create_local_color_map()
+        self.canvas.current_points.clear()
+        self.canvas.update()
 
 # --- 3.5. 위젯: SAM(AI) 편집기 ---
 class SAMCanvasLabel(BaseCanvasLabel):
@@ -1577,9 +1678,15 @@ class SAMAnnotationEditor(QDialog):
     # v1.3: 방해 요소 저장을 위한 커스텀 결과 코드 정의
     DistractorSaved = 100
     SwitchToManual = 102
-    
-    def __init__(self, pixmap, predictor, initial_polygons=None, parent=None, initial_class_name=None):
+
+    mode_switch_requested = pyqtSignal(int)
+    saved = pyqtSignal()
+    canceled = pyqtSignal()
+    distractor_saved = pyqtSignal()
+
+    def __init__(self, pixmap, predictor, initial_polygons=None, parent=None, initial_class_name=None, *, embedded: bool = False):
         super().__init__(parent)
+        self._embedded = embedded
         self.setWindowTitle('AI 어시스트 (변경:C, 지정삭제:D, 완성취소:Z, 초기화:R)')
         self.learning_tab = parent
         self.is_change_mode = False
@@ -1647,19 +1754,25 @@ class SAMAnnotationEditor(QDialog):
         self.save_button = self.button_box.addButton("저장", QDialogButtonBox.ButtonRole.AcceptRole)
         self.distractor_button = self.button_box.addButton("방해 요소로 저장", QDialogButtonBox.ButtonRole.ActionRole)
         self.cancel_button = self.button_box.addButton(QDialogButtonBox.StandardButton.Cancel)
-        self.button_box.accepted.connect(self.accept)
+        self.button_box.accepted.connect(self.on_save)
         self.distractor_button.clicked.connect(self.on_save_distractor)
-        self.button_box.rejected.connect(self.reject)
+        if self._embedded:
+            self.button_box.rejected.connect(self.on_cancel)
+        else:
+            self.button_box.rejected.connect(self.reject)
 
         main_layout.addLayout(top_controls_layout)
         main_layout.addWidget(self.scroll_area)
         main_layout.addWidget(self.status_bar)
         main_layout.addWidget(self.button_box)
         self.setLayout(main_layout)
-        screen_geometry = QApplication.primaryScreen().availableGeometry()
-        new_width = min(pixmap.width() + 50, int(screen_geometry.width() * 0.9))
-        new_height = min(pixmap.height() + 150, int(screen_geometry.height() * 0.9))
-        self.resize(new_width, new_height)
+        if not self._embedded:
+            screen_geometry = QApplication.primaryScreen().availableGeometry()
+            new_width = min(pixmap.width() + 50, int(screen_geometry.width() * 0.9))
+            new_height = min(pixmap.height() + 150, int(screen_geometry.height() * 0.9))
+            self.resize(new_width, new_height)
+        else:
+            self.setWindowFlags(Qt.WindowType.Widget)
 
         self.full_class_list = self.learning_tab.data_manager.get_class_list()
         self.create_local_color_map()
@@ -1683,7 +1796,10 @@ class SAMAnnotationEditor(QDialog):
             QMessageBox.warning(self, "오류", "방해 요소로 지정할 다각형이 없습니다.")
             return
 
-        self.done(self.DistractorSaved)
+        if self._embedded:
+            self.distractor_saved.emit()
+        else:
+            self.done(self.DistractorSaved)
 
     def create_local_color_map(self):
         """현재 이미지에 있는 클래스 ID에 대해서만 동적으로 색상을 할당합니다."""
@@ -1827,16 +1943,52 @@ class SAMAnnotationEditor(QDialog):
         self.reset_current_mask()
         return True
 
+    def on_save(self):
+        self.commit_current_mask()
+        if self._embedded:
+            self.saved.emit()
+        else:
+            self.accept()
+
     def on_switch_to_manual(self):
         """수동 편집기로 전환합니다."""
         self.commit_current_mask()
-        self.done(self.SwitchToManual)
+        if self._embedded:
+            self.mode_switch_requested.emit(EditModeDialog.MANUAL)
+        else:
+            self.done(self.SwitchToManual)
 
     def get_current_class_name(self):
         class_name = self.class_selector.currentText()
         if class_name and class_name != "[새 클래스 추가...]":
             return class_name
         return None
+
+    def on_cancel(self):
+        if self._embedded:
+            self.canceled.emit()
+        else:
+            self.reject()
+
+    def update_mode_buttons(self, is_active: bool):
+        if not hasattr(self, "mode_manual_btn"):
+            return
+        if is_active:
+            self.mode_ai_btn.setEnabled(False)
+            self.mode_ai_btn.setToolTip("현재 AI 편집 모드입니다.")
+            self.mode_manual_btn.setEnabled(True)
+            self.mode_manual_btn.setToolTip("수동 편집으로 전환")
+        else:
+            self.mode_ai_btn.setEnabled(True)
+            self.mode_ai_btn.setToolTip("AI 편집으로 전환")
+            self.mode_manual_btn.setEnabled(False)
+            self.mode_manual_btn.setToolTip("현재 수동 편집 모드입니다.")
+
+    def set_polygons(self, polygons):
+        self.canvas.polygons = polygons if polygons else []
+        self.create_local_color_map()
+        self.reset_current_mask()
+        self.canvas.update()
 
 # --- 4. 위젯: 편집 모드 및 다중 캡처 선택 ---
 class EditModeDialog(QDialog):
@@ -1866,6 +2018,143 @@ class EditModeDialog(QDialog):
     def on_ai_assist(self): self.done(self.AI_ASSIST)
     def on_manual(self): self.done(self.MANUAL)
     def on_cancel(self): self.done(self.CANCEL)
+
+class AnnotationEditorDialog(QDialog):
+    """AI/수동 편집기를 하나의 창에서 전환하기 위한 컨테이너."""
+
+    def __init__(
+        self,
+        pixmap,
+        learning_tab,
+        sam_predictor,
+        initial_polygons=None,
+        initial_class_name=None,
+        initial_mode=EditModeDialog.MANUAL,
+    ):
+        super().__init__(learning_tab)
+        self.pixmap = pixmap
+        self.learning_tab = learning_tab
+        self.sam_predictor = sam_predictor
+        self._result_polygons = []
+        self._result_class_name = None
+        self._current_mode = None
+
+        polygons_copy = self._clone_polygons(initial_polygons)
+
+        sam_ready = sam_predictor is not None
+        self.manual_editor = PolygonAnnotationEditor(
+            pixmap,
+            polygons_copy,
+            learning_tab,
+            initial_class_name,
+            embedded=True,
+            sam_ready=sam_ready,
+        )
+        self.manual_editor.setParent(self)
+        self.manual_editor.saved.connect(lambda: self._finalize(QDialog.DialogCode.Accepted, self.manual_editor))
+        self.manual_editor.distractor_saved.connect(lambda: self._finalize(PolygonAnnotationEditor.DistractorSaved, self.manual_editor))
+        self.manual_editor.canceled.connect(self.reject)
+        self.manual_editor.mode_switch_requested.connect(self._handle_mode_switch)
+
+        if sam_predictor is not None:
+            self.ai_editor = SAMAnnotationEditor(
+                pixmap,
+                sam_predictor,
+                polygons_copy,
+                learning_tab,
+                initial_class_name,
+                embedded=True,
+            )
+            self.ai_editor.setParent(self)
+            self.ai_editor.saved.connect(lambda: self._finalize(QDialog.DialogCode.Accepted, self.ai_editor))
+            self.ai_editor.distractor_saved.connect(lambda: self._finalize(SAMAnnotationEditor.DistractorSaved, self.ai_editor))
+            self.ai_editor.canceled.connect(self.reject)
+            self.ai_editor.mode_switch_requested.connect(self._handle_mode_switch)
+        else:
+            self.ai_editor = None
+
+        self.stack = QStackedLayout()
+        self.stack.addWidget(self.manual_editor)
+        if self.ai_editor is not None:
+            self.stack.addWidget(self.ai_editor)
+
+        main_layout = QVBoxLayout(self)
+        main_layout.addLayout(self.stack)
+
+        if initial_mode == EditModeDialog.AI_ASSIST and self.ai_editor is not None:
+            self._switch_mode(EditModeDialog.AI_ASSIST, initialize=True)
+        else:
+            self._switch_mode(EditModeDialog.MANUAL, initialize=True)
+
+    def _clone_polygons(self, polygons):
+        if not polygons:
+            return []
+        cloned = []
+        for poly in polygons:
+            points = [QPoint(p) for p in poly.get('points', [])]
+            cloned.append({'class_id': poly.get('class_id'), 'points': points})
+        return cloned
+
+    def _handle_mode_switch(self, mode):
+        self._switch_mode(mode)
+
+    def _switch_mode(self, mode, *, initialize=False):
+        sam_ready = self.sam_predictor is not None
+
+        if mode == EditModeDialog.AI_ASSIST:
+            if self.ai_editor is None:
+                if not initialize:
+                    QMessageBox.warning(self, "오류", "SAM 모델이 준비되지 않아 AI 편집기로 전환할 수 없습니다.")
+                return
+            self.manual_editor.commit_current_polygon()
+            polygons = self._clone_polygons(self.manual_editor.get_all_polygons())
+            self.ai_editor.set_polygons(polygons)
+            current_class = self.manual_editor.get_current_class_name()
+            if current_class:
+                self.ai_editor.set_initial_selection(current_class)
+            self.ai_editor.reset_current_mask()
+            self.stack.setCurrentWidget(self.ai_editor)
+            self._current_mode = EditModeDialog.AI_ASSIST
+            self.manual_editor.update_mode_buttons(False, sam_ready)
+            self.ai_editor.update_mode_buttons(True)
+            self.setWindowTitle(self.ai_editor.windowTitle())
+        else:
+            if self.ai_editor is not None:
+                self.ai_editor.commit_current_mask()
+                polygons = self._clone_polygons(self.ai_editor.get_all_polygons())
+            else:
+                polygons = self._clone_polygons(self.manual_editor.get_all_polygons())
+            self.manual_editor.set_polygons(polygons)
+            if self.ai_editor is not None:
+                current_class = self.ai_editor.get_current_class_name()
+                if current_class:
+                    self.manual_editor.set_initial_selection(current_class)
+                self.ai_editor.update_mode_buttons(False)
+            self.stack.setCurrentWidget(self.manual_editor)
+            self._current_mode = EditModeDialog.MANUAL
+            self.manual_editor.update_mode_buttons(True, sam_ready)
+            self.setWindowTitle(self.manual_editor.windowTitle())
+
+        if initialize and self.ai_editor is None:
+            self.manual_editor.update_mode_buttons(True, sam_ready)
+
+        current_widget = self.stack.currentWidget()
+        if current_widget is not None:
+            self.resize(current_widget.sizeHint())
+
+    def _finalize(self, result_code, editor):
+        self._result_polygons = self._clone_polygons(editor.get_all_polygons())
+        self._result_class_name = editor.get_current_class_name()
+        self.done(result_code)
+
+    def result_polygons(self):
+        return self._clone_polygons(self._result_polygons)
+
+    def result_class_name(self):
+        return self._result_class_name
+
+    def current_mode(self):
+        return self._current_mode
 
 class MultiCaptureDialog(QDialog):
     def __init__(self, pixmaps, parent=None):
@@ -6021,43 +6310,16 @@ class LearningTab(QWidget):
         if mode_result == EditModeDialog.CANCEL:
             return
 
-        current_mode = mode_result
-        current_polygons = initial_polygons
-        current_class_name = initial_class_name
+        editor_dialog = AnnotationEditorDialog(
+            pixmap,
+            self,
+            self.sam_predictor,
+            initial_polygons=initial_polygons,
+            initial_class_name=initial_class_name,
+            initial_mode=mode_result,
+        )
 
-        def clone_polygons(polygons):
-            if not polygons:
-                return []
-            cloned = []
-            for poly in polygons:
-                points = [QPoint(point) for point in poly.get('points', [])]
-                cloned.append({'class_id': poly.get('class_id'), 'points': points})
-            return cloned
-
-        while True:
-            if current_mode == EditModeDialog.AI_ASSIST:
-                if self.sam_predictor is None:
-                    QMessageBox.warning(self, "오류", "SAM 모델이 준비되지 않아 AI 편집기로 전환할 수 없습니다.")
-                    current_mode = EditModeDialog.MANUAL
-                    continue
-                editor = SAMAnnotationEditor(pixmap, self.sam_predictor, current_polygons, self, current_class_name)
-            else:
-                editor = PolygonAnnotationEditor(pixmap, current_polygons, self, current_class_name)
-
-            editor_result = editor.exec()
-
-            if editor_result == PolygonAnnotationEditor.SwitchToAI:
-                current_polygons = clone_polygons(editor.get_all_polygons())
-                current_class_name = editor.get_current_class_name() or current_class_name
-                current_mode = EditModeDialog.AI_ASSIST
-                continue
-            if editor_result == SAMAnnotationEditor.SwitchToManual:
-                current_polygons = clone_polygons(editor.get_all_polygons())
-                current_class_name = editor.get_current_class_name() or current_class_name
-                current_mode = EditModeDialog.MANUAL
-                continue
-
-            break
+        editor_result = editor_dialog.exec()
 
         if editor_result == QDialog.DialogCode.Rejected:
             return
@@ -6072,7 +6334,7 @@ class LearningTab(QWidget):
             if previously_selected_class:
                 self.select_class_item_by_name(previously_selected_class)
 
-            polygons_data = editor.get_all_polygons()
+            polygons_data = editor_dialog.result_polygons()
             final_class_list = self.data_manager.get_class_list()
             
             label_lines, involved_class_ids = [], set()
@@ -6146,7 +6408,7 @@ class LearningTab(QWidget):
 
         # 시나리오 2: 방해 요소로 저장
         elif editor_result in {PolygonAnnotationEditor.DistractorSaved, SAMAnnotationEditor.DistractorSaved}:
-            polygons_data = editor.get_all_polygons()
+            polygons_data = editor_dialog.result_polygons()
             if not polygons_data: return
 
             # 마지막 다각형을 방해 요소로 간주
