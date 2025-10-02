@@ -8153,6 +8153,8 @@ class MapTab(QWidget):
         if resource == 'hp':
             # HP 명령은 병렬 수행을 전제로 하므로 기존 명령 보관/차단 로직을 우회한다.
             self._status_saved_command = None
+            if percentage < 20.0:
+                self._ensure_mapleland_foreground()
             self._issue_status_command(resource, command_name)
             self._status_last_command_ts[resource] = timestamp
             return
@@ -8171,6 +8173,39 @@ class MapTab(QWidget):
         reason = f'status:{resource}'
         self._emit_control_command(command_name, reason=reason)
         self.update_general_log(f"[상태] {resource.upper()} 명령 '{command_name}' 실행", "purple")
+
+    def _ensure_mapleland_foreground(self) -> None:
+        """Mapleland 창을 전면으로 가져옵니다."""
+        try:
+            candidate_windows = gw.getWindowsWithTitle('Mapleland')
+        except Exception:
+            return
+
+        target_window = None
+        for window in candidate_windows:
+            if not window:
+                continue
+            try:
+                title = (getattr(window, 'title', '') or '').strip()
+            except Exception:
+                continue
+            if 'mapleland' in title.lower():
+                target_window = window
+                break
+
+        if target_window is None:
+            return
+
+        try:
+            if getattr(target_window, 'isMinimized', False):
+                target_window.restore()
+            if not getattr(target_window, 'isActive', False):
+                target_window.activate()
+            if not getattr(target_window, 'isActive', False):
+                target_window.minimize()
+                target_window.restore()
+        except Exception:
+            return
 
     def _handle_status_command_completed(self, success: bool) -> None:
         active = self._status_active_resource

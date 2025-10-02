@@ -4684,6 +4684,8 @@ class HuntTab(QWidget):
         if resource == 'hp':
             if self._hp_guard_active:
                 return
+            if percentage < 20.0:
+                self._ensure_mapleland_foreground()
             self._issue_status_command(resource, command_name, percentage)
             guard_delay = random.uniform(0.370, 0.400)
             self._hp_guard_active = True
@@ -4717,6 +4719,39 @@ class HuntTab(QWidget):
             )
         else:
             self.append_log(f"[{resource.upper()}] 자동 명령 '{command_name}' 실행", 'info')
+
+    def _ensure_mapleland_foreground(self) -> None:
+        """Mapleland 창을 전면으로 가져옵니다."""
+        try:
+            candidate_windows = gw.getWindowsWithTitle('Mapleland')
+        except Exception:
+            return
+
+        target_window = None
+        for window in candidate_windows:
+            if not window:
+                continue
+            try:
+                title = (getattr(window, 'title', '') or '').strip()
+            except Exception:
+                continue
+            if 'mapleland' in title.lower():
+                target_window = window
+                break
+
+        if target_window is None:
+            return
+
+        try:
+            if getattr(target_window, 'isMinimized', False):
+                target_window.restore()
+            if not getattr(target_window, 'isActive', False):
+                target_window.activate()
+            if not getattr(target_window, 'isActive', False):
+                target_window.minimize()
+                target_window.restore()
+        except Exception:
+            return
 
     def _handle_status_sequence_completed(self, command_name: str, reason: str, success: bool) -> None:
         resource = ''
