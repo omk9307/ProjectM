@@ -3280,8 +3280,13 @@ class MapTab(QWidget):
                     state['armed'] = True
 
     def _find_waypoint_by_id(self, waypoint_id):
+        if waypoint_id is None:
+            return None
+
+        target_id = str(waypoint_id)
         for waypoint in self.geometry_data.get("waypoints", []):
-            if waypoint.get('id') == waypoint_id:
+            current_id = waypoint.get('id')
+            if current_id == waypoint_id or str(current_id) == target_id:
                 return waypoint
         return None
 
@@ -5092,7 +5097,7 @@ class MapTab(QWidget):
 
     def start_other_player_wait_operation(
         self,
-        waypoint_id: int,
+        waypoint_id: int | str,
         waypoint_name: str,
         *,
         source: str = '',
@@ -5101,17 +5106,18 @@ class MapTab(QWidget):
             self.update_general_log("[대기 모드] 탐지 실행 중에만 사용할 수 있습니다.", "red")
             return False
 
+        waypoint_id_str = str(waypoint_id)
         waypoint = self._find_waypoint_by_id(waypoint_id)
         if not waypoint:
             self.update_general_log(
-                f"[대기 모드] 웨이포인트 ID {waypoint_id}를 찾을 수 없습니다.",
+                f"[대기 모드] 웨이포인트 ID {waypoint_id_str}를 찾을 수 없습니다.",
                 "red",
             )
             return False
 
         context = {
             'active': True,
-            'goal_id': waypoint_id,
+            'goal_id': waypoint_id_str,
             'goal_name': waypoint_name,
             'started_at': time.time(),
             'holding': False,
@@ -5124,7 +5130,7 @@ class MapTab(QWidget):
             "orange",
         )
 
-        self._activate_other_player_wait_goal(waypoint_id)
+        self._activate_other_player_wait_goal(waypoint_id_str)
 
         self._authority_priority_override = True
         if self._authority_manager:
@@ -5168,7 +5174,7 @@ class MapTab(QWidget):
         self.navigation_action = 'move_to_target'
         self.guidance_text = '없음'
 
-    def _activate_other_player_wait_goal(self, waypoint_id: int) -> None:
+    def _activate_other_player_wait_goal(self, waypoint_id: str) -> None:
         self.journey_plan = [waypoint_id]
         self.current_journey_index = 0
         self.current_segment_path = []
@@ -5189,21 +5195,23 @@ class MapTab(QWidget):
         if goal_id is None:
             return
 
+        goal_id_str = str(goal_id)
+
         if not context.get('initialized'):
-            self._activate_other_player_wait_goal(int(goal_id))
+            self._activate_other_player_wait_goal(goal_id_str)
 
         # 경로가 비어있으면 다시 설정
         if not self.journey_plan:
-            self._activate_other_player_wait_goal(int(goal_id))
+            self._activate_other_player_wait_goal(goal_id_str)
 
         if not context.get('holding'):
             if self.journey_plan and not self.current_segment_path:
                 self._calculate_segment_path(final_player_pos)
 
-            if self.last_reached_wp_id == goal_id:
+            if self.last_reached_wp_id == goal_id_str:
                 context['holding'] = True
                 context['hold_started_at'] = time.time()
-                waypoint_name = context.get('goal_name', str(goal_id))
+                waypoint_name = context.get('goal_name', goal_id_str)
                 self.update_general_log(
                     f"[대기 모드] '{waypoint_name}' 웨이포인트에 도착했습니다. 대기 상태로 전환합니다.",
                     "DodgerBlue",
@@ -5213,10 +5221,10 @@ class MapTab(QWidget):
                 self.guidance_text = f"대기 중: {waypoint_name}"
                 self.current_segment_path = []
                 self.current_segment_index = 0
-                self.target_waypoint_id = goal_id
+                self.target_waypoint_id = goal_id_str
         else:
             # 일정 거리 이상 벗어나면 다시 이동
-            waypoint_node = self.nav_nodes.get(f"wp_{goal_id}", {})
+            waypoint_node = self.nav_nodes.get(f"wp_{goal_id_str}", {})
             waypoint_pos = waypoint_node.get('pos')
             if isinstance(waypoint_pos, QPointF):
                 distance = abs(final_player_pos.x() - waypoint_pos.x())
@@ -5226,7 +5234,7 @@ class MapTab(QWidget):
                         "orange",
                     )
                     context['holding'] = False
-                    self._activate_other_player_wait_goal(int(goal_id))
+                    self._activate_other_player_wait_goal(goal_id_str)
 
     def on_detection_ready(self, frame_bgr, found_features, my_player_rects, other_player_rects):
         map_perf = {

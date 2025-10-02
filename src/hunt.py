@@ -872,7 +872,7 @@ class HuntTab(QWidget):
         self.shutdown_other_player_action_triggered = False
         self.shutdown_other_player_exit_delay: int = 60
         self.shutdown_other_player_wait_delay: int = 180
-        self.shutdown_other_player_wait_waypoint_id: Optional[int] = None
+        self.shutdown_other_player_wait_waypoint_id: Optional[str] = None
         self.shutdown_other_player_wait_waypoint_name: str = ''
         self.shutdown_other_player_wait_active = False
         self.shutdown_other_player_wait_started_at: Optional[float] = None
@@ -1707,7 +1707,7 @@ class HuntTab(QWidget):
 
         other_header = QHBoxLayout()
         other_header.setSpacing(6)
-        self.shutdown_other_player_checkbox = QCheckBox("다른 캐릭터 감지")
+        self.shutdown_other_player_checkbox = QCheckBox("사용")
         other_header.addWidget(self.shutdown_other_player_checkbox)
         other_header.addStretch(1)
         self.shutdown_other_player_elapsed = QLabel("--")
@@ -1717,7 +1717,8 @@ class HuntTab(QWidget):
 
         self.shutdown_other_player_action_group = QButtonGroup(self)
         actions_layout = QGridLayout()
-        actions_layout.setHorizontalSpacing(6)
+        actions_layout.setContentsMargins(0, 0, 0, 0)
+        actions_layout.setHorizontalSpacing(2)
         actions_layout.setVerticalSpacing(4)
 
         # 게임 종료 액션
@@ -1863,6 +1864,9 @@ class HuntTab(QWidget):
         candidate_pid: Optional[int] = None
         detect_errors: list[str] = []
 
+        target_image = 'msw.exe'
+        target_lower = target_image.lower()
+
         # 1. psutil 우선 사용
         try:
             import psutil  # type: ignore
@@ -1870,7 +1874,7 @@ class HuntTab(QWidget):
             for proc in psutil.process_iter(['pid', 'name', 'cmdline']):
                 name = (proc.info.get('name') or '').lower()
                 cmdline = ' '.join(proc.info.get('cmdline') or []).lower()
-                if 'mapleland' in name or 'mapleland' in cmdline:
+                if name == target_lower or target_lower in cmdline:
                     candidate_pid = int(proc.info['pid'])
                     break
         except ImportError:
@@ -1886,12 +1890,12 @@ class HuntTab(QWidget):
             try:
                 encoding = locale.getpreferredencoding(False) or 'cp949'
                 output = subprocess.check_output(
-                    ['tasklist', '/FI', 'IMAGENAME eq Mapleland.exe'],
+                    ['tasklist', '/FI', f'IMAGENAME eq {target_image}'],
                     stderr=subprocess.STDOUT,
                 )
                 text = output.decode(encoding, errors='ignore')
                 for line in text.splitlines():
-                    if 'Mapleland' not in line:
+                    if target_lower not in line.lower():
                         continue
                     parts = [p for p in line.split() if p.isdigit()]
                     if parts:
@@ -1904,10 +1908,10 @@ class HuntTab(QWidget):
 
         if candidate_pid is None:
             if manual:
-                detail = '\n'.join(detect_errors) if detect_errors else 'Mapleland 프로세스를 찾지 못했습니다.'
+                detail = '\n'.join(detect_errors) if detect_errors else f'{target_image} 프로세스를 찾지 못했습니다.'
                 QMessageBox.warning(self, "PID 검색 실패", detail)
             elif not auto_trigger:
-                self.append_log("Mapleland PID 자동 검색에 실패했습니다.", "warn")
+                self.append_log(f"{target_image} PID 자동 검색에 실패했습니다.", "warn")
             return None
 
         self.shutdown_pid_value = candidate_pid
@@ -1918,7 +1922,7 @@ class HuntTab(QWidget):
             del blocker
 
         if manual:
-            self.append_log(f"Mapleland PID 자동 검색 성공: {candidate_pid}", "info")
+            self.append_log(f"{target_image} PID 자동 검색 성공: {candidate_pid}", "info")
         elif not auto_trigger:
             self.append_log(f"PID {candidate_pid} 자동 감지", "info")
 
@@ -1950,8 +1954,14 @@ class HuntTab(QWidget):
         seconds_spin.setValue(self.shutdown_other_player_exit_delay % 60)
         seconds_spin.setSuffix(" 초")
 
-        layout.addRow("분", minutes_spin)
-        layout.addRow("초", seconds_spin)
+        time_row_widget = QWidget(dialog)
+        time_row_layout = QHBoxLayout(time_row_widget)
+        time_row_layout.setContentsMargins(0, 0, 0, 0)
+        time_row_layout.setSpacing(8)
+        time_row_layout.addWidget(minutes_spin)
+        time_row_layout.addWidget(seconds_spin)
+
+        layout.addRow("지연 시간", time_row_widget)
 
         button_box = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel, dialog)
         button_box.accepted.connect(dialog.accept)
@@ -2021,7 +2031,12 @@ class HuntTab(QWidget):
             QMessageBox.warning(self, "웨이포인트 선택", "대기할 웨이포인트를 선택해주세요.")
             return
 
-        waypoint_id = int(waypoint_combo.currentData())
+        waypoint_data = waypoint_combo.currentData()
+        if waypoint_data is None:
+            QMessageBox.warning(self, "웨이포인트 선택", "유효한 웨이포인트가 아닙니다.")
+            return
+
+        waypoint_id = str(waypoint_data)
         waypoint_name = waypoint_combo.currentText()
 
         self.shutdown_other_player_wait_delay = total_seconds
@@ -2037,7 +2052,7 @@ class HuntTab(QWidget):
         self.shutdown_other_player_action = 'town_return'
         self._update_other_player_action_summary()
 
-    def _collect_waypoint_options(self) -> list[tuple[str, int]]:
+    def _collect_waypoint_options(self) -> list[tuple[str, str]]:
         map_tab = getattr(self, 'map_tab', None)
         geometry = getattr(map_tab, 'geometry_data', None)
         waypoints = []
@@ -2047,7 +2062,7 @@ class HuntTab(QWidget):
                 wp_id = item.get('id')
                 if not name or wp_id is None:
                     continue
-                waypoints.append((str(name), int(wp_id)))
+                waypoints.append((str(name), str(wp_id)))
         waypoints.sort(key=lambda x: x[0].lower())
         return waypoints
 
@@ -2446,11 +2461,12 @@ class HuntTab(QWidget):
             self.append_log("맵 탭이 대기 모드를 지원하지 않습니다.", "warn")
             return False
 
-        waypoint_name = self.shutdown_other_player_wait_waypoint_name or str(waypoint_id)
+        waypoint_id_str = str(waypoint_id)
+        waypoint_name = self.shutdown_other_player_wait_waypoint_name or waypoint_id_str
 
         try:
             success = map_tab.start_other_player_wait_operation(
-                waypoint_id=int(waypoint_id),
+                waypoint_id=waypoint_id_str,
                 waypoint_name=waypoint_name,
                 source='hunt.other_player',
             )
@@ -6922,8 +6938,9 @@ class HuntTab(QWidget):
 
             wait_wp_id = auto_shutdown_cfg.get('other_wait_waypoint_id')
             wait_wp_name = auto_shutdown_cfg.get('other_wait_waypoint_name')
-            if isinstance(wait_wp_id, int):
-                self.shutdown_other_player_wait_waypoint_id = wait_wp_id
+            if wait_wp_id is not None:
+                wait_wp_id_str = str(wait_wp_id).strip()
+                self.shutdown_other_player_wait_waypoint_id = wait_wp_id_str or None
             if isinstance(wait_wp_name, str):
                 self.shutdown_other_player_wait_waypoint_name = wait_wp_name
 
