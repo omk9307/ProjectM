@@ -8698,12 +8698,29 @@ class MapTab(QWidget):
                     elif node_type == 'djump_area':
                         # [수정안2] 아래점프 준비 전에 출발 안전지점으로 이동을 완료하도록 전환을 지연
                         try:
+                            # [개선] 출발선은 항상 현재 djump 노드의 group을 우선한다.
+                            # 기존 contact_terrain 기반 추정은 보조로만 사용.
                             contact_terrain = self._get_contact_terrain(final_player_pos)
                             departure_line = None
-                            if contact_terrain:
-                                departure_line = contact_terrain
-                            elif self.last_known_terrain_group_name:
-                                departure_line = next((line for line in self.geometry_data.get("terrain_lines", []) if line.get('dynamic_name') == self.last_known_terrain_group_name), None)
+                            # 1) djump_area 노드의 group으로 출발선 결정
+                            try:
+                                djump_group = current_node.get('group') if isinstance(current_node, dict) else None
+                            except Exception:
+                                djump_group = None
+                            if djump_group:
+                                departure_line = next((
+                                    line for line in self.geometry_data.get("terrain_lines", [])
+                                    if line.get('dynamic_name') == djump_group
+                                ), None)
+                            # 2) 보조: 접지 지형 또는 마지막 알려진 지형
+                            if not departure_line:
+                                if contact_terrain:
+                                    departure_line = contact_terrain
+                                elif self.last_known_terrain_group_name:
+                                    departure_line = next((
+                                        line for line in self.geometry_data.get("terrain_lines", [])
+                                        if line.get('dynamic_name') == self.last_known_terrain_group_name
+                                    ), None)
 
                             if not departure_line:
                                 # 출발 지형을 알 수 없으면 기존 동작으로 폴백
@@ -9000,6 +9017,18 @@ class MapTab(QWidget):
         except Exception:
             pass
         
+        # --- [개선] 아래점프 준비 시, 출발선은 djump_area 노드의 group을 우선 사용 ---
+        try:
+            if self.navigation_action == 'prepare_to_down_jump' and self.current_segment_path:
+                action_node_key = self.current_segment_path[self.current_segment_index]
+                action_node = self.nav_nodes.get(action_node_key, {})
+                if action_node.get('type') == 'djump_area':
+                    node_group = action_node.get('group')
+                    if node_group:
+                        departure_terrain_group = node_group
+        except Exception:
+            pass
+
         # Case 1: 플레이어가 지상에 있을 때 (가장 일반적인 경우)
         if departure_terrain_group is not None:
             if self.navigation_action in ['prepare_to_down_jump', 'prepare_to_fall']:
