@@ -52,7 +52,22 @@ from PyQt6.QtWidgets import (
     QGraphicsSimpleTextItem, QFormLayout, QProgressDialog, QSizePolicy,
     QSplitter
 )
-from PyQt6.QtGui import QPixmap, QImage, QPainter, QPen, QColor, QBrush, QFont, QCursor, QIcon, QPolygonF, QFontMetrics, QFontMetricsF, QGuiApplication
+from PyQt6.QtGui import (
+    QPixmap,
+    QImage,
+    QPainter,
+    QPen,
+    QColor,
+    QBrush,
+    QFont,
+    QCursor,
+    QIcon,
+    QPolygonF,
+    QFontMetrics,
+    QFontMetricsF,
+    QGuiApplication,
+    QIntValidator,
+)
 from PyQt6.QtCore import Qt, QThread, pyqtSignal, pyqtSlot, QRect, QPoint, QRectF, QPointF, QSize, QSizeF, QTimer, QSignalBlocker
 
 try:
@@ -537,8 +552,14 @@ class MapTab(QWidget):
             self.telegram_send_custom_count = 3
             self.telegram_bot_token = ""
             self.telegram_chat_id = ""
+            self.other_player_test_btn = None
+            self.other_player_test_duration_input = None
             self._other_player_alert_custom_remaining = 0
             self.other_player_wait_context: dict[str, Any] = {}
+            self._other_player_test_end_time = 0.0
+            self._other_player_test_timer = QTimer(self)
+            self._other_player_test_timer.setSingleShot(True)
+            self._other_player_test_timer.timeout.connect(self._finish_other_player_presence_test)
             self._refresh_telegram_credentials()
             self.active_feature_info = []
             self.reference_anchor_id = None
@@ -1332,13 +1353,25 @@ class MapTab(QWidget):
         self.telegram_alert_checkbox.setChecked(False)
         self.telegram_alert_checkbox.toggled.connect(self._on_telegram_alert_toggled)
         telegram_controls_layout.addWidget(self.telegram_alert_checkbox)
+        self.other_player_test_btn = QPushButton("테스트")
+        self.other_player_test_btn.setEnabled(False)
+        self.other_player_test_btn.clicked.connect(self._start_other_player_presence_test)
+        telegram_controls_layout.addWidget(self.other_player_test_btn)
         self.telegram_settings_btn = QPushButton("설정")
         self.telegram_settings_btn.setEnabled(False)
         self.telegram_settings_btn.clicked.connect(self._open_telegram_settings_dialog)
         telegram_controls_layout.addWidget(self.telegram_settings_btn)
+        self.other_player_test_duration_input = QLineEdit()
+        self.other_player_test_duration_input.setEnabled(False)
+        self.other_player_test_duration_input.setFixedWidth(60)
+        self.other_player_test_duration_input.setPlaceholderText("초")
+        self.other_player_test_duration_input.setValidator(QIntValidator(1, 3600, self))
+        self.other_player_test_duration_input.setText("5")
+        telegram_controls_layout.addWidget(self.other_player_test_duration_input)
         third_row_layout.addLayout(telegram_controls_layout)
         third_row_layout.addStretch(1)
         self.telegram_alert_checkbox.setEnabled(False)
+        self._update_other_player_test_controls_enabled()
 
         buttons_row_layout = QHBoxLayout()
         self.state_config_btn = QPushButton("판정 설정")
@@ -2311,7 +2344,9 @@ class MapTab(QWidget):
                 del blocker
             self.other_player_alert_enabled = other_alert_enabled
             if not other_alert_enabled:
+                self._finish_other_player_presence_test()
                 self._reset_other_player_alert_state()
+            self._update_other_player_test_controls_enabled()
 
             telegram_enabled = bool(config.get('telegram_alert_enabled', False))
             if not other_alert_enabled:
@@ -5038,7 +5073,10 @@ class MapTab(QWidget):
         self.my_player_global_rects = my_player_global_rects
         self.other_player_global_rects = other_player_global_rects
         self._handle_other_player_detection_alert(self.other_player_global_rects)
-        self._notify_other_player_presence(len(self.other_player_global_rects))
+        effective_other_count = self._get_effective_other_player_count(
+            len(self.other_player_global_rects)
+        )
+        self._notify_other_player_presence(effective_other_count)
 
         if self.debug_dialog and self.debug_dialog.isVisible():
             debug_data = {
@@ -5087,6 +5125,78 @@ class MapTab(QWidget):
             hunt_tab.handle_other_player_presence(has_other, count, time.time())
         except Exception:
             pass
+
+    def _get_effective_other_player_count(self, actual_count: int) -> int:
+        test_count = 1 if self._is_other_player_test_active() else 0
+        return max(actual_count, test_count)
+
+    def _is_other_player_test_active(self) -> bool:
+        if self._other_player_test_end_time <= 0.0:
+            return False
+        return time.time() < self._other_player_test_end_time
+
+    def _trigger_other_player_presence_test_refresh(self) -> None:
+        self._handle_other_player_detection_alert(self.other_player_global_rects)
+        effective_count = self._get_effective_other_player_count(len(self.other_player_global_rects))
+        self._notify_other_player_presence(effective_count)
+
+    def _finish_other_player_presence_test(self) -> None:
+        if self._other_player_test_timer.isActive():
+            self._other_player_test_timer.stop()
+        if self._other_player_test_end_time <= 0.0:
+            return
+        self._other_player_test_end_time = 0.0
+        try:
+            self.update_general_log("테스트용 다른 유저 감지가 종료되었습니다.", "info")
+        except Exception:
+            pass
+        self._trigger_other_player_presence_test_refresh()
+
+    def _start_other_player_presence_test(self) -> None:
+        if not self.other_player_alert_enabled:
+            QMessageBox.information(self, "테스트 불가", "먼저 '다른 유저 감지'를 활성화해 주세요.")
+            return
+
+        if not self.other_player_test_duration_input:
+            return
+
+        duration_text = self.other_player_test_duration_input.text().strip()
+        if not duration_text:
+            QMessageBox.information(self, "테스트 시간 필요", "테스트 유지 시간을 초 단위로 입력해 주세요.")
+            return
+
+        try:
+            duration = int(duration_text)
+        except ValueError:
+            QMessageBox.warning(self, "입력 오류", "테스트 시간은 1 이상의 정수로 입력해 주세요.")
+            return
+
+        if duration <= 0:
+            QMessageBox.warning(self, "입력 오류", "테스트 시간은 1초 이상이어야 합니다.")
+            return
+
+        if self._other_player_test_timer.isActive():
+            self._other_player_test_timer.stop()
+
+        self._other_player_test_end_time = time.time() + duration
+        self._other_player_test_timer.start(duration * 1000)
+
+        try:
+            self.update_general_log(
+                f"테스트용 다른 유저 감지를 {duration}초 동안 활성화합니다.",
+                "info",
+            )
+        except Exception:
+            pass
+
+        self._trigger_other_player_presence_test_refresh()
+
+    def _update_other_player_test_controls_enabled(self) -> None:
+        enabled = bool(self.other_player_alert_enabled)
+        if self.other_player_test_btn is not None:
+            self.other_player_test_btn.setEnabled(enabled)
+        if self.other_player_test_duration_input is not None:
+            self.other_player_test_duration_input.setEnabled(enabled)
 
     # ------------------------------------------------------------------
     # 다른 캐릭터 대기 모드 연동
@@ -5473,7 +5583,9 @@ class MapTab(QWidget):
     def _on_other_player_alert_toggled(self, checked: bool) -> None:  # noqa: ARG002
         self.other_player_alert_enabled = bool(checked)
         if not self.other_player_alert_enabled:
+            self._finish_other_player_presence_test()
             self._reset_other_player_alert_state()
+        self._update_other_player_test_controls_enabled()
         if self.telegram_alert_checkbox:
             self.telegram_alert_checkbox.setEnabled(self.other_player_alert_enabled)
             if not self.other_player_alert_enabled and self.telegram_alert_checkbox.isChecked():
@@ -5512,7 +5624,8 @@ class MapTab(QWidget):
             return
 
         now = time.time()
-        has_other_player = bool(other_players)
+        effective_count = self._get_effective_other_player_count(len(other_players))
+        has_other_player = effective_count > 0
         if has_other_player:
             first_detection = not self._other_player_alert_active
             if first_detection:
@@ -5545,7 +5658,7 @@ class MapTab(QWidget):
                 should_send = first_detection
 
             if should_send:
-                detected_count = len(other_players)
+                detected_count = effective_count
                 profile_name = self.active_profile_name or "(미지정)"
                 timestamp_text = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(now))
                 count_text = f"{detected_count}명"

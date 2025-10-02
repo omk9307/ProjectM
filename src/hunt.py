@@ -1716,43 +1716,57 @@ class HuntTab(QWidget):
         other_layout.addLayout(other_header)
 
         self.shutdown_other_player_action_group = QButtonGroup(self)
-        actions_layout = QGridLayout()
+        actions_layout = QVBoxLayout()
         actions_layout.setContentsMargins(0, 0, 0, 0)
-        actions_layout.setHorizontalSpacing(2)
-        actions_layout.setVerticalSpacing(4)
+        actions_layout.setSpacing(4)
 
         # 게임 종료 액션
         self.shutdown_other_player_radio_shutdown = QRadioButton()
         self.shutdown_other_player_action_group.addButton(self.shutdown_other_player_radio_shutdown, 0)
-        actions_layout.addWidget(self.shutdown_other_player_radio_shutdown, 0, 0)
 
         self.shutdown_other_player_shutdown_btn = QPushButton("게임 종료")
-        actions_layout.addWidget(self.shutdown_other_player_shutdown_btn, 0, 1)
-
         self.shutdown_other_player_shutdown_summary = QLabel("지연 60초")
-        actions_layout.addWidget(self.shutdown_other_player_shutdown_summary, 0, 2)
+        self.shutdown_other_player_shutdown_summary.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+
+        shutdown_row = QHBoxLayout()
+        shutdown_row.setContentsMargins(0, 0, 0, 0)
+        shutdown_row.setSpacing(6)
+        shutdown_row.addWidget(self.shutdown_other_player_radio_shutdown)
+        shutdown_row.addWidget(self.shutdown_other_player_shutdown_btn)
+        shutdown_row.addWidget(self.shutdown_other_player_shutdown_summary, 1)
+        actions_layout.addLayout(shutdown_row)
 
         # 대기 모드 액션
         self.shutdown_other_player_radio_wait = QRadioButton()
         self.shutdown_other_player_action_group.addButton(self.shutdown_other_player_radio_wait, 1)
-        actions_layout.addWidget(self.shutdown_other_player_radio_wait, 1, 0)
 
         self.shutdown_other_player_wait_btn = QPushButton("대기 모드")
-        actions_layout.addWidget(self.shutdown_other_player_wait_btn, 1, 1)
-
         self.shutdown_other_player_wait_summary = QLabel("지연 180초 / 웨이포인트 미설정")
-        actions_layout.addWidget(self.shutdown_other_player_wait_summary, 1, 2)
+        self.shutdown_other_player_wait_summary.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+
+        wait_row = QHBoxLayout()
+        wait_row.setContentsMargins(0, 0, 0, 0)
+        wait_row.setSpacing(6)
+        wait_row.addWidget(self.shutdown_other_player_radio_wait)
+        wait_row.addWidget(self.shutdown_other_player_wait_btn)
+        wait_row.addWidget(self.shutdown_other_player_wait_summary, 1)
+        actions_layout.addLayout(wait_row)
 
         # 마을 귀환 액션 (미구현)
         self.shutdown_other_player_radio_town = QRadioButton()
         self.shutdown_other_player_action_group.addButton(self.shutdown_other_player_radio_town, 2)
-        actions_layout.addWidget(self.shutdown_other_player_radio_town, 2, 0)
 
         self.shutdown_other_player_town_btn = QPushButton("마을 귀환 (미구현)")
-        actions_layout.addWidget(self.shutdown_other_player_town_btn, 2, 1)
-
         self.shutdown_other_player_town_summary = QLabel("준비 중")
-        actions_layout.addWidget(self.shutdown_other_player_town_summary, 2, 2)
+        self.shutdown_other_player_town_summary.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+
+        town_row = QHBoxLayout()
+        town_row.setContentsMargins(0, 0, 0, 0)
+        town_row.setSpacing(6)
+        town_row.addWidget(self.shutdown_other_player_radio_town)
+        town_row.addWidget(self.shutdown_other_player_town_btn)
+        town_row.addWidget(self.shutdown_other_player_town_summary, 1)
+        actions_layout.addLayout(town_row)
 
         other_layout.addLayout(actions_layout)
         other_group.setLayout(other_layout)
