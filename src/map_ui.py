@@ -6615,10 +6615,41 @@ class MapTab(QWidget):
                     self._abort_alignment_and_recalculate()
                 elif time.time() - self.verify_alignment_start_time > 0.3:
                     if abs(final_player_pos.x() - self.alignment_target_x) <= 1.0:
-                        # 최종 성공
-                        self.update_general_log("정렬 확인 완료. 위 방향으로 오르기를 시도합니다.", "green")
-                        self.navigation_action = 'prepare_to_climb_upward'
+                        # 정렬 성공: 사다리 기준 좌/우에 따라 전용 매크로 실행
+                        command = "사다리타기_정렬(우)" if final_player_pos.x() < self.alignment_target_x else "사다리타기_정렬(좌)"
+                        self.update_general_log("정렬 확인 완료. 사다리 붙기 동작을 실행합니다.", "green")
+
                         self._clear_alignment_state()
+
+                        now_time = time.time()
+
+                        self.last_command_sent_time = now_time
+                        self.last_movement_command = command
+                        self._record_command_context(command, player_pos=final_player_pos)
+
+                        emit_success = True
+                        if self.debug_auto_control_checkbox.isChecked():
+                            print(f"[자동 제어 테스트] {command}")
+                        elif self.auto_control_checkbox.isChecked():
+                            emit_success = self._emit_control_command(command, None)
+
+                        if emit_success:
+                            self.navigation_action = 'climb_in_progress'
+                            self.navigation_state_locked = True
+                            self.lock_timeout_start = now_time
+                            self._climb_last_near_ladder_time = now_time
+                            self.last_printed_action = 'climb_in_progress'
+                            self.last_printed_direction = None
+                        else:
+                            self.update_general_log("사다리 붙기 명령 전송에 실패했습니다. 경로를 재계산합니다.", "orange")
+                            self.navigation_action = 'move_to_target'
+                            self.navigation_state_locked = False
+                            self.current_segment_path = []
+                            self.expected_terrain_group = None
+                            self.last_path_recalculation_time = now_time
+                            self.last_movement_command = None
+                            self.last_command_sent_time = 0.0
+                            self.last_command_context = None
                     else:
                         # 확인 실패, 다시 정렬 상태로 복귀
                         self.update_general_log("위치 이탈 감지. 다시 정렬합니다.", "orange")
@@ -7015,7 +7046,7 @@ class MapTab(QWidget):
                 self.guidance_text = "착지 지점 없음"
                 self.intermediate_target_pos = None
         # <<< 핵심 수정 1 >>> prepare_to_climb 상태를 위한 분기 추가
-        elif self.navigation_action in ['prepare_to_climb', 'align_for_climb', 'verify_alignment', 'prepare_to_climb_upward']:
+        elif self.navigation_action in ['prepare_to_climb', 'align_for_climb', 'verify_alignment']:
             # 사다리 관련 상태에서는 항상 다음 목표(사다리 출구)를 안내
             if self.current_segment_path and self.current_segment_index + 1 < len(self.current_segment_path):
                 target_node_key = self.current_segment_path[self.current_segment_index + 1]
@@ -7107,7 +7138,6 @@ class MapTab(QWidget):
             action_text_map = {
                 'move_to_target': "다음 목표로 이동",
                 'prepare_to_climb': "점프+방향키로 오르세요",
-                'prepare_to_climb_upward': "사다리타기(상) 실행",
                 'prepare_to_jump': "점프하세요",
             }
             nav_action_text = action_text_map.get(self.navigation_action, '대기 중')
@@ -7184,18 +7214,8 @@ class MapTab(QWidget):
                     is_on_ground = self._get_contact_terrain(final_player_pos) is not None
                     needs_safe_move = (self.guidance_text == "안전 지점으로 이동")
                     
-                    # --- [신규] '정렬' 및 '위로 오르기' 명령 전송 로직 ---
-                    if current_action_key == 'prepare_to_climb_upward' and action_changed:
-                        command_to_send = "사다리타기(상)"
-
-                        self.navigation_action = 'climb_in_progress'
-                        self.navigation_state_locked = True
-                        self.lock_timeout_start = time.time()
-                        self._climb_last_near_ladder_time = time.time()
-                        if self.debug_basic_pathfinding_checkbox and self.debug_basic_pathfinding_checkbox.isChecked():
-                            print("[INFO] 'prepare_to_climb_upward' -> 'climb_in_progress' 상태 즉시 전환")
-
-                    elif current_action_key == 'align_for_climb' and is_on_ground:
+                    # --- [신규] '정렬' 명령 전송 로직 ---
+                    if current_action_key == 'align_for_climb' and is_on_ground:
                         # '툭 치기' 명령은 0.5초에 한 번씩만 보내도록 제한 (연타 방지)
                         if time.time() - self.last_align_command_time > 0.5:
                             command_to_send = "정렬(우)" if current_direction == "→" else "정렬(좌)"
