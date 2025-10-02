@@ -8778,9 +8778,23 @@ class MapTab(QWidget):
                                 cx = _clamp(player_x, s_start, s_end)
                                 cx = _clamp(cx, dep_min_x, dep_max_x)
                                 candidates.append(cx)
-
+                            
                             if candidates:
-                                best_x = min(candidates, key=lambda cx: abs(player_x - cx))
+                                # [개선] djump 목표 방향성을 반영한 안전지점 선택 (move_to_target 단계)
+                                goal_x = None
+                                try:
+                                    xr = current_node.get('x_range') if isinstance(current_node, dict) else None
+                                    if isinstance(xr, (list, tuple)) and len(xr) == 2:
+                                        def _clamp(v, lo, hi):
+                                            return lo if v < lo else (hi if v > hi else v)
+                                        goal_x = _clamp(player_x, float(xr[0]), float(xr[1]))
+                                except Exception:
+                                    goal_x = None
+
+                                if goal_x is None:
+                                    best_x = min(candidates, key=lambda cx: abs(player_x - cx))
+                                else:
+                                    best_x = min(candidates, key=lambda cx: (abs(cx - goal_x), abs(cx - player_x)))
                                 line_y = dep_points[0][1]
                                 for i in range(len(dep_points) - 1):
                                     a, b = dep_points[i], dep_points[i + 1]
@@ -9076,7 +9090,25 @@ class MapTab(QWidget):
                                     candidates.append(cx)
 
                                 if candidates:
-                                    best_x = min(candidates, key=lambda cx: abs(player_x - cx))
+                                    # [개선] djump 목표(x_range) 방향성을 반영해 안전지점 선택
+                                    goal_x = None
+                                    try:
+                                        action_node_key = self.current_segment_path[self.current_segment_index]
+                                        action_node = self.nav_nodes.get(action_node_key, {})
+                                        if action_node.get('type') == 'djump_area':
+                                            xr = action_node.get('x_range')
+                                            if isinstance(xr, (list, tuple)) and len(xr) == 2:
+                                                def _clamp(v, lo, hi):
+                                                    return lo if v < lo else (hi if v > hi else v)
+                                                goal_x = _clamp(player_x, float(xr[0]), float(xr[1]))
+                                    except Exception:
+                                        goal_x = None
+
+                                    if goal_x is None:
+                                        best_x = min(candidates, key=lambda cx: abs(player_x - cx))
+                                    else:
+                                        # 1순위: 목표와의 거리 최소화, 2순위: 플레이어와의 이동 거리
+                                        best_x = min(candidates, key=lambda cx: (abs(cx - goal_x), abs(cx - player_x)))
                                     # 출발 지형선에서 best_x에 해당하는 Y를 보간해 지면 위로 스냅
                                     line_y = departure_line['points'][0][1]
                                     pts = departure_line['points']
