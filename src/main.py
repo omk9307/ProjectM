@@ -454,14 +454,14 @@ class MainWindow(QMainWindow):
         hunt_tab = self.loaded_tabs.get('사냥')
         if hasattr(hunt_tab, 'force_stop_detection'):
             try:
-                stopped_any = hunt_tab.force_stop_detection() or stopped_any
+                stopped_any = hunt_tab.force_stop_detection(reason='esc_shortcut') or stopped_any
             except Exception as exc:
                 print(f"경고: 사냥 탭 강제 중단 중 오류: {exc}")
 
         map_tab = self.loaded_tabs.get('맵')
         if hasattr(map_tab, 'force_stop_detection'):
             try:
-                stopped_any = map_tab.force_stop_detection() or stopped_any
+                stopped_any = map_tab.force_stop_detection(reason='esc_shortcut') or stopped_any
             except Exception as exc:
                 print(f"경고: 맵 탭 강제 중단 중 오류: {exc}")
 

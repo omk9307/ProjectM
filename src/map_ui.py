@@ -520,6 +520,9 @@ class MapTab(QWidget):
             self._status_saved_command: Optional[tuple[str, object]] = None
             self._last_regular_command: Optional[tuple[str, object]] = None
             self._status_data_manager = None
+            self._forced_detection_stop_reason: Optional[str] = None
+            self._suppress_hunt_sync_once = False
+            self._suppress_hunt_sync_reason: Optional[str] = None
 
             self.latest_perf_stats: dict[str, object] = {}
             self._latest_thread_perf: dict[str, object] = {}
@@ -1661,6 +1664,15 @@ class MapTab(QWidget):
             return
         if not self.map_link_enabled:
             return
+        if self._suppress_hunt_sync_once:
+            if self._suppress_hunt_sync_reason:
+                self.update_general_log(
+                    f"[대기 모드] 사냥 탭 동기화({self._suppress_hunt_sync_reason})로 인한 탐지 중단을 건너뜁니다.",
+                    "gray",
+                )
+            self._suppress_hunt_sync_once = False
+            self._suppress_hunt_sync_reason = None
+            return
         if getattr(self, '_syncing_with_hunt', False):
             return
         try:
@@ -1678,9 +1690,14 @@ class MapTab(QWidget):
             elif not running and map_running:
                 if hasattr(self.detect_anchor_btn, 'setChecked'):
                     self.detect_anchor_btn.setChecked(False)
+                self.set_detection_stop_reason('hunt_link_sync')
                 self.toggle_anchor_detection(False)
         finally:
             self._syncing_with_hunt = False
+
+    def suppress_hunt_sync_once(self, reason: str = '') -> None:
+        self._suppress_hunt_sync_once = True
+        self._suppress_hunt_sync_reason = reason or None
 
     def _create_empty_route_slots(self):
         return {slot: {"enabled": False, "waypoints": []} for slot in ROUTE_SLOT_IDS}
@@ -2282,6 +2299,7 @@ class MapTab(QWidget):
         
         #  프로필 변경 시 모든 런타임/탐지 관련 상태 변수 완벽 초기화
         if self.detection_thread and self.detection_thread.isRunning():
+            self.set_detection_stop_reason('profile_switch')
             self.toggle_anchor_detection(False) # 탐지 중이었다면 정지
             self.detect_anchor_btn.setChecked(False)
 
@@ -4259,10 +4277,13 @@ class MapTab(QWidget):
 
         return roi_rects
 
-    def force_stop_detection(self) -> bool:
+    def force_stop_detection(self, reason: str = 'force_stop') -> bool:
         stopped = False
         if not hasattr(self, 'detect_anchor_btn'):
             return False
+
+        if reason:
+            self.set_detection_stop_reason(reason)
 
         try:
             is_checked = bool(self.detect_anchor_btn.isChecked())
@@ -4279,10 +4300,17 @@ class MapTab(QWidget):
             stopped = True
 
         if stopped:
-            self.update_general_log("ESC 단축키로 탐지를 강제 중단했습니다.", "orange")
+            if reason == 'esc_shortcut':
+                self.update_general_log("ESC 단축키로 탐지를 강제 중단했습니다.", "orange")
             self._clear_authority_resume_state()
             self._suppress_authority_resume = True
+        else:
+            if self._forced_detection_stop_reason == reason:
+                self._forced_detection_stop_reason = None
         return stopped
+
+    def set_detection_stop_reason(self, reason: str) -> None:
+        self._forced_detection_stop_reason = reason or 'manual'
 
     def toggle_anchor_detection(self, checked):
             #  외부 호출(sender() is None) 또는 버튼 직접 클릭 시 상태를 동기화
@@ -4454,7 +4482,12 @@ class MapTab(QWidget):
                 elif self.auto_control_checkbox.isChecked():
                     self._emit_control_command("모든 키 떼기", None)
 
-                self.update_general_log("탐지를 중단합니다.", "black")
+                stop_reason = self._forced_detection_stop_reason or 'manual'
+                self._forced_detection_stop_reason = None
+                self.update_general_log(
+                    f"탐지를 중단합니다. (사유: {stop_reason})",
+                    "black",
+                )
                 self.detect_anchor_btn.setText("탐지 시작")
                 self.update_detection_log_message("탐지 중단됨", "black")
                 self.minimap_view_label.setText("탐지 중단됨")

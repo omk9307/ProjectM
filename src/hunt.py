@@ -941,7 +941,7 @@ class HuntTab(QWidget):
         except Exception:
             pass
 
-    def force_stop_detection(self) -> bool:
+    def force_stop_detection(self, reason: str = 'force_stop') -> bool:
         stopped = False
         if not hasattr(self, 'detect_btn'):
             return False
@@ -962,7 +962,10 @@ class HuntTab(QWidget):
             stopped = True
 
         if stopped:
-            self.append_log("ESC 단축키로 탐지를 강제 중단했습니다.", "warn")
+            if reason == 'esc_shortcut':
+                self.append_log("ESC 단축키로 탐지를 강제 중단했습니다.", "warn")
+            else:
+                self.append_log(f"탐지를 중단합니다. (사유: {reason})", "warn")
         return stopped
 
     def _schedule_facing_reset(self) -> None:
@@ -2343,10 +2346,10 @@ class HuntTab(QWidget):
             if hasattr(self, 'shutdown_pid_input'):
                 self.shutdown_pid_input.setText('')
             self._issue_all_keys_release('shutdown')
-            self.force_stop_detection()
+            self.force_stop_detection(reason='auto_shutdown')
             if getattr(self, 'map_tab', None) and hasattr(self.map_tab, 'force_stop_detection'):
                 try:
-                    self.map_tab.force_stop_detection()
+                    self.map_tab.force_stop_detection(reason='auto_shutdown')
                 except Exception:
                     pass
             if self.shutdown_sleep_enabled:
@@ -2540,10 +2543,15 @@ class HuntTab(QWidget):
             return False
 
         self.shutdown_other_player_wait_restart_required = self._is_detection_active()
+        if map_tab and hasattr(map_tab, 'suppress_hunt_sync_once'):
+            try:
+                map_tab.suppress_hunt_sync_once('other_player_wait_start')
+            except Exception:
+                pass
         previous_sync = bool(getattr(self, '_syncing_with_map', False))
         self._syncing_with_map = True
         try:
-            self.force_stop_detection()
+            self.force_stop_detection(reason='other_player_wait_start')
         finally:
             self._syncing_with_map = previous_sync
         self.shutdown_other_player_wait_active = True
@@ -3473,6 +3481,8 @@ class HuntTab(QWidget):
                 try:
                     if hasattr(self.map_tab, 'detect_anchor_btn') and self.map_tab.detect_anchor_btn.isChecked():
                         self.map_tab.detect_anchor_btn.setChecked(False)
+                        if hasattr(self.map_tab, 'set_detection_stop_reason'):
+                            self.map_tab.set_detection_stop_reason('hunt_link_sync')
                         self.map_tab.toggle_anchor_detection(False)
                 finally:
                     self._syncing_with_map = False
