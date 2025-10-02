@@ -1282,6 +1282,7 @@ class PolygonAnnotationEditor(QDialog):
     """수동 다각형 편집기 메인 창."""
     # v1.3: 방해 요소 저장을 위한 커스텀 결과 코드 정의
     DistractorSaved = 100
+    SwitchToAI = 101
 
     def __init__(self, pixmap, initial_polygons=None, parent=None, initial_class_name=None):
         super().__init__(parent)
@@ -1310,6 +1311,18 @@ class PolygonAnnotationEditor(QDialog):
         self.change_class_btn.setCheckable(True)
         self.change_class_btn.toggled.connect(self.toggle_change_mode)
         left_controls_layout.addWidget(self.change_class_btn)
+
+        self.switch_to_manual_btn = QPushButton("수동 편집으로 전환")
+        self.switch_to_manual_btn.clicked.connect(self.on_switch_to_manual)
+        left_controls_layout.addWidget(self.switch_to_manual_btn)
+
+        self.switch_to_ai_btn = QPushButton("AI 편집으로 전환")
+        sam_ready = getattr(self.learning_tab, "sam_predictor", None) is not None
+        self.switch_to_ai_btn.setEnabled(sam_ready)
+        if not sam_ready:
+            self.switch_to_ai_btn.setToolTip("SAM 모델이 준비되지 않아 전환할 수 없습니다.")
+        self.switch_to_ai_btn.clicked.connect(self.on_switch_to_ai)
+        left_controls_layout.addWidget(self.switch_to_ai_btn)
 
         # 클래스 선택 UI
         class_selection_layout = QHBoxLayout()
@@ -1464,11 +1477,7 @@ class PolygonAnnotationEditor(QDialog):
 
     def keyPressEvent(self, event):
         if event.key() in [Qt.Key.Key_Return, Qt.Key.Key_Enter]:
-            if len(self.canvas.current_points) >= 3:
-                class_id = self.get_current_class_id()
-                if class_id is not None:
-                    self.canvas.polygons.append({'class_id': class_id, 'points': list(self.canvas.current_points)})
-                    self.canvas.current_points.clear(); self.canvas.update()
+            self.commit_current_polygon()
         elif event.key() == Qt.Key.Key_Backspace:
             if self.canvas.current_points: self.canvas.current_points.pop(); self.canvas.update()
         elif event.key() == Qt.Key.Key_R:
@@ -1483,14 +1492,35 @@ class PolygonAnnotationEditor(QDialog):
         else: super().keyPressEvent(event)
 
     def on_save(self):
-        if len(self.canvas.current_points) >= 3:
-            class_id = self.get_current_class_id()
-            if class_id is not None:
-                self.canvas.polygons.append({'class_id': class_id, 'points': list(self.canvas.current_points)})
-                self.canvas.current_points.clear()
+        self.commit_current_polygon()
         self.accept()
 
     def get_all_polygons(self): return self.canvas.polygons
+
+    def commit_current_polygon(self):
+        """현재 그리고 있는 다각형을 확정합니다."""
+        if len(self.canvas.current_points) < 3:
+            return False
+
+        class_id = self.get_current_class_id()
+        if class_id is None:
+            return False
+
+        self.canvas.polygons.append({'class_id': class_id, 'points': list(self.canvas.current_points)})
+        self.canvas.current_points.clear()
+        self.canvas.update()
+        return True
+
+    def on_switch_to_ai(self):
+        """AI 편집기로 전환합니다."""
+        self.commit_current_polygon()
+        self.done(self.SwitchToAI)
+
+    def get_current_class_name(self):
+        class_name = self.class_selector.currentText()
+        if class_name and class_name != "[새 클래스 추가...]":
+            return class_name
+        return None
 
 # --- 3.5. 위젯: SAM(AI) 편집기 ---
 class SAMCanvasLabel(BaseCanvasLabel):
@@ -1542,6 +1572,7 @@ class SAMAnnotationEditor(QDialog):
     """AI 어시스트 편집기 메인 창."""
     # v1.3: 방해 요소 저장을 위한 커스텀 결과 코드 정의
     DistractorSaved = 100
+    SwitchToManual = 102
     
     def __init__(self, pixmap, predictor, initial_polygons=None, parent=None, initial_class_name=None):
         super().__init__(parent)
@@ -1745,16 +1776,7 @@ class SAMAnnotationEditor(QDialog):
 
     def keyPressEvent(self, event):
         if event.key() in [Qt.Key.Key_Return, Qt.Key.Key_Enter]:
-            if self.canvas.current_mask is not None:
-                class_id = self.get_current_class_id()
-                if class_id is not None:
-                    contours, _ = cv2.findContours(self.canvas.current_mask.astype(np.uint8), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-                    if contours:
-                        largest_contour = max(contours, key=cv2.contourArea)
-                        if cv2.contourArea(largest_contour) > 10:
-                            poly_points = [QPoint(p[0][0], p[0][1]) for p in largest_contour]
-                            self.canvas.polygons.append({'class_id': class_id, 'points': poly_points})
-                            self.reset_current_mask()
+            self.commit_current_mask()
         elif event.key() == Qt.Key.Key_R: self.reset_current_mask()
         elif event.key() == Qt.Key.Key_Z:
             if self.canvas.polygons: self.canvas.polygons.pop(); self.canvas.update()
@@ -1767,6 +1789,39 @@ class SAMAnnotationEditor(QDialog):
         self.canvas.current_mask = None; self.canvas.input_points.clear(); self.canvas.input_labels.clear(); self.canvas.update()
 
     def get_all_polygons(self): return self.canvas.polygons
+
+    def commit_current_mask(self):
+        """현재 마스크를 다각형으로 변환해 저장합니다."""
+        if self.canvas.current_mask is None:
+            return False
+
+        class_id = self.get_current_class_id()
+        if class_id is None:
+            return False
+
+        contours, _ = cv2.findContours(self.canvas.current_mask.astype(np.uint8), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        if not contours:
+            return False
+
+        largest_contour = max(contours, key=cv2.contourArea)
+        if cv2.contourArea(largest_contour) <= 10:
+            return False
+
+        poly_points = [QPoint(p[0][0], p[0][1]) for p in largest_contour]
+        self.canvas.polygons.append({'class_id': class_id, 'points': poly_points})
+        self.reset_current_mask()
+        return True
+
+    def on_switch_to_manual(self):
+        """수동 편집기로 전환합니다."""
+        self.commit_current_mask()
+        self.done(self.SwitchToManual)
+
+    def get_current_class_name(self):
+        class_name = self.class_selector.currentText()
+        if class_name and class_name != "[새 클래스 추가...]":
+            return class_name
+        return None
 
 # --- 4. 위젯: 편집 모드 및 다중 캡처 선택 ---
 class EditModeDialog(QDialog):
@@ -5948,15 +6003,45 @@ class LearningTab(QWidget):
     def open_editor_mode_dialog(self, pixmap, image_path=None, initial_polygons=None, initial_class_name=None):
         dialog = EditModeDialog(pixmap, self.sam_predictor is not None, self)
         mode_result = dialog.exec()
-        editor = None
-        if mode_result == EditModeDialog.AI_ASSIST:
-            editor = SAMAnnotationEditor(pixmap, self.sam_predictor, initial_polygons, self, initial_class_name)
-        elif mode_result == EditModeDialog.MANUAL:
-            editor = PolygonAnnotationEditor(pixmap, initial_polygons, self, initial_class_name)
-        else:
+        if mode_result == EditModeDialog.CANCEL:
             return
 
-        editor_result = editor.exec()
+        current_mode = mode_result
+        current_polygons = initial_polygons
+        current_class_name = initial_class_name
+
+        def clone_polygons(polygons):
+            if not polygons:
+                return []
+            return copy.deepcopy(polygons)
+
+        while True:
+            if current_mode == EditModeDialog.AI_ASSIST:
+                if self.sam_predictor is None:
+                    QMessageBox.warning(self, "오류", "SAM 모델이 준비되지 않아 AI 편집기로 전환할 수 없습니다.")
+                    current_mode = EditModeDialog.MANUAL
+                    continue
+                editor = SAMAnnotationEditor(pixmap, self.sam_predictor, current_polygons, self, current_class_name)
+            else:
+                editor = PolygonAnnotationEditor(pixmap, current_polygons, self, current_class_name)
+
+            editor_result = editor.exec()
+
+            if editor_result == PolygonAnnotationEditor.SwitchToAI:
+                current_polygons = clone_polygons(editor.get_all_polygons())
+                current_class_name = editor.get_current_class_name() or current_class_name
+                current_mode = EditModeDialog.AI_ASSIST
+                continue
+            if editor_result == SAMAnnotationEditor.SwitchToManual:
+                current_polygons = clone_polygons(editor.get_all_polygons())
+                current_class_name = editor.get_current_class_name() or current_class_name
+                current_mode = EditModeDialog.MANUAL
+                continue
+
+            break
+
+        if editor_result == QDialog.DialogCode.Rejected:
+            return
 
         # v1.3: 편집기에서 반환된 결과에 따라 분기 처리
         # 시나리오 1: 일반 저장
@@ -6041,7 +6126,7 @@ class LearningTab(QWidget):
                 self.log_viewer.append(f"라벨 없는 전체 이미지를 방해 요소 '{filename}'(으)로 추가했습니다.")
 
         # 시나리오 2: 방해 요소로 저장
-        elif editor_result == PolygonAnnotationEditor.DistractorSaved:
+        elif editor_result in {PolygonAnnotationEditor.DistractorSaved, SAMAnnotationEditor.DistractorSaved}:
             polygons_data = editor.get_all_polygons()
             if not polygons_data: return
 
