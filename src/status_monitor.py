@@ -4,13 +4,16 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass, field
-from typing import Dict, Optional, Tuple
+from typing import Callable, Dict, Optional, Tuple
+
+import copy
 
 import cv2
 import numpy as np
 from PyQt6.QtCore import QMutex, QMutexLocker, QObject, QThread, pyqtSignal
 
 from capture_manager import get_capture_manager
+from window_anchors import get_maple_window_geometry, resolve_roi_to_absolute
 
 try:
     import pytesseract  # type: ignore
@@ -192,9 +195,17 @@ class StatusMonitorThread(QThread):
     ocr_unavailable = pyqtSignal()
     exp_status_logged = pyqtSignal(str, str)
 
-    def __init__(self, config: StatusMonitorConfig):
+    def __init__(
+        self,
+        config: StatusMonitorConfig,
+        *,
+        roi_payloads: Optional[Dict[str, dict]] = None,
+        roi_provider: Optional[Callable[[], Dict[str, dict]]] = None,
+    ):
         super().__init__()
         self._config = config
+        self._roi_payloads: Dict[str, dict] = copy.deepcopy(roi_payloads) if roi_payloads else {}
+        self._roi_provider = roi_provider
         self._active_hunt = False
         self._active_map = False
         self._running = True
@@ -217,6 +228,13 @@ class StatusMonitorThread(QThread):
     def update_config(self, config: StatusMonitorConfig) -> None:
         with QMutexLocker(self._lock):
             self._config = config
+            if self._roi_provider:
+                try:
+                    payloads = self._roi_provider()
+                except Exception:
+                    payloads = None
+                if isinstance(payloads, dict):
+                    self._roi_payloads = copy.deepcopy(payloads)
             self._last_exp_log_text = ""
             self._last_capture["exp"] = 0.0
             self._last_exp_snapshot = None
@@ -224,6 +242,10 @@ class StatusMonitorThread(QThread):
             self._exp_capture_warned = False
             self._exp_failure_cache = None
             self._exp_last_log_signature = None
+
+    def set_roi_payloads(self, payloads: Dict[str, dict]) -> None:
+        with QMutexLocker(self._lock):
+            self._roi_payloads = copy.deepcopy(payloads)
 
     def set_tab_active(self, *, hunt: Optional[bool] = None, map_tab: Optional[bool] = None) -> None:
         with QMutexLocker(self._lock):
@@ -274,6 +296,9 @@ class StatusMonitorThread(QThread):
             config = self._config
             active_hunt = self._active_hunt
             active_map = self._active_map
+            roi_payloads = copy.deepcopy(self._roi_payloads)
+
+        window_geometry = get_maple_window_geometry()
 
         for resource in tasks:
             cfg = getattr(config, resource)
@@ -296,6 +321,13 @@ class StatusMonitorThread(QThread):
                 continue
 
             roi = getattr(config, resource).roi
+            payload = roi_payloads.get(resource) if isinstance(roi_payloads, dict) else None
+            if isinstance(payload, dict):
+                absolute_roi = resolve_roi_to_absolute(payload, window=window_geometry)
+                if absolute_roi is None:
+                    absolute_roi = resolve_roi_to_absolute(payload)
+                if absolute_roi:
+                    roi = Roi.from_dict(absolute_roi)
             if not roi.is_valid():
                 if resource == "exp" and not self._exp_roi_warned:
                     self._emit_exp_log("warn", "[EXP] ROI가 설정되지 않아 감지를 건너뜁니다.")

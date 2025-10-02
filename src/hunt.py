@@ -9,6 +9,7 @@ import math
 import ctypes
 import signal
 import html
+import copy
 from ctypes import wintypes
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, Iterable, List, Optional, TextIO
@@ -56,6 +57,14 @@ from control_authority_manager import (
     DEFAULT_MAX_FLOOR_HOLD_SEC,
     DEFAULT_MAX_TOTAL_HOLD_SEC,
     DEFAULT_HUNT_PROTECT_SEC,
+)
+
+from window_anchors import (
+    ensure_relative_roi,
+    get_maple_window_geometry,
+    last_used_anchor_name,
+    make_relative_roi,
+    resolve_roi_to_absolute,
 )
 
 if os.name == 'nt':
@@ -2399,11 +2408,19 @@ class HuntTab(QWidget):
             if new_region['width'] <= 0 or new_region['height'] <= 0:
                 self.append_log('지정한 영역의 크기가 유효하지 않아 무시합니다.', 'warn')
                 return
-            self.manual_capture_region = dict(new_region)
-            self.manual_capture_regions = [dict(new_region)]
+            window_geometry = get_maple_window_geometry()
+            if window_geometry:
+                relative_region = make_relative_roi(new_region, window_geometry, anchor_name=last_used_anchor_name())
+            else:
+                relative_region = dict(new_region)
+                self.append_log('경고: Mapleland 창 좌표를 찾지 못해 절대 좌표로 저장했습니다. 창 좌표를 먼저 저장하면 이동해도 안전합니다.', 'warn')
+
+            self.manual_capture_region = copy.deepcopy(relative_region)
+            self.manual_capture_regions = [copy.deepcopy(relative_region)]
             if hasattr(self, 'add_area_btn'):
                 self.add_area_btn.setEnabled(True)
-            self.append_log(f"수동 탐지 영역 초기화: {self.manual_capture_region}")
+            display_region = resolve_roi_to_absolute(relative_region, window=window_geometry) or new_region
+            self.append_log(f"수동 탐지 영역 초기화: {display_region}")
             self._update_manual_area_summary()
             self._save_settings()
         else:
@@ -2426,11 +2443,19 @@ class HuntTab(QWidget):
             if new_region['width'] <= 0 or new_region['height'] <= 0:
                 self.append_log('추가한 영역의 크기가 유효하지 않아 무시합니다.', 'warn')
                 return
-            self.manual_capture_regions.append(dict(new_region))
+            window_geometry = get_maple_window_geometry()
+            if window_geometry:
+                relative_region = make_relative_roi(new_region, window_geometry, anchor_name=last_used_anchor_name())
+            else:
+                relative_region = dict(new_region)
+                self.append_log('경고: Mapleland 창 좌표를 찾지 못해 새 영역을 절대 좌표로 저장했습니다.', 'warn')
+
+            self.manual_capture_regions.append(copy.deepcopy(relative_region))
             self.manual_capture_region = self._merge_manual_capture_regions()
             if hasattr(self, 'add_area_btn') and not self.add_area_btn.isEnabled():
                 self.add_area_btn.setEnabled(True)
-            self.append_log(f"영역 추가 완료. 합성 영역: {self.manual_capture_region}")
+            display_region = resolve_roi_to_absolute(self.manual_capture_region, window=window_geometry) or new_region
+            self.append_log(f"영역 추가 완료. 합성 영역: {display_region}")
             self._update_manual_area_summary()
             self._save_settings()
         else:
@@ -2439,39 +2464,84 @@ class HuntTab(QWidget):
     def _merge_manual_capture_regions(self) -> Optional[dict]:
         if not self.manual_capture_regions:
             return self.manual_capture_region
-        top_values = [region['top'] for region in self.manual_capture_regions]
-        left_values = [region['left'] for region in self.manual_capture_regions]
-        bottoms = [region['top'] + region['height'] for region in self.manual_capture_regions]
-        rights = [region['left'] + region['width'] for region in self.manual_capture_regions]
-        merged = {
+        window_geometry = get_maple_window_geometry()
+        resolved_regions: list[dict] = []
+        for payload in self.manual_capture_regions:
+            absolute = resolve_roi_to_absolute(payload, window=window_geometry)
+            if absolute is None:
+                absolute = resolve_roi_to_absolute(payload)
+            if not absolute:
+                continue
+            resolved_regions.append(absolute)
+
+        if not resolved_regions:
+            return self.manual_capture_region
+
+        top_values = [region['top'] for region in resolved_regions]
+        left_values = [region['left'] for region in resolved_regions]
+        bottoms = [region['top'] + region['height'] for region in resolved_regions]
+        rights = [region['left'] + region['width'] for region in resolved_regions]
+        merged_absolute = {
             'top': min(top_values),
             'left': min(left_values),
             'width': max(rights) - min(left_values),
             'height': max(bottoms) - min(top_values),
         }
-        return merged
+
+        return ensure_relative_roi(
+            merged_absolute,
+            window_geometry,
+            anchor_name=last_used_anchor_name(),
+        ) or merged_absolute
+
+    def _resolve_manual_capture_region(self, *, require_window: bool = False) -> Optional[dict]:
+        if not self.manual_capture_region:
+            return None
+        window_geometry = get_maple_window_geometry()
+        resolved = resolve_roi_to_absolute(self.manual_capture_region, window=window_geometry)
+        if resolved is None and require_window:
+            if window_geometry is None:
+                self.append_log("Mapleland 창을 찾을 수 없어 수동 탐지 영역을 복원하지 못했습니다.", "warn")
+            else:
+                self.append_log("수동 탐지 영역을 복원할 수 없습니다. 영역을 다시 지정해주세요.", "warn")
+        return resolved
 
     def _resolve_manual_subregions(self, capture_region: dict) -> Optional[list[dict]]:
         if not isinstance(capture_region, dict):
             return None
         if not self.manual_capture_regions or len(self.manual_capture_regions) <= 1:
             return None
+
+        window_geometry = get_maple_window_geometry()
+
+        base_absolute = resolve_roi_to_absolute(capture_region, window=window_geometry)
+        if base_absolute is None:
+            base_absolute = resolve_roi_to_absolute(capture_region)
+        if base_absolute is None:
+            return None
+
         try:
-            base_top = int(capture_region['top'])
-            base_left = int(capture_region['left'])
-            base_width = int(capture_region['width'])
-            base_height = int(capture_region['height'])
+            base_top = int(base_absolute['top'])
+            base_left = int(base_absolute['left'])
+            base_width = int(base_absolute['width'])
+            base_height = int(base_absolute['height'])
         except (KeyError, TypeError, ValueError):
             return None
         if base_width <= 0 or base_height <= 0:
             return None
+
         subregions: list[dict] = []
-        for region in self.manual_capture_regions:
+        for payload in self.manual_capture_regions:
+            absolute = resolve_roi_to_absolute(payload, window=window_geometry)
+            if absolute is None:
+                absolute = resolve_roi_to_absolute(payload)
+            if absolute is None:
+                continue
             try:
-                top = int(region['top']) - base_top
-                left = int(region['left']) - base_left
-                width = int(region['width'])
-                height = int(region['height'])
+                top = int(absolute['top']) - base_top
+                left = int(absolute['left']) - base_left
+                width = int(absolute['width'])
+                height = int(absolute['height'])
             except (KeyError, TypeError, ValueError):
                 continue
             if width <= 0 or height <= 0:
@@ -2496,8 +2566,9 @@ class HuntTab(QWidget):
         count = len(self.manual_capture_regions)
         if count <= 1:
             return
+        display_region = self._resolve_manual_capture_region()
         self.append_log(
-            f"추가된 영역 수: {count}, 합성 캡처 범위: {self.manual_capture_region}."
+            f"추가된 영역 수: {count}, 합성 캡처 범위: {display_region or self.manual_capture_region}."
             " 합성 범위 내부에서도 지정된 영역만 탐지에 사용됩니다."
         )
 
@@ -2603,7 +2674,11 @@ class HuntTab(QWidget):
                 QMessageBox.warning(self, '오류', "'영역 지정'으로 탐지 영역을 설정해주세요.")
                 self.detect_btn.setChecked(False)
                 return
-            capture_region = dict(self.manual_capture_region)
+            capture_region = self._resolve_manual_capture_region(require_window=True)
+            if not capture_region:
+                QMessageBox.warning(self, '오류', '탐지 영역을 복원할 수 없습니다. 창 위치를 확인하고 다시 지정해주세요.')
+                self.detect_btn.setChecked(False)
+                return
 
             if capture_region['width'] <= 0 or capture_region['height'] <= 0:
                 QMessageBox.warning(self, '오류', '탐지 영역 크기가 유효하지 않습니다.')
@@ -6411,36 +6486,24 @@ class HuntTab(QWidget):
             self._stop_shutdown_timer_if_idle()
 
         regions_data = data.get('manual_capture_regions', [])
-        valid_regions: list[dict] = []
+        manual_regions: list[dict] = []
+        window_geometry = get_maple_window_geometry()
         if isinstance(regions_data, list):
-            for region in regions_data:
-                if not isinstance(region, dict):
+            for payload in regions_data:
+                if not isinstance(payload, dict):
                     continue
-                try:
-                    top = int(region['top'])
-                    left = int(region['left'])
-                    width = int(region['width'])
-                    height = int(region['height'])
-                except (KeyError, TypeError, ValueError):
+                converted = ensure_relative_roi(payload, window_geometry, anchor_name=last_used_anchor_name())
+                if converted is None:
                     continue
-                if width <= 0 or height <= 0:
-                    continue
-                valid_regions.append({'top': top, 'left': left, 'width': width, 'height': height})
+                manual_regions.append(copy.deepcopy(converted))
 
         legacy_region = data.get('manual_capture_region')
-        if not valid_regions and isinstance(legacy_region, dict):
-            try:
-                top = int(legacy_region['top'])
-                left = int(legacy_region['left'])
-                width = int(legacy_region['width'])
-                height = int(legacy_region['height'])
-            except (KeyError, TypeError, ValueError):
-                legacy_region = None
-            else:
-                if width > 0 and height > 0:
-                    valid_regions = [{'top': top, 'left': left, 'width': width, 'height': height}]
+        if not manual_regions and isinstance(legacy_region, dict):
+            converted_legacy = ensure_relative_roi(legacy_region, window_geometry, anchor_name=last_used_anchor_name())
+            if converted_legacy:
+                manual_regions = [copy.deepcopy(converted_legacy)]
 
-        self.manual_capture_regions = valid_regions
+        self.manual_capture_regions = manual_regions
         if self.manual_capture_regions:
             self.manual_capture_region = self._merge_manual_capture_regions()
         else:
@@ -6449,6 +6512,8 @@ class HuntTab(QWidget):
         self.set_area_btn.setEnabled(True)
         if hasattr(self, 'add_area_btn'):
             self.add_area_btn.setEnabled(bool(self.manual_capture_region))
+
+        self._update_manual_area_summary()
 
         self.overlay_preferences['hunt_area'] = self.show_hunt_area_checkbox.isChecked()
         self.overlay_preferences['primary_area'] = self.show_primary_skill_checkbox.isChecked()

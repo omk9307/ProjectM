@@ -41,10 +41,10 @@ except ImportError:  # pragma: no cover - 실행 환경에 따라 미설치일 �
 from PyQt6.QtWidgets import (
     QApplication, QWidget, QVBoxLayout, QHBoxLayout,
     QPushButton, QListWidget, QLabel, QDialog, QMessageBox, QFileDialog,
-    QListWidgetItem, QInputDialog, QTextEdit, QDialogButtonBox, QCheckBox,
+    QListWidgetItem, QTextEdit, QDialogButtonBox, QCheckBox,
     QComboBox, QDoubleSpinBox, QGroupBox, QScrollArea, QSpinBox,
     QProgressBar, QStatusBar, QAbstractItemView, QTreeWidget, QTreeWidgetItem,
-    QHeaderView, QLineEdit, QFormLayout, QGridLayout, QSizePolicy
+    QHeaderView, QLineEdit, QFormLayout, QGridLayout, QSizePolicy, QInputDialog
 )
 from PyQt6.QtGui import (
     QPixmap, QImage, QIcon, QPainter, QPen, QColor, QBrush, QCursor, QPolygon,
@@ -72,6 +72,18 @@ from status_monitor import (
     StatusConfigNotifier,
     StatusMonitorConfig,
     StatusMonitorThread,
+)
+
+from window_anchors import (
+    anchor_exists,
+    get_anchor,
+    get_maple_window_geometry,
+    last_used_anchor_name,
+    list_saved_anchors,
+    restore_maple_window,
+    save_window_anchor,
+    set_last_used_anchor,
+    WindowGeometry,
 )
 
 # --- 0. 전역 설정 (v1.3 방해 요소 이름 추가) ---
@@ -1813,6 +1825,114 @@ class MultiCaptureDialog(QDialog):
             selected_pixmaps.append(self.pixmaps[row])
         return selected_pixmaps
 
+
+class WindowAnchorSaveDialog(QDialog):
+    """Mapleland 창 좌표 저장 시 이름을 입력받는 다이얼로그."""
+
+    def __init__(self, geometry: WindowGeometry, suggested_name: str, parent: QWidget | None = None):
+        super().__init__(parent)
+        self.setWindowTitle("창 좌표 저장")
+        layout = QVBoxLayout(self)
+
+        info_lines = [
+            f"현재 창 위치: ({geometry.left}, {geometry.top})",
+            f"창 크기: {geometry.width} x {geometry.height}",
+        ]
+        if geometry.screen_device:
+            info_lines.append(f"모니터: {geometry.screen_device}")
+
+        info_label = QLabel("\n".join(info_lines))
+        info_label.setWordWrap(True)
+        layout.addWidget(info_label)
+
+        self.name_edit = QLineEdit(suggested_name)
+        self.name_edit.selectAll()
+        layout.addWidget(self.name_edit)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Save | QDialogButtonBox.StandardButton.Cancel)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+    def anchor_name(self) -> str:
+        return self.name_edit.text().strip()
+
+
+class WindowAnchorLoadDialog(QDialog):
+    """저장된 Mapleland 창 좌표 목록에서 선택하는 다이얼로그."""
+
+    def __init__(self, anchors: dict[str, dict], last_used: Optional[str], parent: QWidget | None = None):
+        super().__init__(parent)
+        self.setWindowTitle("창 좌표 불러오기")
+        self._anchors = anchors
+
+        layout = QVBoxLayout(self)
+        layout.addWidget(QLabel("불러올 창 좌표를 선택하세요."))
+
+        self.anchor_combo = QComboBox()
+        for name, payload in anchors.items():
+            left = int(payload.get("left", 0))
+            top = int(payload.get("top", 0))
+            width = int(payload.get("width", 0))
+            height = int(payload.get("height", 0))
+            display = f"{name} — ({left}, {top}) / {width}x{height}"
+            self.anchor_combo.addItem(display, userData=name)
+
+        if last_used:
+            idx = self.anchor_combo.findData(last_used)
+            if idx >= 0:
+                self.anchor_combo.setCurrentIndex(idx)
+
+        self.detail_label = QLabel()
+        self.detail_label.setWordWrap(True)
+        layout.addWidget(self.anchor_combo)
+        layout.addWidget(self.detail_label)
+
+        self.anchor_combo.currentIndexChanged.connect(self._update_details)
+        self._update_details(self.anchor_combo.currentIndex())
+
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+    def selected_anchor_name(self) -> Optional[str]:
+        return self.anchor_combo.currentData()
+
+    def _update_details(self, index: int) -> None:
+        if index < 0:
+            self.detail_label.setText("")
+            return
+        name = self.anchor_combo.itemData(index)
+        data = self._anchors.get(name, {})
+
+        lines: list[str] = []
+        device = data.get("screen_device")
+        if device:
+            lines.append(f"모니터: {device}")
+
+        screen_components = (
+            data.get("screen_left"),
+            data.get("screen_top"),
+            data.get("screen_width"),
+            data.get("screen_height"),
+        )
+        if all(component is not None for component in screen_components):
+            left, top, width, height = screen_components
+            lines.append(
+                f"모니터 위치: ({int(left)} , {int(top)}) / {int(width)}x{int(height)}"
+            )
+
+        timestamp = data.get("timestamp")
+        if timestamp:
+            try:
+                ts = float(timestamp)
+                lines.append(time.strftime("저장 시각: %Y-%m-%d %H:%M:%S", time.localtime(ts)))
+            except (TypeError, ValueError):
+                pass
+
+        self.detail_label.setText("\n".join(lines))
+
 # --- 5. 핵심 로직 클래스 (백엔드) ---
 class DataManager:
     def __init__(self, workspace_root):
@@ -1844,6 +1964,7 @@ class DataManager:
         self._last_used_model: Optional[str] = None
         self.status_config_notifier = StatusConfigNotifier()
         self.key_mappings_path = self._resolve_key_mappings_path()
+        self._status_roi_payloads: dict[str, dict] = {}
         self.ensure_dirs_and_files()
         self.migrate_manifest_if_needed()
         settings = self.load_settings()
@@ -2848,7 +2969,47 @@ class DataManager:
             config = StatusMonitorConfig.default()
             self._write_status_config(config)
             return config
-        return StatusMonitorConfig.from_dict(data)
+        if not isinstance(data, dict):
+            data = {}
+
+        window_geometry = get_maple_window_geometry()
+        self._status_roi_payloads = {}
+        dirty = False
+
+        for resource_key in ('hp', 'mp', 'exp'):
+            resource_data = data.get(resource_key)
+            if not isinstance(resource_data, dict):
+                resource_data = {}
+                data[resource_key] = resource_data
+
+            roi_payload = resource_data.get('roi_payload')
+            if not isinstance(roi_payload, dict):
+                roi_payload = resource_data.get('roi') if isinstance(resource_data.get('roi'), dict) else None
+
+            if isinstance(roi_payload, dict):
+                converted_payload = ensure_relative_roi(roi_payload, window_geometry, anchor_name=last_used_anchor_name())
+                if converted_payload is None:
+                    converted_payload = roi_payload
+                if converted_payload is not roi_payload:
+                    dirty = True
+                self._status_roi_payloads[resource_key] = copy.deepcopy(converted_payload)
+                absolute_roi = resolve_roi_to_absolute(converted_payload, window=window_geometry)
+                if absolute_roi is not None:
+                    resource_data['roi'] = absolute_roi
+                if resource_data.get('roi_payload') != converted_payload:
+                    resource_data['roi_payload'] = converted_payload
+                    dirty = True
+            else:
+                # ROI 정보가 전혀 없는 경우 안전한 기본값 유지
+                resource_data.setdefault('roi', {'left': 0, 'top': 0, 'width': 0, 'height': 0})
+
+        config = StatusMonitorConfig.from_dict(data)
+        if dirty:
+            self._write_status_config(config)
+        return config
+
+    def get_status_roi_payloads(self) -> dict[str, dict]:
+        return copy.deepcopy(self._status_roi_payloads)
 
     def update_status_monitor_config(self, updates: dict) -> StatusMonitorConfig:
         if not isinstance(updates, dict):
@@ -2856,13 +3017,27 @@ class DataManager:
 
         config = self.load_status_monitor_config()
 
-        def apply_resource(target: StatusResourceConfig, payload: Optional[dict], *, allow_threshold: bool) -> None:
+        def apply_resource(resource_key: str, target: StatusResourceConfig, payload: Optional[dict], *, allow_threshold: bool) -> None:
             if not isinstance(payload, dict):
                 return
-            if 'roi' in payload:
-                roi_payload = payload.get('roi')
-                if isinstance(roi_payload, dict):
-                    target.roi = StatusRoi.from_dict(roi_payload)
+            if 'roi' in payload or 'roi_payload' in payload:
+                raw_roi = payload.get('roi_payload') if isinstance(payload.get('roi_payload'), dict) else payload.get('roi')
+                if isinstance(raw_roi, dict):
+                    window_geometry = get_maple_window_geometry()
+                    relative_payload = ensure_relative_roi(
+                        raw_roi,
+                        window_geometry,
+                        anchor_name=last_used_anchor_name(),
+                    )
+                    if relative_payload is None:
+                        relative_payload = raw_roi
+                    self._status_roi_payloads[resource_key] = copy.deepcopy(relative_payload)
+                    absolute_roi = resolve_roi_to_absolute(relative_payload, window=window_geometry)
+                    if absolute_roi is None:
+                        absolute_roi = resolve_roi_to_absolute(relative_payload)
+                    if absolute_roi is None:
+                        absolute_roi = raw_roi
+                    target.roi = StatusRoi.from_dict(absolute_roi)
             if 'interval_sec' in payload:
                 try:
                     val = float(payload.get('interval_sec'))
@@ -2903,9 +3078,9 @@ class DataManager:
                         if max_val > 0:
                             target.maximum_value = max_val
 
-        apply_resource(config.hp, updates.get('hp'), allow_threshold=True)
-        apply_resource(config.mp, updates.get('mp'), allow_threshold=True)
-        apply_resource(config.exp, updates.get('exp'), allow_threshold=False)
+        apply_resource('hp', config.hp, updates.get('hp'), allow_threshold=True)
+        apply_resource('mp', config.mp, updates.get('mp'), allow_threshold=True)
+        apply_resource('exp', config.exp, updates.get('exp'), allow_threshold=False)
 
         self._write_status_config(config)
         return config
@@ -2919,8 +3094,16 @@ class DataManager:
             pass
 
     def _write_status_config(self, config: StatusMonitorConfig) -> None:
+        payload = config.to_dict()
+        for key in ('hp', 'mp', 'exp'):
+            resource_payload = payload.get(key)
+            if not isinstance(resource_payload, dict):
+                continue
+            roi_payload = self._status_roi_payloads.get(key)
+            if roi_payload:
+                resource_payload['roi_payload'] = roi_payload
         with open(self.status_config_path, 'w', encoding='utf-8') as f:
-            json.dump(config.to_dict(), f, indent=4, ensure_ascii=False)
+            json.dump(payload, f, indent=4, ensure_ascii=False)
         try:
             self.status_config_notifier.emit_config(config)
         except Exception:
@@ -3705,6 +3888,26 @@ class LearningTab(QWidget):
         center_layout.addLayout(center_buttons_layout)
         center_layout.addWidget(nameplate_group)
 
+        window_anchor_group = QGroupBox("Mapleland 창 좌표 관리")
+        window_anchor_layout = QVBoxLayout()
+        self.window_anchor_summary_label = QLabel()
+        self.window_anchor_summary_label.setWordWrap(True)
+        window_anchor_layout.addWidget(self.window_anchor_summary_label)
+
+        anchor_button_row = QHBoxLayout()
+        self.save_window_anchor_btn = QPushButton("창 좌표 저장")
+        self.save_window_anchor_btn.clicked.connect(self._handle_save_window_anchor_clicked)
+        anchor_button_row.addWidget(self.save_window_anchor_btn)
+
+        self.load_window_anchor_btn = QPushButton("창 좌표 불러오기")
+        self.load_window_anchor_btn.clicked.connect(self._handle_load_window_anchor_clicked)
+        anchor_button_row.addWidget(self.load_window_anchor_btn)
+        anchor_button_row.addStretch(1)
+
+        window_anchor_layout.addLayout(anchor_button_row)
+        window_anchor_group.setLayout(window_anchor_layout)
+        center_layout.addWidget(window_anchor_group)
+
         main_layout.addLayout(left_layout, 1)
         main_layout.addLayout(center_layout, 2)
 
@@ -4007,10 +4210,91 @@ class LearningTab(QWidget):
         self.populate_nickname_template_list()
         self._load_status_command_options()
         self._apply_status_config_to_ui()
+        self._refresh_window_anchor_summary()
 
     def update_status_message(self, message):
         """상태바 메시지 업데이트를 위한 슬롯."""
         self.status_label.setText(message)
+
+    def _suggest_window_anchor_name(self) -> str:
+        anchors = list_saved_anchors()
+        base = "기본 위치"
+        if base not in anchors:
+            return base
+        for index in range(2, 99):
+            candidate = f"위치 {index}"
+            if candidate not in anchors:
+                return candidate
+        return f"위치 {int(time.time())}"
+
+    def _refresh_window_anchor_summary(self) -> None:
+        anchors = list_saved_anchors()
+        count = len(anchors)
+        summary = f"저장된 좌표: {count}개"
+        last_used = last_used_anchor_name()
+        if last_used and last_used in anchors:
+            summary += f" (마지막 사용: {last_used})"
+        self.window_anchor_summary_label.setText(summary)
+        self.load_window_anchor_btn.setEnabled(count > 0)
+
+    def _handle_save_window_anchor_clicked(self) -> None:
+        geometry = get_maple_window_geometry()
+        if not geometry:
+            QMessageBox.warning(self, "창 검색 실패", "Mapleland 창을 찾을 수 없습니다.")
+            return
+
+        dialog = WindowAnchorSaveDialog(geometry, self._suggest_window_anchor_name(), self)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+
+        anchor_name = dialog.anchor_name()
+        if not anchor_name:
+            QMessageBox.warning(self, "저장 실패", "이름을 입력해주세요.")
+            return
+
+        if anchor_exists(anchor_name):
+            confirm = QMessageBox.question(
+                self,
+                "덮어쓰기 확인",
+                f"'{anchor_name}' 이름이 이미 존재합니다. 덮어쓸까요?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
+                QMessageBox.StandardButton.Cancel,
+            )
+            if confirm != QMessageBox.StandardButton.Yes:
+                return
+
+        save_window_anchor(anchor_name, geometry)
+        set_last_used_anchor(anchor_name)
+        QMessageBox.information(self, "저장 완료", f"'{anchor_name}' 좌표를 저장했습니다.")
+        self._refresh_window_anchor_summary()
+
+    def _handle_load_window_anchor_clicked(self) -> None:
+        anchors = list_saved_anchors()
+        if not anchors:
+            QMessageBox.information(self, "불러오기", "저장된 창 좌표가 없습니다.")
+            return
+
+        dialog = WindowAnchorLoadDialog(anchors, last_used_anchor_name(), self)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+
+        selected_name = dialog.selected_anchor_name()
+        if not selected_name:
+            return
+
+        anchor = get_anchor(selected_name)
+        if anchor is None:
+            QMessageBox.warning(self, "불러오기 실패", "선택한 좌표 정보를 읽을 수 없습니다.")
+            self._refresh_window_anchor_summary()
+            return
+
+        succeeded, message = restore_maple_window(anchor)
+        if succeeded:
+            set_last_used_anchor(selected_name)
+            QMessageBox.information(self, "복원 완료", message)
+        else:
+            QMessageBox.warning(self, "복원 실패", message)
+        self._refresh_window_anchor_summary()
 
     def init_sam(self):
         if not SAM_AVAILABLE:

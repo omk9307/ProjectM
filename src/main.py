@@ -275,7 +275,12 @@ class MainWindow(QMainWindow):
 
                 if self.status_monitor_thread is None:
                     status_config = data_manager.load_status_monitor_config()
-                    self.status_monitor_thread = StatusMonitorThread(status_config)
+                    roi_payloads = data_manager.get_status_roi_payloads()
+                    self.status_monitor_thread = StatusMonitorThread(
+                        status_config,
+                        roi_payloads=roi_payloads,
+                        roi_provider=data_manager.get_status_roi_payloads,
+                    )
                     data_manager.register_status_config_listener(self.status_monitor_thread.update_config)
                     if '사냥' in self.loaded_tabs:
                         self.loaded_tabs['사냥'].attach_status_monitor(self.status_monitor_thread)

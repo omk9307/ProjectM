@@ -33,6 +33,14 @@ from status_monitor import StatusMonitorThread, StatusMonitorConfig
 from control_authority_manager import ControlAuthorityManager, PlayerStatusSnapshot
 from authority_reason_formatter import format_authority_reason
 
+from window_anchors import (
+    ensure_relative_roi,
+    get_maple_window_geometry,
+    last_used_anchor_name,
+    make_relative_roi,
+    resolve_roi_to_absolute,
+)
+
 from PyQt6.QtWidgets import (
     QApplication, QWidget, QLabel, QVBoxLayout, QHBoxLayout, QPushButton, QTextEdit,
     QMessageBox, QSpinBox, QDialog, QDialogButtonBox, QListWidget,
@@ -2489,7 +2497,20 @@ class MapTab(QWidget):
 
             self.route_profiles = normalized_profiles
             self.active_route_profile_name = config.get('active_route_profile')
-            self.minimap_region = config.get('minimap_region')
+
+            raw_minimap_region = copy.deepcopy(config.get('minimap_region'))
+            if raw_minimap_region:
+                converted_minimap = ensure_relative_roi(
+                    raw_minimap_region,
+                    get_maple_window_geometry(),
+                    anchor_name=last_used_anchor_name(),
+                )
+                self.minimap_region = converted_minimap
+                if converted_minimap is not raw_minimap_region:
+                    config['minimap_region'] = converted_minimap
+                    config_updated = True
+            else:
+                self.minimap_region = None
 
             if profiles_modified:
                 config['route_profiles'] = copy.deepcopy(normalized_profiles)
@@ -3797,13 +3818,32 @@ class MapTab(QWidget):
                 width = int(clamped_roi.width() * scale_x)
                 height = int(clamped_roi.height() * scale_y)
 
-                self.minimap_region = {'top': top, 'left': left, 'width': width, 'height': height}
-                if width * height > (512 * 512):
+                absolute_region = {'top': top, 'left': left, 'width': width, 'height': height}
+                window_geometry = get_maple_window_geometry()
+                if window_geometry:
+                    self.minimap_region = make_relative_roi(
+                        absolute_region,
+                        window_geometry,
+                        anchor_name=last_used_anchor_name(),
+                    )
+                else:
+                    self.minimap_region = absolute_region
                     self.update_general_log(
-                        f"경고: 선택한 미니맵 영역({width}x{height})이 비정상적으로 큽니다. 미니맵만 포함하도록 다시 지정하는 것을 권장합니다.",
+                        "경고: Mapleland 창 위치를 찾지 못해 절대 좌표로 저장했습니다. 창을 고정하려면 창 좌표를 먼저 저장해주세요.",
                         "orange",
                     )
-                self.update_general_log(f"새 미니맵 범위 지정 완료: {self.minimap_region}", "black")
+
+                resolved_region = resolve_roi_to_absolute(self.minimap_region, window=window_geometry)
+                if resolved_region and resolved_region['width'] * resolved_region['height'] > (512 * 512):
+                    self.update_general_log(
+                        f"경고: 선택한 미니맵 영역({resolved_region['width']}x{resolved_region['height']})이 비정상적으로 큽니다. 미니맵만 포함하도록 다시 지정하는 것을 권장합니다.",
+                        "orange",
+                    )
+
+                self.update_general_log(
+                    f"새 미니맵 범위 지정 완료: {resolved_region or absolute_region}",
+                    "black",
+                )
                 self.save_profile_data()
             else:
                 self.update_general_log("미니맵 범위 지정이 취소되었습니다.", "black")
@@ -3855,14 +3895,33 @@ class MapTab(QWidget):
         self._populate_direction_list('backward', route, waypoint_lookup)
 
 
+    def _resolve_minimap_region(self, *, require_window: bool = False) -> Optional[dict]:
+        if not self.minimap_region:
+            return None
+        window_geometry = get_maple_window_geometry()
+        resolved = resolve_roi_to_absolute(self.minimap_region, window=window_geometry)
+        if resolved is None and require_window:
+            if window_geometry is None:
+                self.update_general_log("Mapleland 창을 찾을 수 없습니다. 창을 전면에 두고 다시 시도하세요.", "red")
+            else:
+                self.update_general_log("미니맵 영역을 복원할 수 없습니다. 다시 지정해주세요.", "red")
+        return resolved
+
     def get_cleaned_minimap_image(self):
-        if not self.minimap_region: return None
+        region = self._resolve_minimap_region(require_window=True)
+        if not region:
+            return None
         with mss.mss() as sct:
-            sct_img = sct.grab(self.minimap_region); frame_bgr = cv2.cvtColor(np.array(sct_img), cv2.COLOR_BGRA2BGR)
+            sct_img = sct.grab(region)
+            frame_bgr = cv2.cvtColor(np.array(sct_img), cv2.COLOR_BGRA2BGR)
             hsv = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2HSV)
-            my_player_mask = cv2.inRange(hsv, PLAYER_ICON_LOWER, PLAYER_ICON_UPPER); other_player_mask1 = cv2.inRange(hsv, OTHER_PLAYER_ICON_LOWER1, OTHER_PLAYER_ICON_UPPER1); other_player_mask2 = cv2.inRange(hsv, OTHER_PLAYER_ICON_LOWER2, OTHER_PLAYER_ICON_UPPER2)
-            other_player_mask = cv2.bitwise_or(other_player_mask1, other_player_mask2); kernel = np.ones((5, 5), np.uint8)
-            dilated_my_player_mask = cv2.dilate(my_player_mask, kernel, iterations=1); dilated_other_player_mask = cv2.dilate(other_player_mask, kernel, iterations=1)
+            my_player_mask = cv2.inRange(hsv, PLAYER_ICON_LOWER, PLAYER_ICON_UPPER)
+            other_player_mask1 = cv2.inRange(hsv, OTHER_PLAYER_ICON_LOWER1, OTHER_PLAYER_ICON_UPPER1)
+            other_player_mask2 = cv2.inRange(hsv, OTHER_PLAYER_ICON_LOWER2, OTHER_PLAYER_ICON_UPPER2)
+            other_player_mask = cv2.bitwise_or(other_player_mask1, other_player_mask2)
+            kernel = np.ones((5, 5), np.uint8)
+            dilated_my_player_mask = cv2.dilate(my_player_mask, kernel, iterations=1)
+            dilated_other_player_mask = cv2.dilate(other_player_mask, kernel, iterations=1)
             total_ignore_mask = cv2.bitwise_or(dilated_my_player_mask, dilated_other_player_mask)
             return cv2.inpaint(frame_bgr, total_ignore_mask, 3, cv2.INPAINT_TELEA) if np.any(total_ignore_mask) else frame_bgr
 
@@ -4128,6 +4187,11 @@ class MapTab(QWidget):
                     QMessageBox.warning(self, "오류", "먼저 '미니맵 범위 지정'을 해주세요.")
                     self.detect_anchor_btn.setChecked(False)
                     return
+                resolved_minimap = self._resolve_minimap_region(require_window=True)
+                if not resolved_minimap:
+                    QMessageBox.warning(self, "오류", "미니맵 영역을 복원할 수 없어 탐지를 시작할 수 없습니다.")
+                    self.detect_anchor_btn.setChecked(False)
+                    return
                 if not self.key_features:
                     QMessageBox.warning(self, "오류", "하나 이상의 '핵심 지형'을 등록해야 합니다.")
                     self.detect_anchor_btn.setChecked(False)
@@ -4211,7 +4275,7 @@ class MapTab(QWidget):
                         self.debug_dialog = DebugViewDialog(self)
                     self.debug_dialog.show()
 
-                self.capture_thread = MinimapCaptureThread(self.minimap_region)
+                self.capture_thread = MinimapCaptureThread(resolved_minimap)
                 self.capture_thread.start()
 
                 self.detection_thread = AnchorDetectionThread(self.key_features, capture_thread=self.capture_thread, parent_tab=self)
