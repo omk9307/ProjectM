@@ -10131,7 +10131,11 @@ class MapTab(QWidget):
                                         and not self._hp_emergency_active
                                         and self._hp_recovery_fail_streak >= int(getattr(hp_cfg, 'emergency_trigger_failures', 3) or 3)
                                     ):
-                                        self._enter_hp_emergency_mode()
+                                        # 사다리 상태에서는 긴급모드 진입 금지
+                                        if str(getattr(self, 'player_state', '')) not in {'climbing_up', 'climbing_down', 'on_ladder_idle'}:
+                                            self._enter_hp_emergency_mode()
+                                        else:
+                                            self.update_general_log("[HP] 긴급모드 조건 충족이나 사다리 상태로 진입 보류", "gray")
                         # 긴급모드 시간 초과 검사
                         # [NEW] 긴급모드 HP 임계값(%)에 의한 즉시 진입 (OR 조건)
                         try:
@@ -10142,11 +10146,18 @@ class MapTab(QWidget):
                                 and isinstance(em_thr, int)
                                 and float(current) <= float(em_thr)
                             ):
-                                self.update_general_log(
-                                    f"[HP] 긴급모드 진입: HP 임계값({int(em_thr)}%) 이하 감지 (현재 {int(round(current))}%)",
-                                    "orange",
-                                )
-                                self._enter_hp_emergency_mode()
+                                # 사다리 상태에서는 긴급모드 진입 금지
+                                if str(getattr(self, 'player_state', '')) not in {'climbing_up', 'climbing_down', 'on_ladder_idle'}:
+                                    self.update_general_log(
+                                        f"[HP] 긴급모드 진입: HP 임계값({int(em_thr)}%) 이하 감지 (현재 {int(round(current))}%)",
+                                        "orange",
+                                    )
+                                    self._enter_hp_emergency_mode()
+                                else:
+                                    self.update_general_log(
+                                        f"[HP] 긴급모드 조건 충족(HP {int(round(current))}%)이나 사다리 상태로 진입 보류",
+                                        "gray",
+                                    )
                         except Exception:
                             pass
 
