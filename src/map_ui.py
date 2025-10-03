@@ -8005,7 +8005,14 @@ class MapTab(QWidget):
                     self._reset_airborne_recovery_state()
                 if self.stuck_recovery_attempts > 0:
                     self.stuck_recovery_attempts = 0
-                if self.navigation_state_locked:
+                # 대기 모드에서는 기존에 잠금을 전역 해제했으나,
+                # 진행 중 액션(*_in_progress)까지 해제하면 등반/점프 진행 상태가
+                # 일반 이동 분기로 섞여 '도착 -> prepare' 루프가 발생한다.
+                # 진행 중 액션은 예외로 두어 잠금을 유지한다.
+                if self.navigation_state_locked and not (
+                    isinstance(self.navigation_action, str)
+                    and self.navigation_action.endswith('_in_progress')
+                ):
                     self.navigation_state_locked = False
                 self.recovery_cooldown_until = time.time()
             else:
