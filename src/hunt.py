@@ -825,6 +825,8 @@ class HuntTab(QWidget):
         self._hp_emergency_active: bool = False
         self._hp_emergency_started_at: float = 0.0
         self._hp_emergency_telegram_sent: bool = False
+        # [NEW] HP 저체력(3% 미만) 텔레그램 알림 상태
+        self._low_hp_alert_active: bool = False
 
         self.teleport_settings = TeleportSettings()
         self.teleport_command_left = "텔레포트(좌)"
@@ -5617,6 +5619,39 @@ class HuntTab(QWidget):
                                 self._hp_emergency_active = False
                                 self._hp_emergency_started_at = 0.0
                                 self.append_log("[HP] 긴급 회복 보호 해제 [시간 초과]", 'info')
+                        # [NEW] HP 저체력(3% 미만) 텔레그램 알림 및 회복 알림
+                        try:
+                            low_hp_enabled = bool(getattr(hp_cfg, 'low_hp_telegram_alert', False))
+                            current = float(hp_value)
+                            if low_hp_enabled:
+                                if current < 3.0 and not self._low_hp_alert_active:
+                                    msg = f"[HP] 경고: HP 3% 미만 감지 (현재 {int(round(current))}%)"
+                                    sent = False
+                                    map_tab = getattr(self, 'map_tab', None)
+                                    if map_tab and hasattr(map_tab, 'send_emergency_telegram'):
+                                        try:
+                                            map_tab.send_emergency_telegram(msg)
+                                            sent = True
+                                        except Exception:
+                                            sent = False
+                                    if not sent:
+                                        self.append_log("텔레그램 전송 실패 또는 비활성화 상태입니다.", 'warn')
+                                    self._low_hp_alert_active = True
+                                elif current >= 3.0 and self._low_hp_alert_active:
+                                    msg = f"[HP] 회복: HP 3% 이상으로 회복됨 (현재 {int(round(current))}%)"
+                                    sent = False
+                                    map_tab = getattr(self, 'map_tab', None)
+                                    if map_tab and hasattr(map_tab, 'send_emergency_telegram'):
+                                        try:
+                                            map_tab.send_emergency_telegram(msg)
+                                            sent = True
+                                        except Exception:
+                                            sent = False
+                                    if not sent:
+                                        self.append_log("텔레그램 전송 실패 또는 비활성화 상태입니다.", 'warn')
+                                    self._low_hp_alert_active = False
+                        except Exception:
+                            pass
                     except Exception:
                         pass
         else:

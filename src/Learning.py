@@ -3534,6 +3534,12 @@ class DataManager:
                     target.emergency_timeout_telegram = bool(payload.get('emergency_timeout_telegram'))
                 except Exception:
                     pass
+            # [NEW] HP 저체력(3% 미만) 텔레그램 알림 여부
+            if 'low_hp_telegram_alert' in payload:
+                try:
+                    target.low_hp_telegram_alert = bool(payload.get('low_hp_telegram_alert'))
+                except Exception:
+                    pass
 
         apply_resource('hp', config.hp, updates.get('hp'), allow_threshold=True)
         apply_resource('mp', config.mp, updates.get('mp'), allow_threshold=True)
@@ -5069,6 +5075,11 @@ class LearningTab(QWidget):
         header_layout.addWidget(title_label)
         enabled_checkbox = QCheckBox('사용')
         header_layout.addWidget(enabled_checkbox)
+        # [NEW] HP 카드 전용: 저체력 텔레그램 알림 토글
+        telegram_checkbox = None
+        if resource == 'hp':
+            telegram_checkbox = QCheckBox('텔레그램 알림')
+            header_layout.addWidget(telegram_checkbox)
         header_layout.addStretch(1)
         vbox.addLayout(header_layout)
 
@@ -5143,6 +5154,10 @@ class LearningTab(QWidget):
             self.hp_threshold_input.editingFinished.connect(lambda: self._on_status_threshold_changed('hp'))
             self.hp_command_combo.currentIndexChanged.connect(lambda _: self._on_status_command_changed('hp'))
             self.hp_interval_input.editingFinished.connect(lambda: self._on_status_interval_changed('hp'))
+            # [NEW]
+            self.hp_lowhp_telegram_checkbox = telegram_checkbox
+            if self.hp_lowhp_telegram_checkbox is not None:
+                self.hp_lowhp_telegram_checkbox.toggled.connect(self._on_status_low_hp_telegram_changed)
         else:
             self.mp_enabled_checkbox = enabled_checkbox
             self.mp_roi_button = roi_button
@@ -5634,6 +5649,13 @@ class LearningTab(QWidget):
         if self._status_ui_updating:
             return
         updates = {resource: {'enabled': bool(checked)}}
+        self._status_config = self.data_manager.update_status_monitor_config(updates)
+        self._apply_status_config_to_ui()
+
+    def _on_status_low_hp_telegram_changed(self, checked: bool) -> None:
+        if self._status_ui_updating:
+            return
+        updates = {'hp': {'low_hp_telegram_alert': bool(checked)}}
         self._status_config = self.data_manager.update_status_monitor_config(updates)
         self._apply_status_config_to_ui()
 

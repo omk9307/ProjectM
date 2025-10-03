@@ -530,6 +530,8 @@ class MapTab(QWidget):
             self._hp_emergency_active: bool = False
             self._hp_emergency_started_at: float = 0.0
             self._hp_emergency_telegram_sent: bool = False
+            # [NEW] HP 저체력(3% 미만) 텔레그램 알림 상태
+            self._low_hp_alert_active: bool = False
 
             self.latest_perf_stats: dict[str, object] = {}
             self._latest_thread_perf: dict[str, object] = {}
@@ -10139,6 +10141,20 @@ class MapTab(QWidget):
                                 self._hp_emergency_active = False
                                 self._hp_emergency_started_at = 0.0
                                 self.update_general_log("[HP] 긴급 회복 보호 해제 [시간 초과]", "gray")
+                        # [NEW] HP 저체력(3% 미만) 텔레그램 알림 및 회복 알림
+                        try:
+                            low_hp_enabled = bool(getattr(hp_cfg, 'low_hp_telegram_alert', False))
+                            if low_hp_enabled:
+                                if current < 3.0 and not self._low_hp_alert_active:
+                                    msg = f"[HP] 경고: HP 3% 미만 감지 (현재 {int(round(current))}%)"
+                                    self.send_emergency_telegram(msg)
+                                    self._low_hp_alert_active = True
+                                elif current >= 3.0 and self._low_hp_alert_active:
+                                    msg = f"[HP] 회복: HP 3% 이상으로 회복됨 (현재 {int(round(current))}%)"
+                                    self.send_emergency_telegram(msg)
+                                    self._low_hp_alert_active = False
+                        except Exception:
+                            pass
                 except Exception:
                     pass
         if updated:

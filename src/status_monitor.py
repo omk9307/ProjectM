@@ -77,6 +77,8 @@ class ResourceConfig:
     emergency_trigger_failures: int = 3
     emergency_max_duration_sec: float = 10.0
     emergency_timeout_telegram: bool = False
+    # [NEW] HP 저체력(3% 미만) 텔레그램 알림 사용 여부 (HP 전용 의미)
+    low_hp_telegram_alert: bool = False
 
     def to_dict(self) -> Dict[str, object]:
         data: Dict[str, object] = {
@@ -100,6 +102,8 @@ class ResourceConfig:
         data["emergency_trigger_failures"] = int(max(1, self.emergency_trigger_failures))
         data["emergency_max_duration_sec"] = float(max(1.0, self.emergency_max_duration_sec))
         data["emergency_timeout_telegram"] = bool(self.emergency_timeout_telegram)
+        # 저체력 알림 설정
+        data["low_hp_telegram_alert"] = bool(self.low_hp_telegram_alert)
         return data
 
     @staticmethod
@@ -148,6 +152,8 @@ class ResourceConfig:
         emergency_trigger_failures = max(1, emergency_trigger_failures)
         emergency_max_duration_sec = max(1.0, emergency_max_duration_sec)
         emergency_timeout_telegram = bool(source.get("emergency_timeout_telegram", False))
+        # 저체력 텔레그램 알림
+        low_hp_telegram_alert = bool(source.get("low_hp_telegram_alert", False))
         return ResourceConfig(
             roi=roi,
             interval_sec=interval,
@@ -159,6 +165,7 @@ class ResourceConfig:
             emergency_trigger_failures=emergency_trigger_failures,
             emergency_max_duration_sec=emergency_max_duration_sec,
             emergency_timeout_telegram=emergency_timeout_telegram,
+            low_hp_telegram_alert=low_hp_telegram_alert,
         )
 
 
