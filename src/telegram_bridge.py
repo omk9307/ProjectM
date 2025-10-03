@@ -17,10 +17,8 @@ import time
 from dataclasses import dataclass
 from typing import Callable, Optional
 
-from PyQt6.QtCore import QObject, QTimer, pyqtSignal, Qt, QThread
+from PyQt6.QtCore import QObject, QTimer, pyqtSignal, Qt
 from PyQt6.QtWidgets import QApplication
-from PyQt6.QtGui import QClipboard
-import random
 
 
 def _is_windows() -> bool:
@@ -168,17 +166,11 @@ class TelegramBridge(QObject):
         super().__init__()
         self._main_window = main_window
         self._hunt_tab = getattr(main_window, "loaded_tabs", {}).get("사냥")
-        self._auto_tab = getattr(main_window, "loaded_tabs", {}).get("자동 제어")
         self._running = False
         self._thread: Optional[threading.Thread] = None
         self._creds = _load_credentials()
         self._bot_app = None
         self._loop = None  # 백그라운드 asyncio 이벤트 루프
-        # 채팅 주입 상태
-        self._chat_lock = threading.Lock()
-        self._last_chat_ts = 0.0
-        self._min_chat_interval = 1.5
-        self._max_chat_length = 200
 
     def available(self) -> bool:
         return _is_windows() and self._creds is not None
@@ -339,17 +331,6 @@ class TelegramBridge(QObject):
                             return
                         ok, msg = self._schedule_shutdown(minutes=minutes)
                         await context.bot.send_message(chat_id=chat_id, text=msg)
-                        return
-
-                    # 채팅 주입: /채팅 <메시지> | /chat <message>
-                    if lower.startswith("/채팅") or lower.startswith("/chat"):
-                        parts = text.strip().split(maxsplit=1)
-                        if len(parts) < 2 or not parts[1].strip():
-                            await context.bot.send_message(chat_id=chat_id, text="형식: /채팅 <메시지> (한 줄). 예: /채팅 안녕하세요")
-                            return
-                        raw_msg = parts[1]
-                        ok, reply = self._perform_chat_injection(raw_msg)
-                        await context.bot.send_message(chat_id=chat_id, text=reply)
                         return
 
                     # 알 수 없는 명령 → 도움말
@@ -618,147 +599,6 @@ class TelegramBridge(QObject):
             return _run_in_main_thread(_call)  # type: ignore[return-value]
         except Exception as exc:
             return False, f"화면출력 토글 실패: {exc}"
-
-    # ---------------- 채팅 주입 내부 로직 ----------------
-    def _perform_chat_injection(self, message: str) -> tuple[bool, str]:
-        # 레이트리밋
-        now = time.time()
-        if (now - self._last_chat_ts) < self._min_chat_interval:
-            remain = max(0.0, self._min_chat_interval - (now - self._last_chat_ts))
-            return False, f"너무 빠른 요청입니다. {remain:.1f}초 후 다시 시도하세요."
-
-        # 한 줄 정규화 및 길이 제한
-        try:
-            msg = message.replace("\r", " ").replace("\n", " ")
-            msg = " ".join(msg.split())  # 공백 정리
-        except Exception:
-            msg = str(message)
-        truncated = False
-        if len(msg) > self._max_chat_length:
-            msg = msg[: self._max_chat_length]
-            truncated = True
-        if not msg:
-            return False, "보낼 메시지가 비어 있습니다."
-
-        # 준비 상태 체크
-        if self._auto_tab is None:
-            return False, "자동 제어 탭을 찾을 수 없습니다."
-        if not self._auto_tab.api_is_serial_ready():
-            return False, "라즈베리파이 시리얼 연결이 필요합니다. 자동 제어 탭에서 연결해주세요."
-
-        # 메인 스레드에서 실제 동작 수행
-        def _call() -> tuple[bool, str]:
-            # 1) 창 활성화
-            if not self._auto_tab.api_activate_maple_window():
-                return False, "게임 창 활성화 실패: Mapleland 창을 전면에 두고 다시 시도하세요."
-
-            # 2) 클립보드 백업/설정
-            cb = QApplication.clipboard()
-            try:
-                prev_text = cb.text(QClipboard.Mode.Clipboard)
-            except Exception:
-                prev_text = ""
-            try:
-                cb.setText(msg, QClipboard.Mode.Clipboard)
-            except Exception:
-                return False, "클립보드 설정 실패"
-
-            # 3) 모든 키 강제 해제
-            try:
-                self._auto_tab.api_release_all_keys_global()
-            except Exception:
-                pass
-
-            # 4) Quiet 모드 및 시퀀스 딜레이 계산
-            quiet_total = random.randint(720, 800)  # 요청 범위(500~800) 내 난수, 시퀀스 여유 확보
-            # 소딜레이(무작위) 정의: 전체가 quiet_total 내에 들어가도록 보수적으로 설정
-            d_enter_down = random.randint(60, 90)
-            d_after_enter_release = random.randint(40, 70)
-            d_v_hold = random.randint(40, 55)
-            d_final_enter_down = random.randint(60, 90)
-            d_after_final_release = random.randint(40, 70)
-            d_ctrl_pre_v = 30
-            d_after_v_release = 20
-            d_after_ctrl_release = 40
-            small_sum = (
-                d_enter_down
-                + d_after_enter_release
-                + d_v_hold
-                + d_final_enter_down
-                + d_after_final_release
-                + d_ctrl_pre_v
-                + d_after_v_release
-                + d_after_ctrl_release
-            )
-            # 오픈 대기를 가장 길게 배정 (quiet_total 내에서 마무리)
-            d_open_wait = max(200, quiet_total - (small_sum + 30))
-            if d_open_wait < max(d_enter_down, d_after_enter_release, d_v_hold, d_final_enter_down, d_after_final_release) + 30:
-                d_open_wait = max(
-                    220,
-                    max(d_enter_down, d_after_enter_release, d_v_hold, d_final_enter_down, d_after_final_release) + 30,
-                )
-
-            # Quiet 모드 시작(화이트리스트=CHAT)
-            try:
-                self._auto_tab.api_set_quiet_mode(quiet_total, {"CHAT"})
-            except Exception:
-                pass
-
-            def msleep(ms: int) -> None:
-                try:
-                    QThread.msleep(int(ms))
-                except Exception:
-                    time.sleep(max(float(ms) / 1000.0, 0.0))
-
-            # 5) 시퀀스: Enter(채팅창 오픈) → 대기 → 붙여넣기 → Enter(전송)
-            try:
-                # Enter down/hold/up
-                self._auto_tab.api_press_key("Key.enter", owner="CHAT", force=True)
-                msleep(d_enter_down)
-                self._auto_tab.api_release_key("Key.enter", owner="CHAT", force=True)
-                msleep(d_after_enter_release)
-
-                # 채팅창 오픈 대기(가장 길게)
-                msleep(d_open_wait)
-
-                # Ctrl+V 붙여넣기
-                self._auto_tab.api_press_key("Key.ctrl", owner="CHAT", force=True)
-                msleep(d_ctrl_pre_v)
-                self._auto_tab.api_press_key("v", owner="CHAT", force=True)
-                msleep(d_v_hold)
-                self._auto_tab.api_release_key("v", owner="CHAT", force=True)
-                msleep(d_after_v_release)
-                self._auto_tab.api_release_key("Key.ctrl", owner="CHAT", force=True)
-                msleep(d_after_ctrl_release)
-
-                # 최종 Enter로 전송
-                self._auto_tab.api_press_key("Key.enter", owner="CHAT", force=True)
-                msleep(d_final_enter_down)
-                self._auto_tab.api_release_key("Key.enter", owner="CHAT", force=True)
-                msleep(d_after_final_release)
-            finally:
-                # Quiet 조기 종료(남은 시간이 있어도 해제)
-                try:
-                    self._auto_tab.api_set_quiet_mode(0, {"CHAT"})
-                except Exception:
-                    pass
-                # 클립보드 복구
-                try:
-                    cb.setText(prev_text or "", QClipboard.Mode.Clipboard)
-                except Exception:
-                    pass
-
-            # 완료
-            return True, (
-                ("전송 완료 (절단됨)." if truncated else "전송 완료.")
-                + f" quiet={quiet_total}ms, open_wait={d_open_wait}ms"
-            )
-
-        with self._chat_lock:
-            ok, reply = _run_in_main_thread(_call, timeout=6.0)  # type: ignore[assignment]
-            if ok:
-                self._last_chat_ts = time.time()
-            return bool(ok), str(reply)
 
     # --- 외부 알림용 간단 API ---
     def send_text(self, text: str) -> bool:
