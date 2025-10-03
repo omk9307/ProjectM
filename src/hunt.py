@@ -5169,7 +5169,6 @@ class HuntTab(QWidget):
         # HP 긴급모드 보호: HP 상태 명령과 '모든 키 떼기' 외 차단
         if getattr(self, '_hp_emergency_active', False):
             if not (is_status_command and status_resource == 'hp') and normalized != '모든 키 떼기':
-                self.append_log("[HP] 긴급 회복 보호로 다른 명령을 차단합니다.", "warn")
                 return
 
         if (
@@ -5303,10 +5302,19 @@ class HuntTab(QWidget):
                                         self._hp_emergency_active = False
                                         self._hp_emergency_started_at = 0.0
                                         self._hp_emergency_telegram_sent = False
-                                        self.append_log("[HP] 긴급 회복 모드 해제", 'info')
+                                        self.append_log(f"[HP] 긴급 회복 보호 해제 [{int(round(current))}%]", 'info')
                                 else:
                                     # 실패
                                     self._hp_recovery_fail_streak = int(self._hp_recovery_fail_streak) + 1
+                                    if self._hp_emergency_active:
+                                        self.append_log(
+                                            f"HP회복검사 통과 실패 : 기준치 [{int(threshold)}%] > 현재수치 [{int(round(current))}%]",
+                                            'warn',
+                                        )
+                                        # 긴급 모드에서는 즉시 HP 회복 명령 재발행
+                                        cmd = getattr(hp_cfg, 'command_profile', None)
+                                        if isinstance(cmd, str) and cmd.strip():
+                                            self._issue_status_command('hp', cmd.strip(), current)
                                     if (
                                         getattr(hp_cfg, 'emergency_enabled', False)
                                         and not self._hp_emergency_active
@@ -5333,6 +5341,10 @@ class HuntTab(QWidget):
                                 else:
                                     self.append_log("[HP] 긴급 회복 모드 시간이 초과되었습니다.", 'warn')
                                 self._hp_emergency_telegram_sent = True
+                                # 시간 초과 시 긴급 보호 해제
+                                self._hp_emergency_active = False
+                                self._hp_emergency_started_at = 0.0
+                                self.append_log("[HP] 긴급 회복 보호 해제 [시간 초과]", 'info')
                     except Exception:
                         pass
         else:
@@ -5489,7 +5501,16 @@ class HuntTab(QWidget):
         self._hp_emergency_telegram_sent = False
         # 즉시 모든 키 해제 (원인 로그 포함)
         self._issue_all_keys_release(reason="HP회복 긴급모드 진입")
-        self.append_log("[HP] 긴급 회복 모드에 진입했습니다.", 'warn')
+        # 최초 진입 로그
+        self.append_log("[WARN] [HP] 긴급 회복 모드에 진입했습니다. 다른 명령을 차단합니다.", 'warn')
+        # 즉시 HP 회복 명령 1회 발행하여 다음 주기에 회복판단
+        try:
+            hp_cfg = getattr(self, '_status_config', None).hp if hasattr(self, '_status_config') else None
+            cmd = getattr(hp_cfg, 'command_profile', None) if hp_cfg else None
+            if isinstance(cmd, str) and cmd.strip():
+                self._issue_status_command('hp', cmd.strip(), None)
+        except Exception:
+            pass
 
     def _update_status_summary_cache(self) -> None:
         hp_cfg = getattr(self._status_config, 'hp', None)

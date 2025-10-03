@@ -818,6 +818,11 @@ class MapTab(QWidget):
             self.cfg_walk_teleport_interval = WALK_TELEPORT_INTERVAL_DEFAULT
             self._last_walk_teleport_check_time = 0.0
             self._walk_teleport_active = False
+            
+            # [NEW] 아래점프 전 '안전 지점' 이동 목표를 프레임 간에 고정하기 위한 앵커
+            # - 시간 지연(히스테리시스) 없이, 동일 노드/출발선 맥락에서만 고정 유지
+            # - 도착 또는 상태 전환 시 즉시 해제
+            self.safe_move_anchor = None  # dict: { 'node_key': str, 'line_id': Any, 'x': float, 'y': float }
             self._walk_teleport_walk_started_at = 0.0
             self._walk_teleport_bonus_percent = 0.0
             self.waiting_for_safe_down_jump = False  # 아래점프 전 안전 지대 이동 필요 여부
@@ -1759,7 +1764,6 @@ class MapTab(QWidget):
         # HP 긴급모드 보호: HP 상태 명령과 '모든 키 떼기' 외 차단
         if getattr(self, '_hp_emergency_active', False):
             if not (is_status_command and status_resource == 'hp') and command != '모든 키 떼기':
-                self.update_general_log("[HP] 긴급 회복 보호로 다른 명령을 차단합니다.", "orange")
                 detail = {"command": command, "hp_emergency": True}
                 return _wrap_result(False, "hp_emergency_active", detail)
 
@@ -8683,9 +8687,29 @@ class MapTab(QWidget):
 
             current_node_key = self.current_segment_path[self.current_segment_index]
             current_node = self.nav_nodes.get(current_node_key, {})
-            self.intermediate_target_pos = current_node.get('pos')
-            self.guidance_text = current_node.get('name', '')
-            self.expected_terrain_group = current_node.get('group') 
+
+            # [개선 A] 이미 계산된 안전지점 앵커가 있으면 기본 안내로 덮어쓰기 전에 우선 적용
+            anchor_applied = False
+            try:
+                if (
+                    current_node.get('type') == 'djump_area'
+                    and self.safe_move_anchor
+                    and self.safe_move_anchor.get('node_key') == current_node_key
+                ):
+                    self.guidance_text = "안전 지점으로 이동"
+                    self.intermediate_target_pos = QPointF(
+                        float(self.safe_move_anchor.get('x')),
+                        float(self.safe_move_anchor.get('y')),
+                    )
+                    anchor_applied = True
+            except Exception:
+                anchor_applied = False
+
+            # 기본 안내 세팅 (앵커 미적용 시에만)
+            self.expected_terrain_group = current_node.get('group')
+            if not anchor_applied:
+                self.intermediate_target_pos = current_node.get('pos')
+                self.guidance_text = current_node.get('name', '')
 
             if not self.intermediate_target_pos: return
 
@@ -8808,7 +8832,21 @@ class MapTab(QWidget):
                             # 3) 플레이어가 이미 안전구간에 있으면 즉시 전환
                             is_in_safe = any(start <= player_x <= end for start, end in departure_safe_zones)
                             if is_in_safe:
+                                # 안전구간에 이미 진입 → 준비 상태로 전환하고 앵커 해제
+                                self.safe_move_anchor = None
                                 self._transition_to_action_state('prepare_to_down_jump', current_node_key)
+                                return
+
+                            # [신규] 안전 이동 앵커가 있으면 재계산 없이 기존 목표를 유지
+                            if (
+                                self.safe_move_anchor and
+                                self.safe_move_anchor.get('node_key') == current_node_key
+                            ):
+                                self.guidance_text = "안전 지점으로 이동"
+                                self.intermediate_target_pos = QPointF(
+                                    float(self.safe_move_anchor.get('x')), 
+                                    float(self.safe_move_anchor.get('y'))
+                                )
                                 return
 
                             # 4) 가장 가까운 안전구간의 점으로 유도 (Y는 출발 라인 보간)
@@ -8848,6 +8886,16 @@ class MapTab(QWidget):
                                         break
                                 self.guidance_text = "안전 지점으로 이동"
                                 self.intermediate_target_pos = QPointF(best_x, line_y)
+                                # [신규] 이번에 선택한 안전 목표를 앵커로 고정 (동일 노드/출발선 맥락에 한해 유지)
+                                try:
+                                    self.safe_move_anchor = {
+                                        'node_key': current_node_key,
+                                        'line_id': departure_line.get('id'),
+                                        'x': float(best_x),
+                                        'y': float(line_y),
+                                    }
+                                except Exception:
+                                    self.safe_move_anchor = None
                                 # djump 준비 전, 안전 이동 유도. 상태는 유지하고 반환
                                 return
                             else:
@@ -8857,6 +8905,7 @@ class MapTab(QWidget):
                                 return
                         except Exception:
                             # 예외 시 기존 동작으로 폴백
+                            self.safe_move_anchor = None
                             self._transition_to_action_state('prepare_to_down_jump', current_node_key)
                             return
                 
@@ -9668,9 +9717,18 @@ class MapTab(QWidget):
                                         self._hp_emergency_active = False
                                         self._hp_emergency_started_at = 0.0
                                         self._hp_emergency_telegram_sent = False
-                                        self.update_general_log("[HP] 긴급 회복 모드 해제", "gray")
+                                        self.update_general_log(f"[HP] 긴급 회복 보호 해제 [{int(round(current))}%]", "gray")
                                 else:
                                     self._hp_recovery_fail_streak = int(self._hp_recovery_fail_streak) + 1
+                                    if self._hp_emergency_active:
+                                        self.update_general_log(
+                                            f"HP회복검사 통과 실패 : 기준치 [{int(threshold)}%] > 현재수치 [{int(round(current))}%]",
+                                            "orange",
+                                        )
+                                        # 긴급 모드에서는 즉시 HP 회복 명령 재발행
+                                        cmd = getattr(hp_cfg, 'command_profile', None)
+                                        if isinstance(cmd, str) and cmd.strip():
+                                            self._issue_status_command('hp', cmd.strip())
                                     if (
                                         getattr(hp_cfg, 'emergency_enabled', False)
                                         and not self._hp_emergency_active
@@ -9686,6 +9744,10 @@ class MapTab(QWidget):
                                 else:
                                     self.update_general_log("[HP] 긴급 회복 모드 시간이 초과되었습니다.", "orange")
                                 self._hp_emergency_telegram_sent = True
+                                # 시간 초과 시 긴급 보호 해제
+                                self._hp_emergency_active = False
+                                self._hp_emergency_started_at = 0.0
+                                self.update_general_log("[HP] 긴급 회복 보호 해제 [시간 초과]", "gray")
                 except Exception:
                     pass
         if updated:
@@ -9749,7 +9811,16 @@ class MapTab(QWidget):
         self._hp_emergency_telegram_sent = False
         # 즉시 모든 키 해제 (원인 로그 포함)
         self._emit_control_command("모든 키 떼기", reason="HP회복 긴급모드 진입", allow_forbidden=True)
-        self.update_general_log("[HP] 긴급 회복 모드에 진입했습니다.", "orange")
+        # 최초 진입 로그
+        self.update_general_log("[WARN] [HP] 긴급 회복 모드에 진입했습니다. 다른 명령을 차단합니다.", "orange")
+        # 즉시 HP 회복 명령 1회 발행하여 다음 주기에 회복판단
+        try:
+            hp_cfg = getattr(self, '_status_config', None).hp if hasattr(self, '_status_config') else None
+            cmd = getattr(hp_cfg, 'command_profile', None) if hp_cfg else None
+            if isinstance(cmd, str) and cmd.strip():
+                self._issue_status_command('hp', cmd.strip())
+        except Exception:
+            pass
 
     def send_emergency_telegram(self, message: str) -> None:
         """HP 긴급모드 전용 텔레그램 전송 (학습탭 독립 설정용, 토글 무시)."""
