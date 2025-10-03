@@ -730,8 +730,16 @@ class MapTab(QWidget):
             self.current_segment_path = []      # 현재 구간의 상세 경로 [node_key1, node_key2, ...]
             self.current_segment_index = 0      # 현재 상세 경로 진행 인덱스
             self.last_path_recalculation_time = 0.0 # <<< [v12.2.0] 추가: 경로 떨림 방지용
+            # [신규] 이번 경로에서 선택된 아래점프 지점 잠금
+            self.locked_djump_area_key = None  # type: Optional[str]
             self.expected_terrain_group = None  # 현재 안내 경로가 유효하기 위해 플레이어가 있어야 할 지형 그룹
             # --- v12.0.0: 추가 끝 ---
+
+            # --- [신규] 아래점프 전송 제어(래치/쿨다운/재시도) ---
+            self.down_jump_send_latch = False
+            self.down_jump_sent_at = 0.0
+            self.down_jump_send_cooldown_sec = 0.5  # 사용자 지정: 쿨다운 0.5초
+            self.down_jump_retry_sec = 0.8          # 사용자 지정: 재시도 0.8초
             
             #  마지막으로 출력한 물리적 상태를 기억하기 위한 변수
             self.last_printed_player_state = None
@@ -7228,6 +7236,10 @@ class MapTab(QWidget):
         path, cost = self._find_path_astar(final_player_pos, start_group, goal_node_key)
         
         if path:
+            # 새로운 경로가 계산되면 djump 잠금을 초기화하여 이번 경로의 선택을 새로 반영
+            self.locked_djump_area_key = None
+            # 아래점프 전송 래치 초기화
+            self.down_jump_send_latch = False
             self.current_segment_path = path
             self.current_segment_index = 0
             
@@ -7462,6 +7474,11 @@ class MapTab(QWidget):
             self.navigation_state_locked = True
             self.lock_timeout_start = time.time()
             self.waiting_for_safe_down_jump = False
+            # 아래점프가 시작되었으므로 래치를 해제하여 이후 상태 전이에서 재전송이 개입하지 않도록 함
+            try:
+                self.down_jump_send_latch = False
+            except Exception:
+                pass
             
             # [PATCH] v14.3.9: print문을 조건문으로 감쌈
             if self.debug_basic_pathfinding_checkbox and self.debug_basic_pathfinding_checkbox.isChecked():
@@ -7576,6 +7593,16 @@ class MapTab(QWidget):
             self.navigation_action = 'move_to_target'
             self.navigation_state_locked = False
             self._climb_last_near_ladder_time = 0.0
+            # 아래점프/낙하/등반 등 액션이 완료되면 djump 잠금 해제
+            try:
+                self.locked_djump_area_key = None
+            except Exception:
+                pass
+            # 아래점프 전송 래치 초기화
+            try:
+                self.down_jump_send_latch = False
+            except Exception:
+                pass
             
             via_node_types = {'fall_landing', 'djump_landing', 'ladder_exit'}
             self.current_segment_index += 1
@@ -8021,16 +8048,21 @@ class MapTab(QWidget):
         """마지막 이동 명령을 실제로 재전송하는 역할을 합니다."""
         command = self.last_movement_command
 
-        if (
-            self.guidance_text == "안전 지점으로 이동"
-            and command in ["걷기(우)", "걷기(좌)", None]
-            and not getattr(self, 'edgefall_mode_active', False)
-        ):
-            # 낭떠러지 낙하 모드가 아닐 때만 아래점프로 전환
-            command = "아래점프"
-            self.last_movement_command = command
+        # [변경] 안전지점 안내 상태에서 아래점프로 강제 전환하지 않음 (명령 전송 직전 안전성만 판정)
 
         if command:
+            # 아래점프 재전송도 래치/쿨다운/재시도 규율을 따르게 함
+            if command == "아래점프":
+                now_time = time.time()
+                if getattr(self, 'down_jump_send_latch', False):
+                    if (now_time - float(getattr(self, 'down_jump_sent_at', 0.0))) < float(getattr(self, 'down_jump_retry_sec', 0.8)):
+                        return  # 재시도 대기 중: 전송 금지
+                    else:
+                        self.down_jump_send_latch = False  # 재시도 허용
+                else:
+                    if (now_time - float(getattr(self, 'down_jump_sent_at', 0.0))) < float(getattr(self, 'down_jump_send_cooldown_sec', 0.5)):
+                        return  # 쿨다운: 전송 금지
+
             if command in ("걷기(우)", "걷기(좌)"):
                 self._start_walk_teleport_tracking()
             if self.debug_auto_control_checkbox.isChecked():
@@ -8044,6 +8076,10 @@ class MapTab(QWidget):
                 self.last_command_sent_time = sent_at
             else:
                 self.last_command_sent_time = time.time()
+            # 아래점프 전송 시 래치 설정
+            if command == "아래점프":
+                self.down_jump_send_latch = True
+                self.down_jump_sent_at = self.last_command_sent_time
 
     def _trigger_stuck_recovery(self, final_player_pos, log_message):
         """공통 멈춤 복구 절차를 실행합니다."""
@@ -8318,15 +8354,29 @@ class MapTab(QWidget):
         player_state_text = '알 수 없음'
         nav_action_text = '대기 중'
         final_intermediate_type = 'walk'
-        
+
         nav_action_text = '대기 중'
         direction = '-'
         distance = 0
         final_intermediate_type = 'walk'
 
+        # [변경] 아래점프 준비 상태에서는 먼저 안전성/대기 여부를 평가해 플래그를 세팅
+        try:
+            if self.navigation_action == 'prepare_to_down_jump':
+                self._process_action_preparation(final_player_pos)
+        except Exception:
+            pass
+
         # <<< [핵심 수정] 상태에 따른 안내선 목표(intermediate_target_pos) 및 텍스트(guidance_text) 결정 >>>
-        # 최우선 순위: "안전 지점으로 이동"과 같은 특수 안내는 그대로 유지
-        if self.guidance_text in ["안전 지점으로 이동", "점프 불가: 안전 지대 없음", "이동할 안전 지대 없음"]:
+        # 최우선 순위: 안전 고정 상태는 그대로 유지
+        special_safe_texts = ["안전 지점으로 이동", "점프 불가: 안전 지대 없음", "이동할 안전 지대 없음"]
+        is_special_text = self.guidance_text in special_safe_texts
+        is_safe_sticky_state = (
+            self.navigation_action == 'prepare_to_down_jump'
+            and (getattr(self, 'waiting_for_safe_down_jump', False) or getattr(self, 'safe_move_anchor', None))
+        )
+        if is_special_text or is_safe_sticky_state:
+            # 준비 대기/앵커 상태라도 안내 텍스트는 바꾸지 않음(안전 안내는 키 전송 직전만 사용)
             # 이 경우는 _handle_action_preparation에서 이미 intermediate_target_pos를 설정했으므로 그대로 사용
             pass
         # 1순위: 아래 점프 또는 낙하 관련 상태일 때
@@ -8386,6 +8436,18 @@ class MapTab(QWidget):
 
                     self.guidance_text = final_target_node.get('name', '경로 없음')
                     self.intermediate_target_pos = final_target_node.get('pos')
+                    # [신규] 이번 프레임의 목표가 djump_area라면, 락이 없을 때 해당 노드를 락으로 고정
+                    try:
+                        if (
+                            self.locked_djump_area_key is None
+                            and isinstance(final_target_node, dict)
+                            and final_target_node.get('type') == 'djump_area'
+                        ):
+                            # final_target_key는 위 while에서 최신 갱신됨. 없으면 target_node_key 사용
+                            lock_key = locals().get('final_target_key', target_node_key)
+                            self.locked_djump_area_key = lock_key
+                    except Exception:
+                        pass
                 else:
                     self.guidance_text = "경로 계산 중..."
                     self.intermediate_target_pos = None
@@ -8397,7 +8459,11 @@ class MapTab(QWidget):
         if self.guidance_text == "안전 지점으로 이동":
             if self.intermediate_target_pos:
                 distance = abs(final_player_pos.x() - self.intermediate_target_pos.x())
-                direction = "→" if final_player_pos.x() < self.intermediate_target_pos.x() else "←"
+                # [개선 B] 앵커가 있으면 방향을 고정 (토글 방지)
+                if self.safe_move_anchor and self.safe_move_anchor.get('dir') in ("→", "←"):
+                    direction = self.safe_move_anchor.get('dir')
+                else:
+                    direction = "→" if final_player_pos.x() < self.intermediate_target_pos.x() else "←"
             nav_action_text = self.guidance_text
             final_intermediate_type = 'walk'
         elif 'down_jump' in self.navigation_action or 'fall' in self.navigation_action:
@@ -8534,17 +8600,28 @@ class MapTab(QWidget):
                             self.last_printed_direction = current_direction
 
                     elif current_action_key == 'prepare_to_down_jump':
-                        # [수정안1] 안전지점 이동 필요 또는 안전검증 대기 중이면 아래점프 전송 금지
-                        if needs_safe_move:
-                            self.waiting_for_safe_down_jump = True
-                        else:
-                            can_send = (
-                                (not self.waiting_for_safe_down_jump)
-                                and is_on_ground
-                                and self.guidance_text not in ["점프 불가: 안전 지대 없음", "이동할 안전 지대 없음"]
-                            )
-                            if can_send:
-                                # 사다리 근접 시 아래점프 차단
+                        # 안전지점 안내는 준비과정에서 사용하지 않음. 키 전송 직전 안전성만 판정.
+                        can_send = (
+                            is_on_ground
+                            and self.guidance_text not in ["점프 불가: 안전 지대 없음", "이동할 안전 지대 없음"]
+                        )
+                        if can_send:
+                            now_time = time.time()
+                            # 래치/쿨다운/재시도 제어
+                            if getattr(self, 'down_jump_send_latch', False):
+                                # 전송 후 재시도 대기시간이 지날 때까지 재전송 금지
+                                if (now_time - float(getattr(self, 'down_jump_sent_at', 0.0))) < float(getattr(self, 'down_jump_retry_sec', 0.8)):
+                                    pass  # 대기
+                                else:
+                                    # 재시도 가능: 래치 해제
+                                    self.down_jump_send_latch = False
+                            else:
+                                # 단기 쿨다운: 너무 빠른 재발사 방지
+                                if (now_time - float(getattr(self, 'down_jump_sent_at', 0.0))) < float(getattr(self, 'down_jump_send_cooldown_sec', 0.5)):
+                                    can_send = False
+
+                            if can_send and not getattr(self, 'down_jump_send_latch', False):
+                                # 사다리 근접 시 아래점프 차단 (안전 안내는 띄우지 않고 대기만 설정)
                                 try:
                                     transition_objects = self.geometry_data.get("transition_objects", [])
                                     is_near_ladder, _, dist = self._check_near_ladder(
@@ -8559,10 +8636,11 @@ class MapTab(QWidget):
 
                                 if self._should_issue_down_jump(dist):
                                     command_to_send = "아래점프"
+                                    # 래치/타임스탬프 설정
+                                    self.down_jump_send_latch = True
+                                    self.down_jump_sent_at = now_time
                                     self.waiting_for_safe_down_jump = False
                                 else:
-                                    # 너무 사다리와 가까움 → 안전지점 재유도
-                                    self.guidance_text = "안전 지점으로 이동"
                                     self.waiting_for_safe_down_jump = True
                         self.last_printed_direction = None
 
@@ -8591,6 +8669,17 @@ class MapTab(QWidget):
                         else:
                             if current_direction in ["→", "←"] and (command_to_send is None or needs_safe_move):
                                 if needs_safe_move:
+                                    # 안전 이동 목표에 근접하면 방향 토글 방지를 위해 걷기 명령을 억제
+                                    try:
+                                        if self.intermediate_target_pos is not None and final_player_pos is not None:
+                                            dx = abs(self.intermediate_target_pos.x() - final_player_pos.x())
+                                            deadzone = getattr(self, 'SAFE_MOVE_DIRECTION_DEADZONE', 1.0)
+                                            if dx <= float(deadzone):
+                                                command_to_send = None
+                                                # 너무 가까우면 굳이 걷기 명령을 재전송하지 않음
+                                                raise StopIteration
+                                    except StopIteration:
+                                        pass
                                     now_time = time.time()
                                     if (now_time - self.last_safe_move_command_time) < self.SAFE_MOVE_COMMAND_COOLDOWN:
                                         command_to_send = None
@@ -8671,6 +8760,10 @@ class MapTab(QWidget):
         self.current_segment_path = []
         self.expected_terrain_group = None
         self.last_path_recalculation_time = time.time()
+        # 경로 재탐색 시 djump 잠금을 해제하여 새 경로 선택에 따름
+        self.locked_djump_area_key = None
+        # 아래점프 전송 래치 초기화
+        self.down_jump_send_latch = False
 
     def _handle_move_to_target(self, final_player_pos):
             """
@@ -8688,22 +8781,8 @@ class MapTab(QWidget):
             current_node_key = self.current_segment_path[self.current_segment_index]
             current_node = self.nav_nodes.get(current_node_key, {})
 
-            # [개선 A] 이미 계산된 안전지점 앵커가 있으면 기본 안내로 덮어쓰기 전에 우선 적용
+            # [변경] 이동 중(move_to_target)에는 안전지점 앵커를 적용하지 않음
             anchor_applied = False
-            try:
-                if (
-                    current_node.get('type') == 'djump_area'
-                    and self.safe_move_anchor
-                    and self.safe_move_anchor.get('node_key') == current_node_key
-                ):
-                    self.guidance_text = "안전 지점으로 이동"
-                    self.intermediate_target_pos = QPointF(
-                        float(self.safe_move_anchor.get('x')),
-                        float(self.safe_move_anchor.get('y')),
-                    )
-                    anchor_applied = True
-            except Exception:
-                anchor_applied = False
 
             # 기본 안내 세팅 (앵커 미적용 시에만)
             self.expected_terrain_group = current_node.get('group')
@@ -8720,8 +8799,10 @@ class MapTab(QWidget):
             arrived = False
             if current_node.get('type') == 'djump_area':
                 x_range = current_node.get('x_range')
+                # [변경] 이번 경로에서 선택(락)된 djump_area만 도착으로 인정
                 if x_range and x_range[0] <= final_player_pos.x() <= x_range[1] and floor_matches:
-                    arrived = True
+                    if (self.locked_djump_area_key is None) or (self.locked_djump_area_key == current_node_key):
+                        arrived = True
             else:
                 distance_to_target = abs(final_player_pos.x() - self.intermediate_target_pos.x())
                 if not self.event_in_progress:
@@ -8745,6 +8826,17 @@ class MapTab(QWidget):
                         self._transition_to_action_state('prepare_to_fall', current_node_key)
                         return
                     elif node_type == 'djump_area':
+                        # [변경] 이동 단계에서는 안전지점 계산 없이 바로 아래점프 준비로 전환
+                        # 단, 이번 경로에서 선택(락)된 djump_area만 인정
+                        if (self.locked_djump_area_key is None) or (self.locked_djump_area_key == current_node_key):
+                            self.safe_move_anchor = None
+                            self._transition_to_action_state('prepare_to_down_jump', current_node_key)
+                            # 준비 단계 진입 시, 락이 비어있다면 현재 노드로 설정
+                            if self.locked_djump_area_key is None:
+                                self.locked_djump_area_key = current_node_key
+                            return
+                        # 비선택 djump_area면 무시하고 다음 노드 진행 처리로 넘어감
+                        # [기존 로직 비활성화] 아래는 이전 안전지점 선계산 로직(이동 중)이었음
                         # [수정안2] 아래점프 준비 전에 출발 안전지점으로 이동을 완료하도록 전환을 지연
                         try:
                             # [개선] 출발선은 항상 현재 djump 노드의 group을 우선한다.
@@ -8842,9 +8934,9 @@ class MapTab(QWidget):
                                 self.safe_move_anchor and
                                 self.safe_move_anchor.get('node_key') == current_node_key
                             ):
-                                self.guidance_text = "안전 지점으로 이동"
+                                # 이동 중에는 안전지점 안내를 띄우지 않음. 내부 목표만 유지.
                                 self.intermediate_target_pos = QPointF(
-                                    float(self.safe_move_anchor.get('x')), 
+                                    float(self.safe_move_anchor.get('x')),
                                     float(self.safe_move_anchor.get('y'))
                                 )
                                 return
@@ -8853,11 +8945,11 @@ class MapTab(QWidget):
                             def _clamp(val, lo, hi):
                                 return lo if val < lo else (hi if val > hi else val)
 
-                            candidates = []
+                            candidates = []  # (cx, s_start, s_end)
                             for s_start, s_end in departure_safe_zones:
                                 cx = _clamp(player_x, s_start, s_end)
                                 cx = _clamp(cx, dep_min_x, dep_max_x)
-                                candidates.append(cx)
+                                candidates.append((cx, s_start, s_end))
                             
                             if candidates:
                                 # [개선] djump 목표 방향성을 반영한 안전지점 선택 (move_to_target 단계)
@@ -8871,10 +8963,12 @@ class MapTab(QWidget):
                                 except Exception:
                                     goal_x = None
 
+                                # 후보 중 최적의 점을 선택하면서 해당 안전구간도 함께 보존
                                 if goal_x is None:
-                                    best_x = min(candidates, key=lambda cx: abs(player_x - cx))
+                                    best_c = min(candidates, key=lambda t: abs(player_x - t[0]))
                                 else:
-                                    best_x = min(candidates, key=lambda cx: (abs(cx - goal_x), abs(cx - player_x)))
+                                    best_c = min(candidates, key=lambda t: (abs(t[0] - goal_x), abs(t[0] - player_x)))
+                                best_x, best_s_start, best_s_end = best_c
                                 line_y = dep_points[0][1]
                                 for i in range(len(dep_points) - 1):
                                     a, b = dep_points[i], dep_points[i + 1]
@@ -8884,13 +8978,16 @@ class MapTab(QWidget):
                                         dx = (b[0] - a[0])
                                         line_y = a[1] + (dy * ((best_x - a[0]) / dx)) if dx != 0 else a[1]
                                         break
-                                self.guidance_text = "안전 지점으로 이동"
+                                # 이동 중에는 안전지점 안내를 띄우지 않음. 내부 목표만 유지.
                                 self.intermediate_target_pos = QPointF(best_x, line_y)
                                 # [신규] 이번에 선택한 안전 목표를 앵커로 고정 (동일 노드/출발선 맥락에 한해 유지)
                                 try:
                                     self.safe_move_anchor = {
                                         'node_key': current_node_key,
                                         'line_id': departure_line.get('id'),
+                                        'dir': '→' if best_x > player_x else '←',
+                                        'safe_start': float(best_s_start),
+                                        'safe_end': float(best_s_end),
                                         'x': float(best_x),
                                         'y': float(line_y),
                                     }
@@ -8899,8 +8996,7 @@ class MapTab(QWidget):
                                 # djump 준비 전, 안전 이동 유도. 상태는 유지하고 반환
                                 return
                             else:
-                                # 안전 구간이 없으면 점프 불가로 표시
-                                self.guidance_text = "이동할 안전 지대 없음"
+                                # 안전 구간이 없으면 내부 목표만 해제
                                 self.intermediate_target_pos = None
                                 return
                         except Exception:
@@ -9105,7 +9201,8 @@ class MapTab(QWidget):
 
         # Case 1: 플레이어가 지상에 있을 때 (가장 일반적인 경우)
         if departure_terrain_group is not None:
-            if self.navigation_action in ['prepare_to_down_jump', 'prepare_to_fall']:
+            # [변경] 안전지점 유도는 오직 아래점프 준비 단계에서만 수행
+            if self.navigation_action == 'prepare_to_down_jump':
                 player_x = final_player_pos.x()
 
                 # 1단계: 출발 지점 안전성 검사
@@ -9160,91 +9257,7 @@ class MapTab(QWidget):
                         
                         is_in_hazard = any(start <= player_x <= end for start, end in ladder_hazard_zones)
                         if is_in_hazard:
-                            self.guidance_text = "안전 지점으로 이동"
-                            # ... (가장 가까운 안전 지점 계산 및 안내 로직) ...
-                            dep_min_x = min(p[0] for p in departure_line['points'])
-                            dep_max_x = max(p[0] for p in departure_line['points'])
-                            departure_safe_zones = [(dep_min_x, dep_max_x)]
-                            for h_start, h_end in ladder_hazard_zones:
-                                new_safe_zones = []
-                                for s_start, s_end in departure_safe_zones:
-                                    overlap_start = max(s_start, h_start); overlap_end = min(s_end, h_end)
-                                    if overlap_start < overlap_end:
-                                        if s_start < overlap_start: new_safe_zones.append((s_start, overlap_start))
-                                        if overlap_end < s_end: new_safe_zones.append((overlap_end, s_end))
-                                    else:
-                                        new_safe_zones.append((s_start, s_end))
-                                departure_safe_zones = new_safe_zones
-                            
-                            if departure_safe_zones:
-                                # [개선] 각 구간 내부로 player_x를 클램프하여 후보 생성 후 최단 이동 X 선택
-                                def _clamp(val, lo, hi):
-                                    return lo if val < lo else (hi if val > hi else val)
-
-                                # 출발 지형선의 X 범위 계산
-                                dep_min_x = min(p[0] for p in departure_line['points'])
-                                dep_max_x = max(p[0] for p in departure_line['points'])
-
-                                candidates = []
-                                for s_start, s_end in departure_safe_zones:
-                                    cx = _clamp(player_x, s_start, s_end)
-                                    # 출발 지형 범위로 한 번 더 제한
-                                    cx = _clamp(cx, dep_min_x, dep_max_x)
-                                    candidates.append(cx)
-
-                                if candidates:
-                                    # [개선] djump 목표(x_range) 방향성을 반영해 안전지점 선택
-                                    goal_x = None
-                                    try:
-                                        action_node_key = self.current_segment_path[self.current_segment_index]
-                                        action_node = self.nav_nodes.get(action_node_key, {})
-                                        if action_node.get('type') == 'djump_area':
-                                            xr = action_node.get('x_range')
-                                            if isinstance(xr, (list, tuple)) and len(xr) == 2:
-                                                def _clamp(v, lo, hi):
-                                                    return lo if v < lo else (hi if v > hi else v)
-                                                goal_x = _clamp(player_x, float(xr[0]), float(xr[1]))
-                                    except Exception:
-                                        goal_x = None
-
-                                    if goal_x is None:
-                                        best_x = min(candidates, key=lambda cx: abs(player_x - cx))
-                                    else:
-                                        # 1순위: 목표와의 거리 최소화, 2순위: 플레이어와의 이동 거리
-                                        best_x = min(candidates, key=lambda cx: (abs(cx - goal_x), abs(cx - player_x)))
-                                    # 출발 지형선에서 best_x에 해당하는 Y를 보간해 지면 위로 스냅
-                                    line_y = departure_line['points'][0][1]
-                                    pts = departure_line['points']
-                                    for i in range(len(pts) - 1):
-                                        a, b = pts[i], pts[i + 1]
-                                        lx, rx = (a[0], b[0]) if a[0] <= b[0] else (b[0], a[0])
-                                        if lx <= best_x <= rx:
-                                            dy = (b[1] - a[1])
-                                            dx = (b[0] - a[0])
-                                            line_y = a[1] + (dy * ((best_x - a[0]) / dx)) if dx != 0 else a[1]
-                                            break
-                                    self.intermediate_target_pos = QPointF(best_x, line_y)
-
-                                    # [신규] 낭떠러지 낙하 모드 활성화 조건: 안전구간 경계와 지형 끝의 거리 <= 2px
-                                    try:
-                                        direction = 'right' if best_x >= player_x else 'left'
-                                        edge_x = dep_max_x if direction == 'right' else dep_min_x
-                                        if abs(edge_x - best_x) <= 2.0:
-                                            self.edgefall_mode_active = True
-                                            self.edgefall_direction = direction
-                                            self.edgefall_started_at = time.time()
-                                            # 목표를 지형의 끝으로 재설정 (Y는 출발 지형선 보간값 사용)
-                                            self.intermediate_target_pos = QPointF(edge_x, line_y)
-                                            self.update_general_log(
-                                                f"[낭떠러지 낙하] {('우' if direction=='right' else '좌')} 에지까지 {abs(edge_x - best_x):.1f}px — 걷기로 낙하 유도",
-                                                "gray",
-                                            )
-                                    except Exception:
-                                        pass
-                                else:
-                                    self.intermediate_target_pos = None
-                            else:
-                                self.intermediate_target_pos = None
+                            # [변경] 준비 단계에서는 안전지점 안내를 띄우지 않음. 대기만 설정하고 반환.
                             if self.navigation_action == 'prepare_to_down_jump':
                                 self.waiting_for_safe_down_jump = True
                             self._process_action_preparation(final_player_pos)
@@ -9260,13 +9273,14 @@ class MapTab(QWidget):
                     ideal_landing_group = self.nav_nodes.get(landing_key, {}).get('group')
                     safe_zones, _ = self._find_safe_landing_zones(ideal_landing_group)
                     if not safe_zones:
-                        self.guidance_text = "점프 불가: 안전 지대 없음"; self.intermediate_target_pos = None
+                        # 안내를 변경하지 않고 전송만 보류
+                        self.intermediate_target_pos = None
                         if self.navigation_action == 'prepare_to_down_jump':
                             self.waiting_for_safe_down_jump = False
                     else:
-                        self.guidance_text = "안전 지점으로 이동"
+                        # 안내를 변경하지 않고 전송만 보류
                         closest_point_x = min([p for zone in safe_zones for p in zone], key=lambda p: abs(player_x - p))
-                        self.intermediate_target_pos = QPointF(closest_point_x, final_player_pos.y())
+                        self.intermediate_target_pos = self.intermediate_target_pos or QPointF(closest_point_x, final_player_pos.y())
                         if self.navigation_action == 'prepare_to_down_jump':
                             self.waiting_for_safe_down_jump = True
                     self._process_action_preparation(final_player_pos)
@@ -9276,8 +9290,7 @@ class MapTab(QWidget):
                 safe_zones, landing_y = self._find_safe_landing_zones(landing_terrain_group)
 
                 if not any(start <= player_x <= end for start, end in safe_zones):
-                    self.guidance_text = "안전 지점으로 이동"
-                    # [개선] 착지층 안전 구간 기준으로 X를 선택하되, 출발 지형 범위로 제한 + Y는 출발 지형선 보간
+                    # 안내를 변경하지 않고 전송만 보류. 필요 시 내부 목표만 보정.
                     def _clamp(val, lo, hi):
                         return lo if val < lo else (hi if val > hi else val)
 
@@ -9304,21 +9317,22 @@ class MapTab(QWidget):
                                 dx = (b[0] - a[0])
                                 line_y = a[1] + (dy * ((best_x - a[0]) / dx)) if dx != 0 else a[1]
                                 break
-                        self.intermediate_target_pos = QPointF(best_x, line_y)
+                        self.intermediate_target_pos = self.intermediate_target_pos or QPointF(best_x, line_y)
 
                         # [신규] 낭떠러지 낙하 모드 활성화 조건 검사
                         try:
                             direction = 'right' if best_x >= player_x else 'left'
                             edge_x = dep_max_x if direction == 'right' else dep_min_x
                             if abs(edge_x - best_x) <= 2.0:
-                                self.edgefall_mode_active = True
-                                self.edgefall_direction = direction
-                                self.edgefall_started_at = time.time()
-                                self.intermediate_target_pos = QPointF(edge_x, line_y)
-                                self.update_general_log(
-                                    f"[낭떠러지 낙하] {('우' if direction=='right' else '좌')} 에지까지 {abs(edge_x - best_x):.1f}px — 걷기로 낙하 유도",
-                                    "gray",
-                                )
+                                if not getattr(self, 'edgefall_mode_active', False):
+                                    self.edgefall_mode_active = True
+                                    self.edgefall_direction = direction
+                                    self.edgefall_started_at = time.time()
+                                    self.intermediate_target_pos = QPointF(edge_x, line_y)
+                                    self.update_general_log(
+                                        f"[낭떠러지 낙하] {('우' if direction=='right' else '좌')} 에지까지 {abs(edge_x - best_x):.1f}px — 걷기로 낙하 유도",
+                                        "gray",
+                                    )
                         except Exception:
                             pass
                     else:
