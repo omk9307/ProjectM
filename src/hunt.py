@@ -5286,9 +5286,9 @@ class HuntTab(QWidget):
         elif is_primary_release_command:
             allow_during_cooldown = True
 
-        # HP 긴급모드 보호: HP 상태 명령과 '모든 키 떼기' 외 차단
+        # HP 긴급모드 보호: HP 상태 명령과 '모든 키 떼기', '사다리 멈춤복구' 외 차단
         if getattr(self, '_hp_emergency_active', False):
-            if not (is_status_command and status_resource == 'hp') and normalized != '모든 키 떼기':
+            if not (is_status_command and status_resource == 'hp') and normalized not in ('모든 키 떼기', '사다리 멈춤복구'):
                 return
 
         if (
@@ -5380,6 +5380,17 @@ class HuntTab(QWidget):
 
     def _handle_status_config_update(self, config: StatusMonitorConfig) -> None:
         self._status_config = config
+        # 설정에서 HP 긴급모드를 비활성화하면 즉시 긴급 보호를 해제하여 차단 상태를 풀어준다.
+        try:
+            hp_cfg = getattr(config, 'hp', None)
+            if hp_cfg is not None and not getattr(hp_cfg, 'emergency_enabled', False):
+                if getattr(self, '_hp_emergency_active', False):
+                    self._hp_emergency_active = False
+                    self._hp_emergency_started_at = 0.0
+                    self._hp_emergency_telegram_sent = False
+                    self.append_log("[HP] 긴급 회복 보호 해제 [설정 해제]", 'info')
+        except Exception:
+            pass
         if not getattr(config.hp, 'enabled', True):
             self._status_display_values['hp'] = None
         if not getattr(config.mp, 'enabled', True):

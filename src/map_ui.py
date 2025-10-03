@@ -799,6 +799,22 @@ class MapTab(QWidget):
             # [NEW] UI 업데이트 조절(Throttling)을 위한 카운터
             self.log_update_counter = 0
 
+            # --- [대기 모드 내비 유지용 타이머] 주기 보강 전송 (200~400ms) ---
+            self._wait_nav_reinforce_interval_ms = 300
+            self._wait_nav_reinforce_timer = QTimer(self)
+            try:
+                # CoarseTimer로 오버헤드 축소
+                self._wait_nav_reinforce_timer.setTimerType(Qt.TimerType.CoarseTimer)
+            except Exception:
+                pass
+            self._wait_nav_reinforce_timer.setInterval(self._wait_nav_reinforce_interval_ms)
+            self._wait_nav_reinforce_timer.timeout.connect(self._on_wait_nav_reinforce_timer)
+            self._last_wait_nav_log_at = 0.0
+            # 보강 전송 관련 쿨다운/억제 타임스탬프
+            self._wait_nav_last_climb_sent_at = 0.0
+            self._wait_nav_last_jump_sent_at = 0.0
+            self._wait_nav_kick_suppress_until = 0.0
+
             #  탐지 시작 시간을 기록하기 위한 변수
             self.detection_start_time = 0
             # [핵심 수정] 시작 딜레이 중 키 해제 명령을 한 번만 보내기 위한 플래그
@@ -1164,7 +1180,9 @@ class MapTab(QWidget):
                     extra=resume_extra,
                 )
 
-            QTimer.singleShot(120, _resend_last_command)
+            # 대기 모드(wait)에서는 권한 재실행을 스케줄하지 않음
+            if not self._is_other_player_wait_active():
+                QTimer.singleShot(120, _resend_last_command)
 
         self._authority_resume_candidate = None
 
@@ -1775,9 +1793,9 @@ class MapTab(QWidget):
             except Exception:
                 status_resource = ''
 
-        # HP 긴급모드 보호: HP 상태 명령과 '모든 키 떼기' 외 차단
+        # HP 긴급모드 보호: HP 상태 명령과 '모든 키 떼기', '사다리 멈춤복구' 외 차단
         if getattr(self, '_hp_emergency_active', False):
-            if not (is_status_command and status_resource == 'hp') and command != '모든 키 떼기':
+            if not (is_status_command and status_resource == 'hp') and command not in ('모든 키 떼기', '사다리 멈춤복구'):
                 detail = {"command": command, "hp_emergency": True}
                 return _wrap_result(False, "hp_emergency_active", detail)
 
@@ -1857,6 +1875,15 @@ class MapTab(QWidget):
             return _wrap_result(False, "forbidden_wall_active", detail)
 
         self.control_command_issued.emit(command, reason)
+
+        # [대기 모드] '모든 키 떼기' 이후 다음 틱에 즉시 이동 재킥
+        try:
+            if command == "모든 키 떼기" and wait_mode_active:
+                phase = wait_context.get('phase')
+                if phase == 'wait_travel' and wait_navigation_allowed and not is_authority_command:
+                    QTimer.singleShot(120, lambda: self._kick_wait_navigation_movement(getattr(self, 'last_player_pos', None)))
+        except Exception:
+            pass
 
         if not is_status_command and command != "모든 키 떼기":
             self._last_regular_command = (command, reason)
@@ -5768,6 +5795,9 @@ class MapTab(QWidget):
 
         self._emit_control_command("모든 키 떼기", "other_player_wait:end")
 
+        # 주기 보강 전송 타이머 중지
+        self._stop_wait_nav_reinforce_timer()
+
         # 일반 경로 탐색 재개를 위해 상태 초기화
         self.journey_plan = []
         self.current_journey_index = 0
@@ -5976,6 +6006,11 @@ class MapTab(QWidget):
                     f"[대기 모드] '{waypoint_name}' 웨이포인트 경로를 계산했습니다.",
                     "DodgerBlue",
                 )
+            # 경로 계산 직후 즉시 이동 킥오프 및 주기 보강 시작
+            try:
+                self._kick_wait_navigation_movement(final_player_pos)
+            except Exception:
+                pass
             return True
 
         context['wait_route'] = None
@@ -6036,6 +6071,8 @@ class MapTab(QWidget):
             "DodgerBlue",
         )
         self._emit_control_command("모든 키 떼기", "other_player_wait:hold")
+        # 대기 상태에선 보강 타이머를 중지
+        self._stop_wait_nav_reinforce_timer()
 
     def _maintain_other_player_wait_travel(
         self,
@@ -6059,9 +6096,175 @@ class MapTab(QWidget):
                 self._recalculate_other_player_wait_route(context, final_player_pos, announce=False)
             return
 
-        if self.navigation_action != 'move_to_target':
+        # 대기 모드 이동 유지: 준비/진행/정렬 상태는 보존하고, 그 외에만 이동 상태로 되돌립니다.
+        allowed_action_states = {
+            'prepare_to_climb', 'align_for_climb', 'verify_alignment', 'climb_in_progress',
+            'prepare_to_jump', 'prepare_to_down_jump', 'prepare_to_fall',
+            'down_jump_in_progress', 'fall_in_progress'
+        }
+        current_action = getattr(self, 'navigation_action', '') or ''
+        if current_action not in allowed_action_states and current_action != 'move_to_target':
             self.navigation_action = 'move_to_target'
         self.guidance_text = f"대기 이동: {waypoint_name}"
+
+    # --- [신규] 대기 모드 이동 킥오프 & 주기 보강 전송 ---
+    def _start_wait_nav_reinforce_timer(self) -> None:
+        try:
+            if self._wait_nav_reinforce_timer and not self._wait_nav_reinforce_timer.isActive():
+                self._wait_nav_reinforce_timer.start()
+        except Exception:
+            pass
+
+    def _stop_wait_nav_reinforce_timer(self) -> None:
+        try:
+            if self._wait_nav_reinforce_timer and self._wait_nav_reinforce_timer.isActive():
+                self._wait_nav_reinforce_timer.stop()
+        except Exception:
+            pass
+
+    def _kick_wait_navigation_movement(self, final_player_pos: Optional[QPointF]) -> None:
+        """대기 모드(wait_travel)에서 즉시 1회 걷기 입력으로 이동을 킥오프한다."""
+        if not self._is_other_player_wait_active():
+            return
+
+        context = getattr(self, 'other_player_wait_context', {})
+        if context.get('phase') != 'wait_travel':
+            return
+
+        pos = final_player_pos if isinstance(final_player_pos, QPointF) else getattr(self, 'last_player_pos', None)
+        if not isinstance(pos, QPointF):
+            return
+
+        # 목표 X 계산: intermediate_target_pos > 현재 세그먼트 노드 > 웨이포인트
+        target_x: Optional[float] = None
+        try:
+            if isinstance(self.intermediate_target_pos, QPointF):
+                target_x = float(self.intermediate_target_pos.x())
+            elif self.current_segment_path and self.current_segment_index < len(self.current_segment_path):
+                node_key = self.current_segment_path[self.current_segment_index]
+                node = self.nav_nodes.get(node_key, {}) or {}
+                node_pos = node.get('pos')
+                if isinstance(node_pos, QPointF):
+                    target_x = float(node_pos.x())
+            elif self.target_waypoint_id is not None:
+                wp_node = self.nav_nodes.get(f"wp_{str(self.target_waypoint_id)}", {}) or {}
+                wp_pos = wp_node.get('pos')
+                if isinstance(wp_pos, QPointF):
+                    target_x = float(wp_pos.x())
+        except Exception:
+            target_x = None
+
+        if target_x is None:
+            return
+
+        dx = float(target_x) - float(pos.x())
+        direction_symbol = "→" if dx >= 0.0 else "←"
+        walk_command = "걷기(우)" if direction_symbol == "→" else "걷기(좌)"
+
+        # 킥오프: 권한 사유 없이 대기 모드 전용 사유로 전송
+        emit_ok = self._emit_control_command(walk_command, "other_player_wait:travel")
+        if emit_ok:
+            try:
+                self.last_movement_command = walk_command
+                self._record_command_context(walk_command, player_pos=pos)
+                ctx = self.last_command_context or {}
+                sent_at = ctx.get("sent_at") if isinstance(ctx, dict) else None
+                self.last_command_sent_time = sent_at if sent_at is not None else time.time()
+                # 킥오프 직후 짧은 시간(200ms) 동안 걷기 보강 억제
+                self._wait_nav_kick_suppress_until = time.time() + 0.2
+            except Exception:
+                pass
+
+            # 가벼운 로깅(스팸 방지)
+            try:
+                self.update_general_log(f"[대기 이동] 걷기({direction_symbol}) 킥오프.", "DodgerBlue")
+            except Exception:
+                pass
+
+        # 주기 보강 전송 타이머 실행
+        self._start_wait_nav_reinforce_timer()
+
+    def _on_wait_nav_reinforce_timer(self) -> None:
+        """대기 모드 이동을 유지하기 위해 걷기/액션 준비 명령을 주기 보강 전송."""
+        if not self._is_other_player_wait_active():
+            self._stop_wait_nav_reinforce_timer()
+            return
+
+        context = getattr(self, 'other_player_wait_context', {})
+        if not context.get('allow_navigation') or context.get('phase') != 'wait_travel':
+            return
+
+        pos = getattr(self, 'last_player_pos', None)
+        if not isinstance(pos, QPointF):
+            return
+
+        # 방향 계산 (킥오프와 동일한 규칙)
+        target_x: Optional[float] = None
+        try:
+            if isinstance(self.intermediate_target_pos, QPointF):
+                target_x = float(self.intermediate_target_pos.x())
+            elif self.current_segment_path and self.current_segment_index < len(self.current_segment_path):
+                node_key = self.current_segment_path[self.current_segment_index]
+                node = self.nav_nodes.get(node_key, {}) or {}
+                node_pos = node.get('pos')
+                if isinstance(node_pos, QPointF):
+                    target_x = float(node_pos.x())
+            elif self.target_waypoint_id is not None:
+                wp_node = self.nav_nodes.get(f"wp_{str(self.target_waypoint_id)}", {}) or {}
+                wp_pos = wp_node.get('pos')
+                if isinstance(wp_pos, QPointF):
+                    target_x = float(wp_pos.x())
+        except Exception:
+            target_x = None
+
+        if target_x is None:
+            return
+
+        dx = float(target_x) - float(pos.x())
+        direction_symbol = "→" if dx >= 0.0 else "←"
+        walk_command = "걷기(우)" if direction_symbol == "→" else "걷기(좌)"
+
+        # 1) 방향 유지 보강 전송 (상태/억제 윈도우 확인)
+        action = getattr(self, 'navigation_action', '') or ''
+        now = time.time()
+        walking_block_states = {
+            'prepare_to_climb', 'align_for_climb', 'verify_alignment', 'climb_in_progress',
+            'prepare_to_jump', 'prepare_to_down_jump', 'prepare_to_fall',
+            'down_jump_in_progress', 'fall_in_progress'
+        }
+        can_reinforce_walk = (
+            action not in walking_block_states and
+            now >= float(getattr(self, '_wait_nav_kick_suppress_until', 0.0) or 0.0)
+        )
+        if can_reinforce_walk:
+            self._emit_control_command(walk_command, "other_player_wait:travel")
+
+        # 2) 액션 준비 상태일 경우 해당 액션도 보강 전송 (권한 사유 금지)
+        try:
+            # 액션 준비 보강 (각각 쿨다운 적용)
+            if action == 'prepare_to_climb':
+                if (now - float(getattr(self, '_wait_nav_last_climb_sent_at', 0.0))) >= 0.35:
+                    entry_distance = self._get_ladder_entry_distance(pos)
+                    climb_cmd = self._select_ladder_climb_command(direction_symbol, entry_distance)
+                    self._emit_control_command(climb_cmd, "other_player_wait:prepare_climb")
+                    self._wait_nav_last_climb_sent_at = now
+                    if now - self._last_wait_nav_log_at > 1.0:
+                        self.update_general_log("[대기 이동] 오르기 준비 보강 전송.", "gray")
+                        self._last_wait_nav_log_at = now
+            elif action == 'prepare_to_jump':
+                if (now - float(getattr(self, '_wait_nav_last_jump_sent_at', 0.0))) >= 0.35:
+                    self._emit_control_command("점프", "other_player_wait:prepare_jump")
+                    self._wait_nav_last_jump_sent_at = now
+                    if now - self._last_wait_nav_log_at > 1.0:
+                        self.update_general_log("[대기 이동] 점프 준비 보강 전송.", "gray")
+                        self._last_wait_nav_log_at = now
+            else:
+                # 기본: 주기적으로 방향 유지 로그(저빈도)
+                if can_reinforce_walk and (now - self._last_wait_nav_log_at > 1.5):
+                    self.update_general_log(f"[대기 이동] 걷기({direction_symbol}) 유지.", "gray")
+                    self._last_wait_nav_log_at = now
+        except Exception:
+            pass
 
     def _maintain_other_player_wait_hold(
         self,
@@ -6110,6 +6313,11 @@ class MapTab(QWidget):
         self.target_waypoint_id = goal_id_str
 
         self._recalculate_other_player_wait_route(context, final_player_pos, announce=False)
+        # 재이동 시작을 즉시 킥오프
+        try:
+            self._kick_wait_navigation_movement(final_player_pos)
+        except Exception:
+            pass
 
     def _handle_other_player_wait_navigation(self, final_player_pos: QPointF) -> None:
         if not self._is_other_player_wait_active():
@@ -6827,10 +7035,41 @@ class MapTab(QWidget):
             if feature_id in self.key_features:
                 feature_data = self.key_features[feature_id]
                 size_data = feature_data.get('size')
-                if size_data and len(size_data) == 2:
-                    size = QSizeF(size_data[0], size_data[1])
-                    feature_rect = QRectF(pos, size)
-                    content_rect = content_rect.united(feature_rect)
+
+                # pos를 QPointF로 정규화
+                point = None
+                try:
+                    if isinstance(pos, QPointF):
+                        point = QPointF(float(pos.x()), float(pos.y()))
+                    elif isinstance(pos, QPoint):
+                        point = QPointF(float(pos.x()), float(pos.y()))
+                    elif isinstance(pos, (list, tuple)) and len(pos) >= 2:
+                        point = QPointF(float(pos[0]), float(pos[1]))
+                except Exception:
+                    point = None
+
+                if point is None:
+                    continue
+
+                # size를 QSizeF로 정규화
+                width = height = None
+                try:
+                    if isinstance(size_data, (QSizeF, QSize)):
+                        width = float(size_data.width())
+                        height = float(size_data.height())
+                    elif isinstance(size_data, (list, tuple)) and len(size_data) >= 2:
+                        width = float(size_data[0])
+                        height = float(size_data[1])
+                except Exception:
+                    width = height = None
+
+                if width is not None and height is not None:
+                    try:
+                        sizef = QSizeF(width, height)
+                        feature_rect = QRectF(point, sizef)
+                        content_rect = content_rect.united(feature_rect)
+                    except Exception:
+                        pass
 
         # 2. 모든 지오메트리 포인트 수집
         all_points = []
@@ -9793,6 +10032,17 @@ class MapTab(QWidget):
 
     def _handle_status_config_update(self, config: StatusMonitorConfig) -> None:
         self._status_config = config
+        # [추가] 긴급모드 설정 해제 시, 이미 활성화된 긴급 보호를 즉시 해제
+        try:
+            hp_cfg = getattr(self._status_config, 'hp', None)
+            if hp_cfg is not None and not getattr(hp_cfg, 'emergency_enabled', False):
+                if getattr(self, '_hp_emergency_active', False):
+                    self._hp_emergency_active = False
+                    self._hp_emergency_started_at = 0.0
+                    self._hp_emergency_telegram_sent = False
+                    self.update_general_log("[HP] 긴급 회복 보호 해제 [설정 해제]", "gray")
+        except Exception:
+            pass
         for idx, resource in enumerate(('hp', 'mp')):
             cfg = getattr(self._status_config, resource, None)
             if not cfg or not getattr(cfg, 'enabled', True):
