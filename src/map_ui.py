@@ -658,6 +658,7 @@ class MapTab(QWidget):
             self.cfg_jump_initial_velocity_threshold = None
             self.cfg_climb_max_velocity = None
             self.cfg_edgefall_timeout_sec = None
+            self.cfg_edgefall_trigger_distance = None
             self.cfg_walk_teleport_probability = None
             self.cfg_walk_teleport_interval = None
             self.cfg_walk_teleport_bonus_delay = None
@@ -780,6 +781,8 @@ class MapTab(QWidget):
             self.edgefall_mode_active = False           # 낭떠러지 낙하 모드 on/off
             self.edgefall_direction = None              # 'left' 또는 'right'
             self.edgefall_started_at = 0.0              # 모드 진입 시각
+            self.edgefall_started_x = 0.0               # 모드 진입 당시 X좌표(로그/통계용)
+            self.edgefall_edge_x: float | None = None   # 목표 에지 X좌표(로그/통계용)
             self.edgefall_timeout_sec = 3.0             # 타임아웃(초) - 기본 3초
 
             self.action_collection_max_frames = 200  
@@ -848,6 +851,9 @@ class MapTab(QWidget):
             self.airborne_warning_started_at = 0.0
             self.airborne_recovery_cooldown_until = 0.0
             self._last_airborne_recovery_log_time = 0.0
+            # 공중 경로 대기 메시지 쓰로틀(쿨타임)
+            self.AIRBORNE_PATH_WAIT_LOG_COOLDOWN = 0.3
+            self._last_airborne_path_wait_log_time = 0.0
             self._reset_airborne_recovery_state()
 
             self._active_waypoint_threshold_key = None
@@ -2568,6 +2574,7 @@ class MapTab(QWidget):
                 self.cfg_ladder_recovery_resend_delay = state_config.get("ladder_recovery_resend_delay", self.cfg_ladder_recovery_resend_delay)
                 # 낭떠러지 낙하 대기시간(초)
                 self.cfg_edgefall_timeout_sec = state_config.get("edgefall_timeout_sec", self.cfg_edgefall_timeout_sec)
+                self.cfg_edgefall_trigger_distance = state_config.get("edgefall_trigger_distance", self.cfg_edgefall_trigger_distance)
                 probability_percent = state_config.get(
                     "walk_teleport_probability",
                     self.cfg_walk_teleport_probability,
@@ -4648,6 +4655,7 @@ class MapTab(QWidget):
             "prepare_timeout": self.cfg_prepare_timeout if self.cfg_prepare_timeout is not None else PREPARE_TIMEOUT,
             "max_lock_duration": self.cfg_max_lock_duration if self.cfg_max_lock_duration is not None else MAX_LOCK_DURATION,
             "edgefall_timeout_sec": self.cfg_edgefall_timeout_sec if self.cfg_edgefall_timeout_sec is not None else 3.0,
+            "edgefall_trigger_distance": self.cfg_edgefall_trigger_distance if self.cfg_edgefall_trigger_distance is not None else 2.0,
             "walk_teleport_probability": self.cfg_walk_teleport_probability,
             "walk_teleport_interval": self.cfg_walk_teleport_interval,
             "walk_teleport_bonus_delay": self.cfg_walk_teleport_bonus_delay,
@@ -7215,10 +7223,20 @@ class MapTab(QWidget):
         """
         current_terrain = self._get_contact_terrain(final_player_pos)
         if not current_terrain:
-            if not self.current_segment_path and not self.airborne_path_warning_active:
-                self.update_general_log("경로 계산 대기: 공중에서는 경로를 계산할 수 없습니다. 착지 후 재시도합니다.", "gray")
-                self.airborne_path_warning_active = True
-                self.airborne_warning_started_at = time.time()
+            if not self.current_segment_path:
+                now = time.time()
+                # [추가] 공중 경로 대기 메시지 출력 쿨타임(쓰로틀) 적용
+                if (now - self._last_airborne_path_wait_log_time) >= self.AIRBORNE_PATH_WAIT_LOG_COOLDOWN:
+                    self.update_general_log(
+                        "경로 계산 대기: 공중에서는 경로를 계산할 수 없습니다. 착지 후 재시도합니다.",
+                        "gray",
+                    )
+                    self._last_airborne_path_wait_log_time = now
+                # 플래그 및 시작 시각은 별도로 관리하여 복구 로직이 정상 동작하도록 유지
+                if not self.airborne_path_warning_active:
+                    self.airborne_path_warning_active = True
+                    if self.airborne_warning_started_at <= 0.0:
+                        self.airborne_warning_started_at = now
             return
         else:
             if self.airborne_path_warning_active:
@@ -7593,6 +7611,25 @@ class MapTab(QWidget):
             self.navigation_action = 'move_to_target'
             self.navigation_state_locked = False
             self._climb_last_near_ladder_time = 0.0
+            # [로그] 낭떠러지 낙하 세션이 직전 있었다면 착지 결과를 남김
+            try:
+                if float(getattr(self, 'edgefall_started_at', 0.0)) > 0.0 and final_player_pos is not None:
+                    elapsed = time.time() - float(self.edgefall_started_at)
+                    # 최근 10초 이내만 유효한 세션으로 간주
+                    if elapsed <= 10.0:
+                        start_x = float(getattr(self, 'edgefall_started_x', final_player_pos.x()))
+                        travel_dx = abs(float(final_player_pos.x()) - start_x)
+                        arrow = '우' if getattr(self, 'edgefall_direction', 'right') == 'right' else '좌'
+                        landing_group = expected_group if expected_group is not None else (contact_terrain.get('dynamic_name') if contact_terrain else '-')
+                        self.update_general_log(
+                            f"[낭떠러지 낙하] 착지 완료 — 방향:{arrow}, 이동:{travel_dx:.1f}px, 소요:{elapsed:.1f}s, 착지:{landing_group}",
+                            "green",
+                        )
+                        # 세션 종료 표식 초기화
+                        self.edgefall_started_at = 0.0
+                        self.edgefall_edge_x = None
+            except Exception:
+                pass
             # 아래점프/낙하/등반 등 액션이 완료되면 djump 잠금 해제
             try:
                 self.locked_djump_area_key = None
@@ -8172,6 +8209,8 @@ class MapTab(QWidget):
         self.airborne_recovery_cooldown_until = 0.0
         self._last_airborne_recovery_log_time = 0.0
         setattr(self, '_last_airborne_fail_log_time', 0.0)
+        # [추가] 공중 경로 대기 로그 쿨타임 타이머 리셋
+        self._last_airborne_path_wait_log_time = 0.0
 
     def _should_issue_down_jump(self, ladder_dist: Optional[float]) -> bool:
         """사다리와의 거리를 기준으로 아래점프 시도가 안전한지 판단합니다."""
@@ -9199,7 +9238,22 @@ class MapTab(QWidget):
             if self.edgefall_mode_active:
                 ps = getattr(self, 'player_state', None)
                 if ps in ['falling', 'jumping']:
-                    # 낙하/점프 시작되면 모드 종료
+                    # 낙하/점프 시작되면 결과 로그 남기고 모드 종료
+                    try:
+                        curr_x = float(final_player_pos.x()) if final_player_pos is not None else float('nan')
+                        start_x = float(getattr(self, 'edgefall_started_x', curr_x))
+                        travel_dx = abs(curr_x - start_x) if (not math.isnan(curr_x) and not math.isnan(start_x)) else 0.0
+                    except Exception:
+                        travel_dx = 0.0
+                    try:
+                        elapsed = time.time() - float(getattr(self, 'edgefall_started_at', time.time()))
+                    except Exception:
+                        elapsed = 0.0
+                    arrow = '우' if getattr(self, 'edgefall_direction', 'right') == 'right' else '좌'
+                    self.update_general_log(
+                        f"[낭떠러지 낙하] 낙하 시작 — 방향:{arrow}, 이동:{travel_dx:.1f}px, 대기:{elapsed:.1f}s",
+                        "green",
+                    )
                     self.edgefall_mode_active = False
                 else:
                     # 설정값 우선 적용 (없으면 기본값 사용)
@@ -9347,14 +9401,33 @@ class MapTab(QWidget):
                         try:
                             direction = 'right' if best_x >= player_x else 'left'
                             edge_x = dep_max_x if direction == 'right' else dep_min_x
-                            if abs(edge_x - best_x) <= 2.0:
+                            try:
+                                trigger_dx = float(getattr(self, 'cfg_edgefall_trigger_distance', 2.0))
+                                if trigger_dx <= 0:
+                                    trigger_dx = 2.0
+                            except Exception:
+                                trigger_dx = 2.0
+                            if abs(edge_x - best_x) <= trigger_dx:
                                 if not getattr(self, 'edgefall_mode_active', False):
                                     self.edgefall_mode_active = True
                                     self.edgefall_direction = direction
                                     self.edgefall_started_at = time.time()
+                                    # 로그/통계용 시작/목표 좌표 저장
+                                    try:
+                                        self.edgefall_started_x = float(player_x)
+                                        self.edgefall_edge_x = float(edge_x)
+                                    except Exception:
+                                        self.edgefall_started_x = float(edge_x)
+                                        self.edgefall_edge_x = float(edge_x)
+                                    # 목표를 에지로 고정
                                     self.intermediate_target_pos = QPointF(edge_x, line_y)
+                                    # 플레이어 기준 에지까지 남은 X거리로 로그 출력(기존 0.0px 문제 보완)
+                                    try:
+                                        remain_dx = abs(float(edge_x) - float(player_x))
+                                    except Exception:
+                                        remain_dx = abs(float(edge_x) - float(best_x))
                                     self.update_general_log(
-                                        f"[낭떠러지 낙하] {('우' if direction=='right' else '좌')} 에지까지 {abs(edge_x - best_x):.1f}px — 걷기로 낙하 유도",
+                                        f"[낭떠러지 낙하] {('우' if direction=='right' else '좌')} 에지까지 {remain_dx:.1f}px — 걷기로 낙하 유도",
                                         "gray",
                                     )
                         except Exception:
