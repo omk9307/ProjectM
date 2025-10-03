@@ -237,6 +237,7 @@ class TelegramBridge(QObject):
                                 "- /정보 | /info: HP/MP/EXP 요약\n"
                                 "- /정지 | /stop: 탐지 강제중단(ESC 효과)\n"
                                 "- /시작 | /start: 사냥 시작\n"
+                                "- /화면출력 | /display: 사냥탭 화면출력 토글\n"
                                 "- /대기모드 | /wait: 즉시 대기모드(무기한) 진입\n"
                                 "- /대기종료 | /wait_end: 대기모드 해제\n"
                                 "- /종료 | /exit: 10초 뒤 종료 예약\n"
@@ -278,6 +279,12 @@ class TelegramBridge(QObject):
                     # 시작
                     if lower in ("/시작", "/start"):
                         ok, msg = self._start_hunt()
+                        await context.bot.send_message(chat_id=chat_id, text=msg)
+                        return
+
+                    # 화면출력 토글
+                    if lower in ("/화면출력", "/display", "/screen_output"):
+                        ok, msg = self._toggle_screen_output()
                         await context.bot.send_message(chat_id=chat_id, text=msg)
                         return
 
@@ -568,6 +575,28 @@ class TelegramBridge(QObject):
             return _run_in_main_thread(_call)  # type: ignore[return-value]
         except Exception as exc:
             return False, f"대기 모드 해제 실패: {exc}"
+
+    def _toggle_screen_output(self) -> tuple[bool, str]:
+        if self._hunt_tab is None:
+            return False, "사냥탭을 찾을 수 없습니다."
+        def _call() -> tuple[bool, str]:
+            chk = getattr(self._hunt_tab, 'screen_output_checkbox', None)
+            if chk is None:
+                return False, "화면출력 체크박스를 찾을 수 없습니다."
+            try:
+                current = bool(chk.isChecked())
+            except Exception:
+                current = False
+            try:
+                chk.setChecked(not current)
+                state = "켬" if not current else "끔"
+                return True, f"화면출력: {state}"
+            except Exception as exc:
+                return False, f"화면출력 토글 실패: {exc}"
+        try:
+            return _run_in_main_thread(_call)  # type: ignore[return-value]
+        except Exception as exc:
+            return False, f"화면출력 토글 실패: {exc}"
 
 
 def _parse_minutes_korean(text: str) -> Optional[int]:
