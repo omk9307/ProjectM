@@ -5938,15 +5938,28 @@ class HuntTab(QWidget):
                                     if not sent:
                                         self.append_log("텔레그램 전송 실패 또는 비활성화 상태입니다.", 'warn')
                                     self._low_hp_alert_active = False
-                            # 초긴급 명령프로필 실행 (선택된 경우 1회 트리거)
+                            # 초긴급 명령프로필 실행 (선택된 경우: 매 HP 판단 주기마다 재트리거)
                             urgent_cmd = getattr(hp_cfg, 'urgent_command_profile', None)
                             if isinstance(urgent_cmd, str) and urgent_cmd.strip():
-                                if current < threshold and not getattr(self, '_low_hp_urgent_active', False):
-                                    self._emit_control_command(urgent_cmd.strip(), reason=f"urgent:hp:{int(round(current))}")
-                                    self.append_log(f"[HP] 초긴급 명령 실행: '{urgent_cmd.strip()}'", 'warn')
-                                    self._low_hp_urgent_active = True
-                                elif current >= threshold and getattr(self, '_low_hp_urgent_active', False):
-                                    self._low_hp_urgent_active = False
+                                interval = 1.0
+                                try:
+                                    interval = float(getattr(hp_cfg, 'interval_sec', 1.0) or 1.0)
+                                except Exception:
+                                    interval = 1.0
+                                last_ts = float(getattr(self, '_last_hp_urgent_ts', 0.0) or 0.0)
+                                if current < threshold:
+                                    if (timestamp - last_ts) >= max(0.1, interval * 0.9):
+                                        self._emit_control_command(urgent_cmd.strip(), reason=f"urgent:hp:{int(round(current))}")
+                                        self.append_log(f"[HP] 초긴급 명령 실행: '{urgent_cmd.strip()}'", 'warn')
+                                        try:
+                                            setattr(self, '_last_hp_urgent_ts', timestamp)
+                                        except Exception:
+                                            pass
+                                else:
+                                    try:
+                                        setattr(self, '_last_hp_urgent_ts', 0.0)
+                                    except Exception:
+                                        pass
                         except Exception:
                             pass
                     except Exception:

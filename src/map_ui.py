@@ -8559,12 +8559,12 @@ class MapTab(QWidget):
         is_near_ladder, _, dist = self._check_near_ladder(
             final_player_pos,
             transition_objects,
-            1.2,
+            2.0,
             return_dist=True,
             current_floor=self.current_player_floor
         )
 
-        if is_near_ladder and dist >= 0 and dist <= 1.2:
+        if is_near_ladder and dist >= 0 and dist <= 2.0:
             distance_text = self._format_ladder_distance(dist)
             if now - self._last_airborne_recovery_log_time > 1.0:
                 self.update_general_log(
