@@ -587,7 +587,7 @@ class MapTab(QWidget):
             self.reference_anchor_id = None
             self.smoothed_player_pos = None
             self.line_id_to_floor_map = {}  # [v11.4.5] 지형선 ID <-> 층 정보 캐싱용 딕셔너리
-            self.initial_delay_ms = 2000
+            self.initial_delay_ms = 500
 
             # 이벤트 웨이포인트 실행 상태
             self.event_in_progress = False
@@ -1379,7 +1379,7 @@ class MapTab(QWidget):
         self.initial_delay_spinbox = QSpinBox()
         self.initial_delay_spinbox.setRange(0, 10000)
         self.initial_delay_spinbox.setSingleStep(100)
-        self.initial_delay_spinbox.setValue(2000)
+        self.initial_delay_spinbox.setValue(500)
         self.initial_delay_spinbox.setSuffix(" ms")
         self.initial_delay_spinbox.valueChanged.connect(self._on_initial_delay_changed)
         first_row_layout.addWidget(self.initial_delay_spinbox)
@@ -3032,12 +3032,12 @@ class MapTab(QWidget):
                 self.current_hotkey = 'None'
                 self._perf_logging_enabled = False
                 self._minimap_display_enabled = True
-                self.initial_delay_ms = 2000
+                self.initial_delay_ms = 500
                 return None
         self.current_hotkey = 'None'
         self._perf_logging_enabled = False
         self._minimap_display_enabled = True
-        self.initial_delay_ms = 2000
+        self.initial_delay_ms = 500
         return None
 
     def save_global_settings(self):
@@ -3047,7 +3047,7 @@ class MapTab(QWidget):
                 'hotkey': self.current_hotkey, #  단축키 정보 저장
                 'perf_logging_enabled': bool(self._perf_logging_enabled),
                 'minimap_display_enabled': bool(getattr(self, '_minimap_display_enabled', True)),
-                'initial_delay_ms': int(getattr(self, 'initial_delay_ms', 2000)),
+                'initial_delay_ms': int(getattr(self, 'initial_delay_ms', 500)),
             }
             json.dump(settings, f)
 
