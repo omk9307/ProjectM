@@ -8620,28 +8620,52 @@ class MapTab(QWidget):
                                 if (now_time - float(getattr(self, 'down_jump_sent_at', 0.0))) < float(getattr(self, 'down_jump_send_cooldown_sec', 0.5)):
                                     can_send = False
 
-                            if can_send and not getattr(self, 'down_jump_send_latch', False):
-                                # 사다리 근접 시 아래점프 차단 (안전 안내는 띄우지 않고 대기만 설정)
-                                try:
-                                    transition_objects = self.geometry_data.get("transition_objects", [])
-                                    is_near_ladder, _, dist = self._check_near_ladder(
-                                        final_player_pos,
-                                        transition_objects,
-                                        self.cfg_ladder_arrival_x_threshold,
-                                        return_dist=True,
-                                        current_floor=self.current_player_floor,
-                                    )
-                                except Exception:
-                                    dist = None
+                            # 사다리 거리 계산 (안전성 판단 및 대기 여부 결정)
+                            try:
+                                transition_objects = self.geometry_data.get("transition_objects", [])
+                                is_near_ladder, _, dist = self._check_near_ladder(
+                                    final_player_pos,
+                                    transition_objects,
+                                    self.cfg_ladder_arrival_x_threshold,
+                                    return_dist=True,
+                                    current_floor=self.current_player_floor,
+                                )
+                            except Exception:
+                                dist = None
 
-                                if self._should_issue_down_jump(dist):
+                            # edgefall 모드이거나 사다리 근접으로 아래점프 금지 시: 안전지점/에지로 걷기 유도
+                            should_walk_to_safe = (
+                                getattr(self, 'edgefall_mode_active', False)
+                                or not self._should_issue_down_jump(dist)
+                                or getattr(self, 'waiting_for_safe_down_jump', False)
+                                or getattr(self, 'safe_move_anchor', None) is not None
+                            )
+
+                            if can_send and not getattr(self, 'down_jump_send_latch', False):
+                                if not should_walk_to_safe:
+                                    # 아래점프 허용: 키 전송
                                     command_to_send = "아래점프"
-                                    # 래치/타임스탬프 설정
                                     self.down_jump_send_latch = True
                                     self.down_jump_sent_at = now_time
                                     self.waiting_for_safe_down_jump = False
                                 else:
+                                    # 안전지점/에지로 이동: 내부 목표(intermediate_target_pos) 기준으로 걷기 전송
                                     self.waiting_for_safe_down_jump = True
+                                    target = self.intermediate_target_pos
+                                    try:
+                                        if target is not None and final_player_pos is not None:
+                                            dx = float(target.x()) - float(final_player_pos.x())
+                                            deadzone = float(getattr(self, 'SAFE_MOVE_DIRECTION_DEADZONE', 1.0))
+                                            if abs(dx) > deadzone:
+                                                # 쿨다운 내 중복 전송 방지
+                                                if (now_time - self.last_safe_move_command_time) >= float(self.SAFE_MOVE_COMMAND_COOLDOWN):
+                                                    command_to_send = "걷기(우)" if dx > 0 else "걷기(좌)"
+                                                    self.last_safe_move_command_time = now_time
+                                                    # 방향 기억(토글 방지 보조)
+                                                    self.last_printed_direction = "→" if dx > 0 else "←"
+                                    except Exception:
+                                        # 목표가 없거나 계산 실패 시, 아래점프 전송은 하지 않고 대기만 유지
+                                        pass
                         self.last_printed_direction = None
 
                     elif action_changed:
