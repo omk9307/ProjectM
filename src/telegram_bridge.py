@@ -170,6 +170,7 @@ class TelegramBridge(QObject):
         self._thread: Optional[threading.Thread] = None
         self._creds = _load_credentials()
         self._bot_app = None
+        self._loop = None  # 백그라운드 asyncio 이벤트 루프
 
     def available(self) -> bool:
         return _is_windows() and self._creds is not None
@@ -213,6 +214,7 @@ class TelegramBridge(QObject):
                 return
 
             self._bot_app = app
+            self._loop = loop
 
             async def _handle_text(update, context):  # type: ignore[no-redef]
                 try:
@@ -598,6 +600,21 @@ class TelegramBridge(QObject):
         except Exception as exc:
             return False, f"화면출력 토글 실패: {exc}"
 
+    # --- 외부 알림용 간단 API ---
+    def send_text(self, text: str) -> bool:
+        """현재 설정된 챗ID로 텍스트를 전송(가능하면 즉시, 실패 시 False)."""
+        if not self._running or not self._bot_app or not self._loop:
+            return False
+        if not self._creds or self._creds.allowed_chat_id is None:
+            return False
+        try:
+            import asyncio
+            coro = self._bot_app.bot.send_message(chat_id=int(self._creds.allowed_chat_id), text=str(text))
+            asyncio.run_coroutine_threadsafe(coro, self._loop)
+            return True
+        except Exception:
+            return False
+
 
 def _parse_minutes_korean(text: str) -> Optional[int]:
     # 예: "/종료예약 10분" 또는 공백 여러개 허용
@@ -638,6 +655,10 @@ def maybe_start_bridge(main_window) -> Optional[TelegramBridge]:
         bridge = TelegramBridge(main_window)
         if bridge.available():
             bridge.start()
+            try:
+                _set_active_bridge(bridge)
+            except Exception:
+                pass
             return bridge
         else:
             print("[TelegramBridge] 비활성화(자격 미설정 또는 OS 미지원)")
@@ -645,3 +666,20 @@ def maybe_start_bridge(main_window) -> Optional[TelegramBridge]:
     except Exception as exc:  # pragma: no cover - 안전 장치
         print(f"[TelegramBridge] 시작 중 오류: {exc}")
         return None
+
+# ---- 외부에서 간단히 텍스트를 보낼 수 있도록 도우미 제공 ----
+_ACTIVE_BRIDGE: Optional[TelegramBridge] = None
+
+def _set_active_bridge(bridge: Optional[TelegramBridge]) -> None:
+    global _ACTIVE_BRIDGE
+    _ACTIVE_BRIDGE = bridge
+
+def send_telegram_text(text: str) -> bool:
+    """활성 브리지로 텍스트 메시지를 보낸다. 실패 시 False."""
+    bridge = _ACTIVE_BRIDGE
+    if bridge is None:
+        return False
+    try:
+        return bridge.send_text(text)
+    except Exception:
+        return False

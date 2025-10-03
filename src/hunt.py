@@ -70,6 +70,12 @@ from window_anchors import (
     resolve_roi_to_absolute,
 )
 
+# 텔레그램 알림(선택적): 브리지가 활성일 때만 전송
+try:
+    from telegram_bridge import send_telegram_text as _tg_send_text
+except Exception:  # pragma: no cover - 환경에 따라 브리지 미설치/미활성 가능
+    _tg_send_text = None
+
 if os.name == 'nt':
     MOD_ALT = 0x0001
     MOD_CONTROL = 0x0002
@@ -639,6 +645,9 @@ class HuntTab(QWidget):
     CONTROL_REQUEST_TIMEOUT_MS = 5000
     CHARACTER_PERSISTENCE_SEC = 5.0
     DIRECTION_TIMEOUT_SEC = 1.5
+    # 캐릭터 미검출 → ESC 효과 정지 후 재시작
+    CHAR_MISSING_TIMEOUT_SEC = 10.0
+    CHAR_MISSING_RESTART_DELAY_SEC = 2.0
 
     control_command_issued = pyqtSignal(str, object)
     control_authority_requested = pyqtSignal(dict)
@@ -906,6 +915,84 @@ class HuntTab(QWidget):
         self._setup_timers()
         self._setup_facing_reset_timer()
         self._setup_detection_hotkey()
+
+        # 캐릭터 미검출 감시 타이머
+        self._char_missing_restart_pending: bool = False
+        self._char_missing_watchdog = QTimer(self)
+        self._char_missing_watchdog.setInterval(500)
+        self._char_missing_watchdog.setSingleShot(False)
+        self._char_missing_watchdog.timeout.connect(self._check_character_presence_watchdog)
+        self._char_missing_watchdog.start()
+
+    def _check_character_presence_watchdog(self) -> None:
+        """캐릭터가 10초 이상 미검출 시 ESC 효과로 전체 정지 후 2초 뒤 사냥 재시작.
+        - ESC 효과: 사냥/맵 모두 정지 + 모든 키 떼기
+        - 재시작: 사냥탭만 api_start_detection()
+        - 텔레그램 알림 발송(가능 시)
+        """
+        # 사냥탭 탐지가 동작 중이 아닐 때는 감시 불필요
+        if not self._is_detection_active():
+            self._char_missing_restart_pending = False
+            return
+
+        last_seen = float(getattr(self, '_last_character_seen_ts', 0.0) or 0.0)
+        if last_seen <= 0.0:
+            # 최초 탐지 이전 상태에서는 루프 폭주 방지 위해 스킵
+            return
+
+        elapsed = time.time() - last_seen
+        if elapsed < self.CHAR_MISSING_TIMEOUT_SEC:
+            return
+
+        if self._char_missing_restart_pending:
+            return
+
+        # 트리거 고정: 중복 실행 방지
+        self._char_missing_restart_pending = True
+
+        # 텔레그램 알림 (가능 시)
+        try:
+            if _tg_send_text:
+                secs = int(round(elapsed))
+                _tg_send_text(f"캐릭터 미탐지 {secs}초 > 재발동 시퀀스 발동")
+        except Exception:
+            pass
+
+        # 1) ESC 효과와 동일한 전체 정지
+        try:
+            self.append_log(f"캐릭터 미검출 {elapsed:.1f}s → ESC 효과 정지", "warn")
+        except Exception:
+            pass
+        try:
+            self.force_stop_detection(reason='esc_shortcut')
+        except Exception:
+            pass
+        try:
+            map_tab = getattr(self, 'map_tab', None)
+            if map_tab and hasattr(map_tab, 'force_stop_detection'):
+                map_tab.force_stop_detection(reason='esc_shortcut')
+        except Exception:
+            pass
+
+        # 1.5) 약간의 지연 후 모든 키 떼기
+        try:
+            QTimer.singleShot(500, lambda: self._emit_control_command("모든 키 떼기", reason="esc:global_stop"))
+        except Exception:
+            pass
+
+        # 2) 2초 뒤 사냥 재시작
+        def _restart_hunt() -> None:
+            try:
+                try:
+                    self.append_log("사냥 재시작(자동)", "info")
+                except Exception:
+                    pass
+                self.api_start_detection()
+            finally:
+                # 재트리거 허용(다음 미검출 감지 가능)
+                QTimer.singleShot(1000, lambda: setattr(self, '_char_missing_restart_pending', False))
+
+        QTimer.singleShot(int(self.CHAR_MISSING_RESTART_DELAY_SEC * 1000), _restart_hunt)
 
     def _setup_facing_reset_timer(self) -> None:
         self.facing_reset_timer = QTimer(self)
