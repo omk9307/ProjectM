@@ -391,6 +391,10 @@ class AutoControlTab(QWidget):
         self.globally_pressed_keys = set()
         self.global_listener = None
         
+        # --- (신규) Quiet 모드: 지정 시간 동안 화이트리스트 외 입력 차단 ---
+        self._quiet_until_ts: float = 0.0
+        self._quiet_whitelist: set[str] = set()
+        
         self.init_ui()
         self._apply_initial_keyboard_visual_state()
         self.load_mappings()
@@ -1781,6 +1785,14 @@ class AutoControlTab(QWidget):
         if key_object is None:
             return False
 
+        # Quiet 모드: 허용 오너 외 입력 차단
+        try:
+            if self._quiet_until_ts > 0.0 and time.time() < self._quiet_until_ts:
+                if owner not in self._quiet_whitelist:
+                    return False
+        except Exception:
+            pass
+
         key_set = self._get_key_set_for_owner(owner)
         already_owned = key_object in key_set
 
@@ -1804,6 +1816,14 @@ class AutoControlTab(QWidget):
     def _release_key_for_owner(self, owner: str, key_object, *, force: bool = False) -> bool:
         if key_object is None:
             return False
+
+        # Quiet 모드: 허용 오너 외 입력 차단
+        try:
+            if self._quiet_until_ts > 0.0 and time.time() < self._quiet_until_ts:
+                if owner not in self._quiet_whitelist:
+                    return False
+        except Exception:
+            pass
 
         key_set = self._get_key_set_for_owner(owner)
         had_key = key_object in key_set
@@ -1870,6 +1890,69 @@ class AutoControlTab(QWidget):
         force=True이면 _release_key에 force=True로 호출(하드 릴리즈).
         """
         self._release_all_for_owner(self.SEQUENTIAL_OWNER, force=force)
+
+    # ===================
+    # 공개 API (텔레그램 연동용)
+    # ===================
+    def api_is_serial_ready(self) -> bool:
+        """시리얼 연결 준비 상태 반환."""
+        try:
+            return bool(self.ser and getattr(self.ser, 'is_open', False))
+        except Exception:
+            return False
+
+    def api_activate_maple_window(self) -> bool:
+        """게임 창을 전면 활성화 (실패 시 False)."""
+        try:
+            return bool(self._activate_mapleland_window())
+        except Exception:
+            return False
+
+    def api_release_all_keys_global(self) -> None:
+        """모든 오너의 모든 키를 강제 해제한다."""
+        try:
+            for owner, key_set in list(self.sequence_owned_keys.items()):
+                for key_obj in list(key_set):
+                    try:
+                        self._release_key_for_owner(owner, key_obj, force=True)
+                    except Exception:
+                        pass
+            self.global_key_counts.clear()
+            try:
+                self.keyboard_state_reset.emit()
+            except Exception:
+                pass
+        except Exception:
+            pass
+
+    def api_set_quiet_mode(self, duration_ms: int, whitelist_owners: set[str] | None = None) -> None:
+        """quiet 모드 설정: duration_ms 동안 whitelist 외 입력 차단."""
+        if duration_ms <= 0:
+            self._quiet_until_ts = 0.0
+            self._quiet_whitelist = set(whitelist_owners or set())
+            return
+        try:
+            self._quiet_until_ts = time.time() + float(duration_ms) / 1000.0
+            self._quiet_whitelist = set(whitelist_owners or set())
+        except Exception:
+            self._quiet_until_ts = 0.0
+            self._quiet_whitelist = set()
+
+    def api_press_key(self, key_repr: str, *, owner: str = 'CHAT', force: bool = False) -> bool:
+        """문자열 키 표현을 눌러 전송한다. 예: 'Key.enter', 'Key.ctrl', 'v'"""
+        try:
+            key_obj = self._str_to_key_obj(key_repr)
+            return bool(self._press_key_for_owner(owner, key_obj, force=force))
+        except Exception:
+            return False
+
+    def api_release_key(self, key_repr: str, *, owner: str = 'CHAT', force: bool = False) -> bool:
+        """문자열 키 표현을 떼어 전송한다."""
+        try:
+            key_obj = self._str_to_key_obj(key_repr)
+            return bool(self._release_key_for_owner(owner, key_obj, force=force))
+        except Exception:
+            return False
 
     def _abort_sequence_for_recovery(self):
         try:
