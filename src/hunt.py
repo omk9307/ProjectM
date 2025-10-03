@@ -5663,12 +5663,38 @@ class HuntTab(QWidget):
         hp_text = '비활성' if not hp_enabled else _format_resource_text(hp, hp_cfg)
         mp_text = '비활성' if not mp_enabled else _format_resource_text(mp, mp_cfg)
         exp_text = '비활성'
+        exp_extra = ''
         if self._status_exp_records:
             latest = self._status_exp_records[-1]
             amount = latest.get('amount')
             percent = latest.get('percent')
             if amount is not None and percent is not None:
                 exp_text = f"{amount} / {percent:.2f}%"
+                # 실시간 EXP 통계 추가
+                stats = self._compute_exp_live_stats() if exp_enabled else None
+                if isinstance(stats, dict):
+                    def _fmt_percent(val: float) -> str:
+                        try:
+                            text = f"{float(val):.2f}"
+                            if '.' in text:
+                                text = text.rstrip('0').rstrip('.')
+                            return text
+                        except Exception:
+                            return '--'
+
+                    per_min_amt = stats.get('per_minute_amount')
+                    per_min_pct = stats.get('per_minute_percent')
+                    total_pct = stats.get('total_percent_gain')
+                    eta_sec = stats.get('eta_seconds')
+
+                    per_min_text = (
+                        f"{int(per_min_amt)} / {_fmt_percent(float(per_min_pct))}%"
+                        if per_min_amt is not None and per_min_pct is not None
+                        else "-- / --"
+                    )
+                    total_pct_text = _fmt_percent(float(total_pct)) if total_pct is not None else '--'
+                    eta_text = self._format_duration_text(float(eta_sec)) if isinstance(eta_sec, (int, float)) else '--'
+                    exp_extra = f" | 분당: {per_min_text} | 누적: +{total_pct_text}% | 레벨업: {eta_text}"
         elif exp_enabled:
             exp_text = '-- / --'
         else:
@@ -5676,7 +5702,7 @@ class HuntTab(QWidget):
         self._status_summary_cache = {
             'hp': f"HP: {hp_text}",
             'mp': f"MP: {mp_text}",
-            'exp': f"EXP: {exp_text}",
+            'exp': f"EXP: {exp_text}{exp_extra}",
         }
 
     def _record_exp_snapshot(self, record: dict) -> None:
@@ -5854,6 +5880,144 @@ class HuntTab(QWidget):
         minutes = int((seconds % 3600) // 60)
         secs = int(seconds % 60)
         return f"{hours}시간 {minutes}분 {secs}초"
+
+    def _compute_exp_live_stats(self) -> Optional[dict]:
+        """현재까지 수집된 EXP 스냅샷으로 실시간 통계를 계산합니다.
+
+        반환값 예시:
+            {
+                'total_amount_gain': int,
+                'total_percent_gain': float,
+                'per_minute_amount': int,
+                'per_minute_percent': float,
+                'eta_seconds': Optional[float],
+                'latest_percent': float,
+            }
+
+        데이터 부족 시 None을 반환합니다.
+        """
+        try:
+            records = [
+                {
+                    'timestamp': float(e.get('timestamp', time.time())),
+                    'amount': int(str(e.get('amount'))),
+                    'percent': float(e.get('percent')),
+                }
+                for e in (self._status_exp_records or [])
+                if isinstance(e, dict) and e.get('amount') is not None and e.get('percent') is not None
+            ]
+        except (TypeError, ValueError):
+            records = []
+
+        if not records:
+            return None
+
+        records.sort(key=lambda item: item.get('timestamp', 0.0))
+
+        start_snapshot = self._status_exp_start_snapshot
+        start_amount: Optional[int] = None
+        start_percent: Optional[float] = None
+        start_timestamp: float = records[0].get('timestamp', time.time())
+        if isinstance(start_snapshot, dict):
+            try:
+                start_amount = max(0, int(str(start_snapshot.get('amount'))))
+                start_percent = max(0.0, float(start_snapshot.get('percent')))
+                start_timestamp = float(start_snapshot.get('timestamp', start_timestamp))
+            except (TypeError, ValueError):
+                start_amount = None
+                start_percent = None
+
+        if start_amount is None or start_percent is None:
+            start_amount = records[0]['amount']
+            start_percent = records[0]['percent']
+        else:
+            first = records[0]
+            if (
+                start_amount != first['amount']
+                or abs(start_percent - first['percent']) > 1e-6
+            ):
+                records.insert(0, {
+                    'timestamp': start_timestamp,
+                    'amount': start_amount,
+                    'percent': start_percent,
+                })
+            else:
+                first['timestamp'] = min(first.get('timestamp', start_timestamp), start_timestamp)
+
+        # 누적 증가량 계산 (레벨업 감지 포함)
+        LEVELUP_AMOUNT_DROP_MIN = 10
+        LEVELUP_PERCENT_DROP_MIN = 0.2
+        LEVELUP_PERCENT_RESET_THRESHOLD = 5.0
+        LEVELUP_AMOUNT_RATIO_THRESHOLD = 0.2
+        LEVELUP_PERCENT_RATIO_THRESHOLD = 0.5
+        POSITIVE_PERCENT_EPS = 0.001
+
+        total_amount_gain = 0
+        total_percent_gain = 0.0
+        prev_amount = records[0]['amount']
+        prev_percent = records[0]['percent']
+
+        for entry in records[1:]:
+            amount = entry['amount']
+            percent = entry['percent']
+
+            amount_delta = amount - prev_amount
+            percent_delta = percent - prev_percent
+            amount_drop = prev_amount - amount
+            percent_drop = prev_percent - percent
+
+            level_up_detected = (
+                amount_drop > LEVELUP_AMOUNT_DROP_MIN
+                and percent_drop > LEVELUP_PERCENT_DROP_MIN
+                and (
+                    percent <= LEVELUP_PERCENT_RESET_THRESHOLD
+                    or amount <= max(0.0, prev_amount * LEVELUP_AMOUNT_RATIO_THRESHOLD)
+                    or percent <= prev_percent * LEVELUP_PERCENT_RATIO_THRESHOLD
+                )
+            )
+
+            if level_up_detected:
+                if amount > 0:
+                    total_amount_gain += amount
+                if percent > 0:
+                    total_percent_gain += percent
+            else:
+                if amount_delta > 0:
+                    total_amount_gain += amount_delta
+                if percent_delta > POSITIVE_PERCENT_EPS:
+                    total_percent_gain += percent_delta
+
+            prev_amount = amount
+            prev_percent = percent
+
+        total_amount_gain = max(0, int(total_amount_gain))
+        total_percent_gain = max(0.0, float(total_percent_gain))
+
+        # 분당 계산
+        now_ts = time.time()
+        duration_start_ts = self._status_detection_start_ts or records[0].get('timestamp', now_ts)
+        duration = max(0.0, float(now_ts) - float(duration_start_ts))
+        minutes = max(1.0 / 60.0, duration / 60.0)
+        per_minute_amount = int(total_amount_gain / minutes) if minutes > 0 else total_amount_gain
+        per_minute_percent = total_percent_gain / minutes if minutes > 0 else total_percent_gain
+
+        # ETA 계산 (현재 레벨에서 100%까지)
+        latest_percent = float(records[-1]['percent'])
+        if per_minute_percent > POSITIVE_PERCENT_EPS and latest_percent < 100.0:
+            left_percent = max(0.0, 100.0 - latest_percent)
+            eta_minutes = left_percent / per_minute_percent
+            eta_seconds: Optional[float] = max(0.0, eta_minutes * 60.0)
+        else:
+            eta_seconds = None
+
+        return {
+            'total_amount_gain': total_amount_gain,
+            'total_percent_gain': total_percent_gain,
+            'per_minute_amount': per_minute_amount,
+            'per_minute_percent': per_minute_percent,
+            'eta_seconds': eta_seconds,
+            'latest_percent': latest_percent,
+        }
 
     def handle_detection_payload(self, payload: dict) -> None:
         if not isinstance(payload, dict):
