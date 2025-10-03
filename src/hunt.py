@@ -1526,6 +1526,25 @@ class HuntTab(QWidget):
         group.setLayout(area_layout)
         group.setSizePolicy(QSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed))
 
+        # [추가] 전/후 비대칭 토글 시 높이 변화로 인한 UI 흔들림 방지
+        # - 대칭/비대칭 두 상태의 sizeHint 높이를 측정해, 더 큰 값을 최소 높이로 확보
+        try:
+            initial_checked = bool(self.facing_range_checkbox.isChecked())
+            # 대칭 상태 높이
+            self._update_range_inputs_enabled(False)
+            sym_h = group.sizeHint().height()
+            # 비대칭 상태 높이
+            self._update_range_inputs_enabled(True)
+            asym_h = group.sizeHint().height()
+            # 초기 표시 상태 복원
+            self._update_range_inputs_enabled(initial_checked)
+            reserve_h = max(sym_h, asym_h)
+            if reserve_h > 0:
+                group.setMinimumHeight(reserve_h)
+        except Exception:
+            # 측정 실패 시에도 기능 영향 없음(안전 무시)
+            pass
+
         for spin in (
             self.enemy_range_spinbox,
             self.y_band_height_spinbox,
@@ -1544,7 +1563,7 @@ class HuntTab(QWidget):
         self.facing_range_checkbox.toggled.connect(self._on_area_config_changed)
         self.facing_range_checkbox.toggled.connect(self._handle_setting_changed)
 
-        # 초기 표시 상태 정리
+        # 초기 표시 상태 정리(위의 높이 선확보 로직이 상태를 복원하지만, 안전 차원에서 재호출)
         self._update_range_inputs_enabled(self.facing_range_checkbox.isChecked())
 
         return group

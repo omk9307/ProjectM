@@ -3739,6 +3739,8 @@ class StateConfigDialog(QDialog):
         add_spinbox("ladder_recovery_resend_delay", "사다리 복구 재전송 지연(초):", 0.05, 10.0, 0.05)
         add_spinbox("prepare_timeout", "행동 준비 시간 제한(초):", 0.5, 30.0, 0.5)
         add_spinbox("edgefall_timeout_sec", "낭떠러지 낙하 대기시간(초):", 0.5, 10.0, 0.1)
+        # [신규] 낭떠러지 낙하 활성 임계 X거리(px)
+        add_spinbox("edgefall_trigger_distance", "낭떠러지 낙하 임계거리(px):", 0.0, 20.0, 0.1)
         add_spinbox("max_lock_duration", "행동 진행 잠금 시간(초):", 0.5, 30.0, 0.5)
         add_spinbox("on_ladder_enter_frame_threshold", "사다리 탑승 판정 프레임:", 1, 10, 1, is_double=False)
         add_spinbox("jump_initial_velocity_threshold", "점프 초기 속도 임계값(px/f):", 1.0, 10.0, 0.1)
@@ -3875,6 +3877,7 @@ class StateConfigDialog(QDialog):
             "walk_teleport_bonus_step": WALK_TELEPORT_BONUS_STEP_DEFAULT,
             "walk_teleport_bonus_max": WALK_TELEPORT_BONUS_MAX_DEFAULT,
             "edgefall_timeout_sec": 3.0,
+            "edgefall_trigger_distance": 2.0,
         }
         for key, spinbox in self.spinboxes.items():
             if key in defaults:

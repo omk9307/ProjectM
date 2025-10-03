@@ -7673,6 +7673,25 @@ class MapTab(QWidget):
                 if self.debug_basic_pathfinding_checkbox and self.debug_basic_pathfinding_checkbox.isChecked():
                     print(f"[INFO] {log_message}")
 
+                # [FIX] 액션 완료가 세그먼트 종료인 경우에도 웨이포인트 도착을 확정
+                try:
+                    if (
+                        isinstance(self.journey_plan, list)
+                        and 0 <= self.current_journey_index < len(self.journey_plan)
+                    ):
+                        reached_wp_id = self.journey_plan[self.current_journey_index]
+                        self.last_reached_wp_id = reached_wp_id
+                        self.current_journey_index += 1
+                except Exception:
+                    # 안전상 예외는 무시하고 이어서 처리
+                    pass
+
+                # 다음 경로 계산을 위해 현재 세그먼트 경로를 정리
+                try:
+                    self.current_segment_path = []
+                except Exception:
+                    pass
+
                 self.expected_terrain_group = None
                 self.update_general_log(log_message, "green")
             self._try_execute_pending_event()
