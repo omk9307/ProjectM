@@ -17,7 +17,8 @@ import time
 from dataclasses import dataclass
 from typing import Callable, Optional
 
-from PyQt6.QtCore import QObject, QTimer
+from PyQt6.QtCore import QObject, QTimer, pyqtSignal, Qt
+from PyQt6.QtWidgets import QApplication
 
 
 def _is_windows() -> bool:
@@ -31,52 +32,113 @@ class _Credentials:
 
 
 def _load_credentials() -> Optional[_Credentials]:
-    """workspace/config/telegram/credentials.py에서 토큰/Chat ID를 읽는다."""
+    """다음 우선순위로 자격 정보를 로드한다.
+    1) workspace/config/telegram.json (KEY="VALUE" 형식)
+    2) workspace/config/telegram/credentials.py (기존 폴백)
+    3) 환경변수 BOT_TOKEN / ALLOWED_CHAT_IDS
+    """
     base = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    path = os.path.join(base, "workspace", "config", "telegram", "credentials.py")
-    if not os.path.exists(path):
-        # 환경변수 폴백
-        token = os.environ.get("BOT_TOKEN") or ""
-        chat_raw = os.environ.get("ALLOWED_CHAT_IDS") or ""
+
+    # 1) telegram.json (KEY="VALUE" 텍스트)
+    json_like_path = os.path.join(base, "workspace", "config", "telegram.json")
+    if os.path.exists(json_like_path):
+        try:
+            with open(json_like_path, "r", encoding="utf-8-sig") as fp:
+                lines = fp.readlines()
+        except Exception:
+            lines = []
+        kv: dict[str, str] = {}
+        import re
+
+        pattern = re.compile(r"^\s*([A-Za-z_][A-Za-z0-9_]*)\s*=\s*([\'\"])(.*?)\2\s*$")
+        for raw in lines:
+            m = pattern.match(raw.strip())
+            if not m:
+                continue
+            key, _, val = m.groups()
+            kv[key] = val
+        token = kv.get("TELEGRAM_BOT_TOKEN", "")
+        chat_raw = kv.get("TELEGRAM_CHAT_ID", "")
         chat_id: Optional[int] = None
         try:
-            if chat_raw and "," not in chat_raw:
-                chat_id = int(chat_raw.strip())
-        except ValueError:
+            if chat_raw:
+                chat_id = int(chat_raw.strip().split(",")[0])
+        except Exception:
             chat_id = None
         if token:
             return _Credentials(token=token, allowed_chat_id=chat_id)
-        return None
 
-    spec = importlib.util.spec_from_file_location("telegram_credentials", path)
-    if not spec or not spec.loader:  # pragma: no cover - 방어 코드
-        return None
-    module = importlib.util.module_from_spec(spec)
-    try:
-        spec.loader.exec_module(module)
-    except Exception:
-        return None
+    # 2) credentials.py (폴백)
+    py_path = os.path.join(base, "workspace", "config", "telegram", "credentials.py")
+    if os.path.exists(py_path):
+        spec = importlib.util.spec_from_file_location("telegram_credentials", py_path)
+        if spec and spec.loader:
+            module = importlib.util.module_from_spec(spec)
+            try:
+                spec.loader.exec_module(module)
+            except Exception:
+                module = None
+            if module is not None:
+                token = getattr(module, "TELEGRAM_BOT_TOKEN", None) or ""
+                chat_raw = getattr(module, "TELEGRAM_CHAT_ID", None) or ""
+                chat_id: Optional[int] = None
+                try:
+                    if isinstance(chat_raw, str) and chat_raw.strip():
+                        first = chat_raw.split(",")[0].strip()
+                        chat_id = int(first)
+                    elif isinstance(chat_raw, int):
+                        chat_id = int(chat_raw)
+                except (TypeError, ValueError):
+                    chat_id = None
+                if token:
+                    return _Credentials(token=token, allowed_chat_id=chat_id)
 
-    token = getattr(module, "TELEGRAM_BOT_TOKEN", None) or ""
-    chat_raw = getattr(module, "TELEGRAM_CHAT_ID", None) or ""
+    # 3) 환경변수 (최종 폴백)
+    token = os.environ.get("BOT_TOKEN") or ""
+    chat_raw = os.environ.get("ALLOWED_CHAT_IDS") or ""
     chat_id: Optional[int] = None
     try:
-        if isinstance(chat_raw, str) and chat_raw.strip():
-            # 한 명만 사용(요청사항). 콤마가 있어도 첫 항목만 사용.
-            first = chat_raw.split(",")[0].strip()
-            chat_id = int(first)
-        elif isinstance(chat_raw, int):
-            chat_id = int(chat_raw)
-    except (TypeError, ValueError):
+        if chat_raw and "," not in chat_raw:
+            chat_id = int(chat_raw.strip())
+    except ValueError:
         chat_id = None
+    if token:
+        return _Credentials(token=token, allowed_chat_id=chat_id)
+    return None
 
-    if not token:
-        return None
-    return _Credentials(token=token, allowed_chat_id=chat_id)
+
+_INVOKER: Optional["_MainThreadInvoker"] = None
+
+
+class _MainThreadInvoker(QObject):
+    callRequested = pyqtSignal(object)
+
+    def __init__(self) -> None:
+        super().__init__()
+        # QueuedConnection 보장: emit를 타 스레드에서 호출해도 수신은 객체 소유 스레드에서 실행
+        self.callRequested.connect(self._on_call, Qt.ConnectionType.QueuedConnection)
+
+    def _on_call(self, fn: Callable[[], None]) -> None:  # pragma: no cover - 간단 위임
+        try:
+            fn()
+        except Exception:
+            raise
+
+
+def _ensure_invoker_initialized() -> None:
+    global _INVOKER
+    if _INVOKER is None:
+        # 반드시 메인 스레드에서 생성되도록 보장
+        app = QApplication.instance()
+        if app is None:
+            raise RuntimeError("QApplication이 준비되지 않았습니다.")
+        _INVOKER = _MainThreadInvoker()
 
 
 def _run_in_main_thread(func: Callable[[], object], *, timeout: float = 5.0) -> object:
     """Qt 메인 스레드에서 func를 실행하고 결과를 동기 반환한다."""
+    _ensure_invoker_initialized()
+    assert _INVOKER is not None
     result_holder: dict[str, object] = {}
     event = threading.Event()
 
@@ -88,7 +150,8 @@ def _run_in_main_thread(func: Callable[[], object], *, timeout: float = 5.0) -> 
         finally:
             event.set()
 
-    QTimer.singleShot(0, _wrapper)
+    # 메인 스레드로 큐잉
+    _INVOKER.callRequested.emit(_wrapper)
     if not event.wait(timeout):
         raise TimeoutError("메인 스레드 작업이 제한시간 내에 완료되지 않았습니다.")
     if "error" in result_holder:
@@ -127,9 +190,22 @@ class TelegramBridge(QObject):
             return
 
         self._running = True
+        # 메인 스레드 인보커 초기화 (메인 스레드에서 호출됨)
+        try:
+            _ensure_invoker_initialized()
+        except Exception as exc:
+            print(f"[TelegramBridge] 메인 스레드 인보커 초기화 실패: {exc}")
+            self._running = False
+            return
 
         def _bot_thread() -> None:
             try:
+                import asyncio
+
+                # 전용 이벤트 루프 생성(백그라운드 스레드용)
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+
                 app = ApplicationBuilder().token(token).build()
             except Exception as exc:
                 print(f"[TelegramBridge] 봇 초기화 실패: {exc}")
@@ -161,6 +237,8 @@ class TelegramBridge(QObject):
                                 "- /정보 | /info: HP/MP/EXP 요약\n"
                                 "- /정지 | /stop: 탐지 강제중단(ESC 효과)\n"
                                 "- /시작 | /start: 사냥 시작\n"
+                                "- /대기모드 | /wait: 즉시 대기모드(무기한) 진입\n"
+                                "- /대기종료 | /wait_end: 대기모드 해제\n"
                                 "- /종료 | /exit: 10초 뒤 종료 예약\n"
                                 "- /종료예약 n분 | /exit_in n: n분 뒤 종료 예약\n"
                                 "- /종료예약 취소 | /cancel_exit: 종료 예약 취소\n"
@@ -200,6 +278,18 @@ class TelegramBridge(QObject):
                     # 시작
                     if lower in ("/시작", "/start"):
                         ok, msg = self._start_hunt()
+                        await context.bot.send_message(chat_id=chat_id, text=msg)
+                        return
+
+                    # 대기모드(무기한) 진입
+                    if lower in ("/대기모드", "/wait"):
+                        ok, msg = self._enter_wait_indef()
+                        await context.bot.send_message(chat_id=chat_id, text=msg)
+                        return
+
+                    # 대기모드 해제
+                    if lower in ("/대기종료", "/wait_end"):
+                        ok, msg = self._exit_wait_indef()
                         await context.bot.send_message(chat_id=chat_id, text=msg)
                         return
 
@@ -244,11 +334,47 @@ class TelegramBridge(QObject):
 
             app.add_handler(MessageHandler(filters.TEXT, _handle_text))
 
+            async def _amain():  # 비동기 폴링 루틴
+                try:
+                    await app.initialize()
+                    await app.start()
+                    # Updater가 존재하면 비동기 start_polling 호출
+                    updater = getattr(app, "updater", None)
+                    if updater and hasattr(updater, "start_polling"):
+                        coro = updater.start_polling()
+                        # start_polling이 코루틴이면 await
+                        if hasattr(coro, "__await__"):
+                            await coro
+                    # 실행 유지 루프
+                    while self._running:
+                        await asyncio.sleep(0.5)
+                finally:
+                    try:
+                        updater = getattr(app, "updater", None)
+                        if updater and hasattr(updater, "stop"):
+                            coro = updater.stop()
+                            if hasattr(coro, "__await__"):
+                                await coro
+                    except Exception:
+                        pass
+                    try:
+                        await app.stop()
+                    except Exception:
+                        pass
+                    try:
+                        await app.shutdown()
+                    except Exception:
+                        pass
+
             try:
-                app.run_polling(stop_signals=None, allowed_updates=None)
+                loop.run_until_complete(_amain())
             except Exception as exc:
                 print(f"[TelegramBridge] 폴링 종료: {exc}")
             finally:
+                try:
+                    loop.close()
+                except Exception:
+                    pass
                 self._running = False
 
         self._thread = threading.Thread(target=_bot_thread, name="TelegramBridgeThread", daemon=True)
@@ -258,9 +384,10 @@ class TelegramBridge(QObject):
     def stop(self) -> None:
         self._running = False
         app = self._bot_app
+        # stop()는 비동기 루틴의 종료 루프를 깨우는 용도로 사용
         try:
-            if app is not None:
-                app.stop()
+            # 아무 것도 하지 않아도 루프는 0.5초 내 종료됨
+            pass
         except Exception:
             pass
         self._bot_app = None
@@ -298,10 +425,7 @@ class TelegramBridge(QObject):
             return False, "사냥탭을 찾을 수 없습니다."
 
         def _call() -> tuple[bool, str]:
-            api = getattr(self._hunt_tab, "api_start_detection", None)
-            if callable(api):
-                ok = bool(api())
-                return ok, ("사냥을 시작했습니다." if ok else "사냥 시작에 실패했습니다.")
+            # 버튼 클릭과 동일한 경로로 실행. 창 활성화는 1회 건너뛰어 포커스 제한 문제 회피.
             try:
                 is_running = bool(self._hunt_tab.detect_btn.isChecked())
             except Exception:
@@ -309,10 +433,17 @@ class TelegramBridge(QObject):
             if is_running:
                 return True, "이미 사냥 중입니다."
             try:
-                self._hunt_tab.detect_btn.setChecked(True)
-                self._hunt_tab._toggle_detection(True)
+                try:
+                    setattr(self._hunt_tab, '_skip_window_activation_once', True)
+                except Exception:
+                    pass
+                self._hunt_tab.detect_btn.click()
                 return True, "사냥을 시작했습니다."
             except Exception as exc:
+                # 폴백: API 있으면 호출
+                api = getattr(self._hunt_tab, "api_start_detection", None)
+                if callable(api) and bool(api()):
+                    return True, "사냥을 시작했습니다."
                 return False, f"사냥 시작 실패: {exc}"
 
         try:
@@ -411,6 +542,32 @@ class TelegramBridge(QObject):
                 return True, io.BytesIO(enc.tobytes())
         except Exception as exc:
             return False, f"화면 캡처 실패: {exc}"
+
+    def _enter_wait_indef(self) -> tuple[bool, str]:
+        if self._hunt_tab is None:
+            return False, "사냥탭을 찾을 수 없습니다."
+        def _call() -> tuple[bool, str]:
+            api = getattr(self._hunt_tab, "api_enter_indefinite_wait_mode", None)
+            if callable(api):
+                return api()
+            return False, "대기 모드 API를 찾을 수 없습니다."
+        try:
+            return _run_in_main_thread(_call)  # type: ignore[return-value]
+        except Exception as exc:
+            return False, f"대기 모드 진입 실패: {exc}"
+
+    def _exit_wait_indef(self) -> tuple[bool, str]:
+        if self._hunt_tab is None:
+            return False, "사냥탭을 찾을 수 없습니다."
+        def _call() -> tuple[bool, str]:
+            api = getattr(self._hunt_tab, "api_exit_indefinite_wait_mode", None)
+            if callable(api):
+                return api()
+            return False, "대기 모드 API를 찾을 수 없습니다."
+        try:
+            return _run_in_main_thread(_call)  # type: ignore[return-value]
+        except Exception as exc:
+            return False, f"대기 모드 해제 실패: {exc}"
 
 
 def _parse_minutes_korean(text: str) -> Optional[int]:

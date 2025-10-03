@@ -886,6 +886,8 @@ class HuntTab(QWidget):
         self.shutdown_other_player_wait_started_at: Optional[float] = None
         self.shutdown_other_player_wait_clear_since: Optional[float] = None
         self.shutdown_other_player_wait_restart_required = False
+        # 텔레그램 무기한 대기모드 플래그
+        self._manual_indefinite_wait_active: bool = False
         self._shutdown_last_reason: Optional[str] = None
         self.shutdown_sleep_enabled = False
         self.shutdown_timer = QTimer(self)
@@ -997,6 +999,8 @@ class HuntTab(QWidget):
         except Exception:
             pass
         try:
+            # 비 UI 트리거에서는 창 활성화가 차단될 수 있어 1회 건너뜀
+            setattr(self, '_skip_window_activation_once', True)
             self.detect_btn.setChecked(True)
             self._toggle_detection(True)
             return True
@@ -1050,6 +1054,46 @@ class HuntTab(QWidget):
         except Exception as exc:
             return False, f"종료 예약 취소 실패: {exc}"
         return True, ("종료 예약을 취소했습니다." if had else "취소할 종료 예약이 없습니다.")
+
+    # ---------------------- 대기 모드(무기한) 제어 ----------------------
+    def api_enter_indefinite_wait_mode(self) -> tuple[bool, str]:
+        """즉시 대기모드로 진입하여 /대기종료 전까지 유지한다.
+
+        사전 조건: '대기 모드' 웨이포인트가 설정되어 있어야 한다.
+        """
+        import time as _t
+        # 대기모드가 이미 활성화되어 있다면 플래그만 전환
+        if getattr(self, 'shutdown_other_player_wait_active', False):
+            self._manual_indefinite_wait_active = True
+            try:
+                if hasattr(self, 'shutdown_other_player_elapsed'):
+                    self.shutdown_other_player_elapsed.setText("대기 모드 진행 중")
+            except Exception:
+                pass
+            return True, "이미 대기 모드입니다. 무기한 모드로 전환합니다."
+
+        # 웨이포인트 필요
+        waypoint_id = getattr(self, 'shutdown_other_player_wait_waypoint_id', None)
+        if waypoint_id is None:
+            return False, "대기 모드를 실행하려면 먼저 웨이포인트를 설정해주세요."
+
+        ok = bool(self._start_other_player_wait_mode(float(_t.time())))
+        if not ok:
+            return False, "대기 모드 시작에 실패했습니다."
+        self._manual_indefinite_wait_active = True
+        return True, "대기 모드를 시작했습니다(무기한). /대기종료 로 해제하세요."
+
+    def api_exit_indefinite_wait_mode(self) -> tuple[bool, str]:
+        """무기한 대기모드를 해제하고 일반 종료 동작(필요 시 탐지 재시작)을 수행한다."""
+        was_active = bool(getattr(self, 'shutdown_other_player_wait_active', False))
+        self._manual_indefinite_wait_active = False
+        if was_active:
+            try:
+                self._finish_other_player_wait_mode(reason="manual_exit")
+            except Exception as exc:
+                return False, f"대기 모드 해제 실패: {exc}"
+            return True, "대기 모드를 해제했습니다."
+        return True, "대기 모드가 활성화되어 있지 않습니다."
 
     def _schedule_facing_reset(self) -> None:
         if not hasattr(self, 'facing_reset_timer'):
@@ -2650,14 +2694,21 @@ class HuntTab(QWidget):
         else:
             self.shutdown_other_player_last_count = 0
             if self.shutdown_other_player_action == 'wait_mode' and self.shutdown_other_player_wait_active:
-                if self.shutdown_other_player_wait_clear_since is None:
-                    self.shutdown_other_player_wait_clear_since = now
-                clear_elapsed = now - self.shutdown_other_player_wait_clear_since
-                if clear_elapsed >= max(1, float(self.shutdown_other_player_wait_clear_delay)):
-                    self._finish_other_player_wait_mode(reason="other_absent")
-                    self.shutdown_other_player_detect_since = None
-                    self.shutdown_other_player_action_triggered = False
-                    self.shutdown_other_player_elapsed.setText("감지 대기")
+                # 무기한 대기모드일 경우 자동 해제를 하지 않는다.
+                if getattr(self, '_manual_indefinite_wait_active', False):
+                    try:
+                        self.shutdown_other_player_elapsed.setText("대기 모드 진행 중")
+                    except Exception:
+                        pass
+                else:
+                    if self.shutdown_other_player_wait_clear_since is None:
+                        self.shutdown_other_player_wait_clear_since = now
+                    clear_elapsed = now - self.shutdown_other_player_wait_clear_since
+                    if clear_elapsed >= max(1, float(self.shutdown_other_player_wait_clear_delay)):
+                        self._finish_other_player_wait_mode(reason="other_absent")
+                        self.shutdown_other_player_detect_since = None
+                        self.shutdown_other_player_action_triggered = False
+                        self.shutdown_other_player_elapsed.setText("감지 대기")
             else:
                 self._reset_other_player_progress()
 
@@ -2739,6 +2790,7 @@ class HuntTab(QWidget):
         if restart_required:
             QTimer.singleShot(500, self._restart_hunt_detection_after_wait)
         self.shutdown_other_player_wait_restart_required = False
+        self._manual_indefinite_wait_active = False
 
     def _restart_hunt_detection_after_wait(self) -> None:
         if self._is_detection_active():
@@ -3384,7 +3436,20 @@ class HuntTab(QWidget):
                 self.detect_btn.setChecked(False)
                 return
 
-            maple_window = self._activate_maple_window()
+            # 텔레그램 등 비 UI 트리거에서 포커싱이 막힐 수 있으므로, 1회에 한해 활성화 건너뛰기 지원
+            skip_activation = bool(getattr(self, '_skip_window_activation_once', False))
+            if skip_activation:
+                try:
+                    delattr(self, '_skip_window_activation_once')
+                except Exception:
+                    pass
+                try:
+                    maple_windows = gw.getWindowsWithTitle('Mapleland')
+                except Exception:
+                    maple_windows = []
+                maple_window = maple_windows[0] if maple_windows else None
+            else:
+                maple_window = self._activate_maple_window()
             if not maple_window:
                 QMessageBox.warning(self, '오류', '메이플스토리 창을 찾을 수 없습니다.')
                 self.detect_btn.setChecked(False)
