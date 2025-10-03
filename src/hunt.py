@@ -5851,7 +5851,9 @@ class HuntTab(QWidget):
                                         and not self._hp_emergency_active
                                         and self._hp_recovery_fail_streak >= int(getattr(hp_cfg, 'emergency_trigger_failures', 3) or 3)
                                     ):
-                                        self._enter_hp_emergency_mode()
+                                        # [변경] 사다리 등반 중에는 긴급모드 진입 금지
+                                        if not self._is_on_ladder():
+                                            self._enter_hp_emergency_mode()
                         # [NEW] 긴급모드 HP 임계값(%)에 의한 즉시 진입 (OR 조건)
                         try:
                             em_thr = getattr(hp_cfg, 'emergency_trigger_hp_percent', None)
@@ -5862,11 +5864,18 @@ class HuntTab(QWidget):
                             ):
                                 current2 = float(hp_value)
                                 if current2 <= float(em_thr):
-                                    self.append_log(
-                                        f"[HP] 긴급모드 진입: HP 임계값({int(em_thr)}%) 이하 감지 (현재 {int(round(current2))}%)",
-                                        'warn',
-                                    )
-                                    self._enter_hp_emergency_mode()
+                                    # [변경] 사다리 등반 중에는 긴급모드 진입 금지
+                                    if not self._is_on_ladder():
+                                        self.append_log(
+                                            f"[HP] 긴급모드 진입: HP 임계값({int(em_thr)}%) 이하 감지 (현재 {int(round(current2))}%)",
+                                            'warn',
+                                        )
+                                        self._enter_hp_emergency_mode()
+                                    else:
+                                        self.append_log(
+                                            f"[HP] 긴급모드 조건 충족(HP {int(round(current2))}%)이나 사다리 상태로 진입 보류",
+                                            'info',
+                                        )
                         except Exception:
                             pass
                         # 긴급모드 시간 초과 검사
@@ -6077,6 +6086,20 @@ class HuntTab(QWidget):
             candidate_windows = gw.getWindowsWithTitle('Mapleland')
         except Exception:
             return
+
+    def _is_on_ladder(self) -> bool:
+        """맵 탭의 player_state를 확인하여 사다리 관련 상태(climbing_up/down, on_ladder_idle)인지 판별.
+
+        맵탭이 없거나 상태를 알 수 없으면 False로 간주한다.
+        """
+        try:
+            map_tab = getattr(self, 'map_tab', None)
+            if not map_tab:
+                return False
+            state = getattr(map_tab, 'player_state', None)
+            return str(state) in {'climbing_up', 'climbing_down', 'on_ladder_idle'}
+        except Exception:
+            return False
 
         target_window = None
         for window in candidate_windows:
