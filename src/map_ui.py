@@ -10191,12 +10191,25 @@ class MapTab(QWidget):
                                     self._low_hp_alert_active = False
                             urgent_cmd = getattr(hp_cfg, 'urgent_command_profile', None)
                             if isinstance(urgent_cmd, str) and urgent_cmd.strip():
-                                if current < threshold and not getattr(self, '_low_hp_urgent_active', False):
-                                    self._emit_control_command(urgent_cmd.strip(), reason=f"urgent:hp:{int(round(current))}")
-                                    self.update_general_log(f"[HP] 초긴급 명령 실행: '{urgent_cmd.strip()}'", "orange")
-                                    self._low_hp_urgent_active = True
-                                elif current >= threshold and getattr(self, '_low_hp_urgent_active', False):
-                                    self._low_hp_urgent_active = False
+                                # 초긴급: 매 HP 판단 주기마다 재트리거
+                                try:
+                                    interval = float(getattr(hp_cfg, 'interval_sec', 1.0) or 1.0)
+                                except Exception:
+                                    interval = 1.0
+                                last_ts = float(getattr(self, '_last_hp_urgent_ts', 0.0) or 0.0)
+                                if current < threshold:
+                                    if (timestamp - last_ts) >= max(0.1, interval * 0.9):
+                                        self._emit_control_command(urgent_cmd.strip(), reason=f"urgent:hp:{int(round(current))}")
+                                        self.update_general_log(f"[HP] 초긴급 명령 실행: '{urgent_cmd.strip()}'", "orange")
+                                        try:
+                                            setattr(self, '_last_hp_urgent_ts', timestamp)
+                                        except Exception:
+                                            pass
+                                else:
+                                    try:
+                                        setattr(self, '_last_hp_urgent_ts', 0.0)
+                                    except Exception:
+                                        pass
                         except Exception:
                             pass
                 except Exception:
@@ -10210,6 +10223,10 @@ class MapTab(QWidget):
             return
         if not getattr(cfg, 'enabled', True):
             return
+        # [정책] HP 상태 명령은 권한을 가진 쪽에서만 발동(맵 링크 사용 시)
+        if resource == 'hp' and getattr(self, 'map_link_enabled', False):
+            if str(getattr(self, 'current_authority_owner', 'map')) != 'map':
+                return
         threshold = getattr(cfg, 'recovery_threshold', None)
         if threshold is None:
             return
