@@ -924,6 +924,9 @@ class HuntTab(QWidget):
         self._char_missing_watchdog.timeout.connect(self._check_character_presence_watchdog)
         self._char_missing_watchdog.start()
 
+        # EXP 정체(1분 주기 연속 동일) 감지 후 재시작 중복 방지용 플래그
+        self._exp_stagnation_restart_pending: bool = False
+
     def _check_character_presence_watchdog(self) -> None:
         """캐릭터가 10초 이상 미검출 시 ESC 효과로 전체 정지 후 2초 뒤 사냥 재시작.
         - ESC 효과: 사냥/맵 모두 정지 + 모든 키 떼기
@@ -993,6 +996,131 @@ class HuntTab(QWidget):
                 QTimer.singleShot(1000, lambda: setattr(self, '_char_missing_restart_pending', False))
 
         QTimer.singleShot(int(self.CHAR_MISSING_RESTART_DELAY_SEC * 1000), _restart_hunt)
+
+    # -------------------- EXP 정체 대응 루틴 --------------------
+    def _notify_telegram(self, text: str) -> bool:
+        if not text:
+            return False
+        # 우선 활성 텔레그램 브리지 사용
+        try:
+            if _tg_send_text and _tg_send_text(text):
+                return True
+        except Exception:
+            pass
+        # 폴백: 맵탭의 직접 전송 API 사용(가능 시)
+        try:
+            map_tab = getattr(self, 'map_tab', None)
+            if map_tab and hasattr(map_tab, 'send_emergency_telegram'):
+                map_tab.send_emergency_telegram(text)
+                return True
+        except Exception:
+            pass
+        return False
+
+    def _kill_mapleland_process_immediately(self, reason_label: str) -> bool:
+        """Mapleland 프로세스를 즉시 종료하고 후속 정리 및 알림을 수행한다."""
+        pid = getattr(self, 'shutdown_pid_value', None)
+        if pid is None:
+            try:
+                self._auto_detect_mapleland_pid(auto_trigger=True)
+                pid = getattr(self, 'shutdown_pid_value', None)
+            except Exception:
+                pid = None
+        if pid is None:
+            try:
+                self.append_log(f"자동 종료[{reason_label}] 시도 실패: PID가 설정되어 있지 않습니다.", 'warn')
+                self._log_map_shutdown(f"자동 종료[{reason_label}] 시도 실패: PID 입력 필요", 'orange')
+            except Exception:
+                pass
+            return False
+
+        success, detail, signal_used = self._perform_process_kill(int(pid))
+        if success:
+            try:
+                signal_text = f" ({signal_used})" if signal_used else ''
+                message = f"자동 종료[{reason_label}] - PID {pid} 프로세스를 종료했습니다{signal_text}."
+                self.append_log(message, 'warn')
+                self._log_map_shutdown(message, 'orange')
+            except Exception:
+                pass
+            # 후속 처리: PID 리셋, 키 해제, 탐지 정지, 절전 모드(선택)
+            try:
+                self.shutdown_pid_value = None
+                if hasattr(self, 'shutdown_pid_input'):
+                    self.shutdown_pid_input.setText('')
+            except Exception:
+                pass
+            try:
+                self._issue_all_keys_release('shutdown')
+            except Exception:
+                pass
+            try:
+                self.force_stop_detection(reason='auto_shutdown')
+            except Exception:
+                pass
+            try:
+                map_tab = getattr(self, 'map_tab', None)
+                if map_tab and hasattr(map_tab, 'force_stop_detection'):
+                    map_tab.force_stop_detection(reason='auto_shutdown')
+            except Exception:
+                pass
+            try:
+                if getattr(self, 'shutdown_sleep_enabled', False):
+                    self._attempt_system_sleep()
+            except Exception:
+                pass
+            return True
+        else:
+            try:
+                detail_text = f": {detail}" if detail else ''
+                message = f"자동 종료[{reason_label}] 실패{detail_text}"
+                self.append_log(message, 'warn')
+                self._log_map_shutdown(message, 'red')
+            except Exception:
+                pass
+            return False
+
+    def _apply_esc_and_restart_for_exp(self) -> None:
+        """EXP 정체 시 ESC 효과로 전체 정지 후 2초 뒤 사냥 재시작."""
+        if self._exp_stagnation_restart_pending:
+            return
+        self._exp_stagnation_restart_pending = True
+
+        try:
+            self.append_log("[EXP] 정체 감지 → ESC 효과 정지 후 재시작", 'warn')
+        except Exception:
+            pass
+
+        # ESC 효과: 사냥/맵 정지
+        try:
+            self.force_stop_detection(reason='esc_shortcut')
+        except Exception:
+            pass
+        try:
+            map_tab = getattr(self, 'map_tab', None)
+            if map_tab and hasattr(map_tab, 'force_stop_detection'):
+                map_tab.force_stop_detection(reason='esc_shortcut')
+        except Exception:
+            pass
+
+        # 약간의 지연 후 모든 키 떼기
+        try:
+            QTimer.singleShot(500, lambda: self._emit_control_command("모든 키 떼기", reason="exp:global_stop"))
+        except Exception:
+            pass
+
+        # 2초 뒤 사냥 재시작
+        def _restart_hunt() -> None:
+            try:
+                self.append_log("[EXP] 정체 대응: 사냥 재시작(자동)", 'info')
+            except Exception:
+                pass
+            try:
+                self.api_start_detection()
+            finally:
+                QTimer.singleShot(1000, lambda: setattr(self, '_exp_stagnation_restart_pending', False))
+
+        QTimer.singleShot(2000, _restart_hunt)
 
     def _setup_facing_reset_timer(self) -> None:
         self.facing_reset_timer = QTimer(self)
@@ -5831,6 +5959,39 @@ class HuntTab(QWidget):
             exp_info = payload.get('exp')
             if isinstance(exp_info, dict):
                 self._record_exp_snapshot(exp_info)
+                # [EXP 정체 감지] 직전 측정 대비 완전 동일하면 문제로 간주
+                try:
+                    records = getattr(self, '_status_exp_records', []) or []
+                    if len(records) >= 2:
+                        prev = records[-2]
+                        curr = records[-1]
+                        same_amount = (int(prev.get('amount')) == int(curr.get('amount')))
+                        same_percent = (float(prev.get('percent')) == float(curr.get('percent')))
+                        if same_amount and same_percent:
+                            # HP 확인: 10% 미만이면(또는 읽기 실패) 사망 판단 → 프로세스 종료
+                            hp_percent: Optional[float] = None
+                            hp_info = payload.get('hp') if isinstance(payload, dict) else None
+                            if isinstance(hp_info, dict) and isinstance(hp_info.get('percentage'), (int, float)):
+                                hp_percent = float(hp_info.get('percentage'))
+                            if hp_percent is None:
+                                hp_last = self._status_display_values.get('hp') if hasattr(self, '_status_display_values') else None
+                                if isinstance(hp_last, (int, float)):
+                                    hp_percent = float(hp_last)
+
+                            if hp_percent is None or hp_percent < 10.0:
+                                # 사망으로 판단 → 즉시 종료 + 텔레그램 알림 + (선택) 절전
+                                reason = "EXP 정체 + HP 읽기 실패" if hp_percent is None else f"EXP 정체 + HP {int(round(hp_percent))}%"
+                                killed = self._kill_mapleland_process_immediately(reason)
+                                if killed:
+                                    try:
+                                        self._notify_telegram(f"[자동조치] {reason} → 게임 프로세스 종료 처리")
+                                    except Exception:
+                                        pass
+                            else:
+                                # 로직 문제로 간주 → ESC 효과로 정지 후 2초 뒤 재시작
+                                self._apply_esc_and_restart_for_exp()
+                except Exception:
+                    pass
         else:
             self._status_exp_records.clear()
 
