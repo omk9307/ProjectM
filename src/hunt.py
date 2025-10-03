@@ -975,6 +975,82 @@ class HuntTab(QWidget):
                 self.append_log(f"탐지를 중단합니다. (사유: {reason})", "warn")
         return stopped
 
+    # ---------------------- Telegram 브리지용 얇은 API ----------------------
+    def api_get_status_summary(self) -> dict[str, str]:
+        """현재 캐시된 HP/MP/EXP 요약 텍스트를 반환한다."""
+        cache = getattr(self, '_status_summary_cache', {}) or {}
+        if not isinstance(cache, dict):
+            return {"hp": "HP: --", "mp": "MP: --", "exp": "EXP: --"}
+        # 사본 반환
+        result = {
+            'hp': str(cache.get('hp', 'HP: --')),
+            'mp': str(cache.get('mp', 'MP: --')),
+            'exp': str(cache.get('exp', 'EXP: -- / --')),
+        }
+        return result
+
+    def api_start_detection(self) -> bool:
+        """사냥 탐지를 시작(이미 실행 중이면 그대로 유지)."""
+        try:
+            if self._is_detection_active():
+                return True
+        except Exception:
+            pass
+        try:
+            self.detect_btn.setChecked(True)
+            self._toggle_detection(True)
+            return True
+        except Exception:
+            return False
+
+    def api_stop_detection(self) -> bool:
+        """사냥 탐지를 중지."""
+        return bool(self.force_stop_detection(reason='telegram'))
+
+    def api_schedule_shutdown(self, total_seconds: int) -> tuple[bool, str]:
+        """n초 뒤 종료 예약을 바로 설정한다. PID 자동탐지 포함."""
+        import time as _t
+        try:
+            sec = max(1, int(total_seconds))
+        except Exception:
+            sec = 10
+        # PID 자동탐지
+        if getattr(self, 'shutdown_pid_value', None) is None:
+            try:
+                self._auto_detect_mapleland_pid(auto_trigger=True)
+            except Exception:
+                pass
+        if getattr(self, 'shutdown_pid_value', None) is None:
+            return False, "PID 자동탐지 실패로 종료 예약을 설정하지 못했습니다."
+        try:
+            self.shutdown_reservation_enabled = True
+            self.shutdown_datetime_target = float(_t.time() + sec)
+            self._ensure_shutdown_timer_running()
+            self._update_shutdown_labels()
+            return True, f"종료 예약을 설정했습니다. {sec}초 후 종료합니다."
+        except Exception as exc:
+            return False, f"종료 예약 실패: {exc}"
+
+    def api_reserve_shutdown(self, minutes: int) -> tuple[bool, str]:
+        """n분 뒤 종료 예약."""
+        try:
+            mins = max(1, int(minutes))
+        except Exception:
+            mins = 1
+        return self.api_schedule_shutdown(mins * 60)
+
+    def api_cancel_shutdown_reservation(self) -> tuple[bool, str]:
+        """예약된 종료가 있으면 취소한다."""
+        had = bool(getattr(self, 'shutdown_datetime_target', None))
+        try:
+            self.shutdown_datetime_target = None
+            self.shutdown_reservation_enabled = False
+            self._stop_shutdown_timer_if_idle()
+            self._update_shutdown_labels()
+        except Exception as exc:
+            return False, f"종료 예약 취소 실패: {exc}"
+        return True, ("종료 예약을 취소했습니다." if had else "취소할 종료 예약이 없습니다.")
+
     def _schedule_facing_reset(self) -> None:
         if not hasattr(self, 'facing_reset_timer'):
             return

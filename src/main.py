@@ -204,6 +204,8 @@ class MainWindow(QMainWindow):
         self._authority_manager.authority_changed.connect(self._handle_global_authority_changed)
 
         self.load_tabs()
+        # 텔레그램 브리지 핸들러 보관용
+        self._telegram_bridge = None
 
     def load_tabs(self):
         """
@@ -227,6 +229,14 @@ class MainWindow(QMainWindow):
             self._handle_global_authority_changed(current_state.owner, {})
         except Exception:
             pass
+
+        # 텔레그램 브리지 시작(자격이 유효한 Windows에서만)
+        try:
+            from telegram_bridge import maybe_start_bridge
+
+            self._telegram_bridge = maybe_start_bridge(self)
+        except Exception as exc:
+            print(f"[Main] 텔레그램 브리지 시작 실패: {exc}")
 
     def load_tab(self, module_name, class_name, tab_title):
         """
