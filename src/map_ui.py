@@ -1788,6 +1788,7 @@ class MapTab(QWidget):
             return _wrap_result(False, "empty_command", {"message": "empty_command"})
 
         is_status_command = isinstance(reason, str) and reason.startswith('status:')
+        is_urgent_command = isinstance(reason, str) and reason.startswith('urgent:')
         status_resource = ''
         if is_status_command:
             try:
@@ -1797,9 +1798,9 @@ class MapTab(QWidget):
             except Exception:
                 status_resource = ''
 
-        # HP 긴급모드 보호: HP 상태 명령과 '모든 키 떼기', '사다리 멈춤복구' 외 차단
+        # HP 긴급모드 보호: HP 상태 명령, 초긴급(urgent:*) 및 '모든 키 떼기', '사다리 멈춤복구' 허용
         if getattr(self, '_hp_emergency_active', False):
-            if not (is_status_command and status_resource == 'hp') and command not in ('모든 키 떼기', '사다리 멈춤복구'):
+            if not (is_status_command and status_resource == 'hp') and not is_urgent_command and command not in ('모든 키 떼기', '사다리 멈춤복구'):
                 detail = {"command": command, "hp_emergency": True}
                 return _wrap_result(False, "hp_emergency_active", detail)
 
@@ -1861,6 +1862,7 @@ class MapTab(QWidget):
         if (
             self._status_active_resource
             and not is_status_command
+            and not is_urgent_command
             and command != "모든 키 떼기"
         ):
             self._status_saved_command = (command, reason)
@@ -10131,6 +10133,23 @@ class MapTab(QWidget):
                                     ):
                                         self._enter_hp_emergency_mode()
                         # 긴급모드 시간 초과 검사
+                        # [NEW] 긴급모드 HP 임계값(%)에 의한 즉시 진입 (OR 조건)
+                        try:
+                            em_thr = getattr(hp_cfg, 'emergency_trigger_hp_percent', None)
+                            if (
+                                getattr(hp_cfg, 'emergency_enabled', False)
+                                and not self._hp_emergency_active
+                                and isinstance(em_thr, int)
+                                and float(current) <= float(em_thr)
+                            ):
+                                self.update_general_log(
+                                    f"[HP] 긴급모드 진입: HP 임계값({int(em_thr)}%) 이하 감지 (현재 {int(round(current))}%)",
+                                    "orange",
+                                )
+                                self._enter_hp_emergency_mode()
+                        except Exception:
+                            pass
+
                         if self._hp_emergency_active:
                             max_dur = float(getattr(hp_cfg, 'emergency_max_duration_sec', 10.0) or 10.0)
                             if max_dur >= 1.0 and (time.time() - self._hp_emergency_started_at) >= max_dur and not self._hp_emergency_telegram_sent:

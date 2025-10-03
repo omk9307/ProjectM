@@ -5539,6 +5539,7 @@ class HuntTab(QWidget):
 
         reason_str = str(reason) if isinstance(reason, str) else ""
         is_status_command = reason_str.startswith('status:')
+        is_urgent_command = reason_str.startswith('urgent:')
         is_primary_release_command = reason_str.startswith('primary_release')
         allow_during_cooldown = False
         status_resource = ''
@@ -5557,9 +5558,9 @@ class HuntTab(QWidget):
         elif is_primary_release_command:
             allow_during_cooldown = True
 
-        # HP 긴급모드 보호: HP 상태 명령과 '모든 키 떼기', '사다리 멈춤복구' 외 차단
+        # HP 긴급모드 보호: HP 상태 명령, 초긴급(urgent:*) 및 '모든 키 떼기', '사다리 멈춤복구' 허용
         if getattr(self, '_hp_emergency_active', False):
-            if not (is_status_command and status_resource == 'hp') and normalized not in ('모든 키 떼기', '사다리 멈춤복구'):
+            if not (is_status_command and status_resource == 'hp') and not is_urgent_command and normalized not in ('모든 키 떼기', '사다리 멈춤복구'):
                 return
 
         if (
@@ -5723,6 +5724,23 @@ class HuntTab(QWidget):
                                         and self._hp_recovery_fail_streak >= int(getattr(hp_cfg, 'emergency_trigger_failures', 3) or 3)
                                     ):
                                         self._enter_hp_emergency_mode()
+                        # [NEW] 긴급모드 HP 임계값(%)에 의한 즉시 진입 (OR 조건)
+                        try:
+                            em_thr = getattr(hp_cfg, 'emergency_trigger_hp_percent', None)
+                            if (
+                                getattr(hp_cfg, 'emergency_enabled', False)
+                                and not self._hp_emergency_active
+                                and isinstance(em_thr, int)
+                            ):
+                                current2 = float(hp_value)
+                                if current2 <= float(em_thr):
+                                    self.append_log(
+                                        f"[HP] 긴급모드 진입: HP 임계값({int(em_thr)}%) 이하 감지 (현재 {int(round(current2))}%)",
+                                        'warn',
+                                    )
+                                    self._enter_hp_emergency_mode()
+                        except Exception:
+                            pass
                         # 긴급모드 시간 초과 검사
                         if self._hp_emergency_active:
                             max_dur = float(getattr(hp_cfg, 'emergency_max_duration_sec', 10.0) or 10.0)

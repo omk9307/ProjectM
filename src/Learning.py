@@ -3534,6 +3534,19 @@ class DataManager:
                     target.emergency_timeout_telegram = bool(payload.get('emergency_timeout_telegram'))
                 except Exception:
                     pass
+            # [NEW] 긴급모드 발동용 HP 임계값(%)
+            if 'emergency_trigger_hp_percent' in payload:
+                raw = payload.get('emergency_trigger_hp_percent')
+                if raw in (None, ''):
+                    target.emergency_trigger_hp_percent = None
+                else:
+                    try:
+                        ival = int(raw)
+                    except (TypeError, ValueError):
+                        pass
+                    else:
+                        if 1 <= ival <= 99:
+                            target.emergency_trigger_hp_percent = ival
             # [NEW] HP 초긴급모드 임계값/명령프로필
             if 'urgent_threshold' in payload:
                 raw = payload.get('urgent_threshold')
@@ -5222,6 +5235,17 @@ class LearningTab(QWidget):
         n_spin.setValue(int(getattr(hp_cfg, 'emergency_trigger_failures', 3) or 3))
         form.addRow('발동조건 N회', n_spin)
 
+        # [NEW] 긴급 발동 HP 임계값(%) - N회 실패 OR HP≤임계값 시 진입
+        em_thr_input = QLineEdit(dialog)
+        em_thr_input.setPlaceholderText('예: 30 (비워두면 미사용)')
+        em_thr_input.setValidator(QIntValidator(1, 99, em_thr_input))
+        try:
+            current_em_thr = getattr(hp_cfg, 'emergency_trigger_hp_percent', None)
+        except Exception:
+            current_em_thr = None
+        em_thr_input.setText('' if current_em_thr in (None, '') else str(int(current_em_thr)))
+        form.addRow('HP 임계값(%)', em_thr_input)
+
         dur_spin = QDoubleSpinBox(dialog)
         dur_spin.setRange(1.0, 3600.0)
         dur_spin.setDecimals(1)
@@ -5251,6 +5275,19 @@ class LearningTab(QWidget):
                 'emergency_timeout_telegram': bool(tg_chk.isChecked()),
             }
         }
+        # 입력값(비어있으면 미사용)
+        em_text = em_thr_input.text().strip()
+        if em_text:
+            try:
+                val = int(em_text)
+                if 1 <= val <= 99:
+                    updates['hp']['emergency_trigger_hp_percent'] = val
+                else:
+                    updates['hp']['emergency_trigger_hp_percent'] = None
+            except ValueError:
+                updates['hp']['emergency_trigger_hp_percent'] = None
+        else:
+            updates['hp']['emergency_trigger_hp_percent'] = None
         self._status_config = self.data_manager.update_status_monitor_config(updates)
         self._apply_status_config_to_ui()
 

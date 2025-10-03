@@ -1133,10 +1133,13 @@ class AutoControlTab(QWidget):
         return item.text() if item else None
 
     def _activate_mapleland_window(self) -> bool:
+        # 0) 대상 창 탐색
         try:
             candidate_windows = gw.getWindowsWithTitle('Mapleland')
         except Exception as exc:
-            QMessageBox.warning(self, "창 탐색 오류", f"게임 창 목록을 가져오는 중 오류가 발생했습니다:\n{exc}")
+            # UI 차단 없는 상태 메시지 업데이트만 수행
+            if getattr(self, 'status_label', None):
+                self.status_label.setText(f"창 탐색 오류: {exc}")
             return False
 
         target_window = None
@@ -1149,35 +1152,105 @@ class AutoControlTab(QWidget):
                 break
 
         if target_window is None:
-            QMessageBox.warning(
-                self,
-                "오류",
-                "'Mapleland' 문자열을 포함한 게임 창을 찾을 수 없습니다.\n게임이 실행 중인지 확인하고 다시 시도하세요.",
-            )
+            if getattr(self, 'status_label', None):
+                self.status_label.setText("Mapleland 창을 찾을 수 없습니다.")
             return False
 
+        # 공용 헬퍼
+        def msleep(ms: int) -> None:
+            try:
+                QThread.msleep(int(ms))
+            except Exception:
+                time.sleep(max(float(ms) / 1000.0, 0.0))
+
+        # Win32 준비
         try:
-            if target_window.isMinimized:
-                target_window.restore()
-                QThread.msleep(120)
-            if not target_window.isActive:
-                target_window.activate()
-                QThread.msleep(120)
-            if not target_window.isActive:
-                target_window.minimize()
-                target_window.restore()
-                QThread.msleep(120)
-        except Exception as exc:
-            QMessageBox.warning(self, "창 활성화 오류", f"게임 창을 활성화하는 중 오류가 발생했습니다:\n{exc}")
-            return False
+            import win32gui  # type: ignore
+            import win32con  # type: ignore
+            import win32api  # type: ignore
+        except Exception:
+            win32gui = None  # type: ignore
+            win32con = None  # type: ignore
+            win32api = None  # type: ignore
 
-        if not target_window.isActive:
-            QMessageBox.warning(self, "창 활성화 실패", "게임 창을 전면으로 가져오지 못했습니다. 수동으로 활성화한 뒤 다시 시도하세요.")
-            return False
+        hwnd = getattr(target_window, '_hWnd', None)
 
+        # 최대 3회 재시도
+        for attempt in range(3):
+            # 1) pygetwindow 경로
+            try:
+                if target_window.isMinimized:
+                    target_window.restore(); msleep(120)
+                target_window.activate(); msleep(120)
+            except Exception:
+                pass
+
+            # 2) Win32 강제 전면화(가능하면)
+            if win32gui is not None and win32con is not None and hwnd:
+                try:
+                    win32gui.ShowWindow(hwnd, win32con.SW_RESTORE); msleep(60)
+                    # AttachThreadInput을 사용하여 포그라운드 제한 우회 (ALT 트릭 사용 안 함)
+                    try:
+                        import win32process  # type: ignore
+                    except Exception:
+                        win32process = None  # type: ignore
+                    attached = False
+                    try:
+                        if win32api is not None and win32process is not None:
+                            curr_tid = win32api.GetCurrentThreadId()
+                            target_tid, _ = win32process.GetWindowThreadProcessId(hwnd)
+                            win32api.AttachThreadInput(curr_tid, target_tid, True)
+                            attached = True
+                        win32gui.SetForegroundWindow(hwnd)
+                        msleep(30)
+                        try:
+                            win32gui.BringWindowToTop(hwnd)
+                        except Exception:
+                            pass
+                    finally:
+                        if attached and win32api is not None and win32process is not None:
+                            try:
+                                win32api.AttachThreadInput(curr_tid, target_tid, False)
+                            except Exception:
+                                pass
+                    msleep(50)
+                    try:
+                        # TopMost 토글로 최전면 강제
+                        win32gui.SetWindowPos(hwnd, -1, 0, 0, 0, 0, win32con.SWP_NOMOVE | win32con.SWP_NOSIZE)
+                        msleep(40)
+                        win32gui.SetWindowPos(hwnd, -2, 0, 0, 0, 0, win32con.SWP_NOMOVE | win32con.SWP_NOSIZE)
+                    except Exception:
+                        pass
+                except Exception:
+                    # 비차단: 예외는 무시하고 계속 확인
+                    pass
+
+            # 3) 성공 확인
+            try:
+                if win32gui is not None and hwnd:
+                    fg = win32gui.GetForegroundWindow()
+                    if int(fg) == int(hwnd):
+                        if getattr(self, 'status_label', None):
+                            self.status_label.setText(f"게임 창 활성화: '{target_window.title}'")
+                        return True
+            except Exception:
+                # 확인 불가 시 소폭 대기 후 다음 단계 진행
+                pass
+
+            try:
+                if getattr(target_window, 'isActive', False):
+                    if getattr(self, 'status_label', None):
+                        self.status_label.setText(f"게임 창 활성화(추정): '{target_window.title}'")
+                    return True
+            except Exception:
+                pass
+
+            msleep(120)
+
+        # 최종 실패
         if getattr(self, 'status_label', None):
-            self.status_label.setText(f"게임 창 활성화: '{target_window.title}'")
-        return True
+            self.status_label.setText("게임 창 활성화 실패(재시도 완료)")
+        return False
 
     def _is_skill_profile(self, command_name: str) -> bool:
         """현재 명령이 스킬 탭에 속하는지 여부를 반환합니다."""
@@ -1752,6 +1825,16 @@ class AutoControlTab(QWidget):
             if key_name == 'ctrl':
                 key_name = 'ctrl_l'
             return getattr(Key, key_name, None)
+        # (보강) Ctrl 조합이 기록될 때 비가시 제어문자(예: '\x16' = ^V)로 들어오는 경우를 영문자로 정규화
+        #  - \x01..\x1A  =>  'a'..'z' 로 매핑하여 HID 전송 가능하게 함
+        try:
+            if isinstance(key_str, str) and len(key_str) == 1:
+                code = ord(key_str)
+                if 1 <= code <= 26:
+                    # ^A(1)->'a'(97), ^B(2)->'b', ... ^Z(26)->'z'
+                    return chr(ord('a') + code - 1)
+        except Exception:
+            pass
         return key_str 
 
     def _send_command(self, command, key_object):
@@ -2563,8 +2646,21 @@ class AutoControlTab(QWidget):
         self._sync_keyboard_visual_state()
 
     def _key_to_str(self, key):
-        if isinstance(key, Key): return f"Key.{key.name}"
-        return key.char if hasattr(key, 'char') else 'N/A'
+        if isinstance(key, Key):
+            return f"Key.{key.name}"
+        # pynput가 Ctrl+<letter> 조합을 제어문자(\x01..\x1A)로 전달하는 경우가 있다.
+        # 이때는 사람이 읽을 수 있고 HID로 전송 가능한 형태('a'..'z')로 정규화한다.
+        if hasattr(key, 'char'):
+            ch = key.char
+            try:
+                if isinstance(ch, str) and len(ch) == 1:
+                    code = ord(ch)
+                    if 1 <= code <= 26:
+                        return chr(ord('a') + code - 1)
+            except Exception:
+                pass
+            return ch
+        return 'N/A'
 
     def _key_obj_to_str(self, key_obj):
         """(신규) key object -> 일관된 문자열 표현으로 변환 (예: 'Key.alt_l' 또는 'a')"""
@@ -2801,6 +2897,15 @@ class AutoControlTab(QWidget):
         return reason_text
 
     def _translate_key_for_logging(self, key_str):
+        # 제어문자(\x01..\x1A)가 문자열로 들어오면 사람이 읽을 수 있도록 'a'..'z' 로 변환
+        try:
+            if isinstance(key_str, str) and len(key_str) == 1:
+                code = ord(key_str)
+                if 1 <= code <= 26:
+                    key_str = chr(ord('a') + code - 1)
+        except Exception:
+            pass
+
         translation_map = {
             'Key.right': '→', 'Key.left': '←', 'Key.down': '↓', 'Key.up': '↑',
             'Key.space': 'Space', 'Key.enter': 'Enter', 'Key.esc': 'Esc',

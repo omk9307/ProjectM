@@ -77,6 +77,8 @@ class ResourceConfig:
     emergency_trigger_failures: int = 3
     emergency_max_duration_sec: float = 10.0
     emergency_timeout_telegram: bool = False
+    # [NEW] 긴급모드 발동용 HP 임계값(%) - N회 실패 OR HP≤임계값 시 진입
+    emergency_trigger_hp_percent: Optional[int] = None
     # [NEW] HP 저체력(3% 미만) 텔레그램 알림 사용 여부 (HP 전용 의미)
     low_hp_telegram_alert: bool = False
     # [NEW] 초긴급모드 임계값(%) 및 기타 명령프로필
@@ -105,6 +107,12 @@ class ResourceConfig:
         data["emergency_trigger_failures"] = int(max(1, self.emergency_trigger_failures))
         data["emergency_max_duration_sec"] = float(max(1.0, self.emergency_max_duration_sec))
         data["emergency_timeout_telegram"] = bool(self.emergency_timeout_telegram)
+        # 긴급모드 HP 임계값 저장 (설정된 경우만)
+        if self.emergency_trigger_hp_percent is not None:
+            try:
+                data["emergency_trigger_hp_percent"] = int(self.emergency_trigger_hp_percent)
+            except (TypeError, ValueError):
+                pass
         # 저체력 알림 설정
         data["low_hp_telegram_alert"] = bool(self.low_hp_telegram_alert)
         if self.urgent_threshold is None:
@@ -164,6 +172,16 @@ class ResourceConfig:
         emergency_trigger_failures = max(1, emergency_trigger_failures)
         emergency_max_duration_sec = max(1.0, emergency_max_duration_sec)
         emergency_timeout_telegram = bool(source.get("emergency_timeout_telegram", False))
+        # 긴급모드 HP 임계값
+        emergency_trigger_hp_percent_val: Optional[int] = None
+        try:
+            raw_em_thr = source.get("emergency_trigger_hp_percent")
+            if raw_em_thr not in (None, ""):
+                e_val = int(raw_em_thr)
+                if 1 <= e_val <= 99:
+                    emergency_trigger_hp_percent_val = e_val
+        except (TypeError, ValueError):
+            emergency_trigger_hp_percent_val = None
         # 저체력 텔레그램 알림
         low_hp_telegram_alert = bool(source.get("low_hp_telegram_alert", False))
         # 초긴급 모드 임계값 및 명령프로필
@@ -191,6 +209,7 @@ class ResourceConfig:
             emergency_trigger_failures=emergency_trigger_failures,
             emergency_max_duration_sec=emergency_max_duration_sec,
             emergency_timeout_telegram=emergency_timeout_telegram,
+            emergency_trigger_hp_percent=emergency_trigger_hp_percent_val,
             low_hp_telegram_alert=low_hp_telegram_alert,
             urgent_threshold=urgent_threshold_val,
             urgent_command_profile=urgent_cmd,
