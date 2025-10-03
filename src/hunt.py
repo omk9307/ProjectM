@@ -1737,23 +1737,29 @@ class HuntTab(QWidget):
         group.setLayout(area_layout)
         group.setSizePolicy(QSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed))
 
-        # [추가] 전/후 비대칭 토글 시 높이 변화로 인한 UI 흔들림 방지
-        # - 대칭/비대칭 두 상태의 sizeHint 높이를 측정해, 더 큰 값을 최소 높이로 확보
+        # [개선] 전/후 비대칭 토글 시 높이 변화로 인한 UI 흔들림 방지
+        # - 대칭/비대칭 두 상태의 sizeHint 높이를 미리 계산해 더 큰 값으로 고정
+        # - 초기에는 대략값으로 고정하고, 레이아웃 적용 직후 한 번 더 정밀 재계산
         try:
             initial_checked = bool(self.facing_range_checkbox.isChecked())
-            # 대칭 상태 높이
+            # 대칭 상태 높이(대략)
             self._update_range_inputs_enabled(False)
             sym_h = group.sizeHint().height()
-            # 비대칭 상태 높이
+            # 비대칭 상태 높이(대략)
             self._update_range_inputs_enabled(True)
             asym_h = group.sizeHint().height()
             # 초기 표시 상태 복원
             self._update_range_inputs_enabled(initial_checked)
             reserve_h = max(sym_h, asym_h)
             if reserve_h > 0:
-                group.setMinimumHeight(reserve_h)
+                group.setFixedHeight(reserve_h)
         except Exception:
-            # 측정 실패 시에도 기능 영향 없음(안전 무시)
+            pass
+
+        # 레이아웃이 실제 배치된 뒤(폭 확정 후) 다시 한 번 고정 높이 재계산
+        try:
+            QTimer.singleShot(0, lambda: self._apply_range_group_fixed_height(group))
+        except Exception:
             pass
 
         for spin in (
@@ -1773,11 +1779,44 @@ class HuntTab(QWidget):
         self.facing_range_checkbox.toggled.connect(self._update_range_inputs_enabled)
         self.facing_range_checkbox.toggled.connect(self._on_area_config_changed)
         self.facing_range_checkbox.toggled.connect(self._handle_setting_changed)
+        # 토글 시에도(필요 시) 고정 높이를 상향 재계산하여 흔들림/클리핑 방지
+        try:
+            self.facing_range_checkbox.toggled.connect(lambda _checked: self._apply_range_group_fixed_height(group))
+        except Exception:
+            pass
 
         # 초기 표시 상태 정리(위의 높이 선확보 로직이 상태를 복원하지만, 안전 차원에서 재호출)
         self._update_range_inputs_enabled(self.facing_range_checkbox.isChecked())
 
         return group
+
+    def _apply_range_group_fixed_height(self, group: QGroupBox) -> None:
+        """사냥 범위 그룹의 고정 높이를 대칭/비대칭 중 더 큰 값으로 설정.
+        - 현재 폭에서의 sizeHint/레이아웃을 반영하기 위해 토글해가며 측정
+        - 이미 설정된 fixedHeight보다 작아지는 경우는 방지(흔들림 방지)
+        """
+        try:
+            initial_checked = bool(self.facing_range_checkbox.isChecked())
+            # 대칭 상태 측정
+            self._update_range_inputs_enabled(False)
+            if group.layout() is not None:
+                group.layout().activate()
+            sym_h = group.sizeHint().height()
+            # 비대칭 상태 측정
+            self._update_range_inputs_enabled(True)
+            if group.layout() is not None:
+                group.layout().activate()
+            asym_h = group.sizeHint().height()
+            # 표시 상태 복원
+            self._update_range_inputs_enabled(initial_checked)
+
+            reserve_h = max(sym_h, asym_h)
+            if reserve_h > 0:
+                current_fixed = group.height() if group.height() > 0 else 0
+                group.setFixedHeight(max(current_fixed, reserve_h))
+                group.updateGeometry()
+        except Exception:
+            pass
 
     def _create_condition_group(self) -> QGroupBox:
         group = QGroupBox("사냥 조건")
