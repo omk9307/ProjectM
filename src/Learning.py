@@ -89,6 +89,11 @@ from window_anchors import (
     resolve_roi_to_absolute,
     WindowGeometry,
 )
+from ocr_watch import (
+    OCRWatchThread,
+    ocr_korean_words,
+    draw_word_boxes,
+)
 
 # --- 0. 전역 설정 (v1.3 방해 요소 이름 추가) ---
 # 소스 코드가 위치한 src/ 폴더
@@ -2391,6 +2396,8 @@ class DataManager:
         self.nameplate_templates_dir = os.path.join(self.nameplate_dir, 'templates')
         self.nameplate_config_path = os.path.join(self.nameplate_dir, 'config.json')
         self.status_config_path = os.path.join(self.config_path, 'status_monitor.json')
+        # OCR 감시 설정 파일
+        self.ocr_watch_config_path = os.path.join(self.config_path, 'ocr_watch.json')
         self._overlay_listeners: list = []
         self._model_listeners: list[callable] = []
         self._last_used_model: Optional[str] = None
@@ -2499,6 +2506,10 @@ class DataManager:
                     json.load(f)
             except (json.JSONDecodeError, FileNotFoundError):
                 self._write_status_config(status_default)
+        # OCR 감시 기본 파일
+        if not os.path.exists(self.ocr_watch_config_path):
+            with open(self.ocr_watch_config_path, 'w', encoding='utf-8') as f:
+                json.dump({"active_profile": None, "profiles": {}}, f, ensure_ascii=False, indent=4)
 
     def _default_nickname_config(self):
         return {
@@ -2517,6 +2528,107 @@ class DataManager:
     def _write_nickname_config(self, config_data):
         with open(self.nickname_config_path, 'w', encoding='utf-8') as f:
             json.dump(config_data, f, indent=4, ensure_ascii=False)
+
+    # -------------------- OCR 감시 설정 --------------------
+    def load_ocr_watch_config(self) -> dict:
+        try:
+            with open(self.ocr_watch_config_path, 'r', encoding='utf-8') as f:
+                cfg = json.load(f)
+        except (json.JSONDecodeError, FileNotFoundError):
+            cfg = {"active_profile": None, "profiles": {}}
+        if not isinstance(cfg, dict):
+            cfg = {"active_profile": None, "profiles": {}}
+        # 정합성 정리
+        if "profiles" not in cfg or not isinstance(cfg.get("profiles"), dict):
+            cfg["profiles"] = {}
+        return cfg
+
+    def save_ocr_watch_config(self, cfg: dict) -> dict:
+        if not isinstance(cfg, dict):
+            cfg = {"active_profile": None, "profiles": {}}
+        with open(self.ocr_watch_config_path, 'w', encoding='utf-8') as f:
+            json.dump(cfg, f, ensure_ascii=False, indent=4)
+        return cfg
+
+    def get_ocr_profiles(self) -> list[str]:
+        cfg = self.load_ocr_watch_config()
+        names = list(cfg.get("profiles", {}).keys())
+        names.sort()
+        return names
+
+    def get_ocr_active_profile(self) -> Optional[str]:
+        cfg = self.load_ocr_watch_config()
+        name = cfg.get("active_profile")
+        return name if isinstance(name, str) and name else None
+
+    def set_ocr_active_profile(self, name: Optional[str]) -> dict:
+        cfg = self.load_ocr_watch_config()
+        cfg["active_profile"] = name if isinstance(name, str) and name else None
+        return self.save_ocr_watch_config(cfg)
+
+    def get_ocr_profile(self, name: Optional[str]) -> dict:
+        cfg = self.load_ocr_watch_config()
+        profiles = cfg.get("profiles", {}) if isinstance(cfg.get("profiles"), dict) else {}
+        prof = profiles.get(name) if isinstance(name, str) and name else None
+        if not isinstance(prof, dict):
+            # 기본값
+            return {
+                "enabled": False,
+                "interval_sec": 30.0,
+                "rois": [],
+                "telegram_enabled": False,
+                "telegram_send_count": 1,
+                "telegram_send_interval": 5.0,
+                "keywords": [],
+            }
+        # 필드 보정
+        prof.setdefault("enabled", False)
+        prof.setdefault("interval_sec", 30.0)
+        prof.setdefault("rois", [])
+        prof.setdefault("telegram_enabled", False)
+        prof.setdefault("telegram_send_count", 1)
+        prof.setdefault("telegram_send_interval", 5.0)
+        prof.setdefault("keywords", [])
+        return prof
+
+    def save_ocr_profile(self, name: str, profile_data: dict) -> dict:
+        if not isinstance(name, str) or not name.strip():
+            return self.load_ocr_watch_config()
+        cfg = self.load_ocr_watch_config()
+        profiles = cfg.get("profiles", {}) if isinstance(cfg.get("profiles"), dict) else {}
+        # ROI를 상대 좌표로 변환하여 저장
+        rois = profile_data.get("rois", []) if isinstance(profile_data.get("rois"), list) else []
+        window_geometry = get_maple_window_geometry()
+        rois_rel: list[dict] = []
+        for raw in rois:
+            if not isinstance(raw, dict):
+                continue
+            converted = ensure_relative_roi(raw, window_geometry, anchor_name=last_used_anchor_name())
+            if converted is None:
+                converted = raw
+            rois_rel.append(converted)
+        prof = {
+            "enabled": bool(profile_data.get("enabled", False)),
+            "interval_sec": max(1.0, float(profile_data.get("interval_sec", 30.0))),
+            "rois": rois_rel,
+            "telegram_enabled": bool(profile_data.get("telegram_enabled", False)),
+            "telegram_send_count": int(profile_data.get("telegram_send_count", 1)),
+            "telegram_send_interval": max(1.0, float(profile_data.get("telegram_send_interval", 5.0))),
+            "keywords": [str(x).strip() for x in (profile_data.get("keywords") or []) if str(x).strip()],
+        }
+        profiles[name] = prof
+        cfg["profiles"] = profiles
+        return self.save_ocr_watch_config(cfg)
+
+    def delete_ocr_profile(self, name: str) -> dict:
+        cfg = self.load_ocr_watch_config()
+        profiles = cfg.get("profiles", {}) if isinstance(cfg.get("profiles"), dict) else {}
+        if name in profiles:
+            profiles.pop(name, None)
+        if cfg.get("active_profile") == name:
+            cfg["active_profile"] = None
+        cfg["profiles"] = profiles
+        return self.save_ocr_watch_config(cfg)
 
     def _default_direction_config(self):
         return {
@@ -4137,6 +4249,9 @@ class LearningTab(QWidget):
         self._thumbnail_disk_limit = 512
         self._runtime_ui_updating = False
         self._monster_settings_dialog_open = False
+        # OCR 감시 관련 상태
+        self._ocr_profile_loaded = False
+        self._ocr_thread: Optional[OCRWatchThread] = None
         self.initUI()
         self.init_sam()
         self.data_manager.register_status_config_listener(self._handle_status_config_changed)
@@ -4639,6 +4754,10 @@ class LearningTab(QWidget):
 
         status_group = self._create_status_monitor_group()
         right_layout.addWidget(status_group)
+
+        # OCR 감시 섹션
+        ocr_group = self._create_ocr_watch_group()
+        right_layout.addWidget(ocr_group)
 
         self.log_viewer = QTextEdit()
         self.log_viewer.setReadOnly(True)
@@ -5290,6 +5409,363 @@ class LearningTab(QWidget):
             updates['hp']['emergency_trigger_hp_percent'] = None
         self._status_config = self.data_manager.update_status_monitor_config(updates)
         self._apply_status_config_to_ui()
+
+    # -------------------- OCR 감시 UI/로직 --------------------
+    def _create_ocr_watch_group(self) -> QGroupBox:
+        box = QGroupBox("OCR 감시(한글, 높이≥23px)")
+        layout = QVBoxLayout()
+
+        # 프로필 행
+        prof_row = QHBoxLayout()
+        prof_row.addWidget(QLabel("프로필:"))
+        self.ocr_profile_combo = QComboBox()
+        self.ocr_profile_combo.setEditable(True)
+        self.ocr_profile_combo.currentTextChanged.connect(self._on_ocr_profile_changed)
+        prof_row.addWidget(self.ocr_profile_combo, 1)
+        self.ocr_profile_save_btn = QPushButton("저장")
+        self.ocr_profile_save_btn.clicked.connect(self._on_ocr_profile_save)
+        prof_row.addWidget(self.ocr_profile_save_btn)
+        self.ocr_profile_delete_btn = QPushButton("삭제")
+        self.ocr_profile_delete_btn.clicked.connect(self._on_ocr_profile_delete)
+        prof_row.addWidget(self.ocr_profile_delete_btn)
+        layout.addLayout(prof_row)
+
+        # ROI 행
+        roi_row = QHBoxLayout()
+        roi_row.addWidget(QLabel("ROI 목록"))
+        self.ocr_add_roi_btn = QPushButton("+")
+        self.ocr_add_roi_btn.setToolTip("ROI 추가")
+        self.ocr_add_roi_btn.clicked.connect(self._on_ocr_add_roi)
+        roi_row.addWidget(self.ocr_add_roi_btn)
+        self.ocr_del_roi_btn = QPushButton("-")
+        self.ocr_del_roi_btn.setToolTip("선택 ROI 삭제")
+        self.ocr_del_roi_btn.clicked.connect(self._on_ocr_delete_roi)
+        roi_row.addWidget(self.ocr_del_roi_btn)
+        roi_row.addStretch(1)
+        layout.addLayout(roi_row)
+
+        self.ocr_roi_list = QListWidget()
+        self.ocr_roi_list.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
+        self.ocr_roi_list.setFixedHeight(80)
+        layout.addWidget(self.ocr_roi_list)
+
+        # 설정 행 1: 주기/전송 토글
+        opt1 = QHBoxLayout()
+        opt1.addWidget(QLabel("촬영 주기(초):"))
+        self.ocr_interval_spin = QDoubleSpinBox()
+        self.ocr_interval_spin.setRange(1.0, 3600.0)
+        self.ocr_interval_spin.setDecimals(1)
+        self.ocr_interval_spin.setValue(30.0)
+        self.ocr_interval_spin.setSingleStep(1.0)
+        self.ocr_interval_spin.editingFinished.connect(self._on_ocr_interval_changed)
+        opt1.addWidget(self.ocr_interval_spin)
+        self.ocr_telegram_chk = QCheckBox("감지시 텔레그램 전송")
+        self.ocr_telegram_chk.toggled.connect(self._on_ocr_telegram_toggled)
+        opt1.addWidget(self.ocr_telegram_chk)
+        opt1.addStretch(1)
+        layout.addLayout(opt1)
+
+        # 설정 행 2: 전송 횟수/주기/키워드
+        opt2 = QHBoxLayout()
+        opt2.addWidget(QLabel("전송 횟수(0=무제한):"))
+        self.ocr_send_count_spin = QSpinBox()
+        self.ocr_send_count_spin.setRange(0, 1000)
+        self.ocr_send_count_spin.setValue(1)
+        self.ocr_send_count_spin.valueChanged.connect(self._on_ocr_send_policy_changed)
+        opt2.addWidget(self.ocr_send_count_spin)
+        opt2.addSpacing(8)
+        opt2.addWidget(QLabel("전송 주기(초):"))
+        self.ocr_send_interval_spin = QDoubleSpinBox()
+        self.ocr_send_interval_spin.setRange(1.0, 3600.0)
+        self.ocr_send_interval_spin.setDecimals(1)
+        self.ocr_send_interval_spin.setValue(5.0)
+        self.ocr_send_interval_spin.setSingleStep(1.0)
+        self.ocr_send_interval_spin.valueChanged.connect(self._on_ocr_send_policy_changed)
+        opt2.addWidget(self.ocr_send_interval_spin)
+        opt2.addStretch(1)
+        layout.addLayout(opt2)
+
+        # 설정 행 3: 키워드
+        opt3 = QHBoxLayout()
+        opt3.addWidget(QLabel("키워드(쉼표 구분):"))
+        self.ocr_keywords_edit = QLineEdit()
+        self.ocr_keywords_edit.setPlaceholderText("예: 경고, 완료, 이벤트")
+        self.ocr_keywords_edit.editingFinished.connect(self._on_ocr_keywords_changed)
+        opt3.addWidget(self.ocr_keywords_edit, 1)
+        self.ocr_preview_btn = QPushButton("결과 보기")
+        self.ocr_preview_btn.clicked.connect(self._on_ocr_preview)
+        opt3.addWidget(self.ocr_preview_btn)
+        layout.addLayout(opt3)
+
+        box.setLayout(layout)
+        self._load_ocr_profiles_to_ui()
+        self._start_ocr_thread_if_needed()
+        return box
+
+    def _load_ocr_profiles_to_ui(self) -> None:
+        names = self.data_manager.get_ocr_profiles()
+        self.ocr_profile_combo.blockSignals(True)
+        self.ocr_profile_combo.clear()
+        self.ocr_profile_combo.addItems(names)
+        active = self.data_manager.get_ocr_active_profile()
+        if active:
+            idx = self.ocr_profile_combo.findText(active)
+            if idx >= 0:
+                self.ocr_profile_combo.setCurrentIndex(idx)
+            else:
+                self.ocr_profile_combo.setCurrentText(active)
+        self.ocr_profile_combo.blockSignals(False)
+        # 로드된 프로필 적용
+        self._apply_ocr_profile_to_ui(self.data_manager.get_ocr_profile(self.ocr_profile_combo.currentText()))
+
+    def _apply_ocr_profile_to_ui(self, profile: dict) -> None:
+        self._ocr_profile_loaded = True
+        try:
+            interval = float(profile.get('interval_sec', 30.0))
+        except (TypeError, ValueError):
+            interval = 30.0
+        self.ocr_interval_spin.setValue(max(1.0, interval))
+        tel_enabled = bool(profile.get('telegram_enabled', False))
+        self.ocr_telegram_chk.setChecked(tel_enabled)
+        try:
+            send_count = int(profile.get('telegram_send_count', 1))
+        except (TypeError, ValueError):
+            send_count = 1
+        self.ocr_send_count_spin.setValue(max(0, send_count))
+        try:
+            send_itv = float(profile.get('telegram_send_interval', 5.0))
+        except (TypeError, ValueError):
+            send_itv = 5.0
+        self.ocr_send_interval_spin.setValue(max(1.0, send_itv))
+        # 키워드
+        keywords = []
+        raw_kw = profile.get('keywords')
+        if isinstance(raw_kw, list):
+            keywords = [str(x) for x in raw_kw]
+        self.ocr_keywords_edit.setText(", ".join(keywords))
+        # ROI 목록(요약)
+        self.ocr_roi_list.clear()
+        rois = profile.get('rois') if isinstance(profile.get('rois'), list) else []
+        for roi in rois:
+            # 저장은 상대좌표이므로, 미리보기에는 절대좌표로 변환해 보여줄 필요가 있으나
+            # 여기서는 간단히 상대 payload의 키만 요약한다.
+            if isinstance(roi, dict):
+                if all(k in roi for k in ("mode", "anchor", "x", "y", "w", "h")):
+                    text = f"rel {roi.get('w')}x{roi.get('h')} @ ({roi.get('x')},{roi.get('y')})"
+                else:
+                    # legacy 또는 절대값
+                    text = f"{roi.get('width')}x{roi.get('height')}+{roi.get('left')},{roi.get('top')}"
+                self.ocr_roi_list.addItem(text)
+        self._ocr_profile_loaded = False
+
+    def _active_ocr_profile_name(self) -> Optional[str]:
+        name = self.ocr_profile_combo.currentText().strip()
+        return name if name else None
+
+    def _current_ocr_profile_payload(self) -> dict:
+        # 현재 UI 상태를 profile dict로 생성
+        # ROI payload는 목록 텍스트가 아니라 내부 저장본을 DataManager에서 가져와 업데이트하는 방식으로 유지
+        name = self._active_ocr_profile_name()
+        prof = self.data_manager.get_ocr_profile(name) if name else self.data_manager.get_ocr_profile(None)
+        prof = dict(prof)
+        prof['interval_sec'] = float(self.ocr_interval_spin.value())
+        prof['telegram_enabled'] = bool(self.ocr_telegram_chk.isChecked())
+        prof['telegram_send_count'] = int(self.ocr_send_count_spin.value())
+        prof['telegram_send_interval'] = float(self.ocr_send_interval_spin.value())
+        # 키워드 파싱
+        raw = self.ocr_keywords_edit.text().strip()
+        keywords = [x.strip() for x in raw.split(',') if x.strip()]
+        prof['keywords'] = keywords
+        return prof
+
+    def _persist_ocr_profile(self) -> None:
+        name = self._active_ocr_profile_name()
+        prof = self._current_ocr_profile_payload()
+        if name:
+            self.data_manager.save_ocr_profile(name, prof)
+            self.data_manager.set_ocr_active_profile(name)
+        self._start_ocr_thread_if_needed()
+
+    def _on_ocr_profile_changed(self, _: str) -> None:
+        if self._ocr_profile_loaded:
+            return
+        name = self._active_ocr_profile_name()
+        self.data_manager.set_ocr_active_profile(name)
+        self._apply_ocr_profile_to_ui(self.data_manager.get_ocr_profile(name))
+        self._start_ocr_thread_if_needed()
+
+    def _on_ocr_profile_save(self) -> None:
+        name = self._active_ocr_profile_name()
+        if not name:
+            # 새 이름 입력
+            new_name, ok = QInputDialog.getText(self, "OCR 프로필 저장", "프로필 이름:")
+            if not ok or not new_name.strip():
+                return
+            self.ocr_profile_combo.setCurrentText(new_name.strip())
+            name = new_name.strip()
+        self._persist_ocr_profile()
+        # 콤보 갱신
+        self._load_ocr_profiles_to_ui()
+
+    def _on_ocr_profile_delete(self) -> None:
+        name = self._active_ocr_profile_name()
+        if not name:
+            return
+        if QMessageBox.question(self, "삭제 확인", f"'{name}' 프로필을 삭제할까요?") != QMessageBox.StandardButton.Yes:
+            return
+        self.data_manager.delete_ocr_profile(name)
+        self._load_ocr_profiles_to_ui()
+        self._start_ocr_thread_if_needed()
+
+    def _on_ocr_add_roi(self) -> None:
+        selector = StatusRegionSelector(self)
+        if selector.exec() != QDialog.DialogCode.Accepted:
+            return
+        rect = selector.get_roi()
+        left, top, width, height = rect.left(), rect.top(), rect.width(), rect.height()
+        roi_absolute = {"left": int(left), "top": int(top), "width": int(width), "height": int(height)}
+        name = self._active_ocr_profile_name()
+        prof = self.data_manager.get_ocr_profile(name)
+        rois = prof.get('rois', []) if isinstance(prof.get('rois'), list) else []
+        rois.append(roi_absolute)
+        prof['rois'] = rois
+        if name:
+            self.data_manager.save_ocr_profile(name, prof)
+        self._apply_ocr_profile_to_ui(self.data_manager.get_ocr_profile(name))
+        self._start_ocr_thread_if_needed()
+
+    def _on_ocr_delete_roi(self) -> None:
+        name = self._active_ocr_profile_name()
+        if not name:
+            return
+        selected = self.ocr_roi_list.selectedIndexes()
+        if not selected:
+            return
+        prof = self.data_manager.get_ocr_profile(name)
+        rois = prof.get('rois', []) if isinstance(prof.get('rois'), list) else []
+        # 최신 저장본은 상대좌표이므로 단순히 인덱스로 제거
+        indices = sorted([s.row() for s in selected], reverse=True)
+        for i in indices:
+            if 0 <= i < len(rois):
+                rois.pop(i)
+        prof['rois'] = rois
+        self.data_manager.save_ocr_profile(name, prof)
+        self._apply_ocr_profile_to_ui(self.data_manager.get_ocr_profile(name))
+        self._start_ocr_thread_if_needed()
+
+    def _on_ocr_interval_changed(self) -> None:
+        if self._ocr_profile_loaded:
+            return
+        self._persist_ocr_profile()
+
+    def _on_ocr_telegram_toggled(self, _: bool) -> None:
+        if self._ocr_profile_loaded:
+            return
+        self._persist_ocr_profile()
+
+    def _on_ocr_send_policy_changed(self) -> None:
+        if self._ocr_profile_loaded:
+            return
+        self._persist_ocr_profile()
+
+    def _on_ocr_keywords_changed(self) -> None:
+        if self._ocr_profile_loaded:
+            return
+        self._persist_ocr_profile()
+
+    def _on_ocr_preview(self) -> None:
+        name = self._active_ocr_profile_name()
+        prof = self.data_manager.get_ocr_profile(name)
+        roi_payloads = prof.get('rois', []) if isinstance(prof.get('rois'), list) else []
+        if not roi_payloads:
+            QMessageBox.information(self, 'OCR 미리보기', 'ROI가 없습니다. 먼저 ROI를 추가하세요.')
+            return
+        # 리스트에서 선택된 ROI 우선
+        idx = 0
+        if self.ocr_roi_list.currentRow() >= 0:
+            idx = self.ocr_roi_list.currentRow()
+            if idx >= len(roi_payloads):
+                idx = 0
+        # 절대좌표 변환
+        payload = roi_payloads[idx]
+        window_geometry = get_maple_window_geometry()
+        absolute = resolve_roi_to_absolute(payload, window=window_geometry)
+        if absolute is None:
+            absolute = resolve_roi_to_absolute(payload)
+        if absolute is None:
+            QMessageBox.warning(self, 'OCR 미리보기', 'ROI를 절대 좌표로 변환하지 못했습니다.')
+            return
+        monitor_dict = {
+            'left': int(absolute['left']),
+            'top': int(absolute['top']),
+            'width': max(1, int(absolute['width'])),
+            'height': max(1, int(absolute['height'])),
+        }
+        # 캡처
+        manager = get_capture_manager()
+        consumer = f"ocr_preview:{id(self)}:{int(time.time()*1000)}"
+        frame_bgr: Optional[np.ndarray] = None
+        try:
+            manager.register_region(consumer, monitor_dict)
+            frame_bgr = manager.get_frame(consumer, timeout=1.0)
+        except Exception:
+            frame_bgr = None
+        finally:
+            try:
+                manager.unregister_region(consumer)
+            except Exception:
+                pass
+        if frame_bgr is None or frame_bgr.size == 0:
+            QMessageBox.warning(self, 'OCR 미리보기', '화면 캡처에 실패했습니다.')
+            return
+        # OCR 및 오버레이
+        words = ocr_korean_words(frame_bgr, psm=11, conf_threshold=60.0, min_height_px=23)
+        overlay = draw_word_boxes(frame_bgr, words)
+        gray = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2GRAY)
+        _, thresh = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+        # 요약
+        lines: list[str] = []
+        if words:
+            lines.append(f"검출 워드 수: {len(words)}")
+        else:
+            lines.append("검출된 한글 워드 없음")
+        if words:
+            text_joined = " ".join([w.text for w in words])
+            lines.append(f"텍스트: {text_joined}")
+        dialog = StatusRecognitionPreviewDialog(
+            self,
+            'OCR 미리보기',
+            f"ROI {monitor_dict['width']}x{monitor_dict['height']} @ ({monitor_dict['left']},{monitor_dict['top']})",
+            overlay,
+            thresh,
+            lines,
+            processed_title='전처리(Threshold)',
+        )
+        dialog.exec()
+
+    def _start_ocr_thread_if_needed(self) -> None:
+        if self._ocr_thread is None:
+            # 콜백은 DataManager의 현재 상태를 동적으로 반영
+            def _get_active():
+                return self.data_manager.get_ocr_active_profile()
+
+            def _get_profile(name: Optional[str]):
+                return self.data_manager.get_ocr_profile(name)
+
+            self._ocr_thread = OCRWatchThread(get_active_profile=_get_active, get_profile_data=_get_profile)
+
+            def _on_status(msg: str) -> None:
+                if hasattr(self, 'log_viewer') and self.log_viewer:
+                    self.log_viewer.append(msg)
+
+            def _on_detected(payload_list: list) -> None:  # noqa: ARG001
+                # 간단히 이벤트가 왔다는 것만 로그. 상세는 미리보기로 확인.
+                if hasattr(self, 'log_viewer') and self.log_viewer:
+                    self.log_viewer.append("[OCR] 감지 이벤트")
+
+            self._ocr_thread.ocr_status.connect(_on_status)
+            self._ocr_thread.ocr_detected.connect(_on_detected)
+            self._ocr_thread.start()
 
     def _build_exp_status_card(self) -> QGroupBox:
         box = QGroupBox()
@@ -7005,3 +7481,10 @@ class LearningTab(QWidget):
         if hasattr(self, 'sam_thread') and self.sam_thread.isRunning():
             self.sam_thread.quit()
             self.sam_thread.wait()
+        if hasattr(self, '_ocr_thread') and self._ocr_thread is not None and self._ocr_thread.isRunning():
+            try:
+                self._ocr_thread.stop()
+            except Exception:
+                pass
+            self._ocr_thread.quit()
+            self._ocr_thread.wait()
