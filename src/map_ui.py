@@ -532,6 +532,8 @@ class MapTab(QWidget):
             self._hp_emergency_telegram_sent: bool = False
             # [NEW] HP 저체력(3% 미만) 텔레그램 알림 상태
             self._low_hp_alert_active: bool = False
+            # [NEW] 초긴급 명령 1회 트리거 상태
+            self._low_hp_urgent_active: bool = False
 
             self.latest_perf_stats: dict[str, object] = {}
             self._latest_thread_perf: dict[str, object] = {}
@@ -10141,18 +10143,30 @@ class MapTab(QWidget):
                                 self._hp_emergency_active = False
                                 self._hp_emergency_started_at = 0.0
                                 self.update_general_log("[HP] 긴급 회복 보호 해제 [시간 초과]", "gray")
-                        # [NEW] HP 저체력(3% 미만) 텔레그램 알림 및 회복 알림
+                        # [NEW] HP 저체력 텔레그램/초긴급 명령 처리
                         try:
                             low_hp_enabled = bool(getattr(hp_cfg, 'low_hp_telegram_alert', False))
+                            try:
+                                threshold = float(getattr(hp_cfg, 'urgent_threshold', None) or 3.0)
+                            except Exception:
+                                threshold = 3.0
                             if low_hp_enabled:
-                                if current < 3.0 and not self._low_hp_alert_active:
-                                    msg = f"[HP] 경고: HP 3% 미만 감지 (현재 {int(round(current))}%)"
+                                if current < threshold and not self._low_hp_alert_active:
+                                    msg = f"[HP] 경고: HP {int(threshold)}% 미만 감지 (현재 {int(round(current))}%)"
                                     self.send_emergency_telegram(msg)
                                     self._low_hp_alert_active = True
-                                elif current >= 3.0 and self._low_hp_alert_active:
-                                    msg = f"[HP] 회복: HP 3% 이상으로 회복됨 (현재 {int(round(current))}%)"
+                                elif current >= threshold and self._low_hp_alert_active:
+                                    msg = f"[HP] 회복: HP {int(threshold)}% 이상으로 회복됨 (현재 {int(round(current))}%)"
                                     self.send_emergency_telegram(msg)
                                     self._low_hp_alert_active = False
+                            urgent_cmd = getattr(hp_cfg, 'urgent_command_profile', None)
+                            if isinstance(urgent_cmd, str) and urgent_cmd.strip():
+                                if current < threshold and not getattr(self, '_low_hp_urgent_active', False):
+                                    self._emit_control_command(urgent_cmd.strip(), reason=f"urgent:hp:{int(round(current))}")
+                                    self.update_general_log(f"[HP] 초긴급 명령 실행: '{urgent_cmd.strip()}'", "orange")
+                                    self._low_hp_urgent_active = True
+                                elif current >= threshold and getattr(self, '_low_hp_urgent_active', False):
+                                    self._low_hp_urgent_active = False
                         except Exception:
                             pass
                 except Exception:

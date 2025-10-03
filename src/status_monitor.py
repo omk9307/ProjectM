@@ -79,6 +79,9 @@ class ResourceConfig:
     emergency_timeout_telegram: bool = False
     # [NEW] HP 저체력(3% 미만) 텔레그램 알림 사용 여부 (HP 전용 의미)
     low_hp_telegram_alert: bool = False
+    # [NEW] 초긴급모드 임계값(%) 및 기타 명령프로필
+    urgent_threshold: Optional[int] = None
+    urgent_command_profile: Optional[str] = None
 
     def to_dict(self) -> Dict[str, object]:
         data: Dict[str, object] = {
@@ -104,6 +107,15 @@ class ResourceConfig:
         data["emergency_timeout_telegram"] = bool(self.emergency_timeout_telegram)
         # 저체력 알림 설정
         data["low_hp_telegram_alert"] = bool(self.low_hp_telegram_alert)
+        if self.urgent_threshold is None:
+            pass
+        else:
+            try:
+                data["urgent_threshold"] = int(self.urgent_threshold)
+            except (TypeError, ValueError):
+                pass
+        if isinstance(self.urgent_command_profile, str):
+            data["urgent_command_profile"] = self.urgent_command_profile
         return data
 
     @staticmethod
@@ -154,6 +166,20 @@ class ResourceConfig:
         emergency_timeout_telegram = bool(source.get("emergency_timeout_telegram", False))
         # 저체력 텔레그램 알림
         low_hp_telegram_alert = bool(source.get("low_hp_telegram_alert", False))
+        # 초긴급 모드 임계값 및 명령프로필
+        urgent_threshold_val: Optional[int] = None
+        urgent_cmd: Optional[str] = None
+        try:
+            raw_thr = source.get("urgent_threshold")
+            if raw_thr is not None:
+                t_val = int(raw_thr)
+                if 1 <= t_val <= 99:
+                    urgent_threshold_val = t_val
+        except (TypeError, ValueError):
+            urgent_threshold_val = None
+        raw_cmd = source.get("urgent_command_profile")
+        if isinstance(raw_cmd, str) and raw_cmd.strip():
+            urgent_cmd = raw_cmd.strip()
         return ResourceConfig(
             roi=roi,
             interval_sec=interval,
@@ -166,6 +192,8 @@ class ResourceConfig:
             emergency_max_duration_sec=emergency_max_duration_sec,
             emergency_timeout_telegram=emergency_timeout_telegram,
             low_hp_telegram_alert=low_hp_telegram_alert,
+            urgent_threshold=urgent_threshold_val,
+            urgent_command_profile=urgent_cmd,
         )
 
 

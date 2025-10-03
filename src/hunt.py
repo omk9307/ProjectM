@@ -827,6 +827,8 @@ class HuntTab(QWidget):
         self._hp_emergency_telegram_sent: bool = False
         # [NEW] HP 저체력(3% 미만) 텔레그램 알림 상태
         self._low_hp_alert_active: bool = False
+        # [NEW] 초긴급 명령 1회 트리거 상태
+        self._low_hp_urgent_active: bool = False
 
         self.teleport_settings = TeleportSettings()
         self.teleport_command_left = "텔레포트(좌)"
@@ -5619,13 +5621,18 @@ class HuntTab(QWidget):
                                 self._hp_emergency_active = False
                                 self._hp_emergency_started_at = 0.0
                                 self.append_log("[HP] 긴급 회복 보호 해제 [시간 초과]", 'info')
-                        # [NEW] HP 저체력(3% 미만) 텔레그램 알림 및 회복 알림
+                        # [NEW] HP 저체력 텔레그램/초긴급 명령 처리
                         try:
                             low_hp_enabled = bool(getattr(hp_cfg, 'low_hp_telegram_alert', False))
                             current = float(hp_value)
+                            # 임계값: 설정값 없으면 3%
+                            try:
+                                threshold = float(getattr(hp_cfg, 'urgent_threshold', None) or 3.0)
+                            except Exception:
+                                threshold = 3.0
                             if low_hp_enabled:
-                                if current < 3.0 and not self._low_hp_alert_active:
-                                    msg = f"[HP] 경고: HP 3% 미만 감지 (현재 {int(round(current))}%)"
+                                if current < threshold and not self._low_hp_alert_active:
+                                    msg = f"[HP] 경고: HP {int(threshold)}% 미만 감지 (현재 {int(round(current))}%)"
                                     sent = False
                                     map_tab = getattr(self, 'map_tab', None)
                                     if map_tab and hasattr(map_tab, 'send_emergency_telegram'):
@@ -5637,8 +5644,8 @@ class HuntTab(QWidget):
                                     if not sent:
                                         self.append_log("텔레그램 전송 실패 또는 비활성화 상태입니다.", 'warn')
                                     self._low_hp_alert_active = True
-                                elif current >= 3.0 and self._low_hp_alert_active:
-                                    msg = f"[HP] 회복: HP 3% 이상으로 회복됨 (현재 {int(round(current))}%)"
+                                elif current >= threshold and self._low_hp_alert_active:
+                                    msg = f"[HP] 회복: HP {int(threshold)}% 이상으로 회복됨 (현재 {int(round(current))}%)"
                                     sent = False
                                     map_tab = getattr(self, 'map_tab', None)
                                     if map_tab and hasattr(map_tab, 'send_emergency_telegram'):
@@ -5650,6 +5657,15 @@ class HuntTab(QWidget):
                                     if not sent:
                                         self.append_log("텔레그램 전송 실패 또는 비활성화 상태입니다.", 'warn')
                                     self._low_hp_alert_active = False
+                            # 초긴급 명령프로필 실행 (선택된 경우 1회 트리거)
+                            urgent_cmd = getattr(hp_cfg, 'urgent_command_profile', None)
+                            if isinstance(urgent_cmd, str) and urgent_cmd.strip():
+                                if current < threshold and not getattr(self, '_low_hp_urgent_active', False):
+                                    self._emit_control_command(urgent_cmd.strip(), reason=f"urgent:hp:{int(round(current))}")
+                                    self.append_log(f"[HP] 초긴급 명령 실행: '{urgent_cmd.strip()}'", 'warn')
+                                    self._low_hp_urgent_active = True
+                                elif current >= threshold and getattr(self, '_low_hp_urgent_active', False):
+                                    self._low_hp_urgent_active = False
                         except Exception:
                             pass
                     except Exception:

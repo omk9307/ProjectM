@@ -3534,6 +3534,25 @@ class DataManager:
                     target.emergency_timeout_telegram = bool(payload.get('emergency_timeout_telegram'))
                 except Exception:
                     pass
+            # [NEW] HP 초긴급모드 임계값/명령프로필
+            if 'urgent_threshold' in payload:
+                raw = payload.get('urgent_threshold')
+                if raw in (None, ''):
+                    target.urgent_threshold = None
+                else:
+                    try:
+                        ival = int(raw)
+                    except (TypeError, ValueError):
+                        pass
+                    else:
+                        if 1 <= ival <= 99:
+                            target.urgent_threshold = ival
+            if 'urgent_command_profile' in payload:
+                raw = payload.get('urgent_command_profile')
+                if raw is None or (isinstance(raw, str) and not raw.strip()):
+                    target.urgent_command_profile = None
+                elif isinstance(raw, str):
+                    target.urgent_command_profile = raw.strip()
             # [NEW] HP 저체력(3% 미만) 텔레그램 알림 여부
             if 'low_hp_telegram_alert' in payload:
                 try:
@@ -5075,11 +5094,16 @@ class LearningTab(QWidget):
         header_layout.addWidget(title_label)
         enabled_checkbox = QCheckBox('사용')
         header_layout.addWidget(enabled_checkbox)
-        # [NEW] HP 카드 전용: 저체력 텔레그램 알림 토글
+        # [NEW] HP 카드 전용: 저체력 텔레그램 알림 토글 + 설정 버튼
         telegram_checkbox = None
+        telegram_settings_btn = None
         if resource == 'hp':
             telegram_checkbox = QCheckBox('텔레그램 알림')
             header_layout.addWidget(telegram_checkbox)
+            telegram_settings_btn = QPushButton('설정')
+            telegram_settings_btn.setToolTip('초긴급모드 임계값 및 기타 명령프로필 설정')
+            telegram_settings_btn.setFixedWidth(48)
+            header_layout.addWidget(telegram_settings_btn)
         header_layout.addStretch(1)
         vbox.addLayout(header_layout)
 
@@ -5158,6 +5182,9 @@ class LearningTab(QWidget):
             self.hp_lowhp_telegram_checkbox = telegram_checkbox
             if self.hp_lowhp_telegram_checkbox is not None:
                 self.hp_lowhp_telegram_checkbox.toggled.connect(self._on_status_low_hp_telegram_changed)
+            self.hp_lowhp_settings_btn = telegram_settings_btn
+            if self.hp_lowhp_settings_btn is not None:
+                self.hp_lowhp_settings_btn.clicked.connect(self._open_low_hp_settings_dialog)
         else:
             self.mp_enabled_checkbox = enabled_checkbox
             self.mp_roi_button = roi_button
@@ -5658,6 +5685,70 @@ class LearningTab(QWidget):
         updates = {'hp': {'low_hp_telegram_alert': bool(checked)}}
         self._status_config = self.data_manager.update_status_monitor_config(updates)
         self._apply_status_config_to_ui()
+
+    def _open_low_hp_settings_dialog(self) -> None:
+        cfg = getattr(self, '_status_config', None)
+        if not cfg or not hasattr(cfg, 'hp'):
+            QMessageBox.warning(self, '초긴급모드', '상태 모니터 구성이 아직 초기화되지 않았습니다.')
+            return
+        hp_cfg = cfg.hp
+        dialog = QDialog(self)
+        dialog.setWindowTitle('초긴급모드 설정')
+        vbox = QVBoxLayout(dialog)
+        # 임계값 입력
+        thr_row = QHBoxLayout()
+        thr_row.addWidget(QLabel('임계값(%)'))
+        thr_input = QLineEdit(dialog)
+        thr_input.setPlaceholderText('예: 3')
+        thr_input.setValidator(QIntValidator(1, 99, thr_input))
+        current_thr = getattr(hp_cfg, 'urgent_threshold', None)
+        thr_input.setText('' if current_thr is None else str(int(current_thr)))
+        thr_row.addWidget(thr_input)
+        vbox.addLayout(thr_row)
+        # 기타 명령프로필 선택
+        cmd_row = QHBoxLayout()
+        cmd_row.addWidget(QLabel('기타 명령프로필'))
+        cmd_combo = QComboBox(dialog)
+        cmd_combo.addItem('(선택 없음)', '')
+        try:
+            profiles = self.data_manager.list_command_profiles(('기타',))
+            for name in profiles.get('기타', []):
+                cmd_combo.addItem(f"{name}", name)
+        except Exception:
+            pass
+        current_cmd = getattr(hp_cfg, 'urgent_command_profile', None)
+        if isinstance(current_cmd, str) and current_cmd:
+            idx = cmd_combo.findData(current_cmd)
+            if idx == -1:
+                cmd_combo.addItem(current_cmd, current_cmd)
+                idx = cmd_combo.findData(current_cmd)
+            cmd_combo.setCurrentIndex(max(0, idx))
+        cmd_row.addWidget(cmd_combo)
+        vbox.addLayout(cmd_row)
+        # 버튼박스
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel, parent=dialog)
+        vbox.addWidget(buttons)
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            text = thr_input.text().strip()
+            if text:
+                try:
+                    val = int(text)
+                    if not (1 <= val <= 99):
+                        raise ValueError
+                except ValueError:
+                    QMessageBox.warning(self, '초긴급모드', '임계값은 1~99 사이의 정수여야 합니다.')
+                    return
+                thr_value = val
+            else:
+                thr_value = None
+            cmd_value = cmd_combo.currentData()
+            if not isinstance(cmd_value, str) or not cmd_value.strip():
+                cmd_value = None
+            updates = {'hp': {'urgent_threshold': thr_value, 'urgent_command_profile': cmd_value}}
+            self._status_config = self.data_manager.update_status_monitor_config(updates)
+            self._apply_status_config_to_ui()
 
     def _handle_status_config_changed(self, config: StatusMonitorConfig) -> None:
         self._status_config = config
