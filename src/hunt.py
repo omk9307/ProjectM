@@ -1462,11 +1462,31 @@ class HuntTab(QWidget):
         group.setMinimumWidth(0)
         area_form = QFormLayout()
 
+        # 전/후 비대칭 범위 모드 스위치
+        self.facing_range_checkbox = QCheckBox("전/후 비대칭")
+        self.facing_range_checkbox.setChecked(False)
+        area_form.addRow(self.facing_range_checkbox)
+
         self.enemy_range_spinbox = QSpinBox()
         self.enemy_range_spinbox.setRange(20, 2000)
         self.enemy_range_spinbox.setSingleStep(10)
         self.enemy_range_spinbox.setValue(400)
-        area_form.addRow("X 범위(±px)", self.enemy_range_spinbox)
+        self._label_enemy_range = QLabel("X 범위(±px)")
+        area_form.addRow(self._label_enemy_range, self.enemy_range_spinbox)
+
+        # 전/후(비대칭)용 사냥 범위
+        self.enemy_front_spinbox = QSpinBox()
+        self.enemy_front_spinbox.setRange(0, 2000)
+        self.enemy_front_spinbox.setSingleStep(10)
+        self.enemy_front_spinbox.setValue(self.enemy_range_spinbox.value())
+        self.enemy_back_spinbox = QSpinBox()
+        self.enemy_back_spinbox.setRange(0, 2000)
+        self.enemy_back_spinbox.setSingleStep(10)
+        self.enemy_back_spinbox.setValue(self.enemy_range_spinbox.value())
+        self._label_enemy_front = QLabel("사냥 전방 X(px)")
+        self._label_enemy_back = QLabel("사냥 후방 X(px)")
+        area_form.addRow(self._label_enemy_front, self.enemy_front_spinbox)
+        area_form.addRow(self._label_enemy_back, self.enemy_back_spinbox)
 
         self.y_band_height_spinbox = QSpinBox()
         self.y_band_height_spinbox.setRange(10, 400)
@@ -1484,7 +1504,22 @@ class HuntTab(QWidget):
         self.primary_skill_range_spinbox.setRange(10, 1200)
         self.primary_skill_range_spinbox.setSingleStep(10)
         self.primary_skill_range_spinbox.setValue(200)
-        area_form.addRow("주 스킬 X 범위(±px)", self.primary_skill_range_spinbox)
+        self._label_primary_range = QLabel("주 스킬 X 범위(±px)")
+        area_form.addRow(self._label_primary_range, self.primary_skill_range_spinbox)
+
+        # 전/후(비대칭)용 주 스킬 범위
+        self.primary_front_spinbox = QSpinBox()
+        self.primary_front_spinbox.setRange(0, 1200)
+        self.primary_front_spinbox.setSingleStep(10)
+        self.primary_front_spinbox.setValue(self.primary_skill_range_spinbox.value())
+        self.primary_back_spinbox = QSpinBox()
+        self.primary_back_spinbox.setRange(0, 1200)
+        self.primary_back_spinbox.setSingleStep(10)
+        self.primary_back_spinbox.setValue(self.primary_skill_range_spinbox.value())
+        self._label_primary_front = QLabel("주 스킬 전방 X(px)")
+        self._label_primary_back = QLabel("주 스킬 후방 X(px)")
+        area_form.addRow(self._label_primary_front, self.primary_front_spinbox)
+        area_form.addRow(self._label_primary_back, self.primary_back_spinbox)
 
         area_layout = QVBoxLayout()
         area_layout.addLayout(area_form)
@@ -1496,9 +1531,21 @@ class HuntTab(QWidget):
             self.y_band_height_spinbox,
             self.y_band_offset_spinbox,
             self.primary_skill_range_spinbox,
+            self.enemy_front_spinbox,
+            self.enemy_back_spinbox,
+            self.primary_front_spinbox,
+            self.primary_back_spinbox,
         ):
             spin.valueChanged.connect(self._on_area_config_changed)
             spin.valueChanged.connect(self._handle_setting_changed)
+
+        # 모드 토글 시 UI 상태/영역 재계산/저장
+        self.facing_range_checkbox.toggled.connect(self._update_range_inputs_enabled)
+        self.facing_range_checkbox.toggled.connect(self._on_area_config_changed)
+        self.facing_range_checkbox.toggled.connect(self._handle_setting_changed)
+
+        # 초기 표시 상태 정리
+        self._update_range_inputs_enabled(self.facing_range_checkbox.isChecked())
 
         return group
 
@@ -4508,6 +4555,33 @@ class HuntTab(QWidget):
         else:
             self._emit_area_overlays()
 
+    def _update_range_inputs_enabled(self, checked: bool | None = None) -> None:
+        try:
+            mode_on = bool(self.facing_range_checkbox.isChecked() if checked is None else checked)
+        except Exception:
+            mode_on = False
+        # 대칭 컨트롤
+        for w in (self._label_enemy_range, self.enemy_range_spinbox, self._label_primary_range, self.primary_skill_range_spinbox):
+            if hasattr(w, 'setVisible'):
+                w.setVisible(not mode_on)
+            if hasattr(w, 'setEnabled'):
+                w.setEnabled(not mode_on)
+        # 전/후 컨트롤
+        for w in (
+            self._label_enemy_front,
+            self.enemy_front_spinbox,
+            self._label_enemy_back,
+            self.enemy_back_spinbox,
+            self._label_primary_front,
+            self.primary_front_spinbox,
+            self._label_primary_back,
+            self.primary_back_spinbox,
+        ):
+            if hasattr(w, 'setVisible'):
+                w.setVisible(mode_on)
+            if hasattr(w, 'setEnabled'):
+                w.setEnabled(mode_on)
+
     def _emit_area_overlays(self) -> None:
         if not hasattr(self, "show_hunt_area_checkbox"):
             return
@@ -4655,6 +4729,11 @@ class HuntTab(QWidget):
         primary_threshold = payload.get("primary_monster_threshold")
         range_px = payload.get("range_px")
         primary_range = payload.get("primary_skill_range")
+        range_mode = payload.get("range_mode")
+        range_front = payload.get("range_front_px")
+        range_back = payload.get("range_back_px")
+        primary_front = payload.get("primary_front_px")
+        primary_back = payload.get("primary_back_px")
         model = payload.get("model") or "-"
         attack_count = payload.get("attack_skill_count", 0)
         buff_count = payload.get("buff_skill_count", 0)
@@ -4664,7 +4743,11 @@ class HuntTab(QWidget):
         detail_parts = [
             f"현재 몬스터 {latest_total}마리 / 주 스킬 {latest_primary}마리",
             f"사냥범위 기준 {hunt_threshold}마리, 주 스킬 기준 {primary_threshold}마리",
-            f"사냥범위 ±{range_px}px, 주 스킬 범위 ±{primary_range}px",
+            (
+                f"사냥범위 전 {range_front}px / 후 {range_back}px, 주 스킬 전 {primary_front}px / 후 {primary_back}px"
+                if str(range_mode).lower() == 'facing'
+                else f"사냥범위 ±{range_px}px, 주 스킬 범위 ±{primary_range}px"
+            ),
             f"모델 '{model}', 공격 스킬 {attack_count}개, 버프 스킬 {buff_count}개",
         ]
         if reason:
@@ -5111,14 +5194,32 @@ class HuntTab(QWidget):
     def _build_hunt_request_meta(self) -> dict:
         hunt_threshold = self.hunt_monster_threshold_spinbox.value()
         primary_threshold = self.primary_monster_threshold_spinbox.value()
+        mode_on = bool(getattr(self, 'facing_range_checkbox', None) and self.facing_range_checkbox.isChecked())
+        enemy_front = int(self.enemy_front_spinbox.value()) if hasattr(self, 'enemy_front_spinbox') else int(self.enemy_range_spinbox.value())
+        enemy_back = int(self.enemy_back_spinbox.value()) if hasattr(self, 'enemy_back_spinbox') else int(self.enemy_range_spinbox.value())
+        primary_front = int(self.primary_front_spinbox.value()) if hasattr(self, 'primary_front_spinbox') else int(self.primary_skill_range_spinbox.value())
+        primary_back = int(self.primary_back_spinbox.value()) if hasattr(self, 'primary_back_spinbox') else int(self.primary_skill_range_spinbox.value())
+        effective_enemy_range = self.enemy_range_spinbox.value()
+        effective_primary_range = self.primary_skill_range_spinbox.value()
+        if mode_on:
+            try:
+                effective_enemy_range = max(enemy_front, enemy_back)
+                effective_primary_range = max(primary_front, primary_back)
+            except Exception:
+                pass
         return {
             "hunt_monster_threshold": hunt_threshold,
             "primary_monster_threshold": primary_threshold,
             "monster_threshold": hunt_threshold,
-            "range_px": self.enemy_range_spinbox.value(),
+            "range_px": effective_enemy_range,
             "y_band_height": self.y_band_height_spinbox.value(),
             "y_offset": self.y_band_offset_spinbox.value(),
-            "primary_skill_range": self.primary_skill_range_spinbox.value(),
+            "primary_skill_range": effective_primary_range,
+            "range_mode": "facing" if mode_on else "symmetric",
+            "range_front_px": enemy_front,
+            "range_back_px": enemy_back,
+            "primary_front_px": primary_front,
+            "primary_back_px": primary_back,
             "model": self._get_active_model_name() or "-",
             "attack_skill_count": len(self.attack_skills),
             "buff_skill_count": len(self.buff_skills),
@@ -6478,16 +6579,66 @@ class HuntTab(QWidget):
         return max(boxes, key=lambda box: box.score)
 
     def _compute_hunt_area_rect(self, character_box: DetectionBox) -> AreaRect:
-        radius_x = float(self.enemy_range_spinbox.value())
-        width = max(1.0, radius_x * 2.0)
         height = max(1.0, float(self.y_band_height_spinbox.value()))
         offset = float(self.y_band_offset_spinbox.value())
         base_y = character_box.bottom
         top = base_y - height + offset
+
+        mode_on = bool(getattr(self, 'facing_range_checkbox', None) and self.facing_range_checkbox.isChecked())
+        facing = getattr(self, 'last_facing', None)
+
+        if mode_on and facing in ('left', 'right'):
+            front = max(0.0, float(self.enemy_front_spinbox.value()))
+            back = max(0.0, float(self.enemy_back_spinbox.value()))
+            width = max(1.0, front + back)
+            if facing == 'left':
+                x = character_box.center_x - front
+            else:  # 'right'
+                x = character_box.center_x - back
+            return AreaRect(x=x, y=top, width=width, height=height)
+
+        # 폴백: 대칭 처리 (전/후 중 큰 값을 반경으로 사용)
+        radius_x = float(self.enemy_range_spinbox.value())
+        if mode_on:
+            try:
+                fb_max = max(
+                    max(0.0, float(self.enemy_front_spinbox.value())),
+                    max(0.0, float(self.enemy_back_spinbox.value())),
+                )
+                radius_x = max(radius_x, fb_max)
+            except Exception:
+                pass
+        width = max(1.0, radius_x * 2.0)
         return AreaRect(x=character_box.center_x - radius_x, y=top, width=width, height=height)
 
     def _compute_primary_skill_rect(self, character_box: DetectionBox, hunt_area: AreaRect) -> Optional[AreaRect]:
+        mode_on = bool(getattr(self, 'facing_range_checkbox', None) and self.facing_range_checkbox.isChecked())
+        facing = getattr(self, 'last_facing', None)
+
+        if mode_on and facing in ('left', 'right'):
+            front = max(0.0, float(self.primary_front_spinbox.value()))
+            back = max(0.0, float(self.primary_back_spinbox.value()))
+            width = max(1.0, front + back)
+            if width <= 1.0:
+                # 최소 폭 보장(후방 0 허용)
+                width = 1.0
+            if facing == 'left':
+                x = character_box.center_x - front
+            else:
+                x = character_box.center_x - back
+            return AreaRect(x=x, y=hunt_area.y, width=width, height=hunt_area.height)
+
+        # 폴백: 대칭 처리 (전/후 중 큰 값을 반경으로 사용)
         radius = float(self.primary_skill_range_spinbox.value())
+        if mode_on:
+            try:
+                fb_max = max(
+                    max(0.0, float(self.primary_front_spinbox.value())),
+                    max(0.0, float(self.primary_back_spinbox.value())),
+                )
+                radius = max(radius, fb_max)
+            except Exception:
+                pass
         if radius <= 0:
             return None
         width = max(1.0, radius * 2.0)
@@ -6882,6 +7033,26 @@ class HuntTab(QWidget):
             self.y_band_height_spinbox.setValue(int(ranges.get('y_band_height', self.y_band_height_spinbox.value())))
             self.y_band_offset_spinbox.setValue(int(ranges.get('y_band_offset', self.y_band_offset_spinbox.value())))
             self.primary_skill_range_spinbox.setValue(int(ranges.get('primary_range', self.primary_skill_range_spinbox.value())))
+            # 전/후 비대칭 모드 및 값 로드
+            try:
+                mode = str(ranges.get('mode', 'symmetric')).strip().lower()
+            except Exception:
+                mode = 'symmetric'
+            if hasattr(self, 'facing_range_checkbox'):
+                self.facing_range_checkbox.setChecked(mode == 'facing')
+                # 새 필드가 없으면 기존 대칭 값으로 초기화
+                enemy_default = int(ranges.get('enemy_range', self.enemy_range_spinbox.value()))
+                primary_default = int(ranges.get('primary_range', self.primary_skill_range_spinbox.value()))
+                if hasattr(self, 'enemy_front_spinbox'):
+                    self.enemy_front_spinbox.setValue(int(ranges.get('enemy_front', enemy_default)))
+                if hasattr(self, 'enemy_back_spinbox'):
+                    self.enemy_back_spinbox.setValue(int(ranges.get('enemy_back', enemy_default)))
+                if hasattr(self, 'primary_front_spinbox'):
+                    self.primary_front_spinbox.setValue(int(ranges.get('primary_front', primary_default)))
+                if hasattr(self, 'primary_back_spinbox'):
+                    self.primary_back_spinbox.setValue(int(ranges.get('primary_back', primary_default)))
+                # UI 상태 즉시 반영
+                self._update_range_inputs_enabled(self.facing_range_checkbox.isChecked())
 
         confidence = data.get('confidence', {})
         if confidence:
@@ -7443,6 +7614,11 @@ class HuntTab(QWidget):
                 'y_band_height': self.y_band_height_spinbox.value(),
                 'y_band_offset': self.y_band_offset_spinbox.value(),
                 'primary_range': self.primary_skill_range_spinbox.value(),
+                'mode': 'facing' if (hasattr(self, 'facing_range_checkbox') and self.facing_range_checkbox.isChecked()) else 'symmetric',
+                'enemy_front': int(self.enemy_front_spinbox.value()) if hasattr(self, 'enemy_front_spinbox') else int(self.enemy_range_spinbox.value()),
+                'enemy_back': int(self.enemy_back_spinbox.value()) if hasattr(self, 'enemy_back_spinbox') else int(self.enemy_range_spinbox.value()),
+                'primary_front': int(self.primary_front_spinbox.value()) if hasattr(self, 'primary_front_spinbox') else int(self.primary_skill_range_spinbox.value()),
+                'primary_back': int(self.primary_back_spinbox.value()) if hasattr(self, 'primary_back_spinbox') else int(self.primary_skill_range_spinbox.value()),
             },
             'confidence': {
                 'char': self.conf_char_spinbox.value(),
