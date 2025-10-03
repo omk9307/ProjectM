@@ -6241,9 +6241,12 @@ class MapTab(QWidget):
 
         # 2) 액션 준비 상태일 경우 해당 액션도 보강 전송 (권한 사유 금지)
         try:
-            # 액션 준비 보강 (각각 쿨다운 적용)
+            # 액션 준비 보강: 일반 이동의 '행동 준비 시간제한'과 동일한 쿨다운을 적용
+            # 준비 창 동안 재전송을 막아 이전 명령 수행을 보장하고, 시간 초과 시에만 재시도
+            prepare_cooldown = float(getattr(self, 'cfg_prepare_timeout', None) or PREPARE_TIMEOUT)
             if action == 'prepare_to_climb':
-                if (now - float(getattr(self, '_wait_nav_last_climb_sent_at', 0.0))) >= 0.35:
+                last_sent = float(getattr(self, '_wait_nav_last_climb_sent_at', 0.0))
+                if (now - last_sent) >= prepare_cooldown:
                     entry_distance = self._get_ladder_entry_distance(pos)
                     climb_cmd = self._select_ladder_climb_command(direction_symbol, entry_distance)
                     self._emit_control_command(climb_cmd, "other_player_wait:prepare_climb")
@@ -6252,7 +6255,8 @@ class MapTab(QWidget):
                         self.update_general_log("[대기 이동] 오르기 준비 보강 전송.", "gray")
                         self._last_wait_nav_log_at = now
             elif action == 'prepare_to_jump':
-                if (now - float(getattr(self, '_wait_nav_last_jump_sent_at', 0.0))) >= 0.35:
+                last_sent = float(getattr(self, '_wait_nav_last_jump_sent_at', 0.0))
+                if (now - last_sent) >= prepare_cooldown:
                     self._emit_control_command("점프", "other_player_wait:prepare_jump")
                     self._wait_nav_last_jump_sent_at = now
                     if now - self._last_wait_nav_log_at > 1.0:
