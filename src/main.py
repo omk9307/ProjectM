@@ -24,7 +24,6 @@ from PyQt6.QtCore import Qt, QSettings, QTimer, QAbstractNativeEventFilter
 from PyQt6.QtGui import QColor, QPainter
 
 from status_monitor import StatusMonitorThread
-from ocr_watch import OCRWatchThread
 from control_authority_manager import ControlAuthorityManager
 
 
@@ -195,8 +194,6 @@ class MainWindow(QMainWindow):
         # [수정] 로드된 탭 인스턴스를 저장할 딕셔너리
         self.loaded_tabs = {}
         self.status_monitor_thread: StatusMonitorThread | None = None
-        self._ocr_watch_thread: OCRWatchThread | None = None
-        self._data_manager = None
         self.esc_hotkey_manager = None
         self.esc_hotkey_filter = None
         self._tab_color_states: dict[str, str] = {}
@@ -205,6 +202,9 @@ class MainWindow(QMainWindow):
         self._current_authority_owner: str | None = None
         self._authority_manager = ControlAuthorityManager.instance()
         self._authority_manager.authority_changed.connect(self._handle_global_authority_changed)
+        # OCR 워커 상태
+        self._ocr_thread: object | None = None
+        self._ocr_profile_provider: tuple | None = None  # (get_active_profile, get_profile_data)
 
         self.load_tabs()
         # 텔레그램 브리지 핸들러 보관용
@@ -240,6 +240,11 @@ class MainWindow(QMainWindow):
             self._telegram_bridge = maybe_start_bridge(self)
         except Exception as exc:
             print(f"[Main] 텔레그램 브리지 시작 실패: {exc}")
+        # OCR 워커 상태 초기화
+        try:
+            self._update_ocr_watch_state()
+        except Exception:
+            pass
 
     def load_tab(self, module_name, class_name, tab_title):
         """
@@ -283,8 +288,6 @@ class MainWindow(QMainWindow):
                 data_manager = getattr(learning_tab, 'data_manager')
 
             if data_manager:
-                # OCR에서 사용할 데이터 매니저 보관
-                self._data_manager = data_manager
                 hunt_tab.attach_data_manager(data_manager)
                 print("성공: '학습' 탭의 데이터 매니저를 '사냥' 탭에 연결했습니다.")
 
@@ -304,6 +307,40 @@ class MainWindow(QMainWindow):
                         if hasattr(map_tab_instance, 'attach_status_monitor'):
                             map_tab_instance.attach_status_monitor(self.status_monitor_thread, data_manager)
                     self.status_monitor_thread.start()
+
+                # OCR 프로파일 공급자 준비 (학습탭의 이름표 OCR 설정 사용)
+                def _get_active_profile() -> str:
+                    return 'monster_nameplate_ocr'
+
+                def _get_profile_data(_: str) -> dict:
+                    try:
+                        cfg = data_manager.get_monster_nameplate_config()
+                        ocr = cfg.get('ocr', {}) if isinstance(cfg.get('ocr'), dict) else {}
+                        roi = ocr.get('roi') if isinstance(ocr.get('roi'), dict) else {}
+                        parts = []
+                        try:
+                            if all(k in roi for k in ('left','top','width','height')) and int(roi.get('width',0))>0 and int(roi.get('height',0))>0:
+                                parts = [{
+                                    'left': int(roi.get('left', 0)),
+                                    'top': int(roi.get('top', 0)),
+                                    'width': int(roi.get('width', 0)),
+                                    'height': int(roi.get('height', 0)),
+                                }]
+                        except Exception:
+                            parts = []
+                        return {
+                            'roi_parts': parts,
+                            'interval_sec': float(ocr.get('interval_sec', 5.0) or 5.0),
+                            'enabled': bool(ocr.get('enabled', True)),
+                            'keywords': ocr.get('keywords', []) if isinstance(ocr.get('keywords'), list) else [],
+                            'telegram_enabled': bool(ocr.get('telegram_enabled', False)),
+                            'min_height_px': int(ocr.get('min_height_px') or 0),
+                            'conf_threshold': int(ocr.get('conf_threshold') or 0),
+                        }
+                    except Exception:
+                        return {}
+
+                self._ocr_profile_provider = (_get_active_profile, _get_profile_data)
             else:
                 print("경고: '학습' 탭에서 데이터 매니저를 찾을 수 없어 '사냥' 탭 연동을 건너뜁니다.")
 
@@ -413,8 +450,12 @@ class MainWindow(QMainWindow):
         if monitor:
             monitor.stop()
             monitor.wait(2000)
+
         # OCR 워커 정리
-        self._stop_ocr_watch()
+        try:
+            self._stop_ocr_watch()
+        except Exception:
+            pass
 
         self._teardown_global_hotkeys()
 
@@ -569,77 +610,47 @@ class MainWindow(QMainWindow):
         if hunt_index is not None:
             self._set_tab_color('사냥', hunt_color)
 
-    # ===== OCR Watch 관리 =====
-    def _update_ocr_watch_state(self) -> None:
-        any_active = bool(self._hunt_detection_active or self._map_detection_active)
-        if any_active and self._data_manager is not None:
-            self._ensure_ocr_watch_started()
-        else:
-            self._stop_ocr_watch()
-
-    def _ensure_ocr_watch_started(self) -> None:
-        if self._ocr_watch_thread is not None and self._ocr_watch_thread.isRunning():
+    # ----- OCR 워커 제어 -----
+    def _start_ocr_watch(self) -> None:
+        if self._ocr_thread is not None:
             return
-
-        def _get_active_profile() -> str:
-            return 'default'
-
-        def _get_profile_data(_: str) -> dict:
-            dm = self._data_manager
-            out: dict = {}
-            try:
-                cfg = dm.get_monster_nameplate_config() if dm else {}
-                ocr_cfg = cfg.get('ocr', {}) if isinstance(cfg.get('ocr'), dict) else {}
-                roi = ocr_cfg.get('roi', {}) if isinstance(ocr_cfg.get('roi'), dict) else {}
-                parts = []
-                if isinstance(roi, dict) and int(roi.get('width', 0)) > 0 and int(roi.get('height', 0)) > 0:
-                    parts = [{
-                        'left': int(roi.get('left', 0)),
-                        'top': int(roi.get('top', 0)),
-                        'width': int(roi.get('width', 0)),
-                        'height': int(roi.get('height', 0)),
-                    }]
-                out = {
-                    'interval_sec': float(ocr_cfg.get('interval_sec', 5.0) or 5.0),
-                    'roi_parts': parts,
-                    'telegram_enabled': bool(ocr_cfg.get('telegram_enabled', False)),
-                    'keywords': list(ocr_cfg.get('keywords', [])) if isinstance(ocr_cfg.get('keywords'), list) else [],
-                    'conf_threshold': ocr_cfg.get('conf_threshold', None),
-                    'min_height_px': ocr_cfg.get('min_height_px', None),
-                }
-            except Exception:
-                pass
-            return out
-
+        if not self._ocr_profile_provider:
+            return
+        get_active, get_data = self._ocr_profile_provider
         try:
-            # 이전 스레드가 있었다면 정리
-            if self._ocr_watch_thread is not None:
-                try:
-                    self._ocr_watch_thread.stop()
-                except Exception:
-                    pass
-                try:
-                    self._ocr_watch_thread.wait(500)
-                except Exception:
-                    pass
-            self._ocr_watch_thread = OCRWatchThread(get_active_profile=_get_active_profile, get_profile_data=_get_profile_data)
-            self._ocr_watch_thread.start()
+            from ocr_watch import OCRWatchThread  # 지연 임포트로 초기 DLL 로드 충돌 회피
+        except Exception as exc:
+            print(f"[Main] OCR 워커 임포트 실패: {exc}")
+            return
+        self._ocr_thread = OCRWatchThread(get_active_profile=get_active, get_profile_data=get_data)
+        try:
+            self._ocr_thread.start()
+            print('[Main] OCR 워커를 시작했습니다.')
         except Exception as exc:
             print(f"[Main] OCR 워커 시작 실패: {exc}")
-            self._ocr_watch_thread = None
+            self._ocr_thread = None
 
     def _stop_ocr_watch(self) -> None:
-        thr = self._ocr_watch_thread
-        self._ocr_watch_thread = None
-        if thr is not None:
-            try:
-                thr.stop()
-            except Exception:
-                pass
-            try:
-                thr.wait(1500)
-            except Exception:
-                pass
+        th = self._ocr_thread
+        if not th:
+            return
+        try:
+            th.stop()
+        except Exception:
+            pass
+        try:
+            th.wait(2000)
+        except Exception:
+            pass
+        self._ocr_thread = None
+        print('[Main] OCR 워커를 중지했습니다.')
+
+    def _update_ocr_watch_state(self) -> None:
+        should_run = bool(self._hunt_detection_active or self._map_detection_active)
+        if should_run:
+            self._start_ocr_watch()
+        else:
+            self._stop_ocr_watch()
 
 
 if __name__ == '__main__':

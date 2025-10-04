@@ -1,6 +1,7 @@
 """학습탭용 OCR 감시 워커 및 유틸.
 
 요구 사항
+- 한글/숫자만 인식(영문/기호 제거)
 - 다중 ROI 주기 캡처, 바운딩 박스 강조 미리보기 지원
 - 텔레그램 전송(감지 시 n회, 주기 n초 / 0이면 무제한), 키워드 포함 시 전송
 
@@ -25,35 +26,69 @@ from PyQt6.QtCore import QObject, QThread, pyqtSignal
 from capture_manager import get_capture_manager
 from window_anchors import get_maple_window_geometry, resolve_roi_to_absolute
 
-# PaddleOCR(선택적) 지원
+try:
+    import pytesseract  # type: ignore
+    _PYTESSERACT_AVAILABLE = True
+except Exception:  # pragma: no cover - 실행 환경에 따라 미설치일 수 있음
+    _PYTESSERACT_AVAILABLE = False
+
+# PaddleOCR(선택적) 지원 - 지연 임포트로 전환하여 초기 임포트 충돌을 회피
 _PADDLE_AVAILABLE = False
 _PADDLE_GPU_AVAILABLE = False
 _paddle_ocr_instance = None
 _paddle_runtime_label: Optional[str] = None
 _paddle_error_detail: Optional[str] = None
 _paddle_lock = threading.Lock()
+_paddle_import_attempted = False
+_PaddleOCR_cls = None  # type: ignore
 
-try:  # pragma: no cover - 환경에 따라 미설치 가능
-    import paddle  # type: ignore
-    from paddleocr import PaddleOCR  # type: ignore
-
-    _PADDLE_AVAILABLE = True
-    try:
-        _PADDLE_GPU_AVAILABLE = bool(getattr(paddle, "is_compiled_with_cuda", lambda: False)())
-    except Exception:
+def _ensure_paddle_import() -> None:
+    global _PADDLE_AVAILABLE, _PADDLE_GPU_AVAILABLE, _paddle_error_detail, _paddle_import_attempted, _PaddleOCR_cls
+    if _paddle_import_attempted:
+        return
+    _paddle_import_attempted = True
+    try:  # pragma: no cover - 환경에 따라 미설치 가능
+        import paddle  # type: ignore
+        from paddleocr import PaddleOCR as _POCR  # type: ignore
+        _PaddleOCR_cls = _POCR
+        _PADDLE_AVAILABLE = True
+        try:
+            _PADDLE_GPU_AVAILABLE = bool(getattr(paddle, "is_compiled_with_cuda", lambda: False)())
+        except Exception:
+            _PADDLE_GPU_AVAILABLE = False
+    except Exception as exc:
+        _PADDLE_AVAILABLE = False
         _PADDLE_GPU_AVAILABLE = False
-except Exception as exc:
-    _PADDLE_AVAILABLE = False
-    _PADDLE_GPU_AVAILABLE = False
-    try:
-        _paddle_error_detail = f"import error: {exc}"
-    except Exception:
-        _paddle_error_detail = "import error"
+        try:
+            _paddle_error_detail = f"import error: {exc}"
+        except Exception:
+            _paddle_error_detail = "import error"
 
 
-# 텍스트 정규화: 공백 정리만 수행합니다.
+# 텍스트 정규화: 한글+숫자 이외 문자는 제거하고, 공백은 정리합니다.
 _TEXT_NORMALIZE_WS = re.compile(r"\s+")
-_KEEP_KR_NUM_WS = re.compile(r"[^0-9가-힣\s]+")
+_ALLOWED_CHARS = re.compile(r"[가-힣0-9]+")
+
+_KOR_LANG_OK: Optional[bool] = None
+
+def _kor_lang_available() -> bool:
+    global _KOR_LANG_OK
+    if not _PYTESSERACT_AVAILABLE:
+        _KOR_LANG_OK = False
+        return False
+    if _KOR_LANG_OK is not None:
+        return bool(_KOR_LANG_OK)
+    try:
+        langs = pytesseract.get_languages(config="")  # type: ignore[attr-defined]
+        if isinstance(langs, (list, tuple)):
+            _KOR_LANG_OK = ("kor" in langs)
+        else:
+            # 일부 환경은 빈 리스트를 반환할 수 있어, 일단 통과시킴
+            _KOR_LANG_OK = True
+    except Exception:
+        # get_languages 미지원 환경: 일단 통과시킴
+        _KOR_LANG_OK = True
+    return bool(_KOR_LANG_OK)
 
 
 @dataclass
@@ -70,25 +105,19 @@ class OCRWord:
 
 
 def _extract_korean(text: str) -> str:
-    """OCR 원문에서 한글/숫자/공백만 남기고 정리한다.
-
-    - 한글(가-힣), 숫자(0-9), 공백만 유지
-    - 연속 공백은 단일 공백으로 축소
-    """
+    """OCR 원문에서 한글/숫자만 남기고 공백을 정리한다."""
     if text is None:
         return ""
     try:
         s = str(text)
     except Exception:
         return ""
-    s = s.replace("\n", " ").strip()
-    try:
-        # 한글/숫자/공백만 보존
-        s = _KEEP_KR_NUM_WS.sub(" ", s)
-    except Exception:
-        pass
-    s = _TEXT_NORMALIZE_WS.sub(" ", s)
-    return s
+    s = s.replace("\n", " ")
+    # 허용 문자만 추출하여 공백으로 연결
+    tokens = _ALLOWED_CHARS.findall(s)
+    s2 = " ".join(tokens).strip()
+    s2 = _TEXT_NORMALIZE_WS.sub(" ", s2)
+    return s2
 
 
 def is_paddle_available() -> bool:
@@ -103,7 +132,8 @@ def _get_paddle_ocr() -> Optional["PaddleOCR"]:
     - GPU: 가능하면 자동 사용(설치가 GPU 빌드인 경우). 기본은 CPU
     """
     global _paddle_ocr_instance, _paddle_runtime_label, _paddle_error_detail
-    if not _PADDLE_AVAILABLE:
+    _ensure_paddle_import()
+    if not _PADDLE_AVAILABLE or _PaddleOCR_cls is None:
         return None
     if _paddle_ocr_instance is not None:
         return _paddle_ocr_instance
@@ -120,7 +150,7 @@ def _get_paddle_ocr() -> Optional["PaddleOCR"]:
     # 0) 최신 시그니처 우선(use_textline_orientation/device, 검출 민감도 보정)
     try:
         with _paddle_lock:
-            _paddle_ocr_instance = PaddleOCR(
+            _paddle_ocr_instance = _PaddleOCR_cls(
                 lang="korean",
                 device=device,
                 # 문서 권장 파이프라인: 불필요한 보조 모듈 비활성화
@@ -139,7 +169,7 @@ def _get_paddle_ocr() -> Optional["PaddleOCR"]:
     # 1) 최소 인자만 (가장 호환성 높음)
     try:
         with _paddle_lock:
-            _paddle_ocr_instance = PaddleOCR(lang="korean")
+            _paddle_ocr_instance = _PaddleOCR_cls(lang="korean")
         # 레이블: 실제 디바이스 조회 시도
         try:
             import paddle as _pd  # type: ignore
@@ -156,7 +186,7 @@ def _get_paddle_ocr() -> Optional["PaddleOCR"]:
     # 2) 구버전 서명(use_gpu, use_angle_cls)
     try:
         with _paddle_lock:
-            _paddle_ocr_instance = PaddleOCR(
+            _paddle_ocr_instance = _PaddleOCR_cls(
                 use_angle_cls=True,
                 lang="korean",
                 use_gpu=use_gpu,
@@ -178,8 +208,10 @@ def get_ocr_engine_label() -> str:
     """현재 사용할 OCR 엔진 라벨을 반환한다.
 
     - PaddleOCR 초기화 성공 시: "PaddleOCR (CPU|GPU)"
+    - 그렇지 않고 Tesseract 가능 시: "Tesseract (kor)" 또는 "Tesseract (kor 미설치)"
     - 그 외: "엔진 사용 불가"
     """
+    _ensure_paddle_import()
     if _PADDLE_AVAILABLE:
         # 인스턴스가 아직 없을 수 있으므로 생성 시도
         ocr = _get_paddle_ocr()
@@ -216,7 +248,7 @@ def set_paddle_use_gpu(use_gpu: bool) -> None:
         pass
 
 
-def _OCR_LEGACY_REMOVED_do_not_use(
+def ocr_korean_words(
     image_bgr: np.ndarray,
     *,
     psm: int = 11,
@@ -793,27 +825,39 @@ def ocr_korean_words(
     return out
 
 def _load_telegram_credentials() -> Tuple[str, str]:
-    """고정 경로(G:\\Coding\\Project_Maple\\workspace\\config\\telegram.json)에서 (token, chat_id) 로드."""
-    token = ""
-    chat_id = ""
-    fixed_path = r"G:\\Coding\\Project_Maple\\workspace\\config\\telegram.json"
-    path = fixed_path
-    if os.path.exists(path):
+    """workspace/config/telegram.json 또는 환경변수에서 (token, chat_id) 로드."""
+    token = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
+    chat_id = os.getenv("TELEGRAM_CHAT_ID", "").strip()
+    # 파일 candidates (고정 경로 우선)
+    if not token or not chat_id:
+        base = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "workspace", "config"))
+        candidates = []
+        # Windows 고정 경로 최우선
         try:
-            with open(path, "r", encoding="utf-8-sig") as fp:
-                lines = fp.readlines()
+            candidates.append(r"G:\\Coding\\Project_Maple\\workspace\\config\\telegram.json")
         except Exception:
-            lines = []
-        pattern = re.compile(r"^\s*([A-Za-z_][A-Za-z0-9_]*)\s*=\s*([\'\"])(.*?)\2\s*$")
-        kv: Dict[str, str] = {}
-        for raw in lines:
-            m = pattern.match(raw.strip())
-            if not m:
+            pass
+        candidates.append(os.path.join(base, "telegram.json"))
+        for path in candidates:
+            if not os.path.exists(path):
                 continue
-            key, _, val = m.groups()
-            kv[key] = val
-        token = (kv.get("TELEGRAM_BOT_TOKEN", "") or "").strip()
-        chat_id = (kv.get("TELEGRAM_CHAT_ID", "") or "").strip()
+            try:
+                with open(path, "r", encoding="utf-8-sig") as fp:
+                    lines = fp.readlines()
+            except Exception:
+                lines = []
+            pattern = re.compile(r"^\s*([A-Za-z_][A-Za-z0-9_]*)\s*=\s*([\'\"])(.*?)\2\s*$")
+            kv: Dict[str, str] = {}
+            for raw in lines:
+                m = pattern.match(raw.strip())
+                if not m:
+                    continue
+                key, _, val = m.groups()
+                kv[key] = val
+            token = kv.get("TELEGRAM_BOT_TOKEN", token).strip() or token
+            chat_id = kv.get("TELEGRAM_CHAT_ID", chat_id).strip() or chat_id
+            if token and chat_id:
+                break
     return token, chat_id
 
 
@@ -931,7 +975,11 @@ class OCRWatchThread(QThread):
             # 필터는 설정이 있는 경우에만 적용 (기본은 미적용)
             try:
                 _mh = profile.get("min_height_px", None)
-                min_height_px = max(1, int(_mh)) if _mh not in (None, "") else None
+                if _mh in (None, ""):
+                    min_height_px = None
+                else:
+                    _mhi = int(_mh)
+                    min_height_px = None if _mhi <= 0 else _mhi
             except (TypeError, ValueError):
                 min_height_px = None
             try:
@@ -997,14 +1045,11 @@ class OCRWatchThread(QThread):
             joined = " ".join(all_texts).strip()
             matched_keyword = None
             for kw in keywords:
-                if isinstance(kw, str) and kw.strip():
-                    kws = kw.strip()
-                    if kws in joined:
-                        matched_keyword = kws
-                        break
+                if isinstance(kw, str) and kw.strip() and kw.strip() in joined:
+                    matched_keyword = kw.strip()
+                    break
 
-            # 키워드 인식이 켜져 있고, 키워드가 실제로 매칭될 때만 전송
-            if telegram_enabled and matched_keyword:
+            if any_detected and telegram_enabled:
                 now = time.time()
                 can_send = False
                 if self._last_send_ts is None:

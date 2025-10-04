@@ -40,7 +40,9 @@ def _load_credentials() -> Optional[_Credentials]:
     base = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
     # 1) telegram.json (KEY="VALUE" 텍스트)
-    json_like_path = os.path.join(base, "workspace", "config", "telegram.json")
+    #    고정 경로(G:\\Coding\\Project_Maple\\workspace\\config\\telegram.json) 우선
+    fixed_path = r"G:\\Coding\\Project_Maple\\workspace\\config\\telegram.json"
+    json_like_path = fixed_path if os.path.exists(fixed_path) else os.path.join(base, "workspace", "config", "telegram.json")
     if os.path.exists(json_like_path):
         try:
             with open(json_like_path, "r", encoding="utf-8-sig") as fp:
