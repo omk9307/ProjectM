@@ -38,6 +38,7 @@ from PyQt6.QtWidgets import (
     QRadioButton,
     QSpinBox,
     QTextEdit,
+    QListWidget,
     QTreeWidget,
     QTreeWidgetItem,
     QVBoxLayout,
@@ -878,6 +879,10 @@ class HuntTab(QWidget):
         self.hotkey_manager = None
         self.hotkey_event_filter = None
         self.detection_hotkey = 'f10'
+        # 대기모드 토글 단축키(F9)
+        self.wait_hotkey_manager = None
+        self.wait_hotkey_event_filter = None
+        self.waitmode_hotkey = 'f9'
 
         # 자동 대응 상태
         self.shutdown_pid_value: Optional[int] = None
@@ -895,6 +900,8 @@ class HuntTab(QWidget):
         self.shutdown_other_player_wait_clear_delay: int = 60
         self.shutdown_other_player_wait_waypoint_id: Optional[str] = None
         self.shutdown_other_player_wait_waypoint_name: str = ''
+        # 다중 대기 웨이포인트(신규)
+        self.shutdown_other_player_wait_waypoints: list[dict] = []  # [{'id': str, 'name': str}]
         self.shutdown_other_player_wait_active = False
         self.shutdown_other_player_wait_started_at: Optional[float] = None
         self.shutdown_other_player_wait_clear_since: Optional[float] = None
@@ -915,6 +922,7 @@ class HuntTab(QWidget):
         self._setup_timers()
         self._setup_facing_reset_timer()
         self._setup_detection_hotkey()
+        self._setup_waitmode_hotkey()
 
         # 캐릭터 미검출 감시 타이머
         self._char_missing_restart_pending: bool = False
@@ -1156,6 +1164,46 @@ class HuntTab(QWidget):
                 self.hotkey_event_filter = None
             self.append_log(f"단축키 등록 중 오류가 발생했습니다: {exc}", "warn")
 
+    def _setup_waitmode_hotkey(self) -> None:
+        """F9: 대기모드 무기한 토글 단축키 등록."""
+        if _HuntHotkeyManager is None or _HuntHotkeyEventFilter is None:
+            return
+        app = QApplication.instance()
+        if app is None:
+            return
+        try:
+            self.wait_hotkey_manager = _HuntHotkeyManager()
+            hotkey_id = self.wait_hotkey_manager.register_hotkey(self.waitmode_hotkey)
+            self.wait_hotkey_event_filter = _HuntHotkeyEventFilter(hotkey_id, self._toggle_indefinite_wait_hotkey)
+            app.installNativeEventFilter(self.wait_hotkey_event_filter)
+            self.append_log(f"대기모드 단축키가 '{self.waitmode_hotkey.upper()}'로 설정되었습니다.", "info")
+        except Exception as exc:
+            if self.wait_hotkey_manager:
+                try:
+                    self.wait_hotkey_manager.unregister_hotkey()
+                except Exception:
+                    pass
+                self.wait_hotkey_manager = None
+            if self.wait_hotkey_event_filter and app:
+                try:
+                    app.removeNativeEventFilter(self.wait_hotkey_event_filter)
+                except Exception:
+                    pass
+                self.wait_hotkey_event_filter = None
+            self.append_log(f"대기모드 단축키 등록 중 오류가 발생했습니다: {exc}", "warn")
+
+    def _toggle_indefinite_wait_hotkey(self) -> None:
+        """F9 핫키: 대기모드 무기한 토글."""
+        try:
+            if not bool(getattr(self, 'shutdown_other_player_wait_active', False)):
+                ok, msg = self.api_enter_indefinite_wait_mode()
+                self.append_log(msg, 'info' if ok else 'warn')
+            else:
+                ok, msg = self.api_exit_indefinite_wait_mode()
+                self.append_log(msg, 'info' if ok else 'warn')
+        except Exception as exc:
+            self.append_log(f"대기모드 토글 중 오류: {exc}", 'warn')
+
     def _is_detection_active(self) -> bool:
         return bool(self.detect_btn.isChecked())
 
@@ -1291,9 +1339,8 @@ class HuntTab(QWidget):
                 pass
             return True, "이미 대기 모드입니다. 무기한 모드로 전환합니다."
 
-        # 웨이포인트 필요
-        waypoint_id = getattr(self, 'shutdown_other_player_wait_waypoint_id', None)
-        if waypoint_id is None:
+        # 웨이포인트 필요(단일 또는 다중)
+        if not self._has_wait_waypoint_configured():
             return False, "대기 모드를 실행하려면 먼저 웨이포인트를 설정해주세요."
 
         ok = bool(self._start_other_player_wait_mode(float(_t.time())))
@@ -2510,9 +2557,68 @@ class HuntTab(QWidget):
             if index >= 0:
                 waypoint_combo.setCurrentIndex(index)
 
+        # 다중 웨이포인트 편집: 추가/삭제 버튼 + 목록
+        wp_edit_row = QWidget(dialog)
+        wp_edit_layout = QHBoxLayout(wp_edit_row)
+        wp_edit_layout.setContentsMargins(0, 0, 0, 0)
+        wp_edit_layout.setSpacing(8)
+        add_btn = QPushButton("추가", dialog)
+        del_btn = QPushButton("삭제", dialog)
+        wp_edit_layout.addWidget(waypoint_combo, 1)
+        wp_edit_layout.addWidget(add_btn)
+        wp_edit_layout.addWidget(del_btn)
+
+        waypoint_list = QListWidget(dialog)
+        # 초기 목록: 기존 다중 목록 우선, 없으면 단일값
+        initial_items: list[tuple[str, str]] = []
+        if self.shutdown_other_player_wait_waypoints:
+            for item in self.shutdown_other_player_wait_waypoints:
+                wp_id = str(item.get('id') or '').strip()
+                if not wp_id:
+                    continue
+                name = str(item.get('name') or wp_id)
+                initial_items.append((name, wp_id))
+        elif self.shutdown_other_player_wait_waypoint_id:
+            initial_items.append((self.shutdown_other_player_wait_waypoint_name or str(self.shutdown_other_player_wait_waypoint_id), str(self.shutdown_other_player_wait_waypoint_id)))
+        for name, wp_id in initial_items:
+            from PyQt6.QtWidgets import QListWidgetItem as _QLI
+            item = _QLI(name)
+            item.setData(Qt.ItemDataRole.UserRole, wp_id)
+            waypoint_list.addItem(item)
+
+        def _add_current_wp():
+            idx = waypoint_combo.currentIndex()
+            if idx < 0:
+                return
+            wp_id = str(waypoint_combo.currentData())
+            name = waypoint_combo.currentText()
+            if not wp_id:
+                return
+            # 중복 방지
+            for i in range(waypoint_list.count()):
+                it = waypoint_list.item(i)
+                if str(it.data(Qt.ItemDataRole.UserRole)) == wp_id:
+                    return
+            from PyQt6.QtWidgets import QListWidgetItem as _QLI
+            new_item = _QLI(name)
+            new_item.setData(Qt.ItemDataRole.UserRole, wp_id)
+            waypoint_list.addItem(new_item)
+
+        def _remove_selected_wp():
+            selected = waypoint_list.selectedItems()
+            if not selected:
+                return
+            for it in selected:
+                row = waypoint_list.row(it)
+                waypoint_list.takeItem(row)
+
+        add_btn.clicked.connect(_add_current_wp)
+        del_btn.clicked.connect(_remove_selected_wp)
+
         layout.addRow("감지 시간", detect_row_widget)
         layout.addRow("대기 종료", clear_row_widget)
-        layout.addRow("웨이포인트", waypoint_combo)
+        layout.addRow("웨이포인트", wp_edit_row)
+        layout.addRow("선택 목록", waypoint_list)
 
         button_box = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel, dialog)
         button_box.accepted.connect(dialog.accept)
@@ -2532,23 +2638,23 @@ class HuntTab(QWidget):
             QMessageBox.warning(self, "시간 오류", "대기 종료 시간은 1초 이상으로 설정해주세요.")
             return
 
-        selected_index = waypoint_combo.currentIndex()
-        if selected_index < 0:
-            QMessageBox.warning(self, "웨이포인트 선택", "대기할 웨이포인트를 선택해주세요.")
-            return
-
-        waypoint_data = waypoint_combo.currentData()
-        if waypoint_data is None:
-            QMessageBox.warning(self, "웨이포인트 선택", "유효한 웨이포인트가 아닙니다.")
-            return
-
-        waypoint_id = str(waypoint_data)
-        waypoint_name = waypoint_combo.currentText()
-
         self.shutdown_other_player_wait_delay = total_seconds
         self.shutdown_other_player_wait_clear_delay = clear_total_seconds
-        self.shutdown_other_player_wait_waypoint_id = waypoint_id
-        self.shutdown_other_player_wait_waypoint_name = waypoint_name
+        # 목록 수집 및 검증
+        collected: list[dict] = []
+        for i in range(waypoint_list.count()):
+            it = waypoint_list.item(i)
+            wp_id = str(it.data(Qt.ItemDataRole.UserRole) or '').strip()
+            name = it.text().strip() or wp_id
+            if wp_id:
+                collected.append({'id': wp_id, 'name': name})
+        if not collected:
+            QMessageBox.warning(self, "웨이포인트 없음", "대기할 웨이포인트를 최소 1개 이상 추가해주세요.")
+            return
+        # 저장(다중), 구버전 단일 필드도 첫 항목으로 동기화
+        self.shutdown_other_player_wait_waypoints = collected
+        self.shutdown_other_player_wait_waypoint_id = collected[0]['id']
+        self.shutdown_other_player_wait_waypoint_name = collected[0]['name']
         self.shutdown_other_player_radio_wait.setChecked(True)
         self.shutdown_other_player_action = 'wait_mode'
         self._update_other_player_action_summary()
@@ -2573,13 +2679,44 @@ class HuntTab(QWidget):
         waypoints.sort(key=lambda x: x[0].lower())
         return waypoints
 
+    def _has_wait_waypoint_configured(self) -> bool:
+        try:
+            if isinstance(self.shutdown_other_player_wait_waypoints, list) and len(self.shutdown_other_player_wait_waypoints) > 0:
+                return True
+        except Exception:
+            pass
+        return bool(self.shutdown_other_player_wait_waypoint_id)
+
+    def _select_random_wait_waypoint(self) -> Optional[tuple[str, str]]:
+        """다중 웨이포인트 중 하나를 무작위 선택. 없으면 단일 필드 사용."""
+        try:
+            if self.shutdown_other_player_wait_waypoints:
+                choice = random.choice(self.shutdown_other_player_wait_waypoints)
+                wp_id = str(choice.get('id') or '').strip()
+                name = str(choice.get('name') or wp_id)
+                if wp_id:
+                    return wp_id, name
+        except Exception:
+            pass
+        if self.shutdown_other_player_wait_waypoint_id:
+            wp_id = str(self.shutdown_other_player_wait_waypoint_id)
+            name = self.shutdown_other_player_wait_waypoint_name or wp_id
+            return wp_id, name
+        return None
+
     def _update_other_player_action_summary(self) -> None:
         exit_delay_text = self._format_duration_text(self.shutdown_other_player_exit_delay)
         self.shutdown_other_player_shutdown_summary.setText(f"감지시간 {exit_delay_text}")
 
         wait_delay_text = self._format_duration_text(self.shutdown_other_player_wait_delay)
         clear_delay_text = self._format_duration_text(self.shutdown_other_player_wait_clear_delay)
-        waypoint_text = self.shutdown_other_player_wait_waypoint_name or "웨이포인트 미설정"
+        waypoint_count = len(self.shutdown_other_player_wait_waypoints)
+        if waypoint_count == 0:
+            waypoint_text = self.shutdown_other_player_wait_waypoint_name or "웨이포인트 미설정"
+        elif waypoint_count == 1:
+            waypoint_text = self.shutdown_other_player_wait_waypoints[0].get('name') or str(self.shutdown_other_player_wait_waypoints[0].get('id'))
+        else:
+            waypoint_text = f"웨이포인트 {waypoint_count}개"
         self.shutdown_other_player_wait_summary.setText(
             f"감지시간 {wait_delay_text} / 대기종료 {clear_delay_text} / {waypoint_text}"
         )
@@ -2940,11 +3077,11 @@ class HuntTab(QWidget):
                 if (
                     not self.shutdown_other_player_action_triggered
                     and now >= due_ts
-                    and self.shutdown_other_player_wait_waypoint_id is not None
+                    and self._has_wait_waypoint_configured()
                 ):
                     if self._start_other_player_wait_mode(now):
                         self.shutdown_other_player_action_triggered = True
-                elif self.shutdown_other_player_wait_waypoint_id is None:
+                elif not self._has_wait_waypoint_configured():
                     self.shutdown_other_player_elapsed.setText("웨이포인트 미설정")
             else:
                 # 미구현 상태에서는 경과만 표시
@@ -2973,10 +3110,11 @@ class HuntTab(QWidget):
         self._update_shutdown_labels()
 
     def _start_other_player_wait_mode(self, started_at: float) -> bool:
-        waypoint_id = self.shutdown_other_player_wait_waypoint_id
-        if waypoint_id is None:
+        selected = self._select_random_wait_waypoint()
+        if not selected:
             self.append_log("대기 모드를 실행하려면 웨이포인트를 먼저 설정해주세요.", "warn")
             return False
+        waypoint_id, waypoint_name = selected
 
         map_tab = getattr(self, 'map_tab', None)
         if not map_tab or not hasattr(map_tab, 'start_other_player_wait_operation'):
@@ -2984,7 +3122,6 @@ class HuntTab(QWidget):
             return False
 
         waypoint_id_str = str(waypoint_id)
-        waypoint_name = self.shutdown_other_player_wait_waypoint_name or waypoint_id_str
 
         try:
             success = map_tab.start_other_player_wait_operation(
@@ -8035,13 +8172,38 @@ class HuntTab(QWidget):
             if isinstance(wait_clear_delay, (int, float)) and wait_clear_delay > 0:
                 self.shutdown_other_player_wait_clear_delay = int(wait_clear_delay)
 
+            # 다중 웨이포인트 우선 로드
+            waypoints_payload = auto_shutdown_cfg.get('other_wait_waypoints')
+            loaded_waypoints: list[dict] = []
+            if isinstance(waypoints_payload, list):
+                for entry in waypoints_payload:
+                    if isinstance(entry, dict):
+                        wp_id = str(entry.get('id') or '').strip()
+                        if not wp_id:
+                            continue
+                        name = str(entry.get('name') or wp_id)
+                        loaded_waypoints.append({'id': wp_id, 'name': name})
+                    elif isinstance(entry, (list, tuple)) and len(entry) >= 2:
+                        wp_id = str(entry[1]).strip()
+                        name = str(entry[0])
+                        if wp_id:
+                            loaded_waypoints.append({'id': wp_id, 'name': name})
+            # 단일 필드(구버전)도 병합
             wait_wp_id = auto_shutdown_cfg.get('other_wait_waypoint_id')
             wait_wp_name = auto_shutdown_cfg.get('other_wait_waypoint_name')
-            if wait_wp_id is not None:
+            if wait_wp_id is not None and not loaded_waypoints:
                 wait_wp_id_str = str(wait_wp_id).strip()
-                self.shutdown_other_player_wait_waypoint_id = wait_wp_id_str or None
-            if isinstance(wait_wp_name, str):
-                self.shutdown_other_player_wait_waypoint_name = wait_wp_name
+                if wait_wp_id_str:
+                    loaded_waypoints = [{'id': wait_wp_id_str, 'name': str(wait_wp_name or wait_wp_id_str)}]
+            # 상태에 반영
+            self.shutdown_other_player_wait_waypoints = loaded_waypoints
+            # 구버전 단일 필드도 동기화
+            if loaded_waypoints:
+                self.shutdown_other_player_wait_waypoint_id = loaded_waypoints[0]['id']
+                self.shutdown_other_player_wait_waypoint_name = loaded_waypoints[0]['name']
+            else:
+                self.shutdown_other_player_wait_waypoint_id = None
+                self.shutdown_other_player_wait_waypoint_name = ''
 
             other_enabled = bool(auto_shutdown_cfg.get('other_enabled', False))
             if hasattr(self, 'shutdown_other_player_checkbox'):
@@ -8494,6 +8656,11 @@ class HuntTab(QWidget):
             'other_wait_clear_delay': int(self.shutdown_other_player_wait_clear_delay),
             'other_wait_waypoint_id': self.shutdown_other_player_wait_waypoint_id,
             'other_wait_waypoint_name': self.shutdown_other_player_wait_waypoint_name,
+            'other_wait_waypoints': [
+                {'id': str(item.get('id', '')), 'name': str(item.get('name', ''))}
+                for item in (self.shutdown_other_player_wait_waypoints or [])
+                if str(item.get('id', '')).strip()
+            ],
             'sleep_enabled': bool(self.shutdown_sleep_enabled),
         }
 

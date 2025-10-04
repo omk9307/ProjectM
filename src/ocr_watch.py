@@ -67,7 +67,7 @@ def _ensure_paddle_import() -> None:
 
 # 텍스트 정규화: 한글+숫자 이외 문자는 제거하고, 공백은 정리합니다.
 _TEXT_NORMALIZE_WS = re.compile(r"\s+")
-_ALLOWED_CHARS = re.compile(r"[가-힣0-9]+")
+_ALLOWED_CHARS = re.compile(r"[가-힣0-9:]+")
 
 _KOR_LANG_OK: Optional[bool] = None
 
