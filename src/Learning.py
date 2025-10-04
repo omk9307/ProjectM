@@ -75,6 +75,14 @@ from status_monitor import (
     StatusMonitorConfig,
     StatusMonitorThread,
 )
+from ocr_watch import (
+    ocr_korean_words,
+    draw_word_boxes,
+    get_ocr_engine_label,
+    get_ocr_last_error,
+    is_paddle_available,
+    set_paddle_use_gpu,
+)
 
 from window_anchors import (
     anchor_exists,
@@ -2563,6 +2571,18 @@ class DataManager:
             'dead_zone_sec': 0.20,
             'track_missing_grace_sec': 0.12,
             'track_max_hold_sec': 2.0,
+            # [NEW] 이름표 하위 OCR 설정(절대 좌표 ROI + 주기)
+            'ocr': {
+                'roi': {
+                    'left': 0,
+                    'top': 0,
+                    'width': 0,
+                    'height': 0,
+                },
+                'interval_sec': 5.0,
+                'enabled': True,
+                'use_gpu': False,
+            },
             'per_class': {},
         }
 
@@ -2637,6 +2657,37 @@ class DataManager:
                     except (TypeError, ValueError):
                         entry['threshold'] = None
                         changed = True
+        # [NEW] ocr 하위 설정 병합(없으면 기본 추가)
+        ocr_cfg = merged.get('ocr') if isinstance(merged.get('ocr'), dict) else None
+        if ocr_cfg is None:
+            merged['ocr'] = copy.deepcopy(default_config['ocr'])
+            changed = True
+        else:
+            # roi 병합
+            roi = ocr_cfg.get('roi') if isinstance(ocr_cfg.get('roi'), dict) else None
+            if roi is None:
+                ocr_cfg['roi'] = copy.deepcopy(default_config['ocr']['roi'])
+                changed = True
+            else:
+                for k, v in default_config['ocr']['roi'].items():
+                    if k not in roi:
+                        roi[k] = v
+                        changed = True
+            # interval_sec 정규화
+            try:
+                iv = float(ocr_cfg.get('interval_sec', default_config['ocr']['interval_sec']))
+            except (TypeError, ValueError):
+                iv = default_config['ocr']['interval_sec']
+            iv = max(0.2, min(600.0, iv))
+            if abs(iv - float(ocr_cfg.get('interval_sec', 0.0))) > 1e-6:
+                ocr_cfg['interval_sec'] = iv
+                changed = True
+            if 'enabled' not in ocr_cfg:
+                ocr_cfg['enabled'] = bool(default_config['ocr']['enabled'])
+                changed = True
+            if 'use_gpu' not in ocr_cfg:
+                ocr_cfg['use_gpu'] = bool(default_config['ocr']['use_gpu'])
+                changed = True
         return merged, changed
 
     def _ensure_nameplate_class_entry(self, config: dict, class_name: str):
@@ -2781,6 +2832,49 @@ class DataManager:
                     roi_changed = True
             if roi_changed:
                 config['roi'] = roi
+                changed = True
+
+        # [NEW] ocr 하위 설정 갱신(roi/interval_sec/enabled)
+        if 'ocr' in updates and isinstance(updates['ocr'], dict):
+            ocr_cfg = dict(config.get('ocr', {})) if isinstance(config.get('ocr'), dict) else {}
+            ocr_updates = updates['ocr']
+            ocr_changed = False
+            if 'roi' in ocr_updates and isinstance(ocr_updates['roi'], dict):
+                ocr_roi = dict(ocr_cfg.get('roi', {})) if isinstance(ocr_cfg.get('roi'), dict) else {}
+                for key in ('left', 'top', 'width', 'height'):
+                    if key not in ocr_updates['roi']:
+                        continue
+                    try:
+                        value = int(ocr_updates['roi'][key])
+                    except (TypeError, ValueError):
+                        continue
+                    if key in {'width', 'height'}:
+                        value = max(1, value)
+                    if ocr_roi.get(key) != value:
+                        ocr_roi[key] = value
+                        ocr_changed = True
+                ocr_cfg['roi'] = ocr_roi
+            if 'interval_sec' in ocr_updates:
+                try:
+                    iv = float(ocr_updates['interval_sec'])
+                except (TypeError, ValueError):
+                    iv = ocr_cfg.get('interval_sec', 5.0)
+                iv = max(0.2, min(600.0, iv))
+                if abs(float(ocr_cfg.get('interval_sec', 0.0)) - iv) > 1e-6:
+                    ocr_cfg['interval_sec'] = iv
+                    ocr_changed = True
+            if 'enabled' in ocr_updates:
+                en = bool(ocr_updates['enabled'])
+                if bool(ocr_cfg.get('enabled', True)) != en:
+                    ocr_cfg['enabled'] = en
+                    ocr_changed = True
+            if 'use_gpu' in ocr_updates:
+                ug = bool(ocr_updates['use_gpu'])
+                if bool(ocr_cfg.get('use_gpu', False)) != ug:
+                    ocr_cfg['use_gpu'] = ug
+                    ocr_changed = True
+            if ocr_changed:
+                config['ocr'] = ocr_cfg
                 changed = True
 
         if changed:
@@ -4383,6 +4477,57 @@ class LearningTab(QWidget):
         center_layout.addLayout(center_buttons_layout)
         center_layout.addWidget(nameplate_group)
 
+        # [NEW] 몬스터 이름표 하위 OCR 그룹
+        ocr_group = QGroupBox("OCR")
+        self.nameplate_ocr_group = ocr_group
+        ocr_layout = QVBoxLayout()
+
+        # 엔진 상태
+        engine_row = QHBoxLayout()
+        engine_row.addWidget(QLabel('엔진'))
+        self.ocr_engine_label = QLabel(get_ocr_engine_label())
+        engine_row.addWidget(self.ocr_engine_label)
+        # GPU 토글
+        self.ocr_gpu_checkbox = QCheckBox('GPU 사용')
+        self.ocr_gpu_checkbox.setToolTip('PaddleOCR을 GPU로 실행합니다. (Paddle GPU 빌드 필요)')
+        self.ocr_gpu_checkbox.toggled.connect(self._handle_ocr_gpu_toggled)
+        engine_row.addSpacing(12)
+        engine_row.addWidget(self.ocr_gpu_checkbox)
+        engine_row.addStretch(1)
+        ocr_layout.addLayout(engine_row)
+
+        # ROI 선택 + 테스트
+        roi_row = QHBoxLayout()
+        self.ocr_roi_button = QPushButton('탐지 범위 설정')
+        self.ocr_roi_button.setToolTip('이름표 OCR 탐지 범위를 화면에서 지정합니다.')
+        self.ocr_roi_button.clicked.connect(self._handle_ocr_roi_select)
+        roi_row.addWidget(self.ocr_roi_button)
+        self.ocr_test_button = QPushButton('인식 테스트')
+        self.ocr_test_button.setToolTip('지정한 범위를 즉시 캡처하여 한글/숫자를 OCR로 인식합니다.')
+        self.ocr_test_button.clicked.connect(self._handle_ocr_test)
+        roi_row.addWidget(self.ocr_test_button)
+        roi_row.addStretch(1)
+        ocr_layout.addLayout(roi_row)
+
+        self.ocr_roi_label = QLabel('범위가 설정되지 않았습니다.')
+        self.ocr_roi_label.setWordWrap(True)
+        ocr_layout.addWidget(self.ocr_roi_label)
+
+        # 탐지주기
+        itv_row = QHBoxLayout()
+        itv_row.addWidget(QLabel('탐지주기(초):'))
+        self.ocr_interval_spin = QDoubleSpinBox()
+        self.ocr_interval_spin.setRange(0.2, 600.0)
+        self.ocr_interval_spin.setSingleStep(0.2)
+        self.ocr_interval_spin.setDecimals(2)
+        self.ocr_interval_spin.valueChanged.connect(self._handle_ocr_interval_changed)
+        itv_row.addWidget(self.ocr_interval_spin)
+        itv_row.addStretch(1)
+        ocr_layout.addLayout(itv_row)
+
+        ocr_group.setLayout(ocr_layout)
+        center_layout.addWidget(ocr_group)
+
         window_anchor_group = QGroupBox("Mapleland 창 좌표 관리")
         window_anchor_layout = QVBoxLayout()
         self.window_anchor_summary_label = QLabel()
@@ -4670,6 +4815,7 @@ class LearningTab(QWidget):
 
 
         self._apply_nameplate_config_to_ui()
+        self._apply_ocr_config_to_ui()
         self._apply_nickname_config_to_ui()
         self._apply_direction_config_to_ui()
         self.nickname_text_input.editingFinished.connect(self.on_nickname_text_changed)
@@ -5791,6 +5937,163 @@ class LearningTab(QWidget):
         self._status_config = config
         self._load_status_command_options()
         self._apply_status_config_to_ui()
+
+    # ----- [NEW] 이름표 OCR 보조 메서드들 -----
+    def _apply_ocr_config_to_ui(self) -> None:
+        try:
+            cfg = self.nameplate_config if isinstance(self.nameplate_config, dict) else {}
+            ocr_cfg = cfg.get('ocr', {}) if isinstance(cfg.get('ocr'), dict) else {}
+            roi = StatusRoi.from_dict(ocr_cfg.get('roi'))
+            if hasattr(self, 'ocr_roi_label'):
+                self.ocr_roi_label.setText(self._format_status_roi(roi))
+            iv = ocr_cfg.get('interval_sec', 5.0)
+            try:
+                val = float(iv)
+            except (TypeError, ValueError):
+                val = 5.0
+            val = max(0.2, min(600.0, val))
+            if hasattr(self, 'ocr_interval_spin'):
+                self.ocr_interval_spin.blockSignals(True)
+                self.ocr_interval_spin.setValue(val)
+                self.ocr_interval_spin.blockSignals(False)
+            # GPU 토글 동기화 및 엔진 재초기화(필요 시)
+            use_gpu = bool(ocr_cfg.get('use_gpu', False))
+            if hasattr(self, 'ocr_gpu_checkbox') and self.ocr_gpu_checkbox is not None:
+                self.ocr_gpu_checkbox.blockSignals(True)
+                self.ocr_gpu_checkbox.setChecked(use_gpu)
+                self.ocr_gpu_checkbox.blockSignals(False)
+            try:
+                cur_env = os.getenv('PADDLE_OCR_USE_GPU', '0').strip().lower()
+                cur_flag = cur_env in ('1', 'true', 'yes', 'on')
+            except Exception:
+                cur_flag = False
+            if cur_flag != use_gpu:
+                set_paddle_use_gpu(use_gpu)
+            if hasattr(self, 'ocr_engine_label'):
+                self.ocr_engine_label.setText(get_ocr_engine_label())
+                err = get_ocr_last_error()
+                self.ocr_engine_label.setToolTip(err or '')
+        except Exception:
+            pass
+
+    def _handle_ocr_roi_select(self) -> None:
+        try:
+            selector = StatusRegionSelector(self)
+        except RuntimeError as exc:
+            QMessageBox.warning(self, '오류', str(exc))
+            return
+        if selector.exec():
+            rect = selector.get_roi()
+            updates = {
+                'ocr': {
+                    'roi': {
+                        'left': rect.left(),
+                        'top': rect.top(),
+                        'width': rect.width(),
+                        'height': rect.height(),
+                    }
+                }
+            }
+            self.nameplate_config = self.data_manager.update_monster_nameplate_config(updates)
+            self._apply_ocr_config_to_ui()
+
+    def _handle_ocr_interval_changed(self, value: float) -> None:
+        if getattr(self, '_nameplate_ui_updating', False):
+            return
+        try:
+            val = float(value)
+        except (TypeError, ValueError):
+            return
+        val = max(0.2, min(600.0, val))
+        self.nameplate_config = self.data_manager.update_monster_nameplate_config({'ocr': {'interval_sec': val}})
+        self._apply_ocr_config_to_ui()
+
+    def _handle_ocr_gpu_toggled(self, checked: bool) -> None:
+        if getattr(self, '_nameplate_ui_updating', False):
+            return
+        use_gpu = bool(checked)
+        # 설정 저장
+        self.nameplate_config = self.data_manager.update_monster_nameplate_config({'ocr': {'use_gpu': use_gpu}})
+        # 엔진 재설정 및 라벨 갱신
+        try:
+            set_paddle_use_gpu(use_gpu)
+        except Exception:
+            pass
+        if hasattr(self, 'ocr_engine_label'):
+            self.ocr_engine_label.setText(get_ocr_engine_label())
+            err = get_ocr_last_error()
+            self.ocr_engine_label.setToolTip(err or '')
+
+    def _capture_by_monitor(self, monitor: dict, window_title: str) -> Optional[np.ndarray]:
+        manager = get_capture_manager()
+        consumer_name = f"learning:ocr_preview:{id(self)}:{int(time.time()*1000)}"
+        frame_bgr: Optional[np.ndarray] = None
+        try:
+            manager.register_region(consumer_name, monitor)
+            frame_bgr = manager.get_frame(consumer_name, timeout=1.0)
+        except Exception:
+            frame_bgr = None
+        finally:
+            try:
+                manager.unregister_region(consumer_name)
+            except KeyError:
+                pass
+        if frame_bgr is None or frame_bgr.size == 0:
+            try:
+                with mss.mss() as sct:
+                    raw = np.array(sct.grab(monitor))
+            except Exception as exc:
+                QMessageBox.warning(self, window_title, f'화면 캡처에 실패했습니다.\n{exc}')
+                return None
+            if raw.size == 0:
+                QMessageBox.warning(self, window_title, '캡처 결과가 비어 있습니다. ROI 범위를 다시 확인해주세요.')
+                return None
+            try:
+                frame_bgr = cv2.cvtColor(raw, cv2.COLOR_BGRA2BGR)
+            except cv2.error as exc:
+                QMessageBox.warning(self, window_title, f'이미지 변환 중 오류가 발생했습니다.\n{exc}')
+                return None
+        return frame_bgr
+
+    def _handle_ocr_test(self) -> None:
+        cfg = self.nameplate_config if isinstance(self.nameplate_config, dict) else {}
+        ocr_cfg = cfg.get('ocr', {}) if isinstance(cfg.get('ocr'), dict) else {}
+        roi = StatusRoi.from_dict(ocr_cfg.get('roi'))
+        if not roi.is_valid():
+            QMessageBox.information(self, 'OCR 인식 확인', '탐지 범위가 설정되지 않았습니다. 먼저 ROI를 지정해주세요.')
+            return
+        monitor = roi.to_monitor_dict()
+        frame_bgr = self._capture_by_monitor(monitor, 'OCR 인식 확인')
+        if frame_bgr is None:
+            return
+        # 기본값: 최소 높이/신뢰도 필터 없이 있는 그대로 추출
+        words = ocr_korean_words(frame_bgr, psm=11, preprocess='auto')
+        annotated = draw_word_boxes(frame_bgr, words)
+        lines: list[str] = []
+        engine = get_ocr_engine_label()
+        lines.append(f'엔진: {engine}')
+        if not words:
+            lines.append('상태: OCR 결과가 비어 있습니다.')
+        else:
+            lines.append(f'감지 워드 수: {len(words)}')
+            for i, w in enumerate(words[:30]):
+                try:
+                    lines.append(f'- #{i+1} "{w.text}" (conf={int(round(w.conf))}%, h={w.height}px)')
+                except Exception:
+                    pass
+            if len(words) > 30:
+                lines.append(f'... 외 {len(words)-30}개 생략')
+        roi_text = self._format_status_roi(roi)
+        dialog = StatusRecognitionPreviewDialog(
+            self,
+            'OCR 인식 확인',
+            f'탐지 범위: {roi_text}',
+            frame_bgr,
+            annotated,
+            lines,
+            processed_title='OCR 결과',
+        )
+        dialog.exec()
 
     def on_nickname_text_changed(self):
         if self._nickname_ui_updating:
