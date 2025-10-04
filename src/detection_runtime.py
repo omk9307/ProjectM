@@ -24,7 +24,13 @@ from PyQt6.QtWidgets import (
     QSlider,
     QVBoxLayout,
 )
-from ultralytics import YOLO
+# 울트라리틱스는 환경에 따라 토치 DLL 의존성으로 임포트가 실패할 수 있으므로 안전하게 처리
+try:  # pragma: no cover - 환경 의존
+    from ultralytics import YOLO  # type: ignore
+    _ULTRA_IMPORT_ERROR = None
+except Exception as _e:  # ImportError, OSError(WinError 127) 등 포함
+    YOLO = None  # type: ignore[assignment]
+    _ULTRA_IMPORT_ERROR = str(_e)
 
 from nickname_detection import NicknameDetector
 from direction_detection import DirectionDetector
@@ -451,6 +457,14 @@ class DetectionThread(QThread):
         try:
             self._start_capture_worker(manager, consumer_name)
             last_processed_version = -1
+            if YOLO is None:
+                # 환경 문제로 YOLO를 사용할 수 없음: 깔끔히 종료
+                if _ULTRA_IMPORT_ERROR:
+                    try:
+                        print(f"[DetectionThread] YOLO 임포트 실패: {_ULTRA_IMPORT_ERROR}")
+                    except Exception:
+                        pass
+                return
             model = YOLO(self.model_path)
             use_char_class = self.char_class_index >= 0
             monster_base_conf = self._minimum_monster_confidence()

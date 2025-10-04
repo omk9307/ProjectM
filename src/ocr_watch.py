@@ -1,7 +1,6 @@
 """학습탭용 OCR 감시 워커 및 유틸.
 
 요구 사항
-- 한글만 인식 (숫자/기호 허용)
 - 다중 ROI 주기 캡처, 바운딩 박스 강조 미리보기 지원
 - 텔레그램 전송(감지 시 n회, 주기 n초 / 0이면 무제한), 키워드 포함 시 전송
 
@@ -25,12 +24,6 @@ from PyQt6.QtCore import QObject, QThread, pyqtSignal
 
 from capture_manager import get_capture_manager
 from window_anchors import get_maple_window_geometry, resolve_roi_to_absolute
-
-try:
-    import pytesseract  # type: ignore
-    _PYTESSERACT_AVAILABLE = True
-except Exception:  # pragma: no cover - 실행 환경에 따라 미설치일 수 있음
-    _PYTESSERACT_AVAILABLE = False
 
 # PaddleOCR(선택적) 지원
 _PADDLE_AVAILABLE = False
@@ -58,29 +51,9 @@ except Exception as exc:
         _paddle_error_detail = "import error"
 
 
-# 텍스트 정규화: 한글 전용 필터를 제거하고 공백 정리만 수행합니다.
+# 텍스트 정규화: 공백 정리만 수행합니다.
 _TEXT_NORMALIZE_WS = re.compile(r"\s+")
-
-_KOR_LANG_OK: Optional[bool] = None
-
-def _kor_lang_available() -> bool:
-    global _KOR_LANG_OK
-    if not _PYTESSERACT_AVAILABLE:
-        _KOR_LANG_OK = False
-        return False
-    if _KOR_LANG_OK is not None:
-        return bool(_KOR_LANG_OK)
-    try:
-        langs = pytesseract.get_languages(config="")  # type: ignore[attr-defined]
-        if isinstance(langs, (list, tuple)):
-            _KOR_LANG_OK = ("kor" in langs)
-        else:
-            # 일부 환경은 빈 리스트를 반환할 수 있어, 일단 통과시킴
-            _KOR_LANG_OK = True
-    except Exception:
-        # get_languages 미지원 환경: 일단 통과시킴
-        _KOR_LANG_OK = True
-    return bool(_KOR_LANG_OK)
+_KEEP_KR_NUM_WS = re.compile(r"[^0-9가-힣\s]+")
 
 
 @dataclass
@@ -97,9 +70,9 @@ class OCRWord:
 
 
 def _extract_korean(text: str) -> str:
-    """OCR 원문에서 공백만 정리하여 반환한다.
+    """OCR 원문에서 한글/숫자/공백만 남기고 정리한다.
 
-    - 한글 전용 필터 제거: 인식된 영문/숫자/기호도 그대로 유지
+    - 한글(가-힣), 숫자(0-9), 공백만 유지
     - 연속 공백은 단일 공백으로 축소
     """
     if text is None:
@@ -109,6 +82,11 @@ def _extract_korean(text: str) -> str:
     except Exception:
         return ""
     s = s.replace("\n", " ").strip()
+    try:
+        # 한글/숫자/공백만 보존
+        s = _KEEP_KR_NUM_WS.sub(" ", s)
+    except Exception:
+        pass
     s = _TEXT_NORMALIZE_WS.sub(" ", s)
     return s
 
@@ -200,7 +178,6 @@ def get_ocr_engine_label() -> str:
     """현재 사용할 OCR 엔진 라벨을 반환한다.
 
     - PaddleOCR 초기화 성공 시: "PaddleOCR (CPU|GPU)"
-    - 그렇지 않고 Tesseract 가능 시: "Tesseract (kor)" 또는 "Tesseract (kor 미설치)"
     - 그 외: "엔진 사용 불가"
     """
     if _PADDLE_AVAILABLE:
@@ -239,7 +216,7 @@ def set_paddle_use_gpu(use_gpu: bool) -> None:
         pass
 
 
-def ocr_korean_words(
+def _OCR_LEGACY_REMOVED_do_not_use(
     image_bgr: np.ndarray,
     *,
     psm: int = 11,
@@ -816,35 +793,27 @@ def ocr_korean_words(
     return out
 
 def _load_telegram_credentials() -> Tuple[str, str]:
-    """workspace/config/telegram.json 또는 환경변수에서 (token, chat_id) 로드."""
-    token = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
-    chat_id = os.getenv("TELEGRAM_CHAT_ID", "").strip()
-    # 파일 candidates (map_ui와 유사한 경로 정책 일부만 적용)
-    if not token or not chat_id:
-        base = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "workspace", "config"))
-        candidates = [
-            os.path.join(base, "telegram.json"),
-        ]
-        for path in candidates:
-            if not os.path.exists(path):
+    """고정 경로(G:\\Coding\\Project_Maple\\workspace\\config\\telegram.json)에서 (token, chat_id) 로드."""
+    token = ""
+    chat_id = ""
+    fixed_path = r"G:\\Coding\\Project_Maple\\workspace\\config\\telegram.json"
+    path = fixed_path
+    if os.path.exists(path):
+        try:
+            with open(path, "r", encoding="utf-8-sig") as fp:
+                lines = fp.readlines()
+        except Exception:
+            lines = []
+        pattern = re.compile(r"^\s*([A-Za-z_][A-Za-z0-9_]*)\s*=\s*([\'\"])(.*?)\2\s*$")
+        kv: Dict[str, str] = {}
+        for raw in lines:
+            m = pattern.match(raw.strip())
+            if not m:
                 continue
-            try:
-                with open(path, "r", encoding="utf-8-sig") as fp:
-                    lines = fp.readlines()
-            except Exception:
-                lines = []
-            pattern = re.compile(r"^\s*([A-Za-z_][A-Za-z0-9_]*)\s*=\s*([\'\"])(.*?)\2\s*$")
-            kv: Dict[str, str] = {}
-            for raw in lines:
-                m = pattern.match(raw.strip())
-                if not m:
-                    continue
-                key, _, val = m.groups()
-                kv[key] = val
-            token = kv.get("TELEGRAM_BOT_TOKEN", token).strip() or token
-            chat_id = kv.get("TELEGRAM_CHAT_ID", chat_id).strip() or chat_id
-            if token and chat_id:
-                break
+            key, _, val = m.groups()
+            kv[key] = val
+        token = (kv.get("TELEGRAM_BOT_TOKEN", "") or "").strip()
+        chat_id = (kv.get("TELEGRAM_CHAT_ID", "") or "").strip()
     return token, chat_id
 
 
@@ -1028,11 +997,14 @@ class OCRWatchThread(QThread):
             joined = " ".join(all_texts).strip()
             matched_keyword = None
             for kw in keywords:
-                if isinstance(kw, str) and kw.strip() and kw.strip() in joined:
-                    matched_keyword = kw.strip()
-                    break
+                if isinstance(kw, str) and kw.strip():
+                    kws = kw.strip()
+                    if kws in joined:
+                        matched_keyword = kws
+                        break
 
-            if any_detected and telegram_enabled:
+            # 키워드 인식이 켜져 있고, 키워드가 실제로 매칭될 때만 전송
+            if telegram_enabled and matched_keyword:
                 now = time.time()
                 can_send = False
                 if self._last_send_ts is None:
