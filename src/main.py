@@ -626,6 +626,13 @@ class MainWindow(QMainWindow):
         try:
             self._ocr_thread.start()
             print('[Main] OCR 워커를 시작했습니다.')
+            # 학습 탭에 워커 전달
+            learning_tab = self.loaded_tabs.get('학습')
+            if learning_tab and hasattr(learning_tab, 'attach_ocr_watch'):
+                try:
+                    learning_tab.attach_ocr_watch(self._ocr_thread)
+                except Exception:
+                    pass
         except Exception as exc:
             print(f"[Main] OCR 워커 시작 실패: {exc}")
             self._ocr_thread = None
@@ -642,6 +649,13 @@ class MainWindow(QMainWindow):
             th.wait(2000)
         except Exception:
             pass
+        # 학습 탭 연결 해제
+        learning_tab = self.loaded_tabs.get('학습')
+        if learning_tab and hasattr(learning_tab, 'detach_ocr_watch'):
+            try:
+                learning_tab.detach_ocr_watch()
+            except Exception:
+                pass
         self._ocr_thread = None
         print('[Main] OCR 워커를 중지했습니다.')
 

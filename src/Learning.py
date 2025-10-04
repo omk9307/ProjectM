@@ -575,6 +575,82 @@ class StatusRecognitionPreviewDialog(QDialog):
         viewer.resize(max(320, w), max(240, h))
         viewer.show()
 
+
+class OcrLiveReportDialog(QDialog):
+    """OCR 워커 결과를 주기적으로 갱신 표시하는 간단 리포트 창."""
+
+    def __init__(self, parent: Optional[QWidget] = None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle('OCR 탐지 보고')
+        self.setModal(False)
+        self.resize(600, 850)
+
+        self._buffers: list[np.ndarray] = []
+        layout = QVBoxLayout(self)
+        self.summary_label = QLabel('최근 결과 요약')
+        self.summary_label.setWordWrap(True)
+        layout.addWidget(self.summary_label)
+
+        self.image_title = QLabel('OCR 결과')
+        self.image_title.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        layout.addWidget(self.image_title)
+
+        self.image_view = QLabel()
+        self.image_view.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        layout.addWidget(self.image_view)
+
+        self.text_box = QTextEdit()
+        self.text_box.setReadOnly(True)
+        self.text_box.setMinimumHeight(160)
+        layout.addWidget(self.text_box)
+
+        btns = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
+        btns.rejected.connect(self.reject)
+        layout.addWidget(btns)
+
+    def _to_pixmap(self, image: Optional[np.ndarray]) -> QPixmap:
+        if image is None or not hasattr(image, 'size') or image.size == 0:
+            return QPixmap()
+        buf = np.ascontiguousarray(image)
+        self._buffers.append(buf)
+        if buf.ndim == 2:
+            h, w = buf.shape
+            qimg = QImage(buf.data, w, h, w, QImage.Format.Format_Grayscale8)
+        else:
+            h, w, c = buf.shape
+            if c == 3:
+                qimg = QImage(buf.data, w, h, c * w, QImage.Format.Format_BGR888)
+            elif c == 4:
+                qimg = QImage(buf.data, w, h, c * w, QImage.Format.Format_RGBA8888)
+            else:
+                return QPixmap()
+        return QPixmap.fromImage(qimg)
+
+    @staticmethod
+    def _scaled(pix: QPixmap) -> QPixmap:
+        if pix.isNull():
+            return pix
+        return pix.scaled(320, 250, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation)
+
+    def update_content(self, *, annotated_bgr: Optional[np.ndarray], words: list[dict], ts: float) -> None:
+        pix = self._to_pixmap(annotated_bgr)
+        self.image_view.setPixmap(self._scaled(pix))
+        # summary
+        import time as _t
+        tstr = _t.strftime('%H:%M:%S', _t.localtime(ts))
+        self.summary_label.setText(f'최근 업데이트: {tstr}  |  항목: {len(words)}')
+        # text list
+        lines: list[str] = []
+        for i, w in enumerate(words[:50]):
+            try:
+                text = str(w.get('text', ''))
+                conf = int(round(float(w.get('conf', 0))))
+                h = int(w.get('height', 0))
+                lines.append(f'- #{i+1} "{text}" (c={conf}% h={h}px)')
+            except Exception:
+                continue
+        self.text_box.setPlainText('\n'.join(lines) if lines else '표시할 항목이 없습니다.')
+
 # --- 1.5. 위젯: 드래그앤드롭 커스텀 QTreeWidget ---
 class ClassTreeWidget(QTreeWidget):
     """
@@ -4539,6 +4615,11 @@ class LearningTab(QWidget):
         self.ocr_test_button.setToolTip('지정한 범위를 즉시 캡처하여 텍스트를 OCR로 인식합니다.')
         self.ocr_test_button.clicked.connect(self._handle_ocr_test)
         roi_field_row.addWidget(self.ocr_test_button)
+        # 탐지 보고 버튼
+        self.ocr_report_button = QPushButton('탐지 보고')
+        self.ocr_report_button.setToolTip('탐지 주기마다 최신 인식 결과를 보여주는 창을 엽니다.')
+        self.ocr_report_button.clicked.connect(self._open_ocr_live_report)
+        roi_field_row.addWidget(self.ocr_report_button)
         self.ocr_roi_summary_label = QLabel('위치/크기 미설정')
         self.ocr_roi_summary_label.setStyleSheet('color: #666666;')
         roi_field_row.addSpacing(8)
@@ -6250,6 +6331,84 @@ class LearningTab(QWidget):
         # 비모달로 표시, 참조 보유
         self._last_ocr_preview_dialog = dialog
         dialog.show()
+
+    # ---- OCR 실시간 보고 ----
+    def attach_ocr_watch(self, thread) -> None:
+        self._ocr_thread = thread
+        try:
+            thread.ocr_detected.connect(self._on_ocr_detected_update)
+        except Exception:
+            pass
+
+    def detach_ocr_watch(self) -> None:
+        th = getattr(self, '_ocr_thread', None)
+        if th is not None:
+            try:
+                th.ocr_detected.disconnect(self._on_ocr_detected_update)
+            except Exception:
+                pass
+        self._ocr_thread = None
+
+    def _get_ocr_monitor(self) -> Optional[dict]:
+        try:
+            cfg = self.nameplate_config if isinstance(self.nameplate_config, dict) else {}
+            ocr_cfg = cfg.get('ocr', {}) if isinstance(cfg.get('ocr'), dict) else {}
+            roi = StatusRoi.from_dict(ocr_cfg.get('roi'))
+            if not roi.is_valid():
+                return None
+            return roi.to_monitor_dict()
+        except Exception:
+            return None
+
+    def _open_ocr_live_report(self) -> None:
+        if getattr(self, '_ocr_live_dialog', None) is None:
+            self._ocr_live_dialog = OcrLiveReportDialog(self)
+        self._ocr_live_dialog.show()
+        self._ocr_live_dialog.raise_()
+
+    def _on_ocr_detected_update(self, payload_list: list) -> None:
+        # payload_list: [{ 'roi_index': int, 'timestamp': float, 'words': [ {text,conf,left,top,width,height}, ... ] }]
+        if not isinstance(payload_list, list) or not payload_list:
+            return
+        item = payload_list[0]
+        words = item.get('words', []) if isinstance(item, dict) else []
+        ts = float(item.get('timestamp', 0.0)) if isinstance(item, dict) else 0.0
+        if not hasattr(self, '_ocr_live_dialog') or self._ocr_live_dialog is None:
+            return
+        monitor = self._get_ocr_monitor()
+        if monitor is None:
+            # ROI 미설정 시 텍스트만 갱신
+            self._ocr_live_dialog.update_content(annotated_bgr=None, words=words, ts=ts)
+            return
+        # 화면 캡처 후 바운딩 박스 그리기
+        frame_bgr = self._capture_by_monitor(monitor, 'OCR 탐지 보고')
+        if frame_bgr is None:
+            self._ocr_live_dialog.update_content(annotated_bgr=None, words=words, ts=ts)
+            return
+        try:
+            # words를 OCRWord 형태로 변환 없이 draw_word_boxes에 맞춰 재구성
+            annotated = frame_bgr.copy()
+            for w in words:
+                try:
+                    left = int(w.get('left', 0)); top = int(w.get('top', 0))
+                    width = int(w.get('width', 0)); height = int(w.get('height', 0))
+                    conf = float(w.get('conf', 0.0))
+                    text = str(w.get('text', ''))
+                    # 간단 사각형과 라벨 그리기 (draw_word_boxes와 유사)
+                    pt1 = (left, top)
+                    pt2 = (left + max(1, width), top + max(1, height))
+                    cv2.rectangle(annotated, pt1, pt2, (0, 255, 0), 1)
+                    label = f"h={height}px c={int(round(conf))}%"
+                    (tw, th), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.45, 1)
+                    bg1 = (pt1[0], max(0, pt1[1] - th - 4))
+                    bg2 = (pt1[0] + tw + 6, pt1[1])
+                    cv2.rectangle(annotated, bg1, bg2, (0, 0, 0), -1)
+                    cv2.putText(annotated, label, (pt1[0] + 3, pt1[1] - 2), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (255, 255, 255), 1, cv2.LINE_AA)
+                except Exception:
+                    continue
+        except Exception:
+            annotated = frame_bgr
+        self._ocr_live_dialog.update_content(annotated_bgr=annotated, words=words, ts=ts)
 
     def on_nickname_text_changed(self):
         if self._nickname_ui_updating:
