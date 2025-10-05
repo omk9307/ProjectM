@@ -1648,7 +1648,7 @@ class FullMinimapEditorDialog(QDialog):
         self.lod_text_items = []  # LOD 적용 대상 텍스트 아이템 리스트
         
         # [v11.1.0] 좌표 텍스트를 위한 LOD 시스템 확장 (배율 조정)
-        self.lod_coord_threshold = 6.0 # 좌표 텍스트가 보이기 시작하는 줌 배율
+        self.lod_coord_threshold = 10.0 # 좌표 텍스트가 보이기 시작하는 줌 배율 (요청에 따라 상향)
         self.lod_coord_items = [] # 좌표 텍스트 아이템 리스트
 
         # 그리기 상태 변수
@@ -1759,6 +1759,16 @@ class FullMinimapEditorDialog(QDialog):
             for item in items_to_remove:
                 self.scene.removeItem(item)
 
+            # 기존 층 이름 리더 라인 삭제 및 그룹 정리
+            if hasattr(self, "_name_label_groups"):
+                for g in list(self._name_label_groups):
+                    if g.get("type") == "floor_text":
+                        leader = g.get("leader")
+                        if leader and leader.scene() is not None:
+                            self.scene.removeItem(leader)
+                # 해당 타입 그룹 제거 (재생성 예정)
+                self._name_label_groups = [g for g in self._name_label_groups if g.get("type") != "floor_text"]
+
             from collections import defaultdict, deque
             terrain_lines = self.geometry_data.get("terrain_lines", [])
             if not terrain_lines: return
@@ -1800,8 +1810,8 @@ class FullMinimapEditorDialog(QDialog):
                 center_x = sum(all_points_x) / len(all_points_x)
                 
                 floor_text = group[0].get('dynamic_name', f"{group[0].get('floor', 'N/A')}층")
-                font = QFont("맑은 고딕", 4, QFont.Weight.Bold) #층 이름 폰트 크기 미니맵 지형 편집기
-                    
+                font = QFont("맑은 고딕", 3, QFont.Weight.Bold) # 웨이포인트 수준의 기본 크기
+
                 text_item = QGraphicsTextItem(floor_text)
                 text_item.setFont(font)
                 text_item.setDefaultTextColor(Qt.GlobalColor.white)
@@ -1814,6 +1824,7 @@ class FullMinimapEditorDialog(QDialog):
                 padding_y = -3
                 bg_rect_geom = text_rect.adjusted(-padding_x, -padding_y, padding_x, padding_y)
 
+                # 요청: 지형의 이름은 충돌회피 없이 항상 가운데 아래에 고정 배치
                 base_pos_x = center_x - bg_rect_geom.width() / 2
                 base_pos_y = max_y + 4
 
@@ -1821,8 +1832,6 @@ class FullMinimapEditorDialog(QDialog):
                 background_rect.setBrush(QColor(0, 0, 0, 120))
                 background_rect.setPen(QPen(Qt.GlobalColor.transparent))
                 background_rect.setPos(base_pos_x, base_pos_y)
-                
-                text_item.setPos(base_pos_x + padding_x, base_pos_y + padding_y)
 
                 background_rect.setData(0, "floor_text_bg")
                 text_item.setData(0, "floor_text")
@@ -1831,10 +1840,13 @@ class FullMinimapEditorDialog(QDialog):
                 text_item.setZValue(6)
 
                 self.scene.addItem(background_rect)
+                # 텍스트 위치를 배경 중앙 정렬로 배치
+                text_item.setPos(base_pos_x + padding_x, base_pos_y + padding_y)
                 self.scene.addItem(text_item)
                 # 미니맵 지형 편집기 층 이름 LOD 적용 대상 리스트에 추가 ---
                 self.lod_text_items.append(background_rect)
                 self.lod_text_items.append(text_item)
+                # 충돌회피에 참여하지 않음. 단, 다른 라벨 배치 시 장애물로는 취급됨.
 
     def _draw_text_with_outline(self, painter, rect, flags, text, font, text_color, outline_color):
         """지정한 사각형 영역에 테두리가 있는 텍스트를 그립니다."""
@@ -1912,6 +1924,9 @@ class FullMinimapEditorDialog(QDialog):
         self.x_lock_check = QCheckBox("X축 고정")
         self.y_lock_check.toggled.connect(self.on_y_lock_toggled)
         self.x_lock_check.toggled.connect(self.on_x_lock_toggled)
+        # 요청: 기본적으로 체크되어 있도록 설정
+        self.y_lock_check.setChecked(True)
+        self.x_lock_check.setChecked(True)
         terrain_opts_layout.addWidget(self.y_lock_check)
         terrain_opts_layout.addWidget(self.x_lock_check)
         terrain_opts_box.setLayout(terrain_opts_layout)
@@ -1944,6 +1959,11 @@ class FullMinimapEditorDialog(QDialog):
         self.chk_show_jump_links = QCheckBox("지형 점프 연결")
         self.chk_show_jump_links.setChecked(self.render_options.get('jump_links', True))
         self.chk_show_jump_links.stateChanged.connect(self._update_visibility)
+        # 좌표 라벨 표시 옵션 (LOD 대신)
+        self.chk_show_coords = QCheckBox("좌표 라벨")
+        self.chk_show_coords.setChecked(self.render_options.get('coords', True))
+        self.chk_show_coords.stateChanged.connect(self._update_lod_visibility)
+
         self.chk_show_forbidden_walls = QCheckBox("금지벽")
         self.chk_show_forbidden_walls.setChecked(self.render_options.get('forbidden_walls', True))
         self.chk_show_forbidden_walls.stateChanged.connect(self._update_visibility)
@@ -1972,6 +1992,7 @@ class FullMinimapEditorDialog(QDialog):
         view_opts_layout.addWidget(self.chk_show_terrain)
         view_opts_layout.addWidget(self.chk_show_objects)
         view_opts_layout.addWidget(self.chk_show_jump_links)
+        view_opts_layout.addWidget(self.chk_show_coords)
         view_opts_layout.addWidget(self.chk_show_forbidden_walls)
         view_opts_layout.addLayout(zoom_layout)
         view_opts_box.setLayout(view_opts_layout)
@@ -2014,6 +2035,7 @@ class FullMinimapEditorDialog(QDialog):
             'terrain': self.chk_show_terrain.isChecked(),
             'objects': self.chk_show_objects.isChecked(),
             'jump_links': self.chk_show_jump_links.isChecked(),
+            'coords': getattr(self, 'chk_show_coords', None).isChecked() if hasattr(self, 'chk_show_coords') else True,
             'forbidden_walls': self.chk_show_forbidden_walls.isChecked()
         }
         
@@ -2274,6 +2296,127 @@ class FullMinimapEditorDialog(QDialog):
         # [v11.2.8] 두 아이템을 독립적으로 반환
         return background_item, text_item
     
+    # --- 좌표 라벨 배치 유틸리티 (겹침 방지 + 재배치 지원) ---
+    def _place_coord_label_items(self, bg_item, text_item, anchor_point: QPointF, placed_rects: list, preferred: str = "above") -> None:
+        """
+        좌표 라벨 배경/텍스트 아이템의 위치를 anchor_point 주변으로 배치한다.
+        이미 배치된 placed_rects와의 충돌을 피하며, 선호 방향(preferred)을 우선 시도한다.
+        preferred: "above"|"below"
+        """
+        current_zoom = max(self.view.transform().m11(), 1e-6)
+        gap_px = 10.0
+        gap_scene = gap_px / current_zoom
+
+        bg_rect_local = bg_item.boundingRect()
+        w, h = bg_rect_local.width(), bg_rect_local.height()
+
+        def make_pos(direction: str, shift_idx: int = 0) -> QPointF:
+            if direction == "above":
+                return QPointF(anchor_point.x() - w / 2, anchor_point.y() - h - gap_scene - shift_idx * (h + gap_scene))
+            # below
+            return QPointF(anchor_point.x() - w / 2, anchor_point.y() + gap_scene + shift_idx * (h + gap_scene))
+
+        opposite = "below" if preferred == "above" else "above"
+        directions = [preferred, opposite]
+
+        def overlaps(rect: QRectF) -> bool:
+            # 여유 간격을 반영한 충돌 검사
+            inflated = rect.adjusted(-gap_scene/2, -gap_scene/2, gap_scene/2, gap_scene/2)
+            return any(inflated.intersects(r) for r in placed_rects)
+
+        placed = False
+        for d in directions:
+            for s in range(0, 10):
+                pos = make_pos(d, s)
+                bg_item.setPos(pos)
+                # 텍스트는 배경 중앙에 정렬
+                text_rect_local = text_item.boundingRect()
+                text_item.setPos(
+                    bg_item.x() + (w - text_rect_local.width()) / 2,
+                    bg_item.y() + (h - text_rect_local.height()) / 2,
+                )
+                rect_scene = bg_item.sceneBoundingRect()
+                if not overlaps(rect_scene):
+                    placed_rects.append(rect_scene)
+                    placed = True
+                    break
+            if placed:
+                break
+
+        if not placed:
+            # 마지막 수단: preferred 위치에 고정(충돌 허용)
+            pos = make_pos(preferred, 0)
+            bg_item.setPos(pos)
+            text_rect_local = text_item.boundingRect()
+            text_item.setPos(
+                bg_item.x() + (w - text_rect_local.width()) / 2,
+                bg_item.y() + (h - text_rect_local.height()) / 2,
+            )
+
+    def _relayout_all_labels(self) -> None:
+        """좌표/이름/피처 라벨을 하나의 충돌 회피 패스로 재배치한다 (웨이포인트 라벨 제외)."""
+        coord_groups = getattr(self, "_coord_label_groups", []) or []
+        name_groups = getattr(self, "_name_label_groups", []) or []
+        # 우선순위: 이름 라벨 먼저, 좌표 라벨 나중 (이름 가독성 우선)
+        combined = list(name_groups) + list(coord_groups)
+        if not combined:
+            return
+        placed_rects: list[QRectF] = []
+        # 웨이포인트 라벨은 그대로 두되, 충돌 회피 시에는 장애물로 취급하여 겹치지 않도록 함
+        try:
+            for item in self.scene.items():
+                if item.data(0) in ("waypoint_lod_text", "floor_text", "floor_text_bg") and item.isVisible():
+                    placed_rects.append(item.sceneBoundingRect())
+        except Exception:
+            pass
+        for group in combined:
+            anchor = group["anchor"]
+            bg_item = group["bg"]
+            text_item = group["text"]
+            preferred = group.get("preferred", "above")
+            label_type = group.get("type", "")
+            # 위치 배치 (충돌 회피)
+            self._place_coord_label_items(bg_item, text_item, anchor, placed_rects, preferred)
+            # 리더 라인 업데이트
+            rect_scene = bg_item.sceneBoundingRect()
+            left, right, top, bottom = rect_scene.left(), rect_scene.right(), rect_scene.top(), rect_scene.bottom()
+            cx = min(max(anchor.x(), left), right)
+            cy = min(max(anchor.y(), top), bottom)
+            distances = [
+                (abs(cx - left), QPointF(left, cy)),
+                (abs(cx - right), QPointF(right, cy)),
+                (abs(cy - top), QPointF(cx, top)),
+                (abs(cy - bottom), QPointF(cx, bottom)),
+            ]
+            _, target = min(distances, key=lambda t: t[0])
+            if "leader" not in group or group["leader"] is None or group["leader"].scene() is None:
+                line_item = self.scene.addLine(anchor.x(), anchor.y(), target.x(), target.y(), QPen(QColor("red"), 0))
+                line_item.setZValue(9)
+                # 타입별로 data 설정
+                if label_type == "transition_object_name":
+                    line_item.setData(0, "transition_object_name_leader")
+                    if line_item not in self.lod_text_items:
+                        self.lod_text_items.append(line_item)
+                elif label_type == "jump_link_name":
+                    line_item.setData(0, "jump_link_name_leader")
+                    if line_item not in self.lod_text_items:
+                        self.lod_text_items.append(line_item)
+                elif label_type == "floor_text":
+                    line_item.setData(0, "floor_text_leader")
+                    if line_item not in self.lod_text_items:
+                        self.lod_text_items.append(line_item)
+                elif label_type == "feature_name":
+                    line_item.setData(0, "feature_name_leader")
+                    # feature 리더는 LOD 리스트에 넣지 않음 (기존 feature 가시성 정책 유지)
+                else:
+                    # 좌표 라벨 등
+                    line_item.setData(0, "coord_text_leader")
+                    if line_item not in self.lod_coord_items:
+                        self.lod_coord_items.append(line_item)
+                group["leader"] = line_item
+            else:
+                group["leader"].setLine(anchor.x(), anchor.y(), target.x(), target.y())
+    
     def populate_scene(self):
                 self.scene.clear()
                 # --- v10.3.4 수정: 씬 아이템을 참조하는 멤버 변수 초기화 ---
@@ -2288,6 +2431,10 @@ class FullMinimapEditorDialog(QDialog):
                 self.lod_coord_items = []
                 # [v11.3.2] lock_coord_text_item 초기화를 명시적으로 수행
                 self.lock_coord_text_item = None
+                # 좌표 라벨 그룹(재배치용) 초기화
+                self._coord_label_groups = []
+                # 이름 라벨 그룹(재배치용) 초기화
+                self._name_label_groups = []
                 
                 # 1. 배경 이미지 설정
                 if self.parent_map_tab.full_map_pixmap and not self.parent_map_tab.full_map_pixmap.isNull():
@@ -2311,13 +2458,23 @@ class FullMinimapEditorDialog(QDialog):
                             rect_item.setPos(pos)
                             rect_item.setData(0, "feature")
                             text_item = self.scene.addText(item_id)
-                            text_item.setFont(QFont("맑은 고딕", 5)) #미니맵 지형 편집기 핵심지형 폰트 크기
+                            text_item.setFont(QFont("맑은 고딕", 3)) # 웨이포인트 수준의 기본 크기
                             text_item.setDefaultTextColor(Qt.GlobalColor.white)
                             text_rect = text_item.boundingRect()
-                            text_item.setPos(pos + QPointF((pixmap.width() - text_rect.width()) / 2, (pixmap.height() - text_rect.height()) / 2))
+                            center = pos + QPointF(pixmap.width() / 2, pixmap.height() / 2)
+                            text_item.setPos(center - QPointF(text_rect.width() / 2, text_rect.height() / 2))
                             text_item.setData(0, "feature")
+                            # 이름 라벨 그룹 등록 (충돌 회피 + 리더 라인, 웨이포인트 제외)
+                            self._name_label_groups.append({
+                                "anchor": center,
+                                "bg": text_item,  # 배경 없음: 텍스트 자체를 배치 대상으로 사용
+                                "text": text_item,
+                                "preferred": "above",
+                                "type": "feature_name"
+                            })
 
                 # 3. 모든 지오메트리 그리기 (층 번호 텍스트 제외)
+                unique_vertices = set()
                 for line_data in self.geometry_data.get("terrain_lines", []):
                     points = line_data.get("points", [])
                     if len(points) >= 2:
@@ -2326,37 +2483,21 @@ class FullMinimapEditorDialog(QDialog):
                             p2 = QPointF(points[i+1][0], points[i+1][1])
                             self._add_terrain_line_segment(p1, p2, line_data['id'])
                         for p in points:
-                            self._add_vertex_indicator(QPointF(p[0], p[1]), line_data['id'])
+                            q = QPointF(p[0], p[1])
+                            self._add_vertex_indicator(q, line_data['id'])
+                            unique_vertices.add((q.x(), q.y()))
 
-                        # [v11.2.8] 지형선 양 끝 꼭짓점 좌표 텍스트 (위치 계산 수정)
-                        p_start = QPointF(points[0][0], points[0][1])
-                        p_end = QPointF(points[-1][0], points[-1][1])
-
-                        left_point = p_start if p_start.x() <= p_end.x() else p_end
-                        right_point = p_end if p_start.x() <= p_end.x() else p_start
-
-                        # 좌측 꼭짓점 좌표
-                        left_text_str = f"({left_point.x():.1f}, {left_point.y():.1f})"
-                        bg_item, text_item = self._create_coord_text_item(left_text_str, QColor("magenta"), None)
-                        bg_rect = bg_item.boundingRect()
-                        text_rect = text_item.boundingRect()
-                        bg_item.setPos(left_point.x() - bg_rect.width() / 2, left_point.y() + 1)
-                        text_item.setPos(bg_item.x() + (bg_rect.width() - text_rect.width()) / 2, bg_item.y() + (bg_rect.height() - text_rect.height()) / 2)
-                        self.scene.addItem(bg_item)
-                        self.scene.addItem(text_item)
-                        self.lod_coord_items.extend([bg_item, text_item])
-                        
-                        # 우측 꼭짓점 좌표
-                        if left_point != right_point:
-                            right_text_str = f"({right_point.x():.1f}, {right_point.y():.1f})"
-                            bg_item, text_item = self._create_coord_text_item(right_text_str, QColor("magenta"), None)
-                            bg_rect = bg_item.boundingRect()
-                            text_rect = text_item.boundingRect()
-                            bg_item.setPos(right_point.x() - bg_rect.width() / 2, right_point.y() - bg_rect.height() - 1)
-                            text_item.setPos(bg_item.x() + (bg_rect.width() - text_rect.width()) / 2, bg_item.y() + (bg_rect.height() - text_rect.height()) / 2)
-                            self.scene.addItem(bg_item)
-                            self.scene.addItem(text_item)
-                            self.lod_coord_items.extend([bg_item, text_item])
+                # 유니크 꼭짓점만 좌표 라벨 1회 생성
+                for vx, vy in unique_vertices:
+                    anchor = QPointF(vx, vy)
+                    text_str = f"({vx:.1f}, {vy:.1f})"
+                    bg_item, text_item = self._create_coord_text_item(text_str, QColor("magenta"), None)
+                    self.scene.addItem(bg_item)
+                    self.scene.addItem(text_item)
+                    self.lod_coord_items.extend([bg_item, text_item])
+                    self._coord_label_groups.append({
+                        "anchor": anchor, "bg": bg_item, "text": text_item, "preferred": "above"
+                    })
 
                 for obj_data in self.geometry_data.get("transition_objects", []):
                     points = obj_data.get("points", [])
@@ -2369,96 +2510,106 @@ class FullMinimapEditorDialog(QDialog):
                         upper_point = p1_pos if p1_pos.y() < p2_pos.y() else p2_pos
                         lower_point = p2_pos if p1_pos.y() < p2_pos.y() else p1_pos
 
-                        # 위쪽 꼭짓점 좌표
+                        # 위쪽 꼭짓점 좌표 (원래 로직은 아래쪽으로 배치)
                         upper_text_str = f"({upper_point.x():.1f}, {upper_point.y():.1f})"
-                        bg_item, text_item = self._create_coord_text_item(upper_text_str, QColor("orange"), None)
-                        bg_rect = bg_item.boundingRect()
-                        text_rect = text_item.boundingRect()
-                        bg_item.setPos(upper_point.x() - bg_rect.width() / 2, upper_point.y())
-                        text_item.setPos(bg_item.x() + (bg_rect.width() - text_rect.width()) / 2, bg_item.y() + (bg_rect.height() - text_rect.height()) / 2)
-                        self.scene.addItem(bg_item)
-                        self.scene.addItem(text_item)
-                        self.lod_coord_items.extend([bg_item, text_item])
+                        bg_item_u, text_item_u = self._create_coord_text_item(upper_text_str, QColor("orange"), None)
+                        self.scene.addItem(bg_item_u)
+                        self.scene.addItem(text_item_u)
+                        self.lod_coord_items.extend([bg_item_u, text_item_u])
+                        self._coord_label_groups.append({
+                            "anchor": upper_point, "bg": bg_item_u, "text": text_item_u, "preferred": "below"
+                        })
 
-                        # 아래쪽 꼭짓점 좌표
+                        # 아래쪽 꼭짓점 좌표 (원래 로직은 위쪽으로 배치)
                         lower_text_str = f"({lower_point.x():.1f}, {lower_point.y():.1f})"
-                        bg_item, text_item = self._create_coord_text_item(lower_text_str, QColor("orange"), None)
-                        bg_rect = bg_item.boundingRect()
-                        text_rect = text_item.boundingRect()
-                        bg_item.setPos(lower_point.x() - bg_rect.width() / 2, lower_point.y() - bg_rect.height())
-                        text_item.setPos(bg_item.x() + (bg_rect.width() - text_rect.width()) / 2, bg_item.y() + (bg_rect.height() - text_rect.height()) / 2)
-                        self.scene.addItem(bg_item)
-                        self.scene.addItem(text_item)
-                        self.lod_coord_items.extend([bg_item, text_item])
+                        bg_item_l, text_item_l = self._create_coord_text_item(lower_text_str, QColor("orange"), None)
+                        self.scene.addItem(bg_item_l)
+                        self.scene.addItem(text_item_l)
+                        self.lod_coord_items.extend([bg_item_l, text_item_l])
+                        self._coord_label_groups.append({
+                            "anchor": lower_point, "bg": bg_item_l, "text": text_item_l, "preferred": "above"
+                        })
 
                         if 'dynamic_name' in obj_data:
                             name = obj_data['dynamic_name']
-                            font = QFont("맑은 고딕", 3, QFont.Weight.Bold)
+                            font = QFont("맑은 고딕", 3, QFont.Weight.Bold)  # 웨이포인트 수준의 기본 크기
                             text_item = QGraphicsTextItem(name)
                             text_item.setFont(font)
                             text_item.setDefaultTextColor(QColor("orange"))
-                            
+
                             text_rect = text_item.boundingRect()
                             padding_x = -3
                             padding_y = -3
                             bg_rect_geom = text_rect.adjusted(-padding_x, -padding_y, padding_x, padding_y)
 
                             line_center = line_item.boundingRect().center()
-                            
-                            base_pos_x = line_center.x() - bg_rect_geom.width() / 2
-                            base_pos_y = line_center.y() - bg_rect_geom.height() / 2
-                            
+
                             background_rect = RoundedRectItem(QRectF(0, 0, bg_rect_geom.width(), bg_rect_geom.height()), 3, 3)
                             background_rect.setBrush(QColor(0, 0, 0, 120))
                             background_rect.setPen(QPen(Qt.GlobalColor.transparent))
-                            background_rect.setPos(base_pos_x, base_pos_y)
                             background_rect.setData(0, "transition_object_name_bg")
-                            
-                            text_item.setPos(base_pos_x + padding_x, base_pos_y + padding_y)
+
+                            text_item.setData(0, "transition_object_name")
                             background_rect.setZValue(10)
                             text_item.setZValue(11)
-                            
+
                             self.scene.addItem(background_rect)
                             self.scene.addItem(text_item)
-                            
+
                             self.lod_text_items.append(text_item)
                             self.lod_text_items.append(background_rect)
+                            # 이름 라벨 그룹 등록 (앵커는 선의 중앙, 위 선호)
+                            self._name_label_groups.append({
+                                "anchor": line_center,
+                                "bg": background_rect,
+                                "text": text_item,
+                                "preferred": "above",
+                                "type": "transition_object_name"
+                            })
                 
                 for jump_data in self.geometry_data.get("jump_links", []):
                     line_item = self._add_jump_link_line(QPointF(jump_data['start_vertex_pos'][0], jump_data['start_vertex_pos'][1]), QPointF(jump_data['end_vertex_pos'][0], jump_data['end_vertex_pos'][1]), jump_data['id'])
                     if 'dynamic_name' in jump_data:
                         name = jump_data['dynamic_name']
-                        
+
                         text_item = QGraphicsTextItem(name)
-                        font = QFont("맑은 고딕", 3, QFont.Weight.Bold)
+                        font = QFont("맑은 고딕", 3, QFont.Weight.Bold)  # 웨이포인트 수준의 기본 크기
                         text_item.setFont(font)
                         text_item.setDefaultTextColor(QColor("lime"))
-                        
+
                         text_rect = text_item.boundingRect()
                         padding_x = -3
                         padding_y = -3
                         bg_rect_geom = text_rect.adjusted(-padding_x, -padding_y, padding_x, padding_y)
 
                         line_center = line_item.boundingRect().center()
-                        base_pos_x = line_center.x() - bg_rect_geom.width() / 2
-                        base_pos_y = line_center.y() - bg_rect_geom.height() / 2 - 7
-                        
+
                         background_rect = RoundedRectItem(QRectF(0, 0, bg_rect_geom.width(), bg_rect_geom.height()), 3, 3)
                         background_rect.setBrush(QColor(0, 0, 0, 120))
                         background_rect.setPen(QPen(Qt.GlobalColor.transparent))
-                        background_rect.setPos(base_pos_x, base_pos_y)
                         background_rect.setData(0, "jump_link_name_bg")
-                        
-                        text_item.setPos(base_pos_x + padding_x, base_pos_y + padding_y)
-                        
+
+                        text_item.setData(0, "jump_link_name")
+
                         background_rect.setZValue(10)
                         text_item.setZValue(11)
-                        
+
                         self.scene.addItem(background_rect)
                         self.scene.addItem(text_item)
-                        
+
                         self.lod_text_items.append(text_item)
                         self.lod_text_items.append(background_rect)
+                        # 이름 라벨 그룹 등록 (앵커는 선의 중앙, 위 선호)
+                        self._name_label_groups.append({
+                            "anchor": line_center,
+                            "bg": background_rect,
+                            "text": text_item,
+                            "preferred": "above",
+                            "type": "jump_link_name"
+                        })
+
+                # 좌표/이름 라벨 초기 배치 수행 (통합 충돌회피)
+                self._relayout_all_labels()
                             
                 # 4. 웨이포인트 순서 계산 및 그리기
                 wp_order_map = {}
@@ -2516,19 +2667,21 @@ class FullMinimapEditorDialog(QDialog):
                 item.setVisible(show_bg)
             elif item_type == "feature":
                 item.setVisible(show_features)
+            elif item_type == "feature_name_leader":
+                item.setVisible(show_features)
             elif item_type == "waypoint_v10":
                 item.setVisible(show_waypoints)
             elif item_type in ["terrain_line", "vertex"]:
                 item.setVisible(show_terrain)
-            elif item_type == "floor_text": 
+            elif item_type in ["floor_text", "floor_text_leader"]:
                 item.setVisible(show_terrain)
             elif item_type == "transition_object":
                 item.setVisible(show_objects)
-            elif item_type in ["transition_object_name", "transition_object_name_bg"]: # 수정: _bg 타입 추가
+            elif item_type in ["transition_object_name", "transition_object_name_bg", "transition_object_name_leader"]: # 수정: _bg/leader 타입 추가
                 item.setVisible(show_objects)
             elif item_type == "jump_link":
                 item.setVisible(show_jump_links)
-            elif item_type in ["jump_link_name", "jump_link_name_bg"]: # 수정: _bg 타입 추가
+            elif item_type in ["jump_link_name", "jump_link_name_bg", "jump_link_name_leader"]: # 수정: _bg/leader 타입 추가
                 item.setVisible(show_jump_links)
             elif item_type in ["forbidden_wall", "forbidden_wall_indicator", "forbidden_wall_range"]:
                 item.setVisible(show_forbidden_walls)
@@ -2553,11 +2706,21 @@ class FullMinimapEditorDialog(QDialog):
                 base_visible = self.chk_show_terrain.isChecked()
             elif item_type == "waypoint_lod_text":
                 base_visible = self.chk_show_waypoints.isChecked()
+            elif item_type == "transition_object_name_leader":
+                base_visible = self.chk_show_objects.isChecked()
+            elif item_type == "jump_link_name_leader":
+                base_visible = self.chk_show_jump_links.isChecked()
+            elif item_type == "floor_text_leader":
+                base_visible = self.chk_show_terrain.isChecked()
 
             item.setVisible(is_name_visible and base_visible)
 
-        # 좌표 텍스트 가시성 제어
-        is_coord_visible = current_zoom >= self.lod_coord_threshold
+        # 좌표 텍스트 가시성 제어 (LOD 대신 보기 옵션 체크박스)
+        is_coord_visible = True
+        try:
+            is_coord_visible = self.chk_show_coords.isChecked()
+        except Exception:
+            pass
         for item in self.lod_coord_items:
             # [v11.3.3] 통합된 lock_coord_text_item의 가시성 제어
             if item is self.lock_coord_text_item:
@@ -2567,6 +2730,9 @@ class FullMinimapEditorDialog(QDialog):
             else: # 일반 좌표 텍스트 (지형선, 오브젝트)
                 # coord_text_group, coord_text_bg, coord_text 모두 처리
                 item.setVisible(is_coord_visible)
+        
+        # 줌 변화에 따른 좌표 라벨 재배치 (겹침 최소화)
+        self._relayout_all_labels()
                 
     def on_scene_mouse_press(self, scene_pos, button):
         #  '기본' 모드에서 웨이포인트 클릭 시 이름 변경 기능 추가 ---
@@ -3162,8 +3328,9 @@ class FullMinimapEditorDialog(QDialog):
 
     def _add_vertex_indicator(self, pos, line_id):
         """지형선의 꼭짓점을 씬에 추가합니다."""
-        dot = self.scene.addEllipse(0, 0, 6, 6, QPen(Qt.GlobalColor.magenta), QBrush(Qt.GlobalColor.white))
-        dot.setPos(pos - QPointF(3, 3))
+        # 기본 6 -> 3 (요청 반영)
+        dot = self.scene.addEllipse(0, 0, 3.0, 3.0, QPen(Qt.GlobalColor.magenta), QBrush(Qt.GlobalColor.white))
+        dot.setPos(pos - QPointF(1.5, 1.5))
         dot.setData(0, "vertex")
         dot.setData(1, line_id)
         return dot
@@ -3184,9 +3351,10 @@ class FullMinimapEditorDialog(QDialog):
 
         if snap_point:
             if not self.snap_indicator:
-                self.snap_indicator = self.scene.addEllipse(0, 0, 8, 8, QPen(QColor(0, 255, 0, 200), 2))
+                # 스냅 원 8 -> 3 (요청 반영)
+                self.snap_indicator = self.scene.addEllipse(0, 0, 3.0, 3.0, QPen(QColor(0, 255, 0, 200), 1))
                 self.snap_indicator.setZValue(100)
-            self.snap_indicator.setPos(snap_point - QPointF(4, 4))
+            self.snap_indicator.setPos(snap_point - QPointF(1.5, 1.5))
             self.snap_indicator.setVisible(True)
         else:
             if self.snap_indicator:
