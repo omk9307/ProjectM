@@ -1622,6 +1622,65 @@ class ForbiddenWallDialog(QDialog):
             "skill_profiles": [chk.text() for chk in self.skill_checks if chk.isChecked()],
         }
 
+class HuntZoneConfigDialog(QDialog):
+    """사냥범위 조절칸(영역) 설정 다이얼로그."""
+    def __init__(self, zone: dict, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("사냥범위 설정")
+        self.setMinimumWidth(320)
+
+        self.zone = zone or {}
+        ranges = self.zone.get('ranges') or {}
+
+        layout = QVBoxLayout(self)
+        form = QFormLayout()
+
+        # 활성화
+        self.enabled_checkbox = QCheckBox("활성화")
+        self.enabled_checkbox.setChecked(bool(self.zone.get('enabled', False)))
+        form.addRow(self.enabled_checkbox)
+
+        # 전/후 사냥/주스킬(대칭 숨김)
+        def _spin(min_v, max_v, step, val):
+            sp = QSpinBox()
+            sp.setRange(min_v, max_v)
+            sp.setSingleStep(step)
+            sp.setValue(int(val))
+            return sp
+
+        self.enemy_front_spin = _spin(0, 2000, 10, int(ranges.get('enemy_front', 400)))
+        self.enemy_back_spin = _spin(0, 2000, 10, int(ranges.get('enemy_back', 400)))
+        self.primary_front_spin = _spin(0, 1200, 10, int(ranges.get('primary_front', 200)))
+        self.primary_back_spin = _spin(0, 1200, 10, int(ranges.get('primary_back', 200)))
+        self.y_height_spin = _spin(10, 400, 5, int(ranges.get('y_band_height', 40)))
+        self.y_offset_spin = _spin(-200, 200, 5, int(ranges.get('y_band_offset', 0)))
+
+        form.addRow("사냥 전방 X(px)", self.enemy_front_spin)
+        form.addRow("사냥 후방 X(px)", self.enemy_back_spin)
+        form.addRow("주 스킬 전방 X(px)", self.primary_front_spin)
+        form.addRow("주 스킬 후방 X(px)", self.primary_back_spin)
+        form.addRow("Y 범위 높이(px)", self.y_height_spin)
+        form.addRow("Y 오프셋(px)", self.y_offset_spin)
+
+        layout.addLayout(form)
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+    def get_values(self) -> dict:
+        return {
+            'enabled': bool(self.enabled_checkbox.isChecked()),
+            'ranges': {
+                'enemy_front': int(self.enemy_front_spin.value()),
+                'enemy_back': int(self.enemy_back_spin.value()),
+                'primary_front': int(self.primary_front_spin.value()),
+                'primary_back': int(self.primary_back_spin.value()),
+                'y_band_height': int(self.y_height_spin.value()),
+                'y_band_offset': int(self.y_offset_spin.value()),
+            }
+        }
+
 class FullMinimapEditorDialog(QDialog):
     """
     맵 프로필의 모든 지형/웨이포인트 정보를 종합하여 전체 맵을 시각화하고,
@@ -1639,6 +1698,9 @@ class FullMinimapEditorDialog(QDialog):
         self.geometry_data = copy.deepcopy(geometry_data)
         if "forbidden_walls" not in self.geometry_data:
             self.geometry_data["forbidden_walls"] = []
+        # [신규] 사냥범위 존 기본 키 보장
+        if "hunt_range_zones" not in self.geometry_data:
+            self.geometry_data["hunt_range_zones"] = []
         self._ensure_waypoint_event_fields()
         self.render_options = render_options
         self.global_positions = global_positions
@@ -1674,6 +1736,10 @@ class FullMinimapEditorDialog(QDialog):
         self.is_drawing_jump_link = False
         self.jump_link_start_pos = None
         self.preview_jump_link_item = None
+        # [신규] 사냥범위 드로잉 상태
+        self.is_drawing_hunt_zone = False
+        self.hunt_zone_start_pos = None
+        self.preview_hunt_zone_item = None
         self.feature_color_map = self._create_feature_color_map()
         
         # ==================== v10.6.0 ====================
@@ -1902,6 +1968,8 @@ class FullMinimapEditorDialog(QDialog):
         self.waypoint_mode_radio = QRadioButton("웨이포인트 추가 (W)")
         self.jump_mode_radio = QRadioButton("지형 점프 연결 (J)")
         self.forbidden_wall_mode_radio = QRadioButton("금지벽 추가 (F)")
+        # [신규] 사냥범위 조절칸 추가 모드
+        self.hunt_zone_mode_radio = QRadioButton("사냥범위 조절칸 추가 (H)")
         self.select_mode_radio.setChecked(True)
         self.select_mode_radio.toggled.connect(lambda: self.set_mode("select"))
         self.terrain_mode_radio.toggled.connect(lambda: self.set_mode("terrain"))
@@ -1909,12 +1977,14 @@ class FullMinimapEditorDialog(QDialog):
         self.waypoint_mode_radio.toggled.connect(lambda: self.set_mode("waypoint"))
         self.jump_mode_radio.toggled.connect(lambda: self.set_mode("jump"))
         self.forbidden_wall_mode_radio.toggled.connect(lambda: self.set_mode("forbidden_wall"))
+        self.hunt_zone_mode_radio.toggled.connect(lambda: self.set_mode("hunt_zone"))
         mode_layout.addWidget(self.select_mode_radio)
         mode_layout.addWidget(self.terrain_mode_radio)
         mode_layout.addWidget(self.object_mode_radio)
         mode_layout.addWidget(self.waypoint_mode_radio)
         mode_layout.addWidget(self.jump_mode_radio)
         mode_layout.addWidget(self.forbidden_wall_mode_radio)
+        mode_layout.addWidget(self.hunt_zone_mode_radio)
         mode_box.setLayout(mode_layout)
 
         # 지형 입력 옵션
@@ -1967,6 +2037,10 @@ class FullMinimapEditorDialog(QDialog):
         self.chk_show_forbidden_walls = QCheckBox("금지벽")
         self.chk_show_forbidden_walls.setChecked(self.render_options.get('forbidden_walls', True))
         self.chk_show_forbidden_walls.stateChanged.connect(self._update_visibility)
+        # [신규] 사냥범위 표시 토글
+        self.chk_show_hunt_zones = QCheckBox("사냥범위")
+        self.chk_show_hunt_zones.setChecked(self.render_options.get('hunt_zones', True))
+        self.chk_show_hunt_zones.stateChanged.connect(self._update_visibility)
 
         zoom_layout = QHBoxLayout()
         zoom_in_btn = QPushButton("확대")
@@ -1994,6 +2068,7 @@ class FullMinimapEditorDialog(QDialog):
         view_opts_layout.addWidget(self.chk_show_jump_links)
         view_opts_layout.addWidget(self.chk_show_coords)
         view_opts_layout.addWidget(self.chk_show_forbidden_walls)
+        view_opts_layout.addWidget(self.chk_show_hunt_zones)
         view_opts_layout.addLayout(zoom_layout)
         view_opts_box.setLayout(view_opts_layout)
 
@@ -2036,7 +2111,8 @@ class FullMinimapEditorDialog(QDialog):
             'objects': self.chk_show_objects.isChecked(),
             'jump_links': self.chk_show_jump_links.isChecked(),
             'coords': getattr(self, 'chk_show_coords', None).isChecked() if hasattr(self, 'chk_show_coords') else True,
-            'forbidden_walls': self.chk_show_forbidden_walls.isChecked()
+            'forbidden_walls': self.chk_show_forbidden_walls.isChecked(),
+            'hunt_zones': self.chk_show_hunt_zones.isChecked() if hasattr(self, 'chk_show_hunt_zones') else True,
         }
         
     def set_mode(self, mode):
@@ -2046,6 +2122,13 @@ class FullMinimapEditorDialog(QDialog):
             self._finish_drawing_line()
         if self.is_drawing_object:
             self._finish_drawing_object(cancel=True)
+        # 사냥범위 드로잉 취소
+        if getattr(self, 'is_drawing_hunt_zone', False):
+            if getattr(self, 'preview_hunt_zone_item', None) and self.preview_hunt_zone_item in self.scene.items():
+                self.scene.removeItem(self.preview_hunt_zone_item)
+            self.preview_hunt_zone_item = None
+            self.is_drawing_hunt_zone = False
+            self.hunt_zone_start_pos = None
 
         if mode != "select":
             self.view.setDragMode(QGraphicsView.DragMode.NoDrag)
@@ -2726,13 +2809,37 @@ class FullMinimapEditorDialog(QDialog):
                 for wp_data in self.geometry_data.get("waypoints", []):
                     is_event = bool(wp_data.get('is_event'))
                     self._add_waypoint_rect(QPointF(wp_data['pos'][0], wp_data['pos'][1]), wp_data['id'], wp_data['name'], wp_data['name'], is_event=is_event)
+
+                # 사냥범위 존 그리기
+                for zone in self.geometry_data.get("hunt_range_zones", []):
+                    rect = zone.get('rect') or [0, 0, 0, 0]
+                    if not (isinstance(rect, list) and len(rect) == 4):
+                        continue
+                    x, y, w, h = [float(v) for v in rect]
+                    pen = QPen(QColor(255, 165, 0, 200), 2, Qt.PenStyle.DashLine)
+                    brush = QBrush(QColor(255, 165, 0, 60))
+                    item = self.scene.addRect(x, y, w, h, pen, brush)
+                    item.setZValue(180)
+                    item.setData(0, "hunt_zone")
+                    item.setData(1, zone.get('id'))
+                    # 툴팁 간략 정보
+                    enabled = bool(zone.get('enabled', False))
+                    ranges = zone.get('ranges') or {}
+                    ef = int(ranges.get('enemy_front', 0))
+                    eb = int(ranges.get('enemy_back', 0))
+                    pf = int(ranges.get('primary_front', 0))
+                    pb = int(ranges.get('primary_back', 0))
+                    yh = int(ranges.get('y_band_height', 0))
+                    yo = int(ranges.get('y_band_offset', 0))
+                    tip = f"활성화: {'예' if enabled else '아니오'}\n사냥 전/후: {ef}/{eb}\n주스킬 전/후: {pf}/{pb}\nY 높이/오프셋: {yh}/{yo}"
+                    item.setToolTip(tip)
                     
                 # 5. 모든 층 번호 텍스트를 마지막에 그림
                 self._update_all_floor_texts()
 
                 # v10.3.5: 보기 옵션 및 LOD 상태를 항상 마지막에 다시 적용
                 self._update_visibility()
-                self._update_lod_visibility()
+        self._update_lod_visibility()
 
     def _update_visibility(self):
         """UI 컨트롤 상태에 따라 QGraphicsScene의 아이템 가시성을 업데이트합니다."""
@@ -2743,6 +2850,7 @@ class FullMinimapEditorDialog(QDialog):
         show_objects = self.chk_show_objects.isChecked()
         show_jump_links = self.chk_show_jump_links.isChecked()
         show_forbidden_walls = self.chk_show_forbidden_walls.isChecked()
+        show_hunt_zones = self.chk_show_hunt_zones.isChecked()
 
         for item in self.scene.items():
             item_type = item.data(0)
@@ -2768,6 +2876,8 @@ class FullMinimapEditorDialog(QDialog):
                 item.setVisible(show_jump_links)
             elif item_type in ["forbidden_wall", "forbidden_wall_indicator", "forbidden_wall_range"]:
                 item.setVisible(show_forbidden_walls)
+            elif item_type == "hunt_zone":
+                item.setVisible(show_hunt_zones)
 
     def _update_lod_visibility(self):
         """
@@ -2833,6 +2943,83 @@ class FullMinimapEditorDialog(QDialog):
         # 줌 변화에 따른 좌표 라벨 재배치 (겹침 최소화)
         self._relayout_all_labels()
                 
+    # -------------------- 사냥범위 편의 메서드 --------------------
+    def _get_default_hunt_ranges(self) -> dict:
+        """사냥탭에서 현재 범위를 받아 초기값으로 사용. 실패 시 안전 기본값."""
+        try:
+            hunt_tab = getattr(self.parent_map_tab, '_hunt_tab', None)
+            if hunt_tab and hasattr(hunt_tab, 'api_get_current_ranges'):
+                ranges = hunt_tab.api_get_current_ranges()
+                if isinstance(ranges, dict):
+                    return {
+                        'enemy_front': int(ranges.get('enemy_front', 400)),
+                        'enemy_back': int(ranges.get('enemy_back', 400)),
+                        'primary_front': int(ranges.get('primary_front', 200)),
+                        'primary_back': int(ranges.get('primary_back', 200)),
+                        'y_band_height': int(ranges.get('y_band_height', 40)),
+                        'y_band_offset': int(ranges.get('y_band_offset', 0)),
+                    }
+        except Exception:
+            pass
+        return {
+            'enemy_front': 400,
+            'enemy_back': 400,
+            'primary_front': 200,
+            'primary_back': 200,
+            'y_band_height': 40,
+            'y_band_offset': 0,
+        }
+
+    def _rects_intersect(self, a: QRectF, b: QRectF) -> bool:
+        return a.intersects(b)
+
+    def _any_hunt_zone_overlaps(self, rect: QRectF, exclude_id: Optional[str] = None) -> bool:
+        for zone in self.geometry_data.get('hunt_range_zones', []):
+            if exclude_id and zone.get('id') == exclude_id:
+                continue
+            r = zone.get('rect') or [0, 0, 0, 0]
+            if not (isinstance(r, list) and len(r) == 4):
+                continue
+            zr = QRectF(float(r[0]), float(r[1]), float(r[2]), float(r[3]))
+            if self._rects_intersect(rect, zr):
+                return True
+        return False
+
+    def _delete_hunt_zone_by_id(self, zone_id: str) -> None:
+        if not zone_id:
+            return
+        zones = self.geometry_data.get('hunt_range_zones', [])
+        new_zones = [z for z in zones if z.get('id') != zone_id]
+        if len(new_zones) != len(zones):
+            self.geometry_data['hunt_range_zones'] = new_zones
+            if self.parent_map_tab:
+                try:
+                    self.parent_map_tab.save_profile_data()
+                except Exception:
+                    pass
+            self.populate_scene()
+
+    def _edit_hunt_zone(self, zone_id: str) -> None:
+        if not zone_id:
+            return
+        zones = self.geometry_data.get('hunt_range_zones', [])
+        zone = next((z for z in zones if z.get('id') == zone_id), None)
+        if not zone:
+            return
+        if 'ranges' not in zone or not isinstance(zone['ranges'], dict):
+            zone['ranges'] = self._get_default_hunt_ranges()
+        dlg = HuntZoneConfigDialog(zone, parent=self)
+        if dlg.exec() == QDialog.DialogCode.Accepted:
+            values = dlg.get_values()
+            zone['enabled'] = bool(values.get('enabled', False))
+            zone['ranges'] = dict(values.get('ranges') or {})
+            if self.parent_map_tab:
+                try:
+                    self.parent_map_tab.save_profile_data()
+                except Exception:
+                    pass
+            self.populate_scene()
+
     def on_scene_mouse_press(self, scene_pos, button):
         #  '기본' 모드에서 웨이포인트 클릭 시 이름 변경 기능 추가 ---
         if self.current_mode == "select" and button in (Qt.MouseButton.LeftButton, Qt.MouseButton.RightButton):
@@ -2840,6 +3027,16 @@ class FullMinimapEditorDialog(QDialog):
             view_pos = self.view.mapFromScene(scene_pos)
             item_at_pos = self.view.itemAt(view_pos)
             
+            # [신규] 사냥범위: 기본 모드에서 좌클릭=설정, 우클릭=삭제
+            if item_at_pos and item_at_pos.data(0) == "hunt_zone":
+                zone_id = item_at_pos.data(1)
+                if zone_id:
+                    if button == Qt.MouseButton.LeftButton:
+                        self._edit_hunt_zone(zone_id)
+                    else:
+                        self._delete_hunt_zone_by_id(zone_id)
+                return
+
             if item_at_pos and item_at_pos.data(0) in ["forbidden_wall", "forbidden_wall_indicator", "forbidden_wall_range"]:
                 wall_id = item_at_pos.data(1)
                 if wall_id:
@@ -3079,6 +3276,80 @@ class FullMinimapEditorDialog(QDialog):
                             self._delete_jump_link_by_id(item.data(1))
                             break
 
+        elif self.current_mode == "hunt_zone":
+            if button == Qt.MouseButton.LeftButton:
+                # 2-클릭 생성 방식: 클릭 시작 -> 이동 미리보기 -> 클릭 종료
+                if not self.is_drawing_hunt_zone:
+                    self.is_drawing_hunt_zone = True
+                    self.hunt_zone_start_pos = scene_pos
+                    # 프리뷰 생성
+                    if self.preview_hunt_zone_item and self.preview_hunt_zone_item in self.scene.items():
+                        self.scene.removeItem(self.preview_hunt_zone_item)
+                        self.preview_hunt_zone_item = None
+                    pen = QPen(QColor(255, 165, 0, 200), 2, Qt.PenStyle.DashLine)
+                    brush = QBrush(QColor(255, 165, 0, 60))
+                    self.preview_hunt_zone_item = self.scene.addRect(QRectF(scene_pos, scene_pos).normalized(), pen, brush)
+                    self.preview_hunt_zone_item.setZValue(500)
+                else:
+                    # 종료: 영역 확정
+                    start = self.hunt_zone_start_pos if self.hunt_zone_start_pos else scene_pos
+                    rect = QRectF(start, scene_pos).normalized()
+                    # 최소 크기
+                    if rect.width() < 4 or rect.height() < 4:
+                        QMessageBox.information(self, "사냥범위", "너무 작은 영역입니다.")
+                        # 프리뷰 정리
+                        if self.preview_hunt_zone_item and self.preview_hunt_zone_item in self.scene.items():
+                            self.scene.removeItem(self.preview_hunt_zone_item)
+                        self.preview_hunt_zone_item = None
+                        self.is_drawing_hunt_zone = False
+                        self.hunt_zone_start_pos = None
+                        return
+                    # 겹침 금지
+                    if self._any_hunt_zone_overlaps(rect):
+                        QMessageBox.warning(self, "사냥범위", "다른 사냥범위와 겹칠 수 없습니다.")
+                        if self.preview_hunt_zone_item and self.preview_hunt_zone_item in self.scene.items():
+                            self.scene.removeItem(self.preview_hunt_zone_item)
+                        self.preview_hunt_zone_item = None
+                        self.is_drawing_hunt_zone = False
+                        self.hunt_zone_start_pos = None
+                        return
+                    # 생성
+                    zone_id = f"hz-{uuid.uuid4()}"
+                    ranges = self._get_default_hunt_ranges()
+                    new_zone = {
+                        'id': zone_id,
+                        'rect': [float(rect.x()), float(rect.y()), float(rect.width()), float(rect.height())],
+                        'enabled': False,
+                        'ranges': ranges,
+                    }
+                    self.geometry_data.setdefault('hunt_range_zones', []).append(new_zone)
+                    # 프리뷰 정리 및 저장/갱신
+                    if self.preview_hunt_zone_item and self.preview_hunt_zone_item in self.scene.items():
+                        self.scene.removeItem(self.preview_hunt_zone_item)
+                    self.preview_hunt_zone_item = None
+                    self.is_drawing_hunt_zone = False
+                    self.hunt_zone_start_pos = None
+                    if self.parent_map_tab:
+                        try:
+                            self.parent_map_tab.save_profile_data()
+                        except Exception:
+                            pass
+                    self.populate_scene()
+            elif button == Qt.MouseButton.RightButton:
+                # 드로잉 취소 또는 우클릭 삭제
+                if self.is_drawing_hunt_zone:
+                    if self.preview_hunt_zone_item and self.preview_hunt_zone_item in self.scene.items():
+                        self.scene.removeItem(self.preview_hunt_zone_item)
+                    self.preview_hunt_zone_item = None
+                    self.is_drawing_hunt_zone = False
+                    self.hunt_zone_start_pos = None
+                else:
+                    items_at_pos = self.view.items(self.view.mapFromScene(scene_pos))
+                    for item in items_at_pos:
+                        if item.data(0) == 'hunt_zone':
+                            self._delete_hunt_zone_by_id(item.data(1))
+                            break
+
         elif self.current_mode == "select":
             if button == Qt.MouseButton.LeftButton:
                 items_at_pos = self.view.items(self.view.mapFromScene(scene_pos))
@@ -3208,6 +3479,15 @@ class FullMinimapEditorDialog(QDialog):
                     QPen(QColor(0, 255, 0, 150), 2, Qt.PenStyle.DashLine)
                 )
         # --- v10.0.0 수정 끝 ---
+        elif self.current_mode == "hunt_zone":
+            if self.is_drawing_hunt_zone and self.hunt_zone_start_pos is not None:
+                if self.preview_hunt_zone_item and self.preview_hunt_zone_item in self.scene.items():
+                    self.scene.removeItem(self.preview_hunt_zone_item)
+                pen = QPen(QColor(255, 165, 0, 200), 2, Qt.PenStyle.DashLine)
+                brush = QBrush(QColor(255, 165, 0, 60))
+                rect = QRectF(self.hunt_zone_start_pos, scene_pos).normalized()
+                self.preview_hunt_zone_item = self.scene.addRect(rect, pen, brush)
+                self.preview_hunt_zone_item.setZValue(500)
     
     def _add_waypoint_rect(self, pos, wp_id, name, order_text, is_event=False):
             """씬에 웨이포인트 사각형과 순서를 추가합니다."""

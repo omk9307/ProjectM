@@ -858,6 +858,11 @@ class HuntTab(QWidget):
         self._direction_templates: dict[str, list] = {'left': [], 'right': []}
         self._direction_active = False
         self._direction_last_seen_ts = 0.0
+
+        # [사냥범위 오버라이드] 맵 탭의 영역 진입 시 일시적으로 범위를 바꾸고, 이탈 시 복원하기 위한 상태
+        self._zone_override_active: bool = False
+        self._zone_override_id: Optional[str] = None
+        self._zone_override_backup: Optional[dict] = None
         self._direction_last_side: Optional[str] = None
         self._latest_direction_roi: Optional[dict] = None
         self._latest_direction_match: Optional[dict] = None
@@ -868,6 +873,10 @@ class HuntTab(QWidget):
         self._perf_log_handle: Optional[TextIO] = None
         self._perf_log_writer: Optional[csv.writer] = None
         self._perf_logging_enabled = False
+        # 화면출력(팝업) 상태 추적용 로깅 컨텍스트
+        self._closing_popup_programmatically = False
+        self._popup_close_reason: Optional[str] = None
+        self._popup_open_reason: Optional[str] = None
         self._detection_status = False
         self.yolo_nms_iou = DEFAULT_YOLO_NMS_IOU
         self.yolo_max_det = DEFAULT_YOLO_MAX_DET
@@ -1230,10 +1239,16 @@ class HuntTab(QWidget):
             is_checked = False
 
         if is_checked:
+            # 팝업 닫힘 사유 설정
+            self._closing_popup_programmatically = True
+            self._popup_close_reason = str(reason or 'force_stop')
             self.detect_btn.setChecked(False)
             self._toggle_detection(False)
             stopped = True
         elif self._is_detection_active():
+            # 팝업 닫힘 사유 설정
+            self._closing_popup_programmatically = True
+            self._popup_close_reason = str(reason or 'force_stop')
             self._toggle_detection(False)
             if hasattr(self.detect_btn, 'setChecked'):
                 self.detect_btn.setChecked(False)
@@ -1362,6 +1377,198 @@ class HuntTab(QWidget):
                 return False, f"대기 모드 해제 실패: {exc}"
             return True, "대기 모드를 해제했습니다."
         return True, "대기 모드가 활성화되어 있지 않습니다."
+
+    # ---------------------- 사냥범위 오버라이드 제어(맵 탭 연동) ----------------------
+    def api_get_current_ranges(self) -> dict:
+        """현재 사냥탭 스핀박스 상태를 전/후 비대칭 포맷으로 반환.
+
+        - 새 영역(사냥범위 조절칸) 생성 시 초기 기본값으로 사용.
+        - 대칭 모드일 경우에도 front/back은 현재 대칭 반경 값을 그대로 채워줌.
+        """
+        try:
+            mode_on = bool(self.facing_range_checkbox.isChecked())
+        except Exception:
+            mode_on = False
+
+        # 대칭 모드에서도 front/back을 동일 값으로 채움
+        if mode_on:
+            enemy_front = int(self.enemy_front_spinbox.value())
+            enemy_back = int(self.enemy_back_spinbox.value())
+            primary_front = int(self.primary_front_spinbox.value())
+            primary_back = int(self.primary_back_spinbox.value())
+        else:
+            radius_enemy = int(self.enemy_range_spinbox.value())
+            radius_primary = int(self.primary_skill_range_spinbox.value())
+            enemy_front = radius_enemy
+            enemy_back = radius_enemy
+            primary_front = radius_primary
+            primary_back = radius_primary
+
+        return {
+            'enemy_front': enemy_front,
+            'enemy_back': enemy_back,
+            'primary_front': primary_front,
+            'primary_back': primary_back,
+            'y_band_height': int(self.y_band_height_spinbox.value()),
+            'y_band_offset': int(self.y_band_offset_spinbox.value()),
+        }
+
+    def _snapshot_current_ranges(self) -> dict:
+        """현재 UI의 사냥 범위 관련 값 전체를 스냅샷으로 저장(복원용)."""
+        try:
+            mode_on = bool(self.facing_range_checkbox.isChecked())
+        except Exception:
+            mode_on = False
+
+        snapshot = {
+            'mode': 'facing' if mode_on else 'symmetric',
+            'enemy_range': int(self.enemy_range_spinbox.value()),
+            'primary_range': int(self.primary_skill_range_spinbox.value()),
+            'enemy_front': int(self.enemy_front_spinbox.value()),
+            'enemy_back': int(self.enemy_back_spinbox.value()),
+            'primary_front': int(self.primary_front_spinbox.value()),
+            'primary_back': int(self.primary_back_spinbox.value()),
+            'y_band_height': int(self.y_band_height_spinbox.value()),
+            'y_band_offset': int(self.y_band_offset_spinbox.value()),
+        }
+        return snapshot
+
+    def _restore_ranges_from_snapshot(self, snapshot: dict) -> None:
+        """스냅샷에 저장된 값으로 사냥 범위 UI를 복원."""
+        if not isinstance(snapshot, dict):
+            return
+        try:
+            mode_on = (str(snapshot.get('mode', 'symmetric')).lower() == 'facing')
+        except Exception:
+            mode_on = False
+
+        # 모드 먼저 적용(가려진 위젯 상태 정합성 유지)
+        try:
+            self.facing_range_checkbox.setChecked(mode_on)
+            self._update_range_inputs_enabled(mode_on)
+        except Exception:
+            pass
+
+        # 값 복원(보이는/숨김 여부와 무관하게 설정)
+        try:
+            if 'enemy_range' in snapshot:
+                self.enemy_range_spinbox.setValue(int(snapshot['enemy_range']))
+            if 'primary_range' in snapshot:
+                self.primary_skill_range_spinbox.setValue(int(snapshot['primary_range']))
+            if 'enemy_front' in snapshot:
+                self.enemy_front_spinbox.setValue(int(snapshot['enemy_front']))
+            if 'enemy_back' in snapshot:
+                self.enemy_back_spinbox.setValue(int(snapshot['enemy_back']))
+            if 'primary_front' in snapshot:
+                self.primary_front_spinbox.setValue(int(snapshot['primary_front']))
+            if 'primary_back' in snapshot:
+                self.primary_back_spinbox.setValue(int(snapshot['primary_back']))
+            if 'y_band_height' in snapshot:
+                self.y_band_height_spinbox.setValue(int(snapshot['y_band_height']))
+            if 'y_band_offset' in snapshot:
+                self.y_band_offset_spinbox.setValue(int(snapshot['y_band_offset']))
+        except Exception:
+            pass
+
+        # 내부 상태/표시 갱신
+        try:
+            self._on_area_config_changed()
+            self._handle_setting_changed()
+        except Exception:
+            pass
+
+    def api_apply_zone_override(self, zone_id: str, ranges: dict) -> tuple[bool, str]:
+        """맵 탭에서 전달된 영역(사각형) 설정으로 사냥 범위를 일시 변경.
+
+        - 최초 적용 시 현재 스핀박스 값을 백업
+        - 같은 zone_id 재요청이면 값만 갱신
+        - 다른 zone_id가 활성 중이면 먼저 복원 후 새로 적용
+        - 저장 파일에는 백업값이 기록되도록 _save_settings 분기
+        """
+        try:
+            z = str(zone_id or '').strip()
+        except Exception:
+            z = ''
+        if not z:
+            return False, '유효하지 않은 영역 ID'
+
+        # 다른 ID가 이미 활성인 경우 우선 복원
+        if self._zone_override_active and self._zone_override_id and self._zone_override_id != z:
+            self.api_clear_zone_override(None)
+
+        # 최초 진입 시 백업
+        if not self._zone_override_active:
+            try:
+                self._zone_override_backup = self._snapshot_current_ranges()
+            except Exception:
+                self._zone_override_backup = None
+
+        # 전/후 값만 사용(대칭은 숨김)
+        def _ival(d, k, default):
+            try:
+                return int(d.get(k, default))
+            except Exception:
+                return int(default)
+
+        enemy_front = _ival(ranges, 'enemy_front', self.enemy_front_spinbox.value())
+        enemy_back = _ival(ranges, 'enemy_back', self.enemy_back_spinbox.value())
+        primary_front = _ival(ranges, 'primary_front', self.primary_front_spinbox.value())
+        primary_back = _ival(ranges, 'primary_back', self.primary_back_spinbox.value())
+        y_band_height = _ival(ranges, 'y_band_height', self.y_band_height_spinbox.value())
+        y_band_offset = _ival(ranges, 'y_band_offset', self.y_band_offset_spinbox.value())
+
+        # 모드 강제: 전/후 비대칭 ON
+        try:
+            self.facing_range_checkbox.setChecked(True)
+            self._update_range_inputs_enabled(True)
+        except Exception:
+            pass
+
+        # 값 적용(보이든 숨기든 상관없이 설정 가능)
+        try:
+            self.enemy_front_spinbox.setValue(enemy_front)
+            self.enemy_back_spinbox.setValue(enemy_back)
+            self.primary_front_spinbox.setValue(primary_front)
+            self.primary_back_spinbox.setValue(primary_back)
+            self.y_band_height_spinbox.setValue(y_band_height)
+            self.y_band_offset_spinbox.setValue(y_band_offset)
+        except Exception:
+            pass
+
+        # 내부 상태/표시 갱신(저장은 백업값 기준으로 수행되도록 _save_settings에서 처리)
+        try:
+            self._on_area_config_changed()
+            self._handle_setting_changed()
+        except Exception:
+            pass
+
+        self._zone_override_active = True
+        self._zone_override_id = z
+        return True, '사냥범위 오버라이드를 적용했습니다.'
+
+    def api_clear_zone_override(self, zone_id: Optional[str] = None) -> tuple[bool, str]:
+        """영역 이탈 등으로 오버라이드를 해제하고, 백업한 사용자 설정으로 복원."""
+        if not self._zone_override_active:
+            return True, '활성 오버라이드가 없습니다.'
+
+        if zone_id is not None:
+            try:
+                z = str(zone_id or '').strip()
+            except Exception:
+                z = ''
+            if z and self._zone_override_id and z != self._zone_override_id:
+                return False, '다른 영역 ID가 활성화되어 있습니다.'
+
+        try:
+            if isinstance(self._zone_override_backup, dict):
+                self._restore_ranges_from_snapshot(self._zone_override_backup)
+        except Exception:
+            pass
+
+        self._zone_override_active = False
+        self._zone_override_id = None
+        self._zone_override_backup = None
+        return True, '사냥범위 오버라이드를 해제했습니다.'
 
     def _schedule_facing_reset(self) -> None:
         if not hasattr(self, 'facing_reset_timer'):
@@ -4138,6 +4345,7 @@ class HuntTab(QWidget):
             self._schedule_facing_reset()
 
             if self.screen_output_checkbox.isChecked() and not self.is_popup_active:
+                self._popup_open_reason = 'detect_start'
                 self._toggle_detection_popup()
 
             if self.map_link_enabled and self.map_tab and not self._syncing_with_map:
@@ -4255,6 +4463,10 @@ class HuntTab(QWidget):
             self.detection_thread = None
 
         if self.detection_popup:
+            # 프로그램적 닫힘 사유 기록(상위에서 지정된 사유가 없으면 기본값)
+            if not self._popup_close_reason:
+                self._popup_close_reason = 'stop_detection_thread'
+            self._closing_popup_programmatically = True
             self.detection_popup.close()
         self._clear_pending_skill()
         self._clear_pending_direction()
@@ -4644,18 +4856,60 @@ class HuntTab(QWidget):
         show_frame = bool(self.show_frame_summary_checkbox.isChecked()) if hasattr(self, 'show_frame_summary_checkbox') else True
         self.show_frame_detail_checkbox.setEnabled(show_frame)
 
+    def _log_screen_output_event(self, action: str, level: str = 'info', **kwargs) -> None:
+        """화면출력 팝업 관련 이벤트 로깅(원인 추적용)."""
+        try:
+            parts = [f"action={action}"]
+            for k, v in kwargs.items():
+                try:
+                    parts.append(f"{k}={v}")
+                except Exception:
+                    continue
+            msg = "[화면출력] " + ", ".join(parts)
+            self.append_log(msg, level)
+        except Exception:
+            pass
+
     def _on_screen_output_toggled(self, checked: bool) -> None:
+        # 상태 스냅샷(로깅용)
+        try:
+            detect_active = bool(self._is_detection_active())
+        except Exception:
+            detect_active = False
+        try:
+            thread_running = bool(self.detection_thread is not None and self.detection_thread.isRunning())
+        except Exception:
+            thread_running = False
+        try:
+            is_popup_active = bool(self.is_popup_active)
+        except Exception:
+            is_popup_active = False
+
+        self._log_screen_output_event(
+            "checkbox_toggled",
+            level='info',
+            checked=bool(checked),
+            active=detect_active,
+            thread=thread_running,
+            popup=is_popup_active,
+        )
+
         if self.detection_thread and hasattr(self.detection_thread, 'set_screen_output_enabled'):
             try:
                 self.detection_thread.set_screen_output_enabled(bool(checked))
             except Exception:
                 pass
         if not checked and self.is_popup_active:
+            # 프로그램에 의한 팝업 닫힘 사유 기록
+            self._closing_popup_programmatically = True
+            self._popup_close_reason = 'screen_output_unchecked'
             self._toggle_detection_popup()
         if not checked and self.detection_view:
             self.detection_view.setText("화면출력이 비활성화되었습니다.")
             self.detection_view.setPixmap(QPixmap())
         if checked and self.detect_btn.isChecked() and not self.is_popup_active:
+            # 프로그램에 의한 팝업 열림 사유 기록
+            self._popup_open_reason = 'screen_output_checked_on'
             self._toggle_detection_popup()
         self._handle_setting_changed()
 
@@ -4730,6 +4984,10 @@ class HuntTab(QWidget):
     def _toggle_detection_popup(self) -> None:
         if self.is_popup_active:
             if self.detection_popup:
+                # 프로그램적 닫힘 사유가 없다면 기본값 지정
+                if not self._popup_close_reason:
+                    self._popup_close_reason = 'toggle_detection_popup'
+                self._closing_popup_programmatically = True
                 self.detection_popup.close()
             return
 
@@ -4757,15 +5015,52 @@ class HuntTab(QWidget):
             self.detection_view.setPixmap(QPixmap())
         self.detection_popup.show()
 
+        # 열림 로깅
+        try:
+            reason = self._popup_open_reason or 'toggle_detection_popup'
+            self._popup_open_reason = None
+            # 실행 시점 상태 스냅샷
+            detect_active = bool(self._is_detection_active())
+            thread_running = bool(self.detection_thread is not None and self.detection_thread.isRunning())
+            size_w = int(self.detection_popup.width()) if self.detection_popup else 0
+            size_h = int(self.detection_popup.height()) if self.detection_popup else 0
+            checked = bool(self.screen_output_checkbox.isChecked()) if hasattr(self, 'screen_output_checkbox') else True
+            sender_obj = None
+            try:
+                sender_obj = self.sender()
+            except Exception:
+                sender_obj = None
+            self._log_screen_output_event(
+                'popup_open',
+                level='info',
+                reason=reason,
+                checked=checked,
+                active=detect_active,
+                thread=thread_running,
+                size=f"{size_w}x{size_h}",
+                scale=int(self.last_popup_scale),
+                programmatic=bool(sender_obj is None),
+            )
+        except Exception:
+            pass
+
     def _on_popup_scale_changed(self, value: int) -> None:
         self.last_popup_scale = value
         self._save_settings()
+        try:
+            self._log_screen_output_event('popup_scale', level='debug', scale=int(value))
+        except Exception:
+            pass
 
     def _on_popup_size_changed(self, width: int, height: int) -> None:
         if width <= 0 or height <= 0:
             return
         self.last_popup_size = (int(width), int(height))
         self._save_settings()
+        try:
+            self._log_screen_output_event('popup_size', level='debug', size=f"{int(width)}x{int(height)}")
+        except Exception:
+            pass
 
     def _handle_popup_closed(self) -> None:
         if self.detection_popup:
@@ -4784,6 +5079,33 @@ class HuntTab(QWidget):
             else:
                 self.detection_view.setText("탐지 중단됨")
                 self.detection_view.setPixmap(QPixmap())
+
+        # 닫힘 로깅
+        try:
+            size_w = 0
+            size_h = 0
+            if isinstance(self.last_popup_size, tuple) and len(self.last_popup_size) == 2:
+                try:
+                    size_w = int(self.last_popup_size[0])
+                    size_h = int(self.last_popup_size[1])
+                except Exception:
+                    size_w = size_w or 0
+                    size_h = size_h or 0
+            reason = self._popup_close_reason or 'unknown'
+            self._log_screen_output_event(
+                'popup_close',
+                level='info',
+                reason=reason,
+                programmatic=bool(self._closing_popup_programmatically),
+                size=f"{size_w}x{size_h}",
+                scale=int(self.last_popup_scale),
+            )
+        except Exception:
+            pass
+        finally:
+            # 컨텍스트 초기화
+            self._closing_popup_programmatically = False
+            self._popup_close_reason = None
 
         self.detection_popup = None
 
@@ -8615,8 +8937,28 @@ class HuntTab(QWidget):
         self.teleport_settings.walk_bonus_step = float(self.walk_teleport_bonus_step_spinbox.value())
         self.teleport_settings.walk_bonus_max = float(self.walk_teleport_bonus_max_spinbox.value())
 
-        settings_data = {
-            'ranges': {
+        # [오버라이드 저장 정책]
+        # - 오버라이드 중에는 백업(사용자 원래 설정) 값을 저장하여
+        #   일시 변경값이 설정 파일에 남지 않도록 한다.
+        if getattr(self, '_zone_override_active', False) and isinstance(getattr(self, '_zone_override_backup', None), dict):
+            snap = self._zone_override_backup or {}
+            try:
+                mode_value = str(snap.get('mode', 'symmetric')).strip().lower()
+            except Exception:
+                mode_value = 'symmetric'
+            ranges_data = {
+                'enemy_range': int(snap.get('enemy_range', self.enemy_range_spinbox.value())),
+                'y_band_height': int(snap.get('y_band_height', self.y_band_height_spinbox.value())),
+                'y_band_offset': int(snap.get('y_band_offset', self.y_band_offset_spinbox.value())),
+                'primary_range': int(snap.get('primary_range', self.primary_skill_range_spinbox.value())),
+                'mode': mode_value,
+                'enemy_front': int(snap.get('enemy_front', self.enemy_front_spinbox.value())) if hasattr(self, 'enemy_front_spinbox') else int(self.enemy_range_spinbox.value()),
+                'enemy_back': int(snap.get('enemy_back', self.enemy_back_spinbox.value())) if hasattr(self, 'enemy_back_spinbox') else int(self.enemy_range_spinbox.value()),
+                'primary_front': int(snap.get('primary_front', self.primary_front_spinbox.value())) if hasattr(self, 'primary_front_spinbox') else int(self.primary_skill_range_spinbox.value()),
+                'primary_back': int(snap.get('primary_back', self.primary_back_spinbox.value())) if hasattr(self, 'primary_back_spinbox') else int(self.primary_skill_range_spinbox.value()),
+            }
+        else:
+            ranges_data = {
                 'enemy_range': self.enemy_range_spinbox.value(),
                 'y_band_height': self.y_band_height_spinbox.value(),
                 'y_band_offset': self.y_band_offset_spinbox.value(),
@@ -8626,7 +8968,10 @@ class HuntTab(QWidget):
                 'enemy_back': int(self.enemy_back_spinbox.value()) if hasattr(self, 'enemy_back_spinbox') else int(self.enemy_range_spinbox.value()),
                 'primary_front': int(self.primary_front_spinbox.value()) if hasattr(self, 'primary_front_spinbox') else int(self.primary_skill_range_spinbox.value()),
                 'primary_back': int(self.primary_back_spinbox.value()) if hasattr(self, 'primary_back_spinbox') else int(self.primary_skill_range_spinbox.value()),
-            },
+            }
+
+        settings_data = {
+            'ranges': ranges_data,
             'confidence': {
                 'char': self.conf_char_spinbox.value(),
                 'monster': self.conf_monster_spinbox.value(),

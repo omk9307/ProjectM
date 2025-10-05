@@ -594,6 +594,8 @@ class MapTab(QWidget):
             self.smoothed_player_pos = None
             self.line_id_to_floor_map = {}  # [v11.4.5] 지형선 ID <-> 층 정보 캐싱용 딕셔너리
             self.initial_delay_ms = 500
+            # [신규] 사냥범위 존 오버라이드 추적
+            self._active_hunt_zone_id: Optional[str] = None
 
             # 이벤트 웨이포인트 실행 상태
             self.event_in_progress = False
@@ -3129,6 +3131,46 @@ class MapTab(QWidget):
                     wall.setdefault("instant_on_contact", False)
                     wall.setdefault("skill_profiles", [])
 
+            # [신규] 사냥범위 존 저장 구조 보정
+            if "hunt_range_zones" not in self.geometry_data:
+                self.geometry_data["hunt_range_zones"] = []
+            else:
+                fixed_zones = []
+                for zone in self.geometry_data.get("hunt_range_zones", []) or []:
+                    if not isinstance(zone, dict):
+                        continue
+                    z = dict(zone)
+                    # 기본 필드 보장
+                    z.setdefault('id', f"hz-{uuid.uuid4()}")
+                    rect = z.get('rect') or [0, 0, 0, 0]
+                    try:
+                        if isinstance(rect, list) and len(rect) == 4:
+                            x, y, w, h = float(rect[0]), float(rect[1]), float(rect[2]), float(rect[3])
+                            z['rect'] = [x, y, w, h]
+                        else:
+                            z['rect'] = [0.0, 0.0, 0.0, 0.0]
+                    except Exception:
+                        z['rect'] = [0.0, 0.0, 0.0, 0.0]
+                    z['enabled'] = bool(z.get('enabled', False))
+                    ranges = z.get('ranges') or {}
+                    if not isinstance(ranges, dict):
+                        ranges = {}
+                    def _ival(k, d, default):
+                        try:
+                            return int(d.get(k, default))
+                        except Exception:
+                            return int(default)
+                    z['ranges'] = {
+                        'enemy_front': _ival('enemy_front', ranges, 400),
+                        'enemy_back': _ival('enemy_back', ranges, 400),
+                        'primary_front': _ival('primary_front', ranges, 200),
+                        'primary_back': _ival('primary_back', ranges, 200),
+                        'y_band_height': _ival('y_band_height', ranges, 40),
+                        'y_band_offset': _ival('y_band_offset', ranges, 0),
+                    }
+                    fixed_zones.append(z)
+                self.geometry_data['hunt_range_zones'] = fixed_zones
+
             geometry_data = self._prepare_data_for_json(self.geometry_data)
 
 
@@ -5523,6 +5565,11 @@ class MapTab(QWidget):
             intermediate_node_type=intermediate_node_type,
         )
         self.global_pos_updated.emit(final_player_pos)
+        # [신규] 사냥범위 존 진입/이탈 감지 및 오버라이드 적용/해제
+        try:
+            self._update_hunt_zone_override(final_player_pos)
+        except Exception:
+            pass
 
         outlier_list = [f for f in reliable_features if f['id'] not in inlier_ids]
         self.update_detection_log_from_features(inlier_features, outlier_list)
@@ -5545,6 +5592,71 @@ class MapTab(QWidget):
         if self._other_player_test_end_time <= 0.0:
             return False
         return time.time() < self._other_player_test_end_time
+
+    def _update_hunt_zone_override(self, final_player_pos: Optional[QPointF]) -> None:
+        """활성화된 사냥범위 존 안/밖에 따라 Hunt 탭 범위를 일시 적용/복원한다."""
+        if final_player_pos is None:
+            return
+        zones = (self.geometry_data.get('hunt_range_zones', [])
+                 if isinstance(self.geometry_data, dict) else [])
+        if not zones:
+            # 활성 오버라이드가 남아 있다면 해제
+            if self._active_hunt_zone_id:
+                hunt_tab = getattr(self, '_hunt_tab', None)
+                if hunt_tab and hasattr(hunt_tab, 'api_clear_zone_override'):
+                    try:
+                        hunt_tab.api_clear_zone_override(self._active_hunt_zone_id)
+                    except Exception:
+                        pass
+                self._active_hunt_zone_id = None
+            return
+        # enabled=True인 존 중 포함되는 것 찾기(겹침 금지 가정)
+        px, py = float(final_player_pos.x()), float(final_player_pos.y())
+        current_zone_id = None
+        current_zone_ranges = None
+        for z in zones:
+            try:
+                if not bool(z.get('enabled', False)):
+                    continue
+                r = z.get('rect') or [0, 0, 0, 0]
+                if not (isinstance(r, list) and len(r) == 4):
+                    continue
+                x, y, w, h = float(r[0]), float(r[1]), float(r[2]), float(r[3])
+                if w <= 0 or h <= 0:
+                    continue
+                if (x <= px <= x + w) and (y <= py <= y + h):
+                    current_zone_id = str(z.get('id'))
+                    current_zone_ranges = z.get('ranges') or {}
+                    break
+            except Exception:
+                continue
+
+        hunt_tab = getattr(self, '_hunt_tab', None)
+        if current_zone_id:
+            # 다른 존으로 전환
+            if self._active_hunt_zone_id and self._active_hunt_zone_id != current_zone_id:
+                if hunt_tab and hasattr(hunt_tab, 'api_clear_zone_override'):
+                    try:
+                        hunt_tab.api_clear_zone_override(self._active_hunt_zone_id)
+                    except Exception:
+                        pass
+                self._active_hunt_zone_id = None
+            # 적용
+            if hunt_tab and hasattr(hunt_tab, 'api_apply_zone_override'):
+                try:
+                    ok, _msg = hunt_tab.api_apply_zone_override(current_zone_id, current_zone_ranges or {})
+                    if ok:
+                        self._active_hunt_zone_id = current_zone_id
+                except Exception:
+                    pass
+        else:
+            # 존 밖: 해제
+            if self._active_hunt_zone_id and hunt_tab and hasattr(hunt_tab, 'api_clear_zone_override'):
+                try:
+                    hunt_tab.api_clear_zone_override(self._active_hunt_zone_id)
+                except Exception:
+                    pass
+            self._active_hunt_zone_id = None
 
     def _get_other_player_test_duration(self) -> int:
         return max(0, int(self.other_player_test_duration_seconds or 0))
