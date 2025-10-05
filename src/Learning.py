@@ -2517,6 +2517,9 @@ class AnnotationEditorDialog(QDialog):
     def _switch_mode(self, mode, *, initialize=False):
         sam_ready = self.sam_predictor is not None
 
+        # [NEW] 현재 뷰 상태(줌/스크롤) 스냅샷 후, 전환 대상에도 동일 적용
+        prev_state = self._capture_view_state()
+
         if mode == EditModeDialog.AI_ASSIST:
             if self.ai_editor is None:
                 if not initialize:
@@ -2534,6 +2537,9 @@ class AnnotationEditorDialog(QDialog):
             self.manual_editor.update_mode_buttons(False, sam_ready)
             self.ai_editor.update_mode_buttons(True)
             self.setWindowTitle(self.ai_editor.windowTitle())
+            # [NEW] 이전 뷰 상태 적용
+            if prev_state is not None:
+                self._apply_view_state(self.ai_editor, prev_state)
         else:
             if self.ai_editor is not None:
                 # [CHANGED] AI → 수동 전환 시 더 이상 자동 확정하지 않음.
@@ -2555,6 +2561,9 @@ class AnnotationEditorDialog(QDialog):
             self._current_mode = EditModeDialog.MANUAL
             self.manual_editor.update_mode_buttons(True, sam_ready)
             self.setWindowTitle(self.manual_editor.windowTitle())
+            # [NEW] 이전 뷰 상태 적용
+            if prev_state is not None:
+                self._apply_view_state(self.manual_editor, prev_state)
 
         if initialize and self.ai_editor is None:
             self.manual_editor.update_mode_buttons(True, sam_ready)
@@ -2567,6 +2576,47 @@ class AnnotationEditorDialog(QDialog):
             self.resize(new_width, new_height)
             self.setMinimumSize(QSize(640, 480))
             current_widget.setFocus()
+
+    # [NEW] 줌/스크롤 상태를 캡처/적용하는 헬퍼
+    def _capture_view_state(self) -> dict | None:
+        try:
+            current = self.stack.currentWidget()
+            if current is None:
+                return None
+            canvas = getattr(current, 'canvas', None)
+            scroll = getattr(current, 'scroll_area', None)
+            if canvas is None or scroll is None:
+                return None
+            hbar = scroll.horizontalScrollBar()
+            vbar = scroll.verticalScrollBar()
+            return {
+                'zoom': float(getattr(canvas, 'zoom_factor', 1.0) or 1.0),
+                'h': int(hbar.value()),
+                'v': int(vbar.value()),
+            }
+        except Exception:
+            return None
+
+    def _apply_view_state(self, editor_widget, state: dict) -> None:
+        try:
+            if not state:
+                return
+            canvas = getattr(editor_widget, 'canvas', None)
+            scroll = getattr(editor_widget, 'scroll_area', None)
+            if canvas is None or scroll is None:
+                return
+            # 1) 줌 적용 (포컬 지정 없음으로 위치 변화 최소화)
+            zoom = float(state.get('zoom', 1.0) or 1.0)
+            canvas.set_zoom(zoom)
+            # 2) 스크롤바 적용 (범위 클램프)
+            hbar = scroll.horizontalScrollBar()
+            vbar = scroll.verticalScrollBar()
+            hv = int(state.get('h', 0))
+            vv = int(state.get('v', 0))
+            hbar.setValue(max(hbar.minimum(), min(hbar.maximum(), hv)))
+            vbar.setValue(max(vbar.minimum(), min(vbar.maximum(), vv)))
+        except Exception:
+            pass
 
     def _finalize(self, result_code, editor):
         self._result_polygons = self._clone_polygons(editor.get_all_polygons())
