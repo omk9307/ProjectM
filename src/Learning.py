@@ -1902,20 +1902,39 @@ class PolygonAnnotationEditor(QDialog):
             self.canvas.update()
             return False
 
-        # 최종 확정: base (합집합)에서 sub가 있으면 빼고, 결과를 새 폴리곤으로 추가(기존은 유지)
+        # 최종 확정: base(합집합)에 sub가 있으면 빼고, '몬스터' 카테고리인 경우 겹치는 기존 몬스터와 합치기
         if sub_mask is not None:
             inv = cv2.bitwise_not(sub_mask)
             base_mask = cv2.bitwise_and(base_mask, inv)
 
-        contours, _ = cv2.findContours(base_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        new_polys = []
+        # 커밋 대상 마스크
+        commit_mask = base_mask.copy()
+
+        # [CHANGED] 전 카테고리 공통: 같은 클래스의 겹치는 기존 폴리곤과 합집합, 겹치지 않으면 신규 추가
+        merged_mask = commit_mask.copy()
+        new_list = []
+        for poly in self.canvas.polygons:
+            if poly.get('class_id') != class_id or not poly.get('points'):
+                new_list.append(poly)
+                continue
+            single_mask = np.zeros((h, w), dtype=np.uint8)
+            pts = np.array([[int(p.x()), int(p.y())] for p in poly['points']], dtype=np.int32)
+            cv2.fillPoly(single_mask, [pts], 255)
+            # 겹침 여부 확인하여 겹치면 합집합, 아니면 유지 목록에 남김
+            if cv2.countNonZero(cv2.bitwise_and(single_mask, merged_mask)) > 0:
+                merged_mask = cv2.bitwise_or(merged_mask, single_mask)
+            else:
+                new_list.append(poly)
+
+        # 합집합 결과를 컨투어로 폴리곤화하여 추가
+        contours, _ = cv2.findContours(merged_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
         for c in contours:
             if cv2.contourArea(c) <= 10:
                 continue
             pts = [QPoint(p[0][0], p[0][1]) for p in c]
-            new_polys.append({'class_id': class_id, 'points': pts})
+            new_list.append({'class_id': class_id, 'points': pts})
 
-        self.canvas.polygons.extend(new_polys)
+        self.canvas.polygons = new_list
 
         # 상태 정리
         self.canvas.current_add_points.clear()
