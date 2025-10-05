@@ -8256,6 +8256,9 @@ class HuntTab(QWidget):
             except Exception:
                 version = 0
 
+            # 공통 초기값(분기 밖에서 참조하므로 미리 정의)
+            loaded_waypoints: list[dict] = []
+
             if version < 2:
                 # 기존에 저장된 대기 웨이포인트는 모두 폐기(새로 시작)
                 self.shutdown_other_player_wait_waypoints_by_profile = {}
@@ -8265,7 +8268,6 @@ class HuntTab(QWidget):
             else:
                 # 다중 웨이포인트 우선 로드
                 waypoints_payload = auto_shutdown_cfg.get('other_wait_waypoints')
-                loaded_waypoints: list[dict] = []
                 if isinstance(waypoints_payload, list):
                     for entry in waypoints_payload:
                         if isinstance(entry, dict):
