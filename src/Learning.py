@@ -1392,12 +1392,20 @@ class BaseCanvasLabel(QLabel):
             self.update()
 
 class CanvasLabel(BaseCanvasLabel):
-    """수동 다각형 편집기 전용 캔버스. 현재 그리는 다각형을 추가로 처리합니다."""
+    """수동 다각형 편집기 전용 캔버스.
+
+    변경점:
+    - 좌클릭 다각형(합집합 후보)과 우클릭 다각형(차집합 후보)을 분리해 동시 표시/편집.
+    - AI 편집에서 전달된 임시 마스크(pending_mask) 오버레이 표시.
+    """
     def __init__(self, pixmap, initial_polygons=None, parent_dialog=None):
         super().__init__(pixmap, parent_dialog)
         self.polygons = initial_polygons if initial_polygons else []
-        self.current_points = []
+        self.current_add_points = []  # 좌클릭으로 그리는 다각형
+        self.current_sub_points = []  # 우클릭으로 그리는 다각형(빼기)
         self.current_pos = QPoint()
+        self._last_pressed_button = None  # 최근 포인트 추가 버튼 추적
+        self.pending_mask = None  # AI 편집에서 넘어온 임시 마스크
 
     def paintEvent(self, event):
         super().paintEvent(event)
@@ -1405,15 +1413,47 @@ class CanvasLabel(BaseCanvasLabel):
         painter.drawPixmap(self.rect(), self.pixmap)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         self.paint_polygons(painter)
-        if self.current_points:
+
+        # [NEW] AI에서 넘어온 임시 마스크 시각화
+        if self.pending_mask is not None:
+            h, w = self.pending_mask.shape
+            mask_image = QImage(w, h, QImage.Format.Format_ARGB32)
+            mask_image.fill(Qt.GlobalColor.transparent)
             class_id = self.parent_dialog.get_current_class_id()
-            if class_id is not None:
-                color = self.parent_dialog.get_color_for_class_id(class_id)
-                scaled_current_points = [p * self.zoom_factor for p in self.current_points]
-                painter.setPen(QPen(color.darker(150), 2)); painter.setBrush(QBrush(color))
-                painter.drawPolygon(QPolygon([QPoint(int(p.x()), int(p.y())) for p in scaled_current_points]))
-                if self.rect().contains(self.current_pos): painter.drawLine(scaled_current_points[-1], self.current_pos)
-                for point in scaled_current_points: painter.drawEllipse(point, 4, 4)
+            color = self.parent_dialog.get_color_for_class_id(class_id)
+            for y in range(h):
+                row = self.pending_mask[y]
+                for x in range(w):
+                    if row[x]:
+                        mask_image.setPixelColor(x, y, color)
+            scaled_mask_image = mask_image.scaled(self.size(), Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.FastTransformation)
+            painter.drawImage(self.rect(), scaled_mask_image)
+
+        # 현재 그리고 있는 좌/우클릭 다각형 오버레이
+        class_id = self.parent_dialog.get_current_class_id()
+        if class_id is not None:
+            color_add = self.parent_dialog.get_color_for_class_id(class_id)
+            color_sub_edge = HIGHLIGHT_PEN_COLOR
+            # 좌클릭 다각형(추가)
+            if self.current_add_points:
+                scaled_pts = [p * self.zoom_factor for p in self.current_add_points]
+                painter.setPen(QPen(color_add.darker(150), 2))
+                painter.setBrush(QBrush(color_add))
+                painter.drawPolygon(QPolygon([QPoint(int(p.x()), int(p.y())) for p in scaled_pts]))
+                if self.rect().contains(self.current_pos):
+                    painter.drawLine(scaled_pts[-1], self.current_pos)
+                for point in scaled_pts:
+                    painter.drawEllipse(point, 4, 4)
+            # 우클릭 다각형(빼기)
+            if self.current_sub_points:
+                scaled_pts = [p * self.zoom_factor for p in self.current_sub_points]
+                painter.setPen(QPen(color_sub_edge, 2, Qt.PenStyle.DashLine))
+                painter.setBrush(QBrush(QColor(255, 0, 0, 60)))
+                painter.drawPolygon(QPolygon([QPoint(int(p.x()), int(p.y())) for p in scaled_pts]))
+                if self.rect().contains(self.current_pos):
+                    painter.drawLine(scaled_pts[-1], self.current_pos)
+                for point in scaled_pts:
+                    painter.drawEllipse(point, 4, 4)
 
     def mousePressEvent(self, event):
         if self.parent_dialog.is_change_mode and event.button() == Qt.MouseButton.LeftButton:
@@ -1421,7 +1461,13 @@ class CanvasLabel(BaseCanvasLabel):
                 return
 
         if event.button() == Qt.MouseButton.LeftButton:
-            self.current_points.append(event.pos() / self.zoom_factor); self.update()
+            self._last_pressed_button = Qt.MouseButton.LeftButton
+            self.current_add_points.append(event.pos() / self.zoom_factor)
+            self.update()
+        elif event.button() == Qt.MouseButton.RightButton:
+            self._last_pressed_button = Qt.MouseButton.RightButton
+            self.current_sub_points.append(event.pos() / self.zoom_factor)
+            self.update()
         elif event.button() == Qt.MouseButton.MiddleButton:
             self.panning = True; self.pan_start_pos = event.pos(); self.setCursor(Qt.CursorShape.ClosedHandCursor)
 
@@ -1429,6 +1475,24 @@ class CanvasLabel(BaseCanvasLabel):
         super().mouseMoveEvent(event)
         if not self.panning:
             self.current_pos = event.pos(); self.update()
+
+    # [NEW] 유틸: 마지막 포인트 제거(Backspace)
+    def remove_last_point(self):
+        if self._last_pressed_button == Qt.MouseButton.RightButton:
+            if self.current_sub_points:
+                self.current_sub_points.pop()
+                if not self.current_sub_points:
+                    self._last_pressed_button = Qt.MouseButton.LeftButton if self.current_add_points else None
+                self.update()
+                return True
+        # 기본: 좌클릭 포인트 제거
+        if self.current_add_points:
+            self.current_add_points.pop()
+            if not self.current_add_points:
+                self._last_pressed_button = Qt.MouseButton.RightButton if self.current_sub_points else None
+            self.update()
+            return True
+        return False
 
 # --- 3. 위젯: 다각형 편집기 다이얼로그 (공통 로직 추가) ---
 class PolygonAnnotationEditor(QDialog):
@@ -1449,6 +1513,7 @@ class PolygonAnnotationEditor(QDialog):
         self.learning_tab = parent # LearningTab 인스턴스 저장
         self.is_change_mode = False
         self.canvas = CanvasLabel(pixmap, initial_polygons, self)
+        self.pending_ai_mask = None  # [NEW] AI 편집에서 전달된 임시 마스크
         self.scroll_area = QScrollArea()
         self.scroll_area.setWidget(self.canvas)
         self.scroll_area.setWidgetResizable(False)
@@ -1537,6 +1602,12 @@ class PolygonAnnotationEditor(QDialog):
         self.set_initial_selection(initial_class_name)
         self.setFocus()
 
+    # [NEW] 외부에서 AI 임시 마스크 설정(수동 전환 시 전달)
+    def set_pending_ai_mask(self, mask: Optional[np.ndarray]):
+        self.pending_ai_mask = None if mask is None else (mask.copy().astype(bool))
+        self.canvas.pending_mask = None if mask is None else (mask.copy().astype(bool))
+        self.canvas.update()
+
     def _compute_preferred_size(self, pixmap: QPixmap) -> QSize:
         screen_geometry = QApplication.primaryScreen().availableGeometry()
         extra_width, extra_height = 80, 200
@@ -1557,10 +1628,10 @@ class PolygonAnnotationEditor(QDialog):
     # v1.3: 방해 요소 저장 슬롯
     def on_save_distractor(self):
         """'방해 요소로 저장' 버튼 클릭 시 호출됩니다."""
-        if len(self.canvas.current_points) >= 3:
+        if len(self.canvas.current_add_points) >= 3:
             # 방해 요소는 클래스 ID가 필요 없으므로, 현재 그리던 다각형만 저장
-            self.canvas.polygons.append({'class_id': None, 'points': list(self.canvas.current_points)})
-            self.canvas.current_points.clear()
+            self.canvas.polygons.append({'class_id': None, 'points': list(self.canvas.current_add_points)})
+            self.canvas.current_add_points.clear()
         
         if not self.canvas.polygons:
             QMessageBox.warning(self, "오류", "방해 요소로 지정할 다각형이 없습니다.")
@@ -1669,11 +1740,16 @@ class PolygonAnnotationEditor(QDialog):
         if event.key() in [Qt.Key.Key_Return, Qt.Key.Key_Enter]:
             self.commit_current_polygon()
         elif event.key() == Qt.Key.Key_Backspace:
-            if self.canvas.current_points: self.canvas.current_points.pop(); self.canvas.update()
+            # 좌/우클릭 포인트에서 최근 것을 제거
+            self.canvas.remove_last_point()
         elif event.key() == Qt.Key.Key_R:
-            if self.canvas.polygons or self.canvas.current_points:
+            if self.canvas.polygons or self.canvas.current_add_points or self.canvas.current_sub_points or self.pending_ai_mask is not None:
                 if QMessageBox.question(self, "초기화", "모든 다각형을 지우시겠습니까?") == QMessageBox.StandardButton.Yes:
-                    self.canvas.polygons.clear(); self.canvas.current_points.clear(); self.canvas.update()
+                    self.canvas.polygons.clear();
+                    self.canvas.current_add_points.clear();
+                    self.canvas.current_sub_points.clear();
+                    self.pending_ai_mask = None; self.canvas.pending_mask = None;
+                    self.canvas.update()
         elif event.key() == Qt.Key.Key_Z:
             if self.canvas.polygons: self.canvas.polygons.pop(); self.canvas.update()
         elif event.key() == Qt.Key.Key_D: self.canvas.delete_hovered_polygon()
@@ -1693,16 +1769,121 @@ class PolygonAnnotationEditor(QDialog):
     def get_all_polygons(self): return self.canvas.polygons
 
     def commit_current_polygon(self):
-        """현재 그리고 있는 다각형을 확정합니다."""
-        if len(self.canvas.current_points) < 3:
-            return False
+        """현재 그리고 있는 다각형을 확정하거나, 우클릭 차집합을 적용합니다.
 
+        요구사항 반영:
+        - AI→수동 전환 시 자동 완료하지 않고 pending_ai_mask로 보관 후, 엔터 시 수동 다각형과 합집합 완료.
+        - 우클릭 다각형은 엔터 시 겹치는 영역을 빼기. 이미 완성된 경우 즉시 반영, 미완성(좌클릭 진행 중)이면 1회 적용 후 다시 엔터로 최종 완료.
+        """
         class_id = self.get_current_class_id()
         if class_id is None:
             return False
 
-        self.canvas.polygons.append({'class_id': class_id, 'points': list(self.canvas.current_points)})
-        self.canvas.current_points.clear()
+        h = self.canvas.pixmap.height()
+        w = self.canvas.pixmap.width()
+
+        def _mask_from_points(points):
+            if len(points) < 3:
+                return None
+            mask = np.zeros((h, w), dtype=np.uint8)
+            pts = np.array([[int(p.x()), int(p.y())] for p in points], dtype=np.int32)
+            cv2.fillPoly(mask, [pts], 255)
+            return mask
+
+        def _mask_from_class_polygons():
+            mask = np.zeros((h, w), dtype=np.uint8)
+            found = False
+            for poly in self.canvas.polygons:
+                if poly.get('class_id') == class_id and poly.get('points'):
+                    pts = np.array([[int(p.x()), int(p.y())] for p in poly['points']], dtype=np.int32)
+                    cv2.fillPoly(mask, [pts], 255)
+                    found = True
+            return mask if found else None
+
+        add_mask = _mask_from_points(self.canvas.current_add_points)
+        sub_mask = _mask_from_points(self.canvas.current_sub_points)
+
+        # subtract-only: 기존 확정 폴리곤에서 겹치는 부분만 빼기(다른 객체는 유지)
+        if self.pending_ai_mask is None and add_mask is None and sub_mask is not None:
+            updated = False
+            new_list = []
+            inv_sub = cv2.bitwise_not(sub_mask)
+            for poly in self.canvas.polygons:
+                if poly.get('class_id') != class_id or not poly.get('points'):
+                    new_list.append(poly)
+                    continue
+                # 이 폴리곤만 마스크로 만들고 차집합
+                single_mask = np.zeros((h, w), dtype=np.uint8)
+                pts = np.array([[int(p.x()), int(p.y())] for p in poly['points']], dtype=np.int32)
+                cv2.fillPoly(single_mask, [pts], 255)
+                result_mask = cv2.bitwise_and(single_mask, inv_sub)
+                contours, _ = cv2.findContours(result_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+                found_any = False
+                for c in contours:
+                    if cv2.contourArea(c) <= 10:
+                        continue
+                    pts2 = [QPoint(p[0][0], p[0][1]) for p in c]
+                    new_list.append({'class_id': class_id, 'points': pts2})
+                    found_any = True
+                if found_any:
+                    updated = True
+                else:
+                    # 완전히 지워졌으면 추가하지 않음
+                    pass
+
+            if updated:
+                self.canvas.polygons = new_list
+                self.canvas.current_sub_points.clear()
+                self.canvas.update()
+                return True
+            return False
+
+        # base 생성: AI pending 또는 좌클릭 추가
+        base_mask = None
+        if self.pending_ai_mask is not None:
+            base_mask = (self.pending_ai_mask.astype(np.uint8)) * 255
+        if add_mask is not None:
+            base_mask = add_mask if base_mask is None else cv2.bitwise_or(base_mask, add_mask)
+        if base_mask is None:
+            return False
+
+        # in-progress에서 차집합만 먼저 적용하고 확정 보류
+        if self.pending_ai_mask is None and add_mask is not None and sub_mask is not None:
+            inv = cv2.bitwise_not(sub_mask)
+            preview_mask = cv2.bitwise_and(base_mask, inv)
+            contours, _ = cv2.findContours(preview_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+            if contours:
+                largest = max(contours, key=cv2.contourArea)
+                if cv2.contourArea(largest) > 10:
+                    new_points = [QPoint(p[0][0], p[0][1]) for p in largest]
+                    self.canvas.current_add_points = new_points
+                    self.canvas.current_sub_points.clear()
+                    self.canvas.update()
+                    return False
+            self.canvas.current_sub_points.clear()
+            self.canvas.update()
+            return False
+
+        # 최종 확정: base (합집합)에서 sub가 있으면 빼고, 결과를 새 폴리곤으로 추가(기존은 유지)
+        if sub_mask is not None:
+            inv = cv2.bitwise_not(sub_mask)
+            base_mask = cv2.bitwise_and(base_mask, inv)
+
+        contours, _ = cv2.findContours(base_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        new_polys = []
+        for c in contours:
+            if cv2.contourArea(c) <= 10:
+                continue
+            pts = [QPoint(p[0][0], p[0][1]) for p in c]
+            new_polys.append({'class_id': class_id, 'points': pts})
+
+        self.canvas.polygons.extend(new_polys)
+
+        # 상태 정리
+        self.canvas.current_add_points.clear()
+        self.canvas.current_sub_points.clear()
+        self.pending_ai_mask = None
+        self.canvas.pending_mask = None
         self.canvas.update()
         return True
 
@@ -1746,7 +1927,8 @@ class PolygonAnnotationEditor(QDialog):
     def set_polygons(self, polygons):
         self.canvas.polygons = polygons if polygons else []
         self.create_local_color_map()
-        self.canvas.current_points.clear()
+        self.canvas.current_add_points.clear()
+        self.canvas.current_sub_points.clear()
         self.canvas.update()
 
 # --- 3.5. 위젯: SAM(AI) 편집기 ---
@@ -2092,7 +2274,7 @@ class SAMAnnotationEditor(QDialog):
 
     def on_switch_to_manual(self):
         """수동 편집기로 전환합니다."""
-        self.commit_current_mask()
+        # [CHANGED] 자동 확정하지 않고, 진행 중인 마스크는 컨테이너가 수동 편집기로 전달
         if self._embedded:
             self.mode_switch_requested.emit(EditModeDialog.MANUAL)
         else:
@@ -2266,11 +2448,16 @@ class AnnotationEditorDialog(QDialog):
             self.setWindowTitle(self.ai_editor.windowTitle())
         else:
             if self.ai_editor is not None:
-                self.ai_editor.commit_current_mask()
+                # [CHANGED] AI → 수동 전환 시 더 이상 자동 확정하지 않음.
+                # 진행 중이던 마스크를 수동 편집기의 pending_ai_mask로 전달하여, 수동에서 엔터 시 합집합 처리.
+                ai_pending_mask = getattr(self.ai_editor.canvas, 'current_mask', None)
                 polygons = self._clone_polygons(self.ai_editor.get_all_polygons())
+                self.manual_editor.set_polygons(polygons)
+                if ai_pending_mask is not None:
+                    self.manual_editor.set_pending_ai_mask(ai_pending_mask)
             else:
                 polygons = self._clone_polygons(self.manual_editor.get_all_polygons())
-            self.manual_editor.set_polygons(polygons)
+                self.manual_editor.set_polygons(polygons)
             if self.ai_editor is not None:
                 current_class = self.ai_editor.get_current_class_name()
                 if current_class:
@@ -4506,9 +4693,15 @@ class LearningTab(QWidget):
         # 중앙: 이미지 목록
         center_layout = QVBoxLayout()
 
+        # 이미지 목록 그룹 (헤더 정렬 + 리스트 + 캡처 옵션 + 하단 버튼까지 포함)
+        image_group = QGroupBox("이미지 목록")
+        image_group_layout = QVBoxLayout()
+        image_group_layout.setContentsMargins(8, 8, 8, 8)
+        image_group_layout.setSpacing(6)
+
         image_list_header_layout = QHBoxLayout()
-        image_list_header_layout.addWidget(QLabel('이미지 목록'))
-        image_list_header_layout.addStretch(1)
+        image_list_header_layout.setContentsMargins(0, 0, 0, 0)
+        image_list_header_layout.setSpacing(6)
         image_list_header_layout.addWidget(QLabel("정렬:"))
         self.sort_by_name_btn = QPushButton("이름순")
         self.sort_by_date_btn = QPushButton("추가순")
@@ -4527,29 +4720,42 @@ class LearningTab(QWidget):
         self.image_list_widget.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
         self.image_list_widget.setDragDropMode(QAbstractItemView.DragDropMode.NoDragDrop)
         self.image_list_widget.itemDoubleClicked.connect(self.edit_selected_image)
-        self.image_list_widget.setFixedHeight(370)
+        # 고정 높이 제거: 상위 레이아웃 비율에 따라 자연 확장
+        # self.image_list_widget.setFixedHeight(370)
 
         capture_options_layout = QHBoxLayout()
-        capture_options_layout.addWidget(QLabel("대기시간(초):"))
+        capture_options_layout.setContentsMargins(0, 0, 0, 0)
+        capture_options_layout.setSpacing(6)
+        delay_label = QLabel("대기시간(초):")
+        delay_label.setSizePolicy(QSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Preferred))
+        capture_options_layout.addWidget(delay_label)
         self.capture_delay_spinbox = QDoubleSpinBox()
         self.capture_delay_spinbox.setRange(0.0, 10.0)
         self.capture_delay_spinbox.setValue(0.0)
         self.capture_delay_spinbox.setSingleStep(0.1)
+        self.capture_delay_spinbox.setMaximumWidth(100)
         capture_options_layout.addWidget(self.capture_delay_spinbox)
-        capture_options_layout.addWidget(QLabel("횟수:"))
+        count_label = QLabel("횟수:")
+        count_label.setSizePolicy(QSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Preferred))
+        capture_options_layout.addWidget(count_label)
         self.capture_count_spinbox = QSpinBox()
         self.capture_count_spinbox.setRange(1, 50)
         self.capture_count_spinbox.setValue(1)
+        self.capture_count_spinbox.setMaximumWidth(90)
         capture_options_layout.addWidget(self.capture_count_spinbox)
-        capture_options_layout.addWidget(QLabel("간격(초):"))
+        interval_label = QLabel("간격(초):")
+        interval_label.setSizePolicy(QSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Preferred))
+        capture_options_layout.addWidget(interval_label)
         self.capture_interval_spinbox = QDoubleSpinBox()
         self.capture_interval_spinbox.setRange(0.2, 5.0)
         self.capture_interval_spinbox.setValue(1.0)
         self.capture_interval_spinbox.setSingleStep(0.1)
+        self.capture_interval_spinbox.setMaximumWidth(100)
         capture_options_layout.addWidget(self.capture_interval_spinbox)
         self.capture_btn = QPushButton('메이플 창 캡처')
         self.capture_btn.clicked.connect(self.capture_screen)
         capture_options_layout.addWidget(self.capture_btn)
+        capture_options_layout.addStretch(1)
 
         center_buttons_layout = QHBoxLayout()
         self.add_image_btn = QPushButton('이미지 파일 추가')
@@ -4562,6 +4768,13 @@ class LearningTab(QWidget):
         center_buttons_layout.addWidget(self.edit_image_btn)
         center_buttons_layout.addWidget(self.delete_image_btn)
 
+        # 구성 요소들을 이미지 그룹 레이아웃에 모아 추가
+        image_group_layout.addLayout(image_list_header_layout)
+        image_group_layout.addWidget(self.image_list_widget)
+        image_group_layout.addLayout(capture_options_layout)
+        image_group_layout.addLayout(center_buttons_layout)
+        image_group.setLayout(image_group_layout)
+
         nameplate_group = QGroupBox("몬스터 이름표")
         nameplate_group.setSizePolicy(QSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Maximum))
         nameplate_group.setCheckable(True)
@@ -4571,12 +4784,14 @@ class LearningTab(QWidget):
         nameplate_layout.setContentsMargins(8, 8, 8, 8)
         nameplate_layout.setSpacing(8)
 
-        nameplate_grid = QGridLayout()
-        nameplate_grid.setContentsMargins(0, 0, 0, 0)
-        nameplate_grid.setHorizontalSpacing(12)
-        nameplate_grid.setVerticalSpacing(6)
+        # OCR 그룹과 유사한 Form 스타일로 정리
+        nameplate_form = QFormLayout()
+        nameplate_form.setLabelAlignment(Qt.AlignmentFlag.AlignLeft)
+        nameplate_form.setHorizontalSpacing(12)
+        nameplate_form.setVerticalSpacing(8)
+        nameplate_form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.FieldsStayAtSizeHint)
 
-        size_label = QLabel("이름표 크기")
+        # 크기
         size_row = QHBoxLayout()
         size_row.setContentsMargins(0, 0, 0, 0)
         size_row.setSpacing(6)
@@ -4584,21 +4799,24 @@ class LearningTab(QWidget):
         self.nameplate_width_spin.setRange(10, 600)
         self.nameplate_width_spin.setSingleStep(5)
         self.nameplate_width_spin.setMaximumWidth(80)
-        size_row.addWidget(QLabel("가로"))
+        size_label_w = QLabel("가로")
+        size_label_w.setSizePolicy(QSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Preferred))
+        size_row.addWidget(size_label_w)
         size_row.addWidget(self.nameplate_width_spin)
         self.nameplate_height_spin = QSpinBox()
         self.nameplate_height_spin.setRange(10, 400)
         self.nameplate_height_spin.setSingleStep(5)
         self.nameplate_height_spin.setMaximumWidth(80)
-        size_row.addWidget(QLabel("세로"))
+        size_label_h = QLabel("세로")
+        size_label_h.setSizePolicy(QSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Preferred))
+        size_row.addWidget(size_label_h)
         size_row.addWidget(self.nameplate_height_spin)
-        # stretch 제거로 불필요한 세로 여백 방지
+        size_row.addStretch(1)
         size_widget = QWidget()
         size_widget.setLayout(size_row)
-        nameplate_grid.addWidget(size_label, 0, 0)
-        nameplate_grid.addWidget(size_widget, 0, 1)
+        nameplate_form.addRow("이름표 크기", size_widget)
 
-        offset_label = QLabel("오프셋")
+        # 오프셋 + 범위표시
         offset_row = QHBoxLayout()
         offset_row.setContentsMargins(0, 0, 0, 0)
         offset_row.setSpacing(6)
@@ -4606,24 +4824,26 @@ class LearningTab(QWidget):
         self.nameplate_offset_x_spin.setRange(-300, 300)
         self.nameplate_offset_x_spin.setSingleStep(5)
         self.nameplate_offset_x_spin.setMaximumWidth(80)
-        offset_row.addWidget(QLabel("X"))
+        offset_label_x = QLabel("X")
+        offset_label_x.setSizePolicy(QSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Preferred))
+        offset_row.addWidget(offset_label_x)
         offset_row.addWidget(self.nameplate_offset_x_spin)
         self.nameplate_offset_y_spin = QSpinBox()
         self.nameplate_offset_y_spin.setRange(-300, 300)
         self.nameplate_offset_y_spin.setSingleStep(5)
         self.nameplate_offset_y_spin.setMaximumWidth(80)
-        offset_row.addWidget(QLabel("Y"))
+        offset_label_y = QLabel("Y")
+        offset_label_y.setSizePolicy(QSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Preferred))
+        offset_row.addWidget(offset_label_y)
         offset_row.addWidget(self.nameplate_offset_y_spin)
         self.nameplate_overlay_checkbox = QCheckBox("범위 표시")
-        offset_row.addSpacing(8)
         offset_row.addWidget(self.nameplate_overlay_checkbox)
-        # stretch 제거로 불필요한 세로 여백 방지
+        offset_row.addStretch(1)
         offset_widget = QWidget()
         offset_widget.setLayout(offset_row)
-        nameplate_grid.addWidget(offset_label, 1, 0)
-        nameplate_grid.addWidget(offset_widget, 1, 1)
+        nameplate_form.addRow("오프셋", offset_widget)
 
-        detection_label = QLabel("감지 설정")
+        # 감지 설정(임계값/사망 무시/유예/최대 유지)
         detection_row = QHBoxLayout()
         detection_row.setContentsMargins(0, 0, 0, 0)
         detection_row.setSpacing(6)
@@ -4632,40 +4852,43 @@ class LearningTab(QWidget):
         self.nameplate_threshold_spin.setSingleStep(0.01)
         self.nameplate_threshold_spin.setDecimals(2)
         self.nameplate_threshold_spin.setMaximumWidth(90)
-        detection_row.addWidget(QLabel("임계값"))
+        th_label = QLabel("임계값")
+        th_label.setSizePolicy(QSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Preferred))
+        detection_row.addWidget(th_label)
         detection_row.addWidget(self.nameplate_threshold_spin)
         self.nameplate_dead_zone_spin = QDoubleSpinBox()
         self.nameplate_dead_zone_spin.setRange(0.0, 2.0)
         self.nameplate_dead_zone_spin.setSingleStep(0.01)
         self.nameplate_dead_zone_spin.setDecimals(2)
         self.nameplate_dead_zone_spin.setMaximumWidth(90)
-        detection_row.addSpacing(8)
-        detection_row.addWidget(QLabel("사망 무시"))
+        dz_label = QLabel("사망 무시")
+        dz_label.setSizePolicy(QSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Preferred))
+        detection_row.addWidget(dz_label)
         detection_row.addWidget(self.nameplate_dead_zone_spin)
         self.nameplate_grace_spin = QDoubleSpinBox()
         self.nameplate_grace_spin.setRange(0.0, 2.0)
         self.nameplate_grace_spin.setSingleStep(0.01)
         self.nameplate_grace_spin.setDecimals(2)
         self.nameplate_grace_spin.setMaximumWidth(90)
-        detection_row.addSpacing(8)
-        detection_row.addWidget(QLabel("유예"))
+        gr_label = QLabel("유예")
+        gr_label.setSizePolicy(QSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Preferred))
+        detection_row.addWidget(gr_label)
         detection_row.addWidget(self.nameplate_grace_spin)
         self.nameplate_hold_spin = QDoubleSpinBox()
         self.nameplate_hold_spin.setRange(0.0, 5.0)
         self.nameplate_hold_spin.setSingleStep(0.1)
         self.nameplate_hold_spin.setDecimals(2)
         self.nameplate_hold_spin.setMaximumWidth(90)
-        detection_row.addSpacing(8)
-        detection_row.addWidget(QLabel("최대 유지"))
+        hold_label = QLabel("최대 유지")
+        hold_label.setSizePolicy(QSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Preferred))
+        detection_row.addWidget(hold_label)
         detection_row.addWidget(self.nameplate_hold_spin)
+        detection_row.addStretch(1)
         detection_widget = QWidget()
         detection_widget.setLayout(detection_row)
-        nameplate_grid.addWidget(detection_label, 2, 0)
-        nameplate_grid.addWidget(detection_widget, 2, 1)
+        nameplate_form.addRow("감지 설정", detection_widget)
 
-        nameplate_grid.setColumnStretch(1, 1)
-
-        nameplate_layout.addLayout(nameplate_grid)
+        nameplate_layout.addLayout(nameplate_form)
 
         nameplate_group.setLayout(nameplate_layout)
         nameplate_group.toggled.connect(self._handle_nameplate_enabled_toggled)
@@ -4679,10 +4902,8 @@ class LearningTab(QWidget):
         self.nameplate_grace_spin.valueChanged.connect(self._handle_nameplate_grace_changed)
         self.nameplate_hold_spin.valueChanged.connect(self._handle_nameplate_hold_changed)
 
-        center_layout.addLayout(image_list_header_layout)
-        center_layout.addWidget(self.image_list_widget)
-        center_layout.addLayout(capture_options_layout)
-        center_layout.addLayout(center_buttons_layout)
+        # 중앙 레이아웃에는 그룹만 추가
+        center_layout.addWidget(image_group)
         center_layout.addWidget(nameplate_group)
 
         # [NEW] 몬스터 이름표 하위 OCR 그룹
