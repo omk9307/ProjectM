@@ -89,7 +89,7 @@ def load_baseline_state_machine_config() -> dict:
     """
     cfg_path = _resolve_baseline_state_config_path()
     if not cfg_path.is_file():
-        return {}
+        return {k: v for k, v in STANDARD_STATE_MACHINE_BASELINE.items() if k in STATE_MACHINE_CONFIG_KEYS}
 
     raw = None
     for enc in ("utf-8", "utf-8-sig", "cp949", "euc-kr"):
@@ -102,14 +102,58 @@ def load_baseline_state_machine_config() -> dict:
             continue
 
     if not isinstance(raw, dict):
-        return {}
+        return {k: v for k, v in STANDARD_STATE_MACHINE_BASELINE.items() if k in STATE_MACHINE_CONFIG_KEYS}
 
     state = raw.get("state_machine_config") or raw.get("state_config") or {}
     if not isinstance(state, dict):
-        return {}
+        return {k: v for k, v in STANDARD_STATE_MACHINE_BASELINE.items() if k in STATE_MACHINE_CONFIG_KEYS}
 
     # 허용된 키만 추출
     return {k: v for k, v in state.items() if k in STATE_MACHINE_CONFIG_KEYS}
+
+# 동바산6 판정설정 표준 복사본(파일 부재 시 사용)
+STANDARD_STATE_MACHINE_BASELINE = {
+    "idle_time_threshold": 0.3,
+    "climbing_state_frame_threshold": 2,
+    "falling_state_frame_threshold": 2,
+    "jumping_state_frame_threshold": 1,
+    "on_terrain_y_threshold": 1.0,
+    "jump_y_min_threshold": 1.0,
+    "jump_y_max_threshold": 10.5,
+    "fall_y_min_threshold": 4.0,
+    "climb_x_movement_threshold": 1.0,
+    "fall_on_ladder_x_movement_threshold": 1.0,
+    "ladder_x_grab_threshold": 8.0,
+    "move_deadzone": 0.2,
+    "max_jump_duration": 3.0,
+    "y_movement_deadzone": 0.5,
+    "waypoint_arrival_x_threshold": 10.0,
+    "waypoint_arrival_x_threshold_min": 8.0,
+    "waypoint_arrival_x_threshold_max": 12.0,
+    "ladder_arrival_x_threshold": 7.5,
+    "ladder_arrival_short_threshold": 5.5,
+    "jump_link_arrival_x_threshold": 3.1,
+    "ladder_avoidance_width": 3.0,
+    "ladder_down_jump_min_distance": 3.0,
+    "on_ladder_enter_frame_threshold": 3,
+    "jump_initial_velocity_threshold": 4.0,
+    "climb_max_velocity": 3.0,
+    "arrival_frame_threshold": 2,
+    "action_success_frame_threshold": 2,
+    "stuck_detection_wait": 0.5,
+    "airborne_recovery_wait": 2.0,
+    "ladder_recovery_resend_delay": 0.5,
+    "edgefall_timeout_sec": 8.0,
+    # 파일에 없을 수 있으므로 표준 기본값 유지
+    "edgefall_trigger_distance": 2.0,
+    "prepare_timeout": 3.0,
+    "max_lock_duration": 3.5,
+    "walk_teleport_probability": 10.0,
+    "walk_teleport_interval": 0.5,
+    "walk_teleport_bonus_delay": 1.0,
+    "walk_teleport_bonus_step": 10.0,
+    "walk_teleport_bonus_max": 50.0,
+}
 
 
 ROUTE_SLOT_IDS = ["1", "2", "3", "4", "5"]

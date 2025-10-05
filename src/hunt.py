@@ -901,6 +901,8 @@ class HuntTab(QWidget):
         self.shutdown_other_player_wait_waypoint_id: Optional[str] = None
         self.shutdown_other_player_wait_waypoint_name: str = ''
         # 다중 대기 웨이포인트(신규)
+        # [변경] 맵 프로필별로 저장하는 구조를 도입. 기존 필드는 '현재 활성 프로필' 뷰에 매핑.
+        self.shutdown_other_player_wait_waypoints_by_profile: dict[str, list[dict]] = {}
         self.shutdown_other_player_wait_waypoints: list[dict] = []  # [{'id': str, 'name': str}]
         self.shutdown_other_player_wait_active = False
         self.shutdown_other_player_wait_started_at: Optional[float] = None
@@ -2571,8 +2573,10 @@ class HuntTab(QWidget):
         waypoint_list = QListWidget(dialog)
         # 초기 목록: 기존 다중 목록 우선, 없으면 단일값
         initial_items: list[tuple[str, str]] = []
-        if self.shutdown_other_player_wait_waypoints:
-            for item in self.shutdown_other_player_wait_waypoints:
+        # [변경] 현재 활성 맵 프로필 기준으로 초기 목록 구성
+        current_items = self._get_wait_waypoints_for_current_profile()
+        if current_items:
+            for item in current_items:
                 wp_id = str(item.get('id') or '').strip()
                 if not wp_id:
                     continue
@@ -2651,13 +2655,14 @@ class HuntTab(QWidget):
         if not collected:
             QMessageBox.warning(self, "웨이포인트 없음", "대기할 웨이포인트를 최소 1개 이상 추가해주세요.")
             return
-        # 저장(다중), 구버전 단일 필드도 첫 항목으로 동기화
-        self.shutdown_other_player_wait_waypoints = collected
+        # [변경] 현재 활성 프로필에 저장. 구버전 단일 필드도 첫 항목으로 동기화
+        self._set_wait_waypoints_for_current_profile(collected)
         self.shutdown_other_player_wait_waypoint_id = collected[0]['id']
         self.shutdown_other_player_wait_waypoint_name = collected[0]['name']
         self.shutdown_other_player_radio_wait.setChecked(True)
         self.shutdown_other_player_action = 'wait_mode'
         self._update_other_player_action_summary()
+        self._save_settings()
 
     def _configure_other_player_town_mode(self) -> None:
         QMessageBox.information(self, "마을 귀환", "마을 귀환 기능은 아직 구현되지 않았습니다.")
@@ -2679,30 +2684,93 @@ class HuntTab(QWidget):
         waypoints.sort(key=lambda x: x[0].lower())
         return waypoints
 
+    # ---------------------- 대기 모드(무기한) 보조 유틸 ----------------------
+    def _current_map_profile_name(self) -> str:
+        map_tab = getattr(self, 'map_tab', None)
+        name = getattr(map_tab, 'active_profile_name', None)
+        return str(name) if isinstance(name, str) else ''
+
+    def _get_wait_waypoints_for_current_profile(self) -> list[dict]:
+        profile = self._current_map_profile_name()
+        if not profile:
+            return list(self.shutdown_other_player_wait_waypoints or [])
+        return list(self.shutdown_other_player_wait_waypoints_by_profile.get(profile, []))
+
+    def _set_wait_waypoints_for_current_profile(self, items: list[dict]) -> None:
+        profile = self._current_map_profile_name()
+        if profile:
+            self.shutdown_other_player_wait_waypoints_by_profile[profile] = list(items or [])
+        # UI/요약에서 사용할 현재 뷰 동기화
+        self.shutdown_other_player_wait_waypoints = list(items or [])
+
+    def _filter_waypoints_by_geometry(self, items: list[dict]) -> list[dict]:
+        map_tab = getattr(self, 'map_tab', None)
+        geometry = getattr(map_tab, 'geometry_data', None)
+        if not isinstance(geometry, dict):
+            return []
+        valid_ids = {str(wp.get('id')) for wp in (geometry.get('waypoints') or []) if wp.get('id') is not None}
+        result: list[dict] = []
+        for entry in (items or []):
+            wp_id = str(entry.get('id') or '').strip()
+            if wp_id and wp_id in valid_ids:
+                name = str(entry.get('name') or wp_id)
+                result.append({'id': wp_id, 'name': name})
+        return result
+
+    def map_active_profile_changed(self, profile_name: str) -> None:
+        """맵 탭에서 활성 맵 프로필이 변경될 때 호출.
+        - 현재 프로필에 저장된 대기 웨이포인트를 현 기하(geometry) 기준으로 정합성 검증/정리
+        - UI 요약 레이블 갱신
+        - 설정 저장
+        """
+        try:
+            current_items = self._get_wait_waypoints_for_current_profile()
+            filtered = self._filter_waypoints_by_geometry(current_items)
+            self._set_wait_waypoints_for_current_profile(filtered)
+            # 활성 대기 모드 중에 유효 웨이포인트가 사라졌다면 즉시 종료
+            if self.shutdown_other_player_wait_active and not filtered:
+                try:
+                    self._finish_other_player_wait_mode(reason="waypoint_removed", from_map=True)
+                except Exception:
+                    pass
+            # 구버전 단일 필드 동기화
+            if filtered:
+                self.shutdown_other_player_wait_waypoint_id = filtered[0]['id']
+                self.shutdown_other_player_wait_waypoint_name = filtered[0]['name']
+            else:
+                self.shutdown_other_player_wait_waypoint_id = None
+                self.shutdown_other_player_wait_waypoint_name = ''
+            # 요약 반영 및 저장
+            self._update_other_player_action_summary()
+            self._save_settings()
+        except Exception:
+            pass
+
     def _has_wait_waypoint_configured(self) -> bool:
         try:
-            if isinstance(self.shutdown_other_player_wait_waypoints, list) and len(self.shutdown_other_player_wait_waypoints) > 0:
-                return True
+            items = self._get_wait_waypoints_for_current_profile()
+            return bool(isinstance(items, list) and len(items) > 0)
         except Exception:
-            pass
-        return bool(self.shutdown_other_player_wait_waypoint_id)
+            return False
 
     def _select_random_wait_waypoint(self) -> Optional[tuple[str, str]]:
-        """다중 웨이포인트 중 하나를 무작위 선택. 없으면 단일 필드 사용."""
+        """현재 활성 맵 프로필의 유효한 웨이포인트 중 하나를 무작위 선택."""
         try:
-            if self.shutdown_other_player_wait_waypoints:
-                choice = random.choice(self.shutdown_other_player_wait_waypoints)
-                wp_id = str(choice.get('id') or '').strip()
-                name = str(choice.get('name') or wp_id)
-                if wp_id:
-                    return wp_id, name
-        except Exception:
-            pass
-        if self.shutdown_other_player_wait_waypoint_id:
-            wp_id = str(self.shutdown_other_player_wait_waypoint_id)
-            name = self.shutdown_other_player_wait_waypoint_name or wp_id
+            items = self._get_wait_waypoints_for_current_profile()
+            # 현 기하 기준으로 유효성 필터
+            valid_items = self._filter_waypoints_by_geometry(items)
+            if not valid_items:
+                # 저장된 목록을 정리하여 이후 시도에서 반복 로그가 발생하지 않도록 함
+                self._set_wait_waypoints_for_current_profile([])
+                return None
+            choice = random.choice(valid_items)
+            wp_id = str(choice.get('id') or '').strip()
+            if not wp_id:
+                return None
+            name = str(choice.get('name') or wp_id)
             return wp_id, name
-        return None
+        except Exception:
+            return None
 
     def _update_other_player_action_summary(self) -> None:
         exit_delay_text = self._format_duration_text(self.shutdown_other_player_exit_delay)
@@ -2710,11 +2778,13 @@ class HuntTab(QWidget):
 
         wait_delay_text = self._format_duration_text(self.shutdown_other_player_wait_delay)
         clear_delay_text = self._format_duration_text(self.shutdown_other_player_wait_clear_delay)
-        waypoint_count = len(self.shutdown_other_player_wait_waypoints)
+        # [변경] 현재 활성 프로필의 목록 기준으로 요약 표시
+        waypoint_count = len(self._get_wait_waypoints_for_current_profile())
         if waypoint_count == 0:
-            waypoint_text = self.shutdown_other_player_wait_waypoint_name or "웨이포인트 미설정"
+            waypoint_text = "웨이포인트 미설정"
         elif waypoint_count == 1:
-            waypoint_text = self.shutdown_other_player_wait_waypoints[0].get('name') or str(self.shutdown_other_player_wait_waypoints[0].get('id'))
+            items = self._get_wait_waypoints_for_current_profile()
+            waypoint_text = (items[0].get('name') or str(items[0].get('id'))) if items else "웨이포인트 1개"
         else:
             waypoint_text = f"웨이포인트 {waypoint_count}개"
         self.shutdown_other_player_wait_summary.setText(
@@ -7873,6 +7943,13 @@ class HuntTab(QWidget):
                 map_tab.detection_status_changed.connect(self._handle_map_detection_status_changed)
             except Exception:
                 pass
+        # [신규] 현재 활성 맵 프로필 동기화(최초 1회)
+        try:
+            profile = getattr(map_tab, 'active_profile_name', None)
+            if isinstance(profile, str) and profile:
+                self.map_active_profile_changed(profile)
+        except Exception:
+            pass
 
     def set_authority_bridge_active(self, request_connected: bool, release_connected: bool) -> None:
         self._authority_request_connected = bool(request_connected)
@@ -8172,31 +8249,70 @@ class HuntTab(QWidget):
             if isinstance(wait_clear_delay, (int, float)) and wait_clear_delay > 0:
                 self.shutdown_other_player_wait_clear_delay = int(wait_clear_delay)
 
-            # 다중 웨이포인트 우선 로드
-            waypoints_payload = auto_shutdown_cfg.get('other_wait_waypoints')
-            loaded_waypoints: list[dict] = []
-            if isinstance(waypoints_payload, list):
-                for entry in waypoints_payload:
-                    if isinstance(entry, dict):
-                        wp_id = str(entry.get('id') or '').strip()
-                        if not wp_id:
-                            continue
-                        name = str(entry.get('name') or wp_id)
-                        loaded_waypoints.append({'id': wp_id, 'name': name})
-                    elif isinstance(entry, (list, tuple)) and len(entry) >= 2:
-                        wp_id = str(entry[1]).strip()
-                        name = str(entry[0])
-                        if wp_id:
+            # v2 스키마: 이전 저장값 무시(초기화) 후 새 구조 사용
+            version = 0
+            try:
+                version = int(auto_shutdown_cfg.get('wait_waypoints_schema_version') or 0)
+            except Exception:
+                version = 0
+
+            if version < 2:
+                # 기존에 저장된 대기 웨이포인트는 모두 폐기(새로 시작)
+                self.shutdown_other_player_wait_waypoints_by_profile = {}
+                self.shutdown_other_player_wait_waypoint_id = None
+                self.shutdown_other_player_wait_waypoint_name = ''
+                self.shutdown_other_player_wait_waypoints = []
+            else:
+                # 다중 웨이포인트 우선 로드
+                waypoints_payload = auto_shutdown_cfg.get('other_wait_waypoints')
+                loaded_waypoints: list[dict] = []
+                if isinstance(waypoints_payload, list):
+                    for entry in waypoints_payload:
+                        if isinstance(entry, dict):
+                            wp_id = str(entry.get('id') or '').strip()
+                            if not wp_id:
+                                continue
+                            name = str(entry.get('name') or wp_id)
                             loaded_waypoints.append({'id': wp_id, 'name': name})
-            # 단일 필드(구버전)도 병합
-            wait_wp_id = auto_shutdown_cfg.get('other_wait_waypoint_id')
-            wait_wp_name = auto_shutdown_cfg.get('other_wait_waypoint_name')
-            if wait_wp_id is not None and not loaded_waypoints:
-                wait_wp_id_str = str(wait_wp_id).strip()
-                if wait_wp_id_str:
-                    loaded_waypoints = [{'id': wait_wp_id_str, 'name': str(wait_wp_name or wait_wp_id_str)}]
-            # 상태에 반영
-            self.shutdown_other_player_wait_waypoints = loaded_waypoints
+                        elif isinstance(entry, (list, tuple)) and len(entry) >= 2:
+                            wp_id = str(entry[1]).strip()
+                            name = str(entry[0])
+                            if wp_id:
+                                loaded_waypoints.append({'id': wp_id, 'name': name})
+                # 단일 필드(구버전)도 병합
+                wait_wp_id = auto_shutdown_cfg.get('other_wait_waypoint_id')
+                wait_wp_name = auto_shutdown_cfg.get('other_wait_waypoint_name')
+                if wait_wp_id is not None and not loaded_waypoints:
+                    wait_wp_id_str = str(wait_wp_id).strip()
+                    if wait_wp_id_str:
+                        loaded_waypoints = [{'id': wait_wp_id_str, 'name': str(wait_wp_name or wait_wp_id_str)}]
+                # 프로필별 목록 로드(있으면 우선)
+                by_profile_payload = auto_shutdown_cfg.get('other_wait_waypoints_by_profile')
+                self.shutdown_other_player_wait_waypoints_by_profile = {}
+                if isinstance(by_profile_payload, dict):
+                    for k, v in by_profile_payload.items():
+                        try:
+                            profile_key = str(k)
+                            items: list[dict] = []
+                            if isinstance(v, list):
+                                for entry in v:
+                                    if isinstance(entry, dict):
+                                        wp_id = str(entry.get('id') or '').strip()
+                                        if not wp_id:
+                                            continue
+                                        name = str(entry.get('name') or wp_id)
+                                        items.append({'id': wp_id, 'name': name})
+                            if items:
+                                self.shutdown_other_player_wait_waypoints_by_profile[profile_key] = items
+                        except Exception:
+                            continue
+
+                # 상태에 반영(현재 활성 프로필 기준으로 뷰 선택)
+                current_items = self._get_wait_waypoints_for_current_profile()
+                if not current_items and loaded_waypoints:
+                    # 프로필별 정보가 없으면 구버전 목록으로 초기화하되, 현재 프로필 키로 옮겨담는다.
+                    self._set_wait_waypoints_for_current_profile(loaded_waypoints)
+                    current_items = list(loaded_waypoints)
             # 구버전 단일 필드도 동기화
             if loaded_waypoints:
                 self.shutdown_other_player_wait_waypoint_id = loaded_waypoints[0]['id']
@@ -8645,6 +8761,9 @@ class HuntTab(QWidget):
         if not hasattr(self, 'shutdown_pid_input'):
             return {}
         pid_text = self.shutdown_pid_input.text().strip() if self.shutdown_pid_input else ''
+        # 현재 활성 프로필 기준으로 저장되는 목록(호환 유지)
+        current_profile_items = self._get_wait_waypoints_for_current_profile()
+
         data: dict[str, object] = {
             'pid': pid_text,
             'reservation_target': float(self.shutdown_datetime_target) if self.shutdown_datetime_target else None,
@@ -8658,10 +8777,20 @@ class HuntTab(QWidget):
             'other_wait_waypoint_name': self.shutdown_other_player_wait_waypoint_name,
             'other_wait_waypoints': [
                 {'id': str(item.get('id', '')), 'name': str(item.get('name', ''))}
-                for item in (self.shutdown_other_player_wait_waypoints or [])
+                for item in (current_profile_items or [])
                 if str(item.get('id', '')).strip()
             ],
+            # [신규] 맵 프로필별 대기 웨이포인트 저장
+            'other_wait_waypoints_by_profile': {
+                str(profile): [
+                    {'id': str(it.get('id', '')), 'name': str(it.get('name', ''))}
+                    for it in (items or []) if str(it.get('id', '')).strip()
+                ]
+                for profile, items in (self.shutdown_other_player_wait_waypoints_by_profile or {}).items()
+            },
             'sleep_enabled': bool(self.shutdown_sleep_enabled),
+            # v2 스키마 마커(기존 저장값 무시 후 새 구조 사용)
+            'wait_waypoints_schema_version': 2,
         }
 
         if hasattr(self, 'shutdown_datetime_edit') and self.shutdown_datetime_edit:
