@@ -1994,6 +1994,9 @@ class SAMCanvasLabel(BaseCanvasLabel):
     def __init__(self, pixmap, parent_dialog):
         super().__init__(pixmap, parent_dialog)
         self.current_mask, self.input_points, self.input_labels = None, [], []
+        # [NEW] 완료 이후 우클릭으로 수동 차집합 폴리곤을 그리기 위한 상태
+        self.current_sub_points = []
+        self.current_pos = QPoint()
     def paintEvent(self, event):
         super().paintEvent(event)
         painter = QPainter(self)
@@ -2024,15 +2027,40 @@ class SAMCanvasLabel(BaseCanvasLabel):
                 poly_points = [QPoint(p[0][0], p[0][1]) * self.zoom_factor for p in contour]
                 painter.drawPolygon(QPolygon([QPoint(int(p.x()), int(p.y())) for p in poly_points]))
 
+        # [NEW] 우클릭 수동 차집합 폴리곤 미리보기
+        if self.current_sub_points:
+            scaled_pts = [p * self.zoom_factor for p in self.current_sub_points]
+            painter.setPen(QPen(HIGHLIGHT_PEN_COLOR, 2, Qt.PenStyle.DashLine))
+            painter.setBrush(QBrush(QColor(255, 0, 0, 60)))
+            painter.drawPolygon(QPolygon([QPoint(int(p.x()), int(p.y())) for p in scaled_pts]))
+            if self.rect().contains(self.current_pos):
+                painter.drawLine(scaled_pts[-1], self.current_pos)
+            for point in scaled_pts:
+                painter.drawEllipse(point, 4, 4)
+
     def mousePressEvent(self, event):
         if self.parent_dialog.is_change_mode and event.button() == Qt.MouseButton.LeftButton:
             if self.change_hovered_polygon_class():
                 return
 
-        if event.button() in [Qt.MouseButton.LeftButton, Qt.MouseButton.RightButton]:
-            self.parent_dialog.predict_mask(event.pos(), 1 if event.button() == Qt.MouseButton.LeftButton else 0)
+        if event.button() == Qt.MouseButton.RightButton:
+            # [NEW] 마스크 생성 중이 아니면 우클릭 폴리곤 점 추가(수동 차집합 모드)
+            if self.parent_dialog.canvas.current_mask is None:
+                self.current_sub_points.append(event.pos() / self.zoom_factor)
+                self.update()
+                return
+            # 마스크 진행 중이면 기존 SAM 네거티브 클릭 동작 유지
+            self.parent_dialog.predict_mask(event.pos(), 0)
+        elif event.button() == Qt.MouseButton.LeftButton:
+            # SAM 포지티브 클릭
+            self.parent_dialog.predict_mask(event.pos(), 1)
         elif event.button() == Qt.MouseButton.MiddleButton:
             self.panning = True; self.pan_start_pos = event.pos(); self.setCursor(Qt.CursorShape.ClosedHandCursor)
+
+    def mouseMoveEvent(self, event):
+        super().mouseMoveEvent(event)
+        if not self.panning:
+            self.current_pos = event.pos(); self.update()
 
 class SAMAnnotationEditor(QDialog):
     """AI 어시스트 편집기 메인 창."""
@@ -2310,21 +2338,32 @@ class SAMAnnotationEditor(QDialog):
 
     def keyPressEvent(self, event):
         if event.key() in [Qt.Key.Key_Return, Qt.Key.Key_Enter]:
+            # [NEW] 우클릭 수동 차집합 폴리곤이 활성 상태이면 우선 적용
+            if getattr(self.canvas, 'current_sub_points', None) and len(self.canvas.current_sub_points) >= 3 and self.canvas.current_mask is None:
+                if self._commit_subtract_polygon():
+                    return
             self.commit_current_mask()
         elif event.key() == Qt.Key.Key_Escape:
             # [NEW] 작업 중일 때만 취소, 아니면 무시
+            if getattr(self.canvas, 'current_sub_points', None):
+                self.canvas.current_sub_points.clear(); self.canvas.update(); return
             if self.canvas.current_mask is not None or self.canvas.input_points:
-                self.reset_current_mask()
+                self.reset_current_mask(); return
             return
         elif event.key() == Qt.Key.Key_T:
             self.on_switch_to_manual()
-        elif event.key() == Qt.Key.Key_R: self.reset_current_mask()
+        elif event.key() == Qt.Key.Key_R:
+            self.reset_current_mask()
+            if getattr(self.canvas, 'current_sub_points', None):
+                self.canvas.current_sub_points.clear(); self.canvas.update()
         elif event.key() == Qt.Key.Key_Z:
             if self.canvas.polygons: self.canvas.polygons.pop(); self.canvas.update()
-        elif event.key() == Qt.Key.Key_D: self.canvas.delete_hovered_polygon()
+        elif event.key() == Qt.Key.Key_D:
+            self.canvas.delete_hovered_polygon()
         elif event.key() == Qt.Key.Key_C:
             self.change_class_btn.setChecked(not self.change_class_btn.isChecked())
-        else: super().keyPressEvent(event)
+        else:
+            super().keyPressEvent(event)
 
     def reset_current_mask(self):
         self.canvas.current_mask = None; self.canvas.input_points.clear(); self.canvas.input_labels.clear(); self.canvas.update()
@@ -2352,6 +2391,49 @@ class SAMAnnotationEditor(QDialog):
         self.canvas.polygons.append({'class_id': class_id, 'points': poly_points})
         self.reset_current_mask()
         return True
+
+    # [NEW] AI 모드에서 완료 후 우클릭 폴리곤 차집합 적용
+    def _commit_subtract_polygon(self) -> bool:
+        sub_pts = getattr(self.canvas, 'current_sub_points', None)
+        if not sub_pts or len(sub_pts) < 3:
+            return False
+        class_id = self.get_current_class_id()
+        if class_id is None:
+            return False
+        qimg = self.pixmap.toImage()
+        w, h = qimg.width(), qimg.height()
+        if w <= 0 or h <= 0:
+            return False
+        sub_mask = np.zeros((h, w), dtype=np.uint8)
+        pts = np.array([[int(p.x()), int(p.y())] for p in sub_pts], dtype=np.int32)
+        cv2.fillPoly(sub_mask, [pts], 255)
+        inv_sub = cv2.bitwise_not(sub_mask)
+        updated = False
+        new_list = []
+        for poly in self.canvas.polygons:
+            if poly.get('class_id') != class_id or not poly.get('points'):
+                new_list.append(poly)
+                continue
+            single_mask = np.zeros((h, w), dtype=np.uint8)
+            pts2 = np.array([[int(p.x()), int(p.y())] for p in poly['points']], dtype=np.int32)
+            cv2.fillPoly(single_mask, [pts2], 255)
+            result_mask = cv2.bitwise_and(single_mask, inv_sub)
+            contours, _ = cv2.findContours(result_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+            found_any = False
+            for c in contours:
+                if cv2.contourArea(c) <= 10:
+                    continue
+                pts3 = [QPoint(p[0][0], p[0][1]) for p in c]
+                new_list.append({'class_id': class_id, 'points': pts3})
+                found_any = True
+            if found_any:
+                updated = True
+        if updated:
+            self.canvas.polygons = new_list
+            self.canvas.current_sub_points.clear()
+            self.canvas.update()
+            return True
+        return False
 
     def on_save(self):
         self.commit_current_mask()
@@ -2398,6 +2480,9 @@ class SAMAnnotationEditor(QDialog):
         self.canvas.polygons = polygons if polygons else []
         self.create_local_color_map()
         self.reset_current_mask()
+        # [NEW] 우클릭 차집합 폴리곤 초기화
+        if hasattr(self.canvas, 'current_sub_points'):
+            self.canvas.current_sub_points.clear()
         self.canvas.update()
 
 # --- 4. 위젯: 편집 모드 및 다중 캡처 선택 ---
