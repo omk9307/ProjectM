@@ -1558,7 +1558,6 @@ class PolygonAnnotationEditor(QDialog):
         class_selection_layout = QHBoxLayout()
         class_selection_layout.addWidget(QLabel("카테고리:"))
         self.category_selector = QComboBox()
-        self.category_selector.addItems(SELECTABLE_CATEGORIES)
         self.category_selector.currentIndexChanged.connect(self.update_class_selector)
         class_selection_layout.addWidget(self.category_selector)
 
@@ -1599,6 +1598,8 @@ class PolygonAnnotationEditor(QDialog):
 
         self.full_class_list = self.learning_tab.data_manager.get_class_list()
         self.create_local_color_map()
+        # [NEW] 카테고리/클래스를 체크된 항목으로 필터링하여 표시
+        self.populate_category_selector()
         self.set_initial_selection(initial_class_name)
         self.setFocus()
 
@@ -1680,33 +1681,55 @@ class PolygonAnnotationEditor(QDialog):
             self.setWindowTitle('수동 편집기 (변경:C, 지정삭제:D, 완성취소:Z, 초기화:R)')
 
     def update_class_selector(self, new_class_to_select=None):
-        """선택된 카테고리에 맞는 클래스 목록으로 QComboBox를 채웁니다."""
+        """선택된 카테고리에 맞는 '체크된 클래스'만 QComboBox에 채웁니다."""
         self.class_selector.blockSignals(True)
         self.class_selector.clear()
 
         category = self.category_selector.currentText()
         manifest = self.learning_tab.data_manager.get_manifest()
-        classes_in_category = list(manifest.get(category, {}).keys())
+        all_classes_in_category = list(manifest.get(category, {}).keys()) if isinstance(manifest.get(category), dict) else []
+        checked = getattr(self.learning_tab, '_checked_class_names', set())
+        filtered = [name for name in all_classes_in_category if name in checked]
 
-        self.class_selector.addItems(classes_in_category)
-        # '캐릭터' 카테고리는 새 클래스 추가 불가
+        self.class_selector.addItems(filtered)
         if category != CHARACTER_CLASS_NAME:
             self.class_selector.addItem("[새 클래스 추가...]")
 
-        if new_class_to_select and new_class_to_select in classes_in_category:
+        if new_class_to_select and new_class_to_select in filtered:
             self.class_selector.setCurrentText(new_class_to_select)
 
         self.class_selector.blockSignals(False)
 
+    # [NEW] 체크된 클래스가 존재하는 카테고리만 노출
+    def populate_category_selector(self):
+        self.category_selector.blockSignals(True)
+        self.category_selector.clear()
+        manifest = self.learning_tab.data_manager.get_manifest()
+        checked = getattr(self.learning_tab, '_checked_class_names', set())
+        categories = []
+        for cat in SELECTABLE_CATEGORIES:
+            entry = manifest.get(cat)
+            if isinstance(entry, dict):
+                class_names = list(entry.keys())
+                if any((name in checked) for name in class_names):
+                    categories.append(cat)
+        self.category_selector.addItems(categories)
+        self.category_selector.blockSignals(False)
+
     def set_initial_selection(self, class_name):
         """편집기 시작 시 전달받은 클래스 이름으로 선택자를 설정합니다."""
-        if class_name:
+        checked = getattr(self.learning_tab, '_checked_class_names', set())
+        if class_name and class_name in checked:
             category = self.learning_tab.data_manager.get_class_category(class_name)
             if category and category != CHARACTER_CLASS_NAME:
-                self.category_selector.setCurrentText(category)
-                self.update_class_selector(new_class_to_select=class_name)
-                return
-        self.category_selector.setCurrentIndex(0 if self.category_selector.count() else -1)
+                # 카테고리가 목록에 없으면 첫 번째 사용 가능 카테고리로 대체
+                if self.category_selector.findText(category) != -1:
+                    self.category_selector.setCurrentText(category)
+                    self.update_class_selector(new_class_to_select=class_name)
+                    return
+        # 기본 선택: 첫 가용 카테고리/클래스
+        if self.category_selector.count() > 0:
+            self.category_selector.setCurrentIndex(0)
         self.update_class_selector()
 
     def handle_class_selection(self, index):
@@ -1717,8 +1740,14 @@ class PolygonAnnotationEditor(QDialog):
             if ok and new_name:
                 success, message = self.learning_tab.data_manager.add_class(new_name, category)
                 if success:
-                    self.learning_tab.populate_class_list() # 메인 창 목록 갱신
-                    self.full_class_list = self.learning_tab.data_manager.get_class_list() # 전체 목록 갱신
+                    # 메인 창 목록 갱신 및 새 클래스 자동 체크 반영
+                    self.learning_tab.populate_class_list()
+                    if hasattr(self.learning_tab, '_checked_class_names'):
+                        self.learning_tab._checked_class_names.add(new_name)
+                        self.learning_tab._apply_checked_classes_to_tree()
+                        self.learning_tab._persist_checked_classes()
+                    self.full_class_list = self.learning_tab.data_manager.get_class_list()
+                    self.populate_category_selector()
                     self.update_class_selector(new_class_to_select=new_name)
                 else:
                     QMessageBox.warning(self, "오류", message)
@@ -1739,6 +1768,15 @@ class PolygonAnnotationEditor(QDialog):
     def keyPressEvent(self, event):
         if event.key() in [Qt.Key.Key_Return, Qt.Key.Key_Enter]:
             self.commit_current_polygon()
+        elif event.key() == Qt.Key.Key_Escape:
+            # [NEW] 진행 중(좌/우 포인트 또는 pending 마스크)일 때만 취소, 없으면 무시
+            if self.canvas.current_add_points or self.canvas.current_sub_points or self.pending_ai_mask is not None:
+                self.canvas.current_add_points.clear()
+                self.canvas.current_sub_points.clear()
+                self.pending_ai_mask = None
+                self.canvas.pending_mask = None
+                self.canvas.update()
+            return
         elif event.key() == Qt.Key.Key_Backspace:
             # 좌/우클릭 포인트에서 최근 것을 제거
             self.canvas.remove_last_point()
@@ -2160,32 +2198,52 @@ class SAMAnnotationEditor(QDialog):
             self.setWindowTitle('AI 어시스트 (변경:C, 지정삭제:D, 완성취소:Z, 초기화:R)')
 
     def update_class_selector(self, new_class_to_select=None):
-        """선택된 카테고리에 맞는 클래스 목록으로 QComboBox를 채웁니다."""
+        """선택된 카테고리의 '체크된 클래스'만 표시합니다."""
         self.class_selector.blockSignals(True)
         self.class_selector.clear()
 
         category = self.category_selector.currentText()
         manifest = self.learning_tab.data_manager.get_manifest()
-        classes_in_category = list(manifest.get(category, {}).keys())
+        all_classes_in_category = list(manifest.get(category, {}).keys()) if isinstance(manifest.get(category), dict) else []
+        checked = getattr(self.learning_tab, '_checked_class_names', set())
+        filtered = [name for name in all_classes_in_category if name in checked]
 
-        self.class_selector.addItems(classes_in_category)
+        self.class_selector.addItems(filtered)
         if category != CHARACTER_CLASS_NAME:
             self.class_selector.addItem("[새 클래스 추가...]")
 
-        if new_class_to_select and new_class_to_select in classes_in_category:
+        if new_class_to_select and new_class_to_select in filtered:
             self.class_selector.setCurrentText(new_class_to_select)
 
         self.class_selector.blockSignals(False)
 
+    def populate_category_selector(self):
+        """체크된 클래스가 존재하는 카테고리만 표시합니다."""
+        self.category_selector.blockSignals(True)
+        self.category_selector.clear()
+        manifest = self.learning_tab.data_manager.get_manifest()
+        checked = getattr(self.learning_tab, '_checked_class_names', set())
+        categories = []
+        for cat in SELECTABLE_CATEGORIES:
+            entry = manifest.get(cat)
+            if isinstance(entry, dict):
+                class_names = list(entry.keys())
+                if any((name in checked) for name in class_names):
+                    categories.append(cat)
+        self.category_selector.addItems(categories)
+        self.category_selector.blockSignals(False)
+
     def set_initial_selection(self, class_name):
-        """편집기 시작 시 전달받은 클래스 이름으로 선택자를 설정합니다."""
-        if class_name:
+        """체크된 클래스만 초기 선택으로 허용합니다."""
+        checked = getattr(self.learning_tab, '_checked_class_names', set())
+        if class_name and class_name in checked:
             category = self.learning_tab.data_manager.get_class_category(class_name)
-            if category and category != CHARACTER_CLASS_NAME:
+            if category and category != CHARACTER_CLASS_NAME and self.category_selector.findText(category) != -1:
                 self.category_selector.setCurrentText(category)
                 self.update_class_selector(new_class_to_select=class_name)
                 return
-        self.category_selector.setCurrentIndex(0 if self.category_selector.count() else -1)
+        if self.category_selector.count() > 0:
+            self.category_selector.setCurrentIndex(0)
         self.update_class_selector()
 
     def handle_class_selection(self, index):
@@ -2197,7 +2255,13 @@ class SAMAnnotationEditor(QDialog):
                 success, message = self.learning_tab.data_manager.add_class(new_name, category)
                 if success:
                     self.learning_tab.populate_class_list()
+                    # [NEW] 새 클래스 자동 체크 반영
+                    if hasattr(self.learning_tab, '_checked_class_names'):
+                        self.learning_tab._checked_class_names.add(new_name)
+                        self.learning_tab._apply_checked_classes_to_tree()
+                        self.learning_tab._persist_checked_classes()
                     self.full_class_list = self.learning_tab.data_manager.get_class_list()
+                    self.populate_category_selector()
                     self.update_class_selector(new_class_to_select=new_name)
                 else:
                     QMessageBox.warning(self, "오류", message)
@@ -2228,6 +2292,11 @@ class SAMAnnotationEditor(QDialog):
     def keyPressEvent(self, event):
         if event.key() in [Qt.Key.Key_Return, Qt.Key.Key_Enter]:
             self.commit_current_mask()
+        elif event.key() == Qt.Key.Key_Escape:
+            # [NEW] 작업 중일 때만 취소, 아니면 무시
+            if self.canvas.current_mask is not None or self.canvas.input_points:
+                self.reset_current_mask()
+            return
         elif event.key() == Qt.Key.Key_T:
             self.on_switch_to_manual()
         elif event.key() == Qt.Key.Key_R: self.reset_current_mask()
@@ -4627,6 +4696,9 @@ class LearningTab(QWidget):
         self._thumbnail_disk_limit = 512
         self._runtime_ui_updating = False
         self._monster_settings_dialog_open = False
+        # [NEW] 편집 초기 클래스 유지(배치/최근)
+        self._batch_initial_class_name: Optional[str] = None
+        self._last_used_editor_class: Optional[str] = None
         self.initUI()
         self.init_sam()
         self.data_manager.register_status_config_listener(self._handle_status_config_changed)
@@ -4695,6 +4767,8 @@ class LearningTab(QWidget):
 
         # 이미지 목록 그룹 (헤더 정렬 + 리스트 + 캡처 옵션 + 하단 버튼까지 포함)
         image_group = QGroupBox("이미지 목록")
+        # 그룹이 필요 이상 세로 확장되지 않도록 제한
+        image_group.setSizePolicy(QSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Maximum))
         image_group_layout = QVBoxLayout()
         image_group_layout.setContentsMargins(8, 8, 8, 8)
         image_group_layout.setSpacing(6)
@@ -4720,8 +4794,10 @@ class LearningTab(QWidget):
         self.image_list_widget.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
         self.image_list_widget.setDragDropMode(QAbstractItemView.DragDropMode.NoDragDrop)
         self.image_list_widget.itemDoubleClicked.connect(self.edit_selected_image)
-        # 고정 높이 제거: 상위 레이아웃 비율에 따라 자연 확장
-        # self.image_list_widget.setFixedHeight(370)
+        # 가로는 확장, 세로는 고정 정책으로 내부 여백 발생 방지
+        self.image_list_widget.setSizePolicy(QSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed))
+        # 고정 높이: 세로 350px로 제한
+        self.image_list_widget.setFixedHeight(350)
 
         capture_options_layout = QHBoxLayout()
         capture_options_layout.setContentsMargins(0, 0, 0, 0)
@@ -5065,6 +5141,8 @@ class LearningTab(QWidget):
         window_anchor_layout.addLayout(anchor_button_row)
         window_anchor_group.setLayout(window_anchor_layout)
         center_layout.addWidget(window_anchor_group)
+        # 중앙 스택을 상단 정렬로 고정하고 남는 공간은 하단으로
+        center_layout.addStretch(1)
 
         main_layout.addLayout(left_layout, 1)
         main_layout.addLayout(center_layout, 2)
@@ -7657,6 +7735,8 @@ class LearningTab(QWidget):
         interval = self.capture_interval_spinbox.value()
         delay_seconds = self.capture_delay_spinbox.value()
         initial_class_name = self._get_selected_class_name()
+        # [NEW] 배치 시작 시점의 초기 클래스 보존
+        self._batch_initial_class_name = initial_class_name
 
         # 캡처 시에는 메인 윈도우를 숨길 필요가 없으므로 hide/show 로직 제거
         try:
@@ -7716,12 +7796,21 @@ class LearningTab(QWidget):
         if mode_result == EditModeDialog.CANCEL:
             return
 
+        # [NEW] 초기 클래스 결정: 배치 시작 클래스를 우선, 없으면 최근 저장 클래스 사용
+        effective_initial_class = initial_class_name
+        if not effective_initial_class:
+            effective_initial_class = self._last_used_editor_class
+        # 체크되지 않은 클래스는 무시
+        if effective_initial_class and getattr(self, '_checked_class_names', None):
+            if effective_initial_class not in self._checked_class_names:
+                effective_initial_class = None
+
         editor_dialog = AnnotationEditorDialog(
             pixmap,
             self,
             self.sam_predictor,
             initial_polygons=initial_polygons,
-            initial_class_name=initial_class_name,
+            initial_class_name=effective_initial_class,
             initial_mode=mode_result,
         )
 
@@ -7734,6 +7823,8 @@ class LearningTab(QWidget):
         # 시나리오 1: 일반 저장
         if editor_result == QDialog.DialogCode.Accepted:
             previously_selected_class = editor_dialog.result_class_name() or initial_class_name
+            # [NEW] 최근 저장 클래스 업데이트
+            self._last_used_editor_class = previously_selected_class
 
             self.populate_class_list() # 새 클래스가 추가되었을 수 있으므로 목록 갱신
 

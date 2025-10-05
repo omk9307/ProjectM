@@ -97,6 +97,7 @@ try:
         CONFIG_PATH,
         GLOBAL_ACTION_MODEL_DIR,
         GLOBAL_MAP_SETTINGS_FILE,
+        load_baseline_state_machine_config,
         HYSTERESIS_EXIT_OFFSET,
         IDLE_TIME_THRESHOLD,
         AIRBORNE_RECOVERY_WAIT_DEFAULT,
@@ -149,6 +150,7 @@ except ImportError:
         CONFIG_PATH,
         GLOBAL_ACTION_MODEL_DIR,
         GLOBAL_MAP_SETTINGS_FILE,
+        load_baseline_state_machine_config,
         HYSTERESIS_EXIT_OFFSET,
         IDLE_TIME_THRESHOLD,
         AIRBORNE_RECOVERY_WAIT_DEFAULT,
@@ -2477,6 +2479,79 @@ class MapTab(QWidget):
             self.cfg_walk_teleport_bonus_delay = WALK_TELEPORT_BONUS_DELAY_DEFAULT
             self.cfg_walk_teleport_bonus_step = WALK_TELEPORT_BONUS_STEP_DEFAULT
             self.cfg_walk_teleport_bonus_max = WALK_TELEPORT_BONUS_MAX_DEFAULT
+            # [기본값 개선] 동바산6 판정설정을 기본값으로 덮어쓰기
+            try:
+                _baseline = load_baseline_state_machine_config()
+            except Exception:
+                _baseline = {}
+
+            def _apply_default(key: str) -> None:
+                if key not in _baseline:
+                    return
+                if key == "ladder_down_jump_min_distance":
+                    # 비-cfg 속성
+                    self.ladder_down_jump_min_distance = _baseline[key]
+                elif key in ("edgefall_timeout_sec", "edgefall_trigger_distance"):
+                    # None 기본값을 덮어씌우도록 그대로 주입
+                    setattr(self, f"cfg_{key}", _baseline[key])
+                else:
+                    setattr(self, f"cfg_{key}", _baseline[key])
+
+            for _k in (
+                "idle_time_threshold",
+                "climbing_state_frame_threshold",
+                "falling_state_frame_threshold",
+                "jumping_state_frame_threshold",
+                "on_terrain_y_threshold",
+                "jump_y_min_threshold",
+                "jump_y_max_threshold",
+                "fall_y_min_threshold",
+                "climb_x_movement_threshold",
+                "fall_on_ladder_x_movement_threshold",
+                "ladder_x_grab_threshold",
+                "move_deadzone",
+                "max_jump_duration",
+                "y_movement_deadzone",
+                "waypoint_arrival_x_threshold",
+                "waypoint_arrival_x_threshold_min",
+                "waypoint_arrival_x_threshold_max",
+                "ladder_arrival_x_threshold",
+                "ladder_arrival_short_threshold",
+                "jump_link_arrival_x_threshold",
+                "ladder_avoidance_width",
+                "on_ladder_enter_frame_threshold",
+                "jump_initial_velocity_threshold",
+                "climb_max_velocity",
+                "arrival_frame_threshold",
+                "action_success_frame_threshold",
+                "stuck_detection_wait",
+                "airborne_recovery_wait",
+                "ladder_recovery_resend_delay",
+                "edgefall_timeout_sec",
+                "edgefall_trigger_distance",
+                "prepare_timeout",
+                "max_lock_duration",
+                "walk_teleport_probability",
+                "walk_teleport_interval",
+                "walk_teleport_bonus_delay",
+                "walk_teleport_bonus_step",
+                "walk_teleport_bonus_max",
+                "ladder_down_jump_min_distance",
+            ):
+                _apply_default(_k)
+
+            # min/max가 같이 있으면 중앙값 재계산
+            if (
+                isinstance(getattr(self, "cfg_waypoint_arrival_x_threshold_min", None), (int, float))
+                and isinstance(getattr(self, "cfg_waypoint_arrival_x_threshold_max", None), (int, float))
+            ):
+                _min = float(self.cfg_waypoint_arrival_x_threshold_min)
+                _max = float(self.cfg_waypoint_arrival_x_threshold_max)
+                if _min > _max:
+                    _min, _max = _max, _min
+                self.cfg_waypoint_arrival_x_threshold_min = _min
+                self.cfg_waypoint_arrival_x_threshold_max = _max
+                self.cfg_waypoint_arrival_x_threshold = (_min + _max) / 2.0
             self._reset_walk_teleport_state()
 
             config = {}
@@ -2950,6 +3025,7 @@ class MapTab(QWidget):
                 "airborne_recovery_wait": self.cfg_airborne_recovery_wait,
                 "ladder_recovery_resend_delay": self.cfg_ladder_recovery_resend_delay,
                 "edgefall_timeout_sec": self.cfg_edgefall_timeout_sec if self.cfg_edgefall_timeout_sec is not None else 3.0,
+                "edgefall_trigger_distance": self.cfg_edgefall_trigger_distance if self.cfg_edgefall_trigger_distance is not None else 2.0,
                 "prepare_timeout": self.cfg_prepare_timeout if self.cfg_prepare_timeout is not None else PREPARE_TIMEOUT,
                 "max_lock_duration": self.cfg_max_lock_duration if self.cfg_max_lock_duration is not None else MAX_LOCK_DURATION,
                 "walk_teleport_probability": self.cfg_walk_teleport_probability,

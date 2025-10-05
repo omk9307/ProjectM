@@ -26,6 +26,91 @@ MAPS_DIR = os.path.join(CONFIG_PATH, "maps")
 GLOBAL_MAP_SETTINGS_FILE = os.path.join(CONFIG_PATH, "global_map_settings.json")
 GLOBAL_ACTION_MODEL_DIR = os.path.join(CONFIG_PATH, "global_action_model")
 
+# 기본 판정설정 베이스 프로필(요청: 동바산6)
+DEFAULT_STATE_BASE_PROFILE = "동바산6"
+
+# 판정설정 키 목록(필터용)
+STATE_MACHINE_CONFIG_KEYS = [
+    "idle_time_threshold",
+    "climbing_state_frame_threshold",
+    "falling_state_frame_threshold",
+    "jumping_state_frame_threshold",
+    "on_terrain_y_threshold",
+    "jump_y_min_threshold",
+    "jump_y_max_threshold",
+    "fall_y_min_threshold",
+    "climb_x_movement_threshold",
+    "fall_on_ladder_x_movement_threshold",
+    "ladder_x_grab_threshold",
+    "move_deadzone",
+    "max_jump_duration",
+    "y_movement_deadzone",
+    "waypoint_arrival_x_threshold",
+    "waypoint_arrival_x_threshold_min",
+    "waypoint_arrival_x_threshold_max",
+    "ladder_arrival_x_threshold",
+    "ladder_arrival_short_threshold",
+    "jump_link_arrival_x_threshold",
+    "ladder_avoidance_width",
+    "ladder_down_jump_min_distance",
+    "on_ladder_enter_frame_threshold",
+    "jump_initial_velocity_threshold",
+    "climb_max_velocity",
+    "arrival_frame_threshold",
+    "action_success_frame_threshold",
+    "stuck_detection_wait",
+    "airborne_recovery_wait",
+    "ladder_recovery_resend_delay",
+    "edgefall_timeout_sec",
+    "edgefall_trigger_distance",
+    "prepare_timeout",
+    "max_lock_duration",
+    "walk_teleport_probability",
+    "walk_teleport_interval",
+    "walk_teleport_bonus_delay",
+    "walk_teleport_bonus_step",
+    "walk_teleport_bonus_max",
+]
+
+
+def _resolve_baseline_state_config_path() -> Path:
+    """동바산6 프로필의 map_config.json 경로를 반환.
+
+    요청 사항에 따라 향후 새 프로필 기본 판정설정의 기준으로 사용.
+    """
+    return Path(MAPS_DIR) / DEFAULT_STATE_BASE_PROFILE / "map_config.json"
+
+
+def load_baseline_state_machine_config() -> dict:
+    """동바산6의 state_machine_config만 읽어서 반환.
+
+    - 파일 없음/읽기 실패 시 빈 dict 반환
+    - 허용된 판정설정 키만 필터링하여 반환
+    """
+    cfg_path = _resolve_baseline_state_config_path()
+    if not cfg_path.is_file():
+        return {}
+
+    raw = None
+    for enc in ("utf-8", "utf-8-sig", "cp949", "euc-kr"):
+        try:
+            with cfg_path.open("r", encoding=enc) as f:
+                raw = json.load(f)
+            break
+        except Exception:
+            raw = None
+            continue
+
+    if not isinstance(raw, dict):
+        return {}
+
+    state = raw.get("state_machine_config") or raw.get("state_config") or {}
+    if not isinstance(state, dict):
+        return {}
+
+    # 허용된 키만 추출
+    return {k: v for k, v in state.items() if k in STATE_MACHINE_CONFIG_KEYS}
+
 
 ROUTE_SLOT_IDS = ["1", "2", "3", "4", "5"]
 
@@ -158,6 +243,9 @@ _BASE_EXPORTS = [
     "MAPS_DIR",
     "GLOBAL_MAP_SETTINGS_FILE",
     "GLOBAL_ACTION_MODEL_DIR",
+    "DEFAULT_STATE_BASE_PROFILE",
+    "STATE_MACHINE_CONFIG_KEYS",
+    "load_baseline_state_machine_config",
     "ROUTE_SLOT_IDS",
     "PLAYER_ICON_LOWER",
     "PLAYER_ICON_UPPER",

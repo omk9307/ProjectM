@@ -90,6 +90,7 @@ try:
     from .map import (
         CONFIG_PATH,
         GLOBAL_ACTION_MODEL_DIR,
+        load_baseline_state_machine_config,
         LADDER_ARRIVAL_X_THRESHOLD,
         LADDER_ARRIVAL_SHORT_THRESHOLD,
         LADDER_AVOIDANCE_WIDTH,
@@ -126,6 +127,7 @@ except ImportError:
     from map import (  # type: ignore
         CONFIG_PATH,
         GLOBAL_ACTION_MODEL_DIR,
+        load_baseline_state_machine_config,
         LADDER_ARRIVAL_X_THRESHOLD,
         LADDER_ARRIVAL_SHORT_THRESHOLD,
         LADDER_AVOIDANCE_WIDTH,
@@ -3837,6 +3839,13 @@ class StateConfigDialog(QDialog):
     #  v14.3.10: 누락되었던 메서드 복원
     def restore_defaults(self):
         """모든 설정 값을 코드에 정의된 기본값으로 복원합니다."""
+        # 동바산6의 판정설정 값을 우선 적용, 없으면 코드 상수로 대체
+        _baseline = {}
+        try:
+            _baseline = load_baseline_state_machine_config()
+        except Exception:
+            _baseline = {}
+
         defaults = {
             "idle_time_threshold": IDLE_TIME_THRESHOLD,
             "max_jump_duration": MAX_JUMP_DURATION,
@@ -3879,6 +3888,10 @@ class StateConfigDialog(QDialog):
             "edgefall_timeout_sec": 3.0,
             "edgefall_trigger_distance": 2.0,
         }
+        # baseline 값으로 덮어쓰기(존재하는 키만)
+        for k, v in (_baseline.items() if isinstance(_baseline, dict) else {}).items():
+            if k in defaults:
+                defaults[k] = v
         for key, spinbox in self.spinboxes.items():
             if key in defaults:
                 spinbox.setValue(defaults[key])
