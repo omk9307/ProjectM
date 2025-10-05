@@ -497,20 +497,13 @@ class StatusRecognitionPreviewDialog(QDialog):
                 processed_view.setPixmap(self._scaled_pixmap(processed_pixmap))
             else:
                 processed_view.setPixmap(processed_pixmap)
+                try:
+                    processed_view.setFixedSize(processed_pixmap.size())
+                except Exception:
+                    pass
             processed_view.setCursor(Qt.CursorShape.PointingHandCursor)
             processed_view.mousePressEvent = lambda e, pm=processed_pixmap: self._open_image_viewer(pm)
-            if scale_images:
-                processed_column.addWidget(processed_view)
-            else:
-                # 원본 크기 표시를 위해 스크롤 영역에 넣는다
-                scroll = QScrollArea()
-                scroll.setWidgetResizable(True)
-                container = QWidget()
-                v = QVBoxLayout(container)
-                v.setContentsMargins(0, 0, 0, 0)
-                v.addWidget(processed_view)
-                scroll.setWidget(container)
-                processed_column.addWidget(scroll)
+            processed_column.addWidget(processed_view)
             image_layout.addLayout(processed_column)
 
         layout.addLayout(image_layout)
@@ -527,6 +520,19 @@ class StatusRecognitionPreviewDialog(QDialog):
         layout.addWidget(button_box)
 
         self.setLayout(layout)
+
+        # 원본 크기 표시 시 다이얼로그를 이미지 크기에 맞춰 조정
+        if not processed_pixmap.isNull() and not scale_images:
+            try:
+                self.adjustSize()
+                scr = QGuiApplication.primaryScreen()
+                if scr:
+                    avail = scr.availableGeometry()
+                    w = min(self.width(), avail.width() - 80)
+                    h = min(self.height(), avail.height() - 120)
+                    self.resize(max(320, w), max(240, h))
+            except Exception:
+                pass
 
     def _create_pixmap(self, image: Optional[np.ndarray]) -> QPixmap:
         if image is None:
@@ -610,17 +616,10 @@ class OcrLiveReportDialog(QDialog):
         self.image_title.setAlignment(Qt.AlignmentFlag.AlignCenter)
         layout.addWidget(self.image_title)
 
-        # 원본 크기 표시 + 스크롤 가능
+        # 원본 크기 표시(스크롤 없음), 창 크기를 이미지에 맞춰 조정
         self.image_view = QLabel()
         self.image_view.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.image_scroll = QScrollArea()
-        self.image_scroll.setWidgetResizable(True)
-        container = QWidget()
-        vbox = QVBoxLayout(container)
-        vbox.setContentsMargins(0, 0, 0, 0)
-        vbox.addWidget(self.image_view)
-        self.image_scroll.setWidget(container)
-        layout.addWidget(self.image_scroll)
+        layout.addWidget(self.image_view)
 
         self.text_box = QTextEdit()
         self.text_box.setReadOnly(True)
@@ -652,6 +651,18 @@ class OcrLiveReportDialog(QDialog):
     def update_content(self, *, annotated_bgr: Optional[np.ndarray], words: list[dict], ts: float, keywords: Optional[list[str]] = None, show_keywords: bool = False) -> None:
         pix = self._to_pixmap(annotated_bgr)
         self.image_view.setPixmap(pix)
+        try:
+            if not pix.isNull():
+                self.image_view.setFixedSize(pix.size())
+                self.adjustSize()
+                scr = QGuiApplication.primaryScreen()
+                if scr:
+                    avail = scr.availableGeometry()
+                    w = min(self.width(), avail.width() - 80)
+                    h = min(self.height(), avail.height() - 120)
+                    self.resize(max(320, w), max(240, h))
+        except Exception:
+            pass
         # summary
         import time as _t
         tstr = _t.strftime('%H:%M:%S', _t.localtime(ts))
