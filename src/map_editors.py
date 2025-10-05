@@ -1824,9 +1824,9 @@ class FullMinimapEditorDialog(QDialog):
                 padding_y = -3
                 bg_rect_geom = text_rect.adjusted(-padding_x, -padding_y, padding_x, padding_y)
 
-                # 요청: 지형의 이름은 충돌회피 없이 항상 가운데 아래에 고정 배치
+                # 요청: 지형의 이름은 충돌회피 없이 항상 가운데 아래에 고정 배치 (점프링크 이름과 너무 멀지 않게 조금만 아래)
                 base_pos_x = center_x - bg_rect_geom.width() / 2
-                base_pos_y = max_y + 4
+                base_pos_y = max_y + 8
 
                 background_rect = RoundedRectItem(QRectF(0, 0, bg_rect_geom.width(), bg_rect_geom.height()), 3, 3)
                 background_rect.setBrush(QColor(0, 0, 0, 120))
@@ -2297,14 +2297,16 @@ class FullMinimapEditorDialog(QDialog):
         return background_item, text_item
     
     # --- 좌표 라벨 배치 유틸리티 (겹침 방지 + 재배치 지원) ---
-    def _place_coord_label_items(self, bg_item, text_item, anchor_point: QPointF, placed_rects: list, preferred: str = "above") -> None:
+    def _place_coord_label_items(self, bg_item, text_item, anchor_point: QPointF, placed_rects: list, preferred: str = "above", allowed_directions: list[str] | None = None, max_steps: int = 12) -> None:
         """
         좌표 라벨 배경/텍스트 아이템의 위치를 anchor_point 주변으로 배치한다.
         이미 배치된 placed_rects와의 충돌을 피하며, 선호 방향(preferred)을 우선 시도한다.
         preferred: "above"|"below"
+        allowed_directions: 지정 시 해당 방향만 사용 (예: ["below"]).
         """
         current_zoom = max(self.view.transform().m11(), 1e-6)
-        gap_px = 10.0
+        # 좌표 라벨과의 기본 간격(px). 너무 멀어지지 않도록 6px로 조정
+        gap_px = 6.0
         gap_scene = gap_px / current_zoom
 
         bg_rect_local = bg_item.boundingRect()
@@ -2317,7 +2319,7 @@ class FullMinimapEditorDialog(QDialog):
             return QPointF(anchor_point.x() - w / 2, anchor_point.y() + gap_scene + shift_idx * (h + gap_scene))
 
         opposite = "below" if preferred == "above" else "above"
-        directions = [preferred, opposite]
+        directions = allowed_directions if allowed_directions else [preferred, opposite]
 
         def overlaps(rect: QRectF) -> bool:
             # 여유 간격을 반영한 충돌 검사
@@ -2326,7 +2328,7 @@ class FullMinimapEditorDialog(QDialog):
 
         placed = False
         for d in directions:
-            for s in range(0, 10):
+            for s in range(0, max_steps):
                 pos = make_pos(d, s)
                 bg_item.setPos(pos)
                 # 텍스트는 배경 중앙에 정렬
@@ -2369,14 +2371,63 @@ class FullMinimapEditorDialog(QDialog):
                     placed_rects.append(item.sceneBoundingRect())
         except Exception:
             pass
+        # 좌표 라벨은 아래쪽을 우선 시도하고, 불가할 때만 위쪽으로 시도
         for group in combined:
             anchor = group["anchor"]
             bg_item = group["bg"]
             text_item = group["text"]
             preferred = group.get("preferred", "above")
             label_type = group.get("type", "")
+            allowed = None
+            if label_type == "jump_link_name":
+                # 요청: 점프 링크는 항상 바로 아래 고정 배치
+                fixed_base = group.get("fixed_base")
+                if fixed_base:
+                    # 배경/텍스트 크기 산출 후 바로 아래 위치로 고정
+                    bg_rect_local = bg_item.boundingRect()
+                    w, h = bg_rect_local.width(), bg_rect_local.height()
+                    base_x = fixed_base.get("center_x", anchor.x()) - w / 2
+                    # 요청: 점프링크 바로 밑에 더 가깝게 위치하도록 오프셋 축소
+                    base_y = fixed_base.get("bottom_y", anchor.y()) + 2
+                    bg_item.setPos(base_x, base_y)
+                    text_rect_local = text_item.boundingRect()
+                    text_item.setPos(
+                        bg_item.x() + (w - text_rect_local.width()) / 2,
+                        bg_item.y() + (h - text_rect_local.height()) / 2,
+                    )
+                    placed_rects.append(bg_item.sceneBoundingRect())
+                    # 리더 라인 업데이트(고정)
+                    rect_scene = bg_item.sceneBoundingRect()
+                    left, right, top, bottom = rect_scene.left(), rect_scene.right(), rect_scene.top(), rect_scene.bottom()
+                    cx = min(max(anchor.x(), left), right)
+                    cy = min(max(anchor.y(), top), bottom)
+                    distances = [
+                        (abs(cx - left), QPointF(left, cy)),
+                        (abs(cx - right), QPointF(right, cy)),
+                        (abs(cy - top), QPointF(cx, top)),
+                        (abs(cy - bottom), QPointF(cx, bottom)),
+                    ]
+                    _, target = min(distances, key=lambda t: t[0])
+                    if "leader" not in group or group["leader"] is None or group["leader"].scene() is None:
+                        line_item = self.scene.addLine(anchor.x(), anchor.y(), target.x(), target.y(), QPen(QColor("red"), 0))
+                        line_item.setZValue(9)
+                        line_item.setData(0, "jump_link_name_leader")
+                        group["leader"] = line_item
+                        if line_item not in self.lod_text_items:
+                            self.lod_text_items.append(line_item)
+                    else:
+                        group["leader"].setLine(anchor.x(), anchor.y(), target.x(), target.y())
+                    # 점프 링크는 고정 배치이므로 일반 배치 로직 건너뜀
+                    continue
+                else:
+                    allowed = ["below"]
+            elif label_type == "coord_text":
+                # 좌표 라벨은 아래쪽을 우선(필요 시 위쪽)으로만 분산
+                preferred = "below"
+                allowed = ["below", "above"]
             # 위치 배치 (충돌 회피)
-            self._place_coord_label_items(bg_item, text_item, anchor, placed_rects, preferred)
+            max_steps = 8 if label_type == "coord_text" else 12
+            self._place_coord_label_items(bg_item, text_item, anchor, placed_rects, preferred, allowed, max_steps)
             # 리더 라인 업데이트
             rect_scene = bg_item.sceneBoundingRect()
             left, right, top, bottom = rect_scene.left(), rect_scene.right(), rect_scene.top(), rect_scene.bottom()
@@ -2390,7 +2441,15 @@ class FullMinimapEditorDialog(QDialog):
             ]
             _, target = min(distances, key=lambda t: t[0])
             if "leader" not in group or group["leader"] is None or group["leader"].scene() is None:
-                line_item = self.scene.addLine(anchor.x(), anchor.y(), target.x(), target.y(), QPen(QColor("red"), 0))
+                # 타입별 색상: 좌표=흰색, 점프링크=초록, 사다리/오브젝트=주황, 그 외=빨강
+                pen = QPen(QColor("red"), 0)
+                if label_type == "coord_text":
+                    pen = QPen(QColor("white"), 0)
+                elif label_type == "jump_link_name":
+                    pen = QPen(QColor("green"), 0)
+                elif label_type == "transition_object_name":
+                    pen = QPen(QColor("orange"), 0)
+                line_item = self.scene.addLine(anchor.x(), anchor.y(), target.x(), target.y(), pen)
                 line_item.setZValue(9)
                 # 타입별로 data 설정
                 if label_type == "transition_object_name":
@@ -2416,6 +2475,16 @@ class FullMinimapEditorDialog(QDialog):
                 group["leader"] = line_item
             else:
                 group["leader"].setLine(anchor.x(), anchor.y(), target.x(), target.y())
+                # 타입별 색상 갱신
+                pen = None
+                if label_type == "coord_text":
+                    pen = QPen(QColor("white"), 0)
+                elif label_type == "jump_link_name":
+                    pen = QPen(QColor("green"), 0)
+                elif label_type == "transition_object_name":
+                    pen = QPen(QColor("orange"), 0)
+                if pen is not None:
+                    group["leader"].setPen(pen)
     
     def populate_scene(self):
                 self.scene.clear()
@@ -2496,7 +2565,7 @@ class FullMinimapEditorDialog(QDialog):
                     self.scene.addItem(text_item)
                     self.lod_coord_items.extend([bg_item, text_item])
                     self._coord_label_groups.append({
-                        "anchor": anchor, "bg": bg_item, "text": text_item, "preferred": "above"
+                        "anchor": anchor, "bg": bg_item, "text": text_item, "preferred": "above", "type": "coord_text"
                     })
 
                 for obj_data in self.geometry_data.get("transition_objects", []):
@@ -2517,7 +2586,7 @@ class FullMinimapEditorDialog(QDialog):
                         self.scene.addItem(text_item_u)
                         self.lod_coord_items.extend([bg_item_u, text_item_u])
                         self._coord_label_groups.append({
-                            "anchor": upper_point, "bg": bg_item_u, "text": text_item_u, "preferred": "below"
+                            "anchor": upper_point, "bg": bg_item_u, "text": text_item_u, "preferred": "below", "type": "coord_text"
                         })
 
                         # 아래쪽 꼭짓점 좌표 (원래 로직은 위쪽으로 배치)
@@ -2527,7 +2596,7 @@ class FullMinimapEditorDialog(QDialog):
                         self.scene.addItem(text_item_l)
                         self.lod_coord_items.extend([bg_item_l, text_item_l])
                         self._coord_label_groups.append({
-                            "anchor": lower_point, "bg": bg_item_l, "text": text_item_l, "preferred": "above"
+                            "anchor": lower_point, "bg": bg_item_l, "text": text_item_l, "preferred": "above", "type": "coord_text"
                         })
 
                         if 'dynamic_name' in obj_data:
@@ -2543,6 +2612,10 @@ class FullMinimapEditorDialog(QDialog):
                             bg_rect_geom = text_rect.adjusted(-padding_x, -padding_y, padding_x, padding_y)
 
                             line_center = line_item.boundingRect().center()
+                            # 사다리(수직형) 판별: 거의 수직이면 중앙 고정 배치
+                            dx = abs(p2_pos.x() - p1_pos.x())
+                            dy = abs(p2_pos.y() - p1_pos.y())
+                            is_vertical = dx <= 3 and dy > 0
 
                             background_rect = RoundedRectItem(QRectF(0, 0, bg_rect_geom.width(), bg_rect_geom.height()), 3, 3)
                             background_rect.setBrush(QColor(0, 0, 0, 120))
@@ -2558,14 +2631,22 @@ class FullMinimapEditorDialog(QDialog):
 
                             self.lod_text_items.append(text_item)
                             self.lod_text_items.append(background_rect)
-                            # 이름 라벨 그룹 등록 (앵커는 선의 중앙, 위 선호)
-                            self._name_label_groups.append({
-                                "anchor": line_center,
-                                "bg": background_rect,
-                                "text": text_item,
-                                "preferred": "above",
-                                "type": "transition_object_name"
-                            })
+                            if is_vertical:
+                                # 중앙에 고정 배치 (충돌회피 제외)
+                                bg_rect = background_rect.boundingRect()
+                                background_rect.setPos(line_center.x() - bg_rect.width() / 2, line_center.y() - bg_rect.height() / 2)
+                                txt_rect = text_item.boundingRect()
+                                text_item.setPos(background_rect.x() + (bg_rect.width() - txt_rect.width()) / 2,
+                                                 background_rect.y() + (bg_rect.height() - txt_rect.height()) / 2)
+                            else:
+                                # 이름 라벨 그룹 등록 (앵커는 선의 중앙, 위 선호)
+                                self._name_label_groups.append({
+                                    "anchor": line_center,
+                                    "bg": background_rect,
+                                    "text": text_item,
+                                    "preferred": "above",
+                                    "type": "transition_object_name"
+                                })
                 
                 for jump_data in self.geometry_data.get("jump_links", []):
                     line_item = self._add_jump_link_line(QPointF(jump_data['start_vertex_pos'][0], jump_data['start_vertex_pos'][1]), QPointF(jump_data['end_vertex_pos'][0], jump_data['end_vertex_pos'][1]), jump_data['id'])
@@ -2599,13 +2680,15 @@ class FullMinimapEditorDialog(QDialog):
 
                         self.lod_text_items.append(text_item)
                         self.lod_text_items.append(background_rect)
-                        # 이름 라벨 그룹 등록 (앵커는 선의 중앙, 위 선호)
+                        # 이름 라벨 그룹 등록 (앵커는 선의 중앙, 아래 선호 + 아래만 허용)
+                        line_rect = line_item.boundingRect()
                         self._name_label_groups.append({
                             "anchor": line_center,
                             "bg": background_rect,
                             "text": text_item,
-                            "preferred": "above",
-                            "type": "jump_link_name"
+                            "preferred": "below",
+                            "type": "jump_link_name",
+                            "fixed_base": {"center_x": line_rect.center().x(), "bottom_y": line_rect.bottom()}
                         })
 
                 # 좌표/이름 라벨 초기 배치 수행 (통합 충돌회피)
@@ -2714,6 +2797,22 @@ class FullMinimapEditorDialog(QDialog):
                 base_visible = self.chk_show_terrain.isChecked()
 
             item.setVisible(is_name_visible and base_visible)
+
+        # 이름 라벨 동적 스케일링: 줌이 낮을수록 크게, 확대할수록 줄어듦(상/하한 적용)
+        def clamp(v, lo, hi):
+            return max(lo, min(hi, v))
+        # 기준 줌에서 1.0배가 되도록 설정 (예: 2.5)
+        base_zoom = max(self.lod_threshold, 2.5)
+        # 스케일 상/하한 (과도한 확대/축소 방지)
+        min_s, max_s = 0.6, 1.8
+        dynamic_scale = clamp(base_zoom / max(current_zoom, 1e-6), min_s, max_s)
+        for item in self.lod_text_items:
+            t = item.data(0)
+            if t in ("floor_text", "floor_text_bg", "transition_object_name", "transition_object_name_bg", "jump_link_name", "jump_link_name_bg"):
+                try:
+                    item.setScale(dynamic_scale)
+                except Exception:
+                    pass
 
         # 좌표 텍스트 가시성 제어 (LOD 대신 보기 옵션 체크박스)
         is_coord_visible = True

@@ -3408,9 +3408,16 @@ class MapTab(QWidget):
 
     def open_key_feature_manager(self):
         all_waypoints = self.get_all_waypoints_with_route_name()
-        dialog = KeyFeatureManagerDialog(self.key_features, all_waypoints, self)
-        dialog.exec()
-        self._generate_full_map_pixmap()
+        # 모델리스로 열어도 다른 창을 조작 가능하도록 변경
+        self.key_feature_manager_dialog = KeyFeatureManagerDialog(self.key_features, all_waypoints, self)
+        try:
+            self.key_feature_manager_dialog.setModal(False)
+            self.key_feature_manager_dialog.setWindowModality(Qt.WindowModality.NonModal)
+        except Exception:
+            pass
+        # 닫힐 때 미니맵 전체 이미지 재생성 (기존 exec() 후 동작 대체)
+        self.key_feature_manager_dialog.finished.connect(self._on_key_feature_manager_closed)
+        self.key_feature_manager_dialog.show()
 
     def open_full_minimap_editor(self):
         """'미니맵 지형 편집기 열기' 버튼에 연결된 슬롯."""
@@ -3433,26 +3440,62 @@ class MapTab(QWidget):
         )
         self.global_pos_updated.connect(self.editor_dialog.update_locked_position)
         
+        # 모델리스로 열어 타 창 조작 가능
         try:
-            result = self.editor_dialog.exec()
-            
-            if result:
-                self.geometry_data = self.editor_dialog.get_updated_geometry_data()
-                self._ensure_waypoint_event_fields()
-                self._refresh_event_waypoint_states()
-                self._refresh_forbidden_wall_states()
-                self.render_options = self.editor_dialog.get_current_view_options()
-                self.save_profile_data()
-                self.update_general_log("지형 편집기 변경사항이 저장되었습니다.", "green")
-                self.global_positions = self._calculate_global_positions()
-                self._generate_full_map_pixmap()
-                self.populate_waypoint_list()  # 변경사항을 웨이포인트 경로 관리 UI에 즉시 반영 ---
-            else:
-                self.update_general_log("지형 편집이 취소되었습니다.", "black")
-            
+            self.editor_dialog.setModal(False)
+            self.editor_dialog.setWindowModality(Qt.WindowModality.NonModal)
+            self.editor_dialog.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, True)
+        except Exception:
+            pass
+        # 결과 처리 시그널 연결
+        self.editor_dialog.accepted.connect(self._on_full_minimap_editor_accepted)
+        self.editor_dialog.rejected.connect(self._on_full_minimap_editor_rejected)
+        self.editor_dialog.finished.connect(self._on_full_minimap_editor_finished)
+        self.editor_dialog.show()
+
+    def _on_key_feature_manager_closed(self, result: int) -> None:
+        try:
+            self._generate_full_map_pixmap()
+        except Exception:
+            pass
         finally:
+            try:
+                # 참조 해제
+                self.key_feature_manager_dialog.deleteLater()
+            except Exception:
+                pass
+            self.key_feature_manager_dialog = None
+
+    def _on_full_minimap_editor_accepted(self) -> None:
+        # 모델리스 수락 시 기존 exec()의 성공 분기 로직 이식
+        try:
+            self.geometry_data = self.editor_dialog.get_updated_geometry_data()
+            self._ensure_waypoint_event_fields()
+            self._refresh_event_waypoint_states()
+            self._refresh_forbidden_wall_states()
+            self.render_options = self.editor_dialog.get_current_view_options()
+            self.save_profile_data()
+            self.update_general_log("지형 편집기 변경사항이 저장되었습니다.", "green")
+            self.global_positions = self._calculate_global_positions()
+            self._generate_full_map_pixmap()
+            self.populate_waypoint_list()
+        except Exception:
+            pass
+
+    def _on_full_minimap_editor_rejected(self) -> None:
+        self.update_general_log("지형 편집이 취소되었습니다.", "black")
+
+    def _on_full_minimap_editor_finished(self, _: int) -> None:
+        # 시그널 연결 해제 및 참조 정리
+        try:
             self.global_pos_updated.disconnect(self.editor_dialog.update_locked_position)
-            self.editor_dialog = None
+        except Exception:
+            pass
+        try:
+            self.editor_dialog.deleteLater()
+        except Exception:
+            pass
+        self.editor_dialog = None
 
     def get_waypoint_name_from_item(self, item):
         if not item:
