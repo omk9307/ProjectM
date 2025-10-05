@@ -449,6 +449,7 @@ class StatusRecognitionPreviewDialog(QDialog):
         summary_lines: list[str],
         *,
         processed_title: Optional[str] = None,
+        scale_images: bool = True,
     ) -> None:
         super().__init__(parent)
         self.setWindowTitle(window_title)
@@ -492,10 +493,24 @@ class StatusRecognitionPreviewDialog(QDialog):
             processed_column.addWidget(processed_title_label)
             processed_view = QLabel()
             processed_view.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            processed_view.setPixmap(self._scaled_pixmap(processed_pixmap))
+            if scale_images:
+                processed_view.setPixmap(self._scaled_pixmap(processed_pixmap))
+            else:
+                processed_view.setPixmap(processed_pixmap)
             processed_view.setCursor(Qt.CursorShape.PointingHandCursor)
             processed_view.mousePressEvent = lambda e, pm=processed_pixmap: self._open_image_viewer(pm)
-            processed_column.addWidget(processed_view)
+            if scale_images:
+                processed_column.addWidget(processed_view)
+            else:
+                # 원본 크기 표시를 위해 스크롤 영역에 넣는다
+                scroll = QScrollArea()
+                scroll.setWidgetResizable(True)
+                container = QWidget()
+                v = QVBoxLayout(container)
+                v.setContentsMargins(0, 0, 0, 0)
+                v.addWidget(processed_view)
+                scroll.setWidget(container)
+                processed_column.addWidget(scroll)
             image_layout.addLayout(processed_column)
 
         layout.addLayout(image_layout)
@@ -595,9 +610,17 @@ class OcrLiveReportDialog(QDialog):
         self.image_title.setAlignment(Qt.AlignmentFlag.AlignCenter)
         layout.addWidget(self.image_title)
 
+        # 원본 크기 표시 + 스크롤 가능
         self.image_view = QLabel()
         self.image_view.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        layout.addWidget(self.image_view)
+        self.image_scroll = QScrollArea()
+        self.image_scroll.setWidgetResizable(True)
+        container = QWidget()
+        vbox = QVBoxLayout(container)
+        vbox.setContentsMargins(0, 0, 0, 0)
+        vbox.addWidget(self.image_view)
+        self.image_scroll.setWidget(container)
+        layout.addWidget(self.image_scroll)
 
         self.text_box = QTextEdit()
         self.text_box.setReadOnly(True)
@@ -626,29 +649,33 @@ class OcrLiveReportDialog(QDialog):
                 return QPixmap()
         return QPixmap.fromImage(qimg)
 
-    @staticmethod
-    def _scaled(pix: QPixmap) -> QPixmap:
-        if pix.isNull():
-            return pix
-        return pix.scaled(320, 250, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation)
-
-    def update_content(self, *, annotated_bgr: Optional[np.ndarray], words: list[dict], ts: float) -> None:
+    def update_content(self, *, annotated_bgr: Optional[np.ndarray], words: list[dict], ts: float, keywords: Optional[list[str]] = None, show_keywords: bool = False) -> None:
         pix = self._to_pixmap(annotated_bgr)
-        self.image_view.setPixmap(self._scaled(pix))
+        self.image_view.setPixmap(pix)
         # summary
         import time as _t
         tstr = _t.strftime('%H:%M:%S', _t.localtime(ts))
         self.summary_label.setText(f'최근 업데이트: {tstr}  |  항목: {len(words)}')
         # text list
         lines: list[str] = []
+        total = len(words)
+        lines.append(f'감지 단어 수: {total}개')
+        kw_list = keywords if isinstance(keywords, list) else []
+        kw_count = 0
         for i, w in enumerate(words[:50]):
             try:
                 text = str(w.get('text', ''))
                 conf = int(round(float(w.get('conf', 0))))
                 h = int(w.get('height', 0))
-                lines.append(f'- #{i+1} "{text}" (c={conf}% h={h}px)')
+                wid = int(w.get('width', 0))
+                lines.append(f'[{i+1}] : {text} (신뢰도: {conf}% , W: {wid} px, H: {h} px)')
+                if show_keywords and kw_list:
+                    if any((isinstance(kw, str) and kw.strip() and kw.strip() in text) for kw in kw_list):
+                        kw_count += 1
             except Exception:
                 continue
+        if show_keywords and kw_list:
+            lines.append(f'키워드 검출 수: {kw_count}개')
         self.text_box.setPlainText('\n'.join(lines) if lines else '표시할 항목이 없습니다.')
 
 # --- 1.5. 위젯: 드래그앤드롭 커스텀 QTreeWidget ---
@@ -2620,8 +2647,12 @@ class DataManager:
                 # 필터/알림
                 'conf_threshold': 0,         # 0~100 (%). 0이면 미적용
                 'min_height_px': 0,          # 0~1000 px. 0이면 미적용
+                'max_height_px': 0,          # 0이면 미적용
+                'min_width_px': 0,           # 0이면 미적용
+                'max_width_px': 0,           # 0이면 미적용
                 'keywords': [],              # 콤마 구분 저장
                 'telegram_enabled': False,   # 키워드 포함 시 전송
+                'save_screenshots': False,   # 탐지 주기마다 스크린샷 저장 여부
             },
             'per_class': {},
         }
@@ -2752,11 +2783,47 @@ class DataManager:
                 if ocr_cfg.get('min_height_px') != mh:
                     ocr_cfg['min_height_px'] = mh
                     changed = True
+            if 'max_height_px' not in ocr_cfg:
+                ocr_cfg['max_height_px'] = int(default_config['ocr']['max_height_px'])
+                changed = True
+            else:
+                try:
+                    xh = max(0, min(5000, int(ocr_cfg['max_height_px'])))
+                except Exception:
+                    xh = 0
+                if ocr_cfg.get('max_height_px') != xh:
+                    ocr_cfg['max_height_px'] = xh
+                    changed = True
+            if 'min_width_px' not in ocr_cfg:
+                ocr_cfg['min_width_px'] = int(default_config['ocr']['min_width_px'])
+                changed = True
+            else:
+                try:
+                    mw = max(0, min(5000, int(ocr_cfg['min_width_px'])))
+                except Exception:
+                    mw = 0
+                if ocr_cfg.get('min_width_px') != mw:
+                    ocr_cfg['min_width_px'] = mw
+                    changed = True
+            if 'max_width_px' not in ocr_cfg:
+                ocr_cfg['max_width_px'] = int(default_config['ocr']['max_width_px'])
+                changed = True
+            else:
+                try:
+                    xw = max(0, min(5000, int(ocr_cfg['max_width_px'])))
+                except Exception:
+                    xw = 0
+                if ocr_cfg.get('max_width_px') != xw:
+                    ocr_cfg['max_width_px'] = xw
+                    changed = True
             if 'keywords' not in ocr_cfg or not isinstance(ocr_cfg.get('keywords'), list):
                 ocr_cfg['keywords'] = []
                 changed = True
             if 'telegram_enabled' not in ocr_cfg:
                 ocr_cfg['telegram_enabled'] = bool(default_config['ocr']['telegram_enabled'])
+                changed = True
+            if 'save_screenshots' not in ocr_cfg:
+                ocr_cfg['save_screenshots'] = bool(default_config['ocr']['save_screenshots'])
                 changed = True
         return merged, changed
 
@@ -2962,6 +3029,30 @@ class DataManager:
                 if int(ocr_cfg.get('min_height_px', 0) or 0) != mh:
                     ocr_cfg['min_height_px'] = mh
                     ocr_changed = True
+            if 'max_height_px' in ocr_updates:
+                try:
+                    xh = max(0, min(5000, int(ocr_updates['max_height_px'])))
+                except Exception:
+                    xh = int(ocr_cfg.get('max_height_px', 0) or 0)
+                if int(ocr_cfg.get('max_height_px', 0) or 0) != xh:
+                    ocr_cfg['max_height_px'] = xh
+                    ocr_changed = True
+            if 'min_width_px' in ocr_updates:
+                try:
+                    mw = max(0, min(5000, int(ocr_updates['min_width_px'])))
+                except Exception:
+                    mw = int(ocr_cfg.get('min_width_px', 0) or 0)
+                if int(ocr_cfg.get('min_width_px', 0) or 0) != mw:
+                    ocr_cfg['min_width_px'] = mw
+                    ocr_changed = True
+            if 'max_width_px' in ocr_updates:
+                try:
+                    xw = max(0, min(5000, int(ocr_updates['max_width_px'])))
+                except Exception:
+                    xw = int(ocr_cfg.get('max_width_px', 0) or 0)
+                if int(ocr_cfg.get('max_width_px', 0) or 0) != xw:
+                    ocr_cfg['max_width_px'] = xw
+                    ocr_changed = True
             if 'keywords' in ocr_updates:
                 kws = ocr_updates.get('keywords')
                 if not isinstance(kws, list):
@@ -2974,6 +3065,11 @@ class DataManager:
                 te = bool(ocr_updates['telegram_enabled'])
                 if bool(ocr_cfg.get('telegram_enabled', False)) != te:
                     ocr_cfg['telegram_enabled'] = te
+                    ocr_changed = True
+            if 'save_screenshots' in ocr_updates:
+                ss = bool(ocr_updates['save_screenshots'])
+                if bool(ocr_cfg.get('save_screenshots', False)) != ss:
+                    ocr_cfg['save_screenshots'] = ss
                     ocr_changed = True
             if ocr_changed:
                 config['ocr'] = ocr_cfg
@@ -4599,6 +4695,11 @@ class LearningTab(QWidget):
         self.ocr_gpu_checkbox.setToolTip('PaddleOCR을 GPU로 실행합니다. (Paddle GPU 빌드 필요)')
         self.ocr_gpu_checkbox.toggled.connect(self._handle_ocr_gpu_toggled)
         engine_field_row.addWidget(self.ocr_gpu_checkbox)
+        # 단독 실행 체크박스
+        self.ocr_standalone_checkbox = QCheckBox('단독 실행')
+        self.ocr_standalone_checkbox.setToolTip('맵/사냥탭이 실행되지 않아도 OCR을 단독 실행합니다.')
+        self.ocr_standalone_checkbox.toggled.connect(self._handle_ocr_standalone_toggled)
+        engine_field_row.addWidget(self.ocr_standalone_checkbox)
         engine_field_row.addStretch(1)
         ocr_form.addRow('엔진', engine_field)
 
@@ -4627,16 +4728,26 @@ class LearningTab(QWidget):
         roi_field_row.addStretch(1)
         ocr_form.addRow('탐지 범위', roi_field)
 
-        # 탐지주기(초)
+        # 탐지주기(초) + 스크린샷 저장 체크
+        interval_field = QWidget()
+        interval_row = QHBoxLayout(interval_field)
+        interval_row.setContentsMargins(0, 0, 0, 0)
+        interval_row.setSpacing(8)
         self.ocr_interval_spin = QDoubleSpinBox()
         self.ocr_interval_spin.setRange(0.2, 600.0)
         self.ocr_interval_spin.setSingleStep(0.2)
         self.ocr_interval_spin.setDecimals(2)
         self.ocr_interval_spin.setMaximumWidth(100)
         self.ocr_interval_spin.valueChanged.connect(self._handle_ocr_interval_changed)
-        ocr_form.addRow('탐지 주기(초)', self.ocr_interval_spin)
+        interval_row.addWidget(self.ocr_interval_spin)
+        self.ocr_screenshot_checkbox = QCheckBox('스크린샷 저장')
+        self.ocr_screenshot_checkbox.setToolTip('탐지 주기마다 ROI 원본과 OCR 결과 이미지를 저장합니다.')
+        self.ocr_screenshot_checkbox.toggled.connect(self._handle_ocr_save_screenshot_toggled)
+        interval_row.addWidget(self.ocr_screenshot_checkbox)
+        interval_row.addStretch(1)
+        ocr_form.addRow('탐지 주기(초)', interval_field)
 
-        # 필터(신뢰도% + 최소 높이 px)
+        # 필터(신뢰도% + 최소/최대 높이 px + 최소/최대 넓이 px)
         filter_field = QWidget()
         filter_row = QHBoxLayout(filter_field)
         filter_row.setContentsMargins(0, 0, 0, 0)
@@ -4656,6 +4767,30 @@ class LearningTab(QWidget):
         filter_row.addSpacing(8)
         filter_row.addWidget(QLabel('최소 높이(px)'))
         filter_row.addWidget(self.ocr_min_height_spin)
+        self.ocr_max_height_spin = QSpinBox()
+        self.ocr_max_height_spin.setRange(0, 5000)
+        self.ocr_max_height_spin.setSingleStep(1)
+        self.ocr_max_height_spin.setMaximumWidth(90)
+        self.ocr_max_height_spin.valueChanged.connect(self._handle_ocr_max_height_changed)
+        filter_row.addSpacing(8)
+        filter_row.addWidget(QLabel('최대 높이(px)'))
+        filter_row.addWidget(self.ocr_max_height_spin)
+        self.ocr_min_width_spin = QSpinBox()
+        self.ocr_min_width_spin.setRange(0, 5000)
+        self.ocr_min_width_spin.setSingleStep(1)
+        self.ocr_min_width_spin.setMaximumWidth(90)
+        self.ocr_min_width_spin.valueChanged.connect(self._handle_ocr_min_width_changed)
+        filter_row.addSpacing(8)
+        filter_row.addWidget(QLabel('최소 넓이(px)'))
+        filter_row.addWidget(self.ocr_min_width_spin)
+        self.ocr_max_width_spin = QSpinBox()
+        self.ocr_max_width_spin.setRange(0, 5000)
+        self.ocr_max_width_spin.setSingleStep(1)
+        self.ocr_max_width_spin.setMaximumWidth(90)
+        self.ocr_max_width_spin.valueChanged.connect(self._handle_ocr_max_width_changed)
+        filter_row.addSpacing(8)
+        filter_row.addWidget(QLabel('최대 넓이(px)'))
+        filter_row.addWidget(self.ocr_max_width_spin)
         filter_row.addStretch(1)
         ocr_form.addRow('필터', filter_field)
 
@@ -6137,6 +6272,37 @@ class LearningTab(QWidget):
                     self.ocr_min_height_spin.blockSignals(False)
                 except Exception:
                     pass
+            if hasattr(self, 'ocr_max_height_spin'):
+                try:
+                    xh = int(ocr_cfg.get('max_height_px') or 0)
+                    self.ocr_max_height_spin.blockSignals(True)
+                    self.ocr_max_height_spin.setValue(max(0, xh))
+                    self.ocr_max_height_spin.blockSignals(False)
+                except Exception:
+                    pass
+            if hasattr(self, 'ocr_min_width_spin'):
+                try:
+                    mw = int(ocr_cfg.get('min_width_px') or 0)
+                    self.ocr_min_width_spin.blockSignals(True)
+                    self.ocr_min_width_spin.setValue(max(0, mw))
+                    self.ocr_min_width_spin.blockSignals(False)
+                except Exception:
+                    pass
+            if hasattr(self, 'ocr_max_width_spin'):
+                try:
+                    xw = int(ocr_cfg.get('max_width_px') or 0)
+                    self.ocr_max_width_spin.blockSignals(True)
+                    self.ocr_max_width_spin.setValue(max(0, xw))
+                    self.ocr_max_width_spin.blockSignals(False)
+                except Exception:
+                    pass
+            if hasattr(self, 'ocr_screenshot_checkbox'):
+                try:
+                    self.ocr_screenshot_checkbox.blockSignals(True)
+                    self.ocr_screenshot_checkbox.setChecked(bool(ocr_cfg.get('save_screenshots', False)))
+                    self.ocr_screenshot_checkbox.blockSignals(False)
+                except Exception:
+                    pass
             if hasattr(self, 'ocr_keyword_alert_checkbox'):
                 try:
                     self.ocr_keyword_alert_checkbox.blockSignals(True)
@@ -6225,6 +6391,45 @@ class LearningTab(QWidget):
         self.nameplate_config = self.data_manager.update_monster_nameplate_config({'ocr': {'min_height_px': v}})
         self._apply_ocr_config_to_ui()
 
+    def _handle_ocr_max_height_changed(self, value: int) -> None:
+        if getattr(self, '_nameplate_ui_updating', False):
+            return
+        try:
+            v = int(value)
+        except (TypeError, ValueError):
+            return
+        v = max(0, min(5000, v))
+        self.nameplate_config = self.data_manager.update_monster_nameplate_config({'ocr': {'max_height_px': v}})
+        self._apply_ocr_config_to_ui()
+
+    def _handle_ocr_min_width_changed(self, value: int) -> None:
+        if getattr(self, '_nameplate_ui_updating', False):
+            return
+        try:
+            v = int(value)
+        except (TypeError, ValueError):
+            return
+        v = max(0, min(5000, v))
+        self.nameplate_config = self.data_manager.update_monster_nameplate_config({'ocr': {'min_width_px': v}})
+        self._apply_ocr_config_to_ui()
+
+    def _handle_ocr_max_width_changed(self, value: int) -> None:
+        if getattr(self, '_nameplate_ui_updating', False):
+            return
+        try:
+            v = int(value)
+        except (TypeError, ValueError):
+            return
+        v = max(0, min(5000, v))
+        self.nameplate_config = self.data_manager.update_monster_nameplate_config({'ocr': {'max_width_px': v}})
+        self._apply_ocr_config_to_ui()
+
+    def _handle_ocr_save_screenshot_toggled(self, checked: bool) -> None:
+        if getattr(self, '_nameplate_ui_updating', False):
+            return
+        self.nameplate_config = self.data_manager.update_monster_nameplate_config({'ocr': {'save_screenshots': bool(checked)}})
+        self._apply_ocr_config_to_ui()
+
     def _handle_ocr_keyword_alert_toggled(self, checked: bool) -> None:
         if getattr(self, '_nameplate_ui_updating', False):
             return
@@ -6257,6 +6462,21 @@ class LearningTab(QWidget):
             self.ocr_engine_label.setText(get_ocr_engine_label())
             err = get_ocr_last_error()
             self.ocr_engine_label.setToolTip(err or '')
+
+    def _handle_ocr_standalone_toggled(self, checked: bool) -> None:
+        # 메인 윈도우에 단독 실행 상태 전달
+        try:
+            main_window = self.window()
+            if main_window and hasattr(main_window, 'api_set_ocr_standalone'):
+                main_window.api_set_ocr_standalone(bool(checked))
+        except Exception:
+            pass
+        if checked:
+            # 자동으로 탐지 보고 창 열기
+            try:
+                self._open_ocr_live_report()
+            except Exception:
+                pass
 
     def _capture_by_monitor(self, monitor: dict, window_title: str) -> Optional[np.ndarray]:
         manager = get_capture_manager()
@@ -6300,25 +6520,53 @@ class LearningTab(QWidget):
         frame_bgr = self._capture_by_monitor(monitor, 'OCR 인식 확인')
         if frame_bgr is None:
             return
-        # 기본값: 최소 높이/신뢰도 필터 없이 있는 그대로 추출
-        words = ocr_korean_words(frame_bgr, psm=11, preprocess='auto')
+        # 필터값 반영
+        conf_threshold = ocr_cfg.get('conf_threshold', 0) or 0
+        min_height_px = ocr_cfg.get('min_height_px', 0) or 0
+        max_height_px = ocr_cfg.get('max_height_px', 0) or 0
+        min_width_px = ocr_cfg.get('min_width_px', 0) or 0
+        max_width_px = ocr_cfg.get('max_width_px', 0) or 0
+        # 0은 비적용으로 전달(None 처리는 함수 내부에서 함)
+        ct = None if int(conf_threshold) <= 0 else int(conf_threshold)
+        mh = None if int(min_height_px) <= 0 else int(min_height_px)
+        xh = None if int(max_height_px) <= 0 else int(max_height_px)
+        mw = None if int(min_width_px) <= 0 else int(min_width_px)
+        xw = None if int(max_width_px) <= 0 else int(max_width_px)
+        words = ocr_korean_words(
+            frame_bgr,
+            psm=11,
+            conf_threshold=ct,
+            min_height_px=mh,
+            max_height_px=xh,
+            min_width_px=mw,
+            max_width_px=xw,
+            preprocess='auto',
+        )
         annotated = draw_word_boxes(frame_bgr, words)
         lines: list[str] = []
         engine = get_ocr_engine_label()
         lines.append(f'엔진: {engine}')
-        if not words:
-            lines.append('상태: OCR 결과가 비어 있습니다.')
-        else:
-            lines.append(f'감지 워드 수: {len(words)}')
-            for i, w in enumerate(words[:30]):
-                try:
-                    lines.append(f'- #{i+1} "{w.text}" (conf={int(round(w.conf))}%, h={w.height}px)')
-                except Exception:
-                    pass
-            if len(words) > 30:
-                lines.append(f'... 외 {len(words)-30}개 생략')
+        total = len(words)
+        lines.append(f'감지 단어 수: {total}개')
+        for i, w in enumerate(words[:30]):
+            try:
+                lines.append(f'[{i+1}] : {w.text} (신뢰도: {int(round(w.conf))}% , W: {int(w.width)} px, H: {int(w.height)} px)')
+            except Exception:
+                pass
+        if len(words) > 30:
+            lines.append(f'... 외 {len(words)-30}개 생략')
+        # 키워드 검출 수 (A안, 부분일치)
+        show_kw = bool(ocr_cfg.get('telegram_enabled', False))
+        keywords = ocr_cfg.get('keywords', []) if isinstance(ocr_cfg.get('keywords'), list) else []
+        if show_kw and keywords:
+            kw_count = 0
+            for w in words:
+                text = (w.text or '').strip()
+                if any((isinstance(kw, str) and kw.strip() and kw.strip() in text) for kw in keywords):
+                    kw_count += 1
+            lines.append(f'키워드 검출 수: {kw_count}개')
         roi_text = self._format_status_roi(roi)
-        # 요구사항: 학습탭 OCR 테스트는 결과 이미지만 표시(원본은 숨김)
+        # 요구사항: 원본 크기의 OCR 결과 이미지만 표시(원본은 숨김)
         dialog = StatusRecognitionPreviewDialog(
             self,
             'OCR 인식 확인',
@@ -6327,6 +6575,7 @@ class LearningTab(QWidget):
             annotated,
             lines,
             processed_title='OCR 결과',
+            scale_images=False,
         )
         # 비모달로 표시, 참조 보유
         self._last_ocr_preview_dialog = dialog
@@ -6376,14 +6625,19 @@ class LearningTab(QWidget):
         if not hasattr(self, '_ocr_live_dialog') or self._ocr_live_dialog is None:
             return
         monitor = self._get_ocr_monitor()
+        # 키워드 옵션
+        cfg = self.nameplate_config if isinstance(self.nameplate_config, dict) else {}
+        ocr_cfg = cfg.get('ocr', {}) if isinstance(cfg.get('ocr'), dict) else {}
+        show_keywords = bool(ocr_cfg.get('telegram_enabled', False))
+        keywords = ocr_cfg.get('keywords', []) if isinstance(ocr_cfg.get('keywords'), list) else []
         if monitor is None:
             # ROI 미설정 시 텍스트만 갱신
-            self._ocr_live_dialog.update_content(annotated_bgr=None, words=words, ts=ts)
+            self._ocr_live_dialog.update_content(annotated_bgr=None, words=words, ts=ts, keywords=keywords, show_keywords=show_keywords)
             return
         # 화면 캡처 후 바운딩 박스 그리기
         frame_bgr = self._capture_by_monitor(monitor, 'OCR 탐지 보고')
         if frame_bgr is None:
-            self._ocr_live_dialog.update_content(annotated_bgr=None, words=words, ts=ts)
+            self._ocr_live_dialog.update_content(annotated_bgr=None, words=words, ts=ts, keywords=keywords, show_keywords=show_keywords)
             return
         try:
             # words를 OCRWord 형태로 변환 없이 draw_word_boxes에 맞춰 재구성
@@ -6398,7 +6652,7 @@ class LearningTab(QWidget):
                     pt1 = (left, top)
                     pt2 = (left + max(1, width), top + max(1, height))
                     cv2.rectangle(annotated, pt1, pt2, (0, 255, 0), 1)
-                    label = f"h={height}px c={int(round(conf))}%"
+                    label = f"W={width} H={height} C={int(round(conf))}%"
                     (tw, th), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.45, 1)
                     bg1 = (pt1[0], max(0, pt1[1] - th - 4))
                     bg2 = (pt1[0] + tw + 6, pt1[1])
@@ -6408,7 +6662,7 @@ class LearningTab(QWidget):
                     continue
         except Exception:
             annotated = frame_bgr
-        self._ocr_live_dialog.update_content(annotated_bgr=annotated, words=words, ts=ts)
+        self._ocr_live_dialog.update_content(annotated_bgr=annotated, words=words, ts=ts, keywords=keywords, show_keywords=show_keywords)
 
     def on_nickname_text_changed(self):
         if self._nickname_ui_updating:

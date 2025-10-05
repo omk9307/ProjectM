@@ -205,6 +205,7 @@ class MainWindow(QMainWindow):
         # OCR 워커 상태
         self._ocr_thread: object | None = None
         self._ocr_profile_provider: tuple | None = None  # (get_active_profile, get_profile_data)
+        self._ocr_force_running: bool = False  # 학습탭 단독 실행 모드
 
         self.load_tabs()
         # 텔레그램 브리지 핸들러 보관용
@@ -335,7 +336,11 @@ class MainWindow(QMainWindow):
                             'keywords': ocr.get('keywords', []) if isinstance(ocr.get('keywords'), list) else [],
                             'telegram_enabled': bool(ocr.get('telegram_enabled', False)),
                             'min_height_px': int(ocr.get('min_height_px') or 0),
+                            'max_height_px': int(ocr.get('max_height_px') or 0),
+                            'min_width_px': int(ocr.get('min_width_px') or 0),
+                            'max_width_px': int(ocr.get('max_width_px') or 0),
                             'conf_threshold': int(ocr.get('conf_threshold') or 0),
+                            'save_screenshots': bool(ocr.get('save_screenshots', False)),
                         }
                     except Exception:
                         return {}
@@ -660,11 +665,16 @@ class MainWindow(QMainWindow):
         print('[Main] OCR 워커를 중지했습니다.')
 
     def _update_ocr_watch_state(self) -> None:
-        should_run = bool(self._hunt_detection_active or self._map_detection_active)
+        should_run = bool(self._ocr_force_running or self._hunt_detection_active or self._map_detection_active)
         if should_run:
             self._start_ocr_watch()
         else:
             self._stop_ocr_watch()
+
+    # 외부 API: 학습탭 단독 실행 토글
+    def api_set_ocr_standalone(self, enabled: bool) -> None:
+        self._ocr_force_running = bool(enabled)
+        self._update_ocr_watch_state()
 
 
 if __name__ == '__main__':

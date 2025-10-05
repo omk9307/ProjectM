@@ -705,7 +705,7 @@ def ocr_korean_words(
 
 
 def draw_word_boxes(image_bgr: np.ndarray, words: List[OCRWord]) -> np.ndarray:
-    """바운딩 박스와 라벨을 그린 이미지를 반환한다."""
+    """바운딩 박스와 라벨(W/H/Conf)을 그린 이미지를 반환한다."""
     if image_bgr is None or image_bgr.size == 0:
         return image_bgr
     out = image_bgr.copy()
@@ -714,7 +714,7 @@ def draw_word_boxes(image_bgr: np.ndarray, words: List[OCRWord]) -> np.ndarray:
         pt2 = (int(w.left + w.width), int(w.top + w.height))
         cv2.rectangle(out, pt1, pt2, (0, 255, 0), 1)
         # OpenCV 기본 폰트는 한글을 지원하지 않음 → ASCII만 표기
-        label = f"h={w.height}px c={int(round(w.conf))}%"
+        label = f"W={int(w.width)} H={int(w.height)} C={int(round(w.conf))}%"
         (tw, th), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.45, 1)
         bg1 = (pt1[0], max(0, pt1[1] - th - 4))
         bg2 = (pt1[0] + tw + 6, pt1[1])
@@ -730,6 +730,9 @@ def ocr_korean_words(
     psm: int = 11,  # 미사용(호환)
     conf_threshold: float | None = None,
     min_height_px: int | None = None,
+    max_height_px: int | None = None,
+    min_width_px: int | None = None,
+    max_width_px: int | None = None,
     preprocess: str = "auto",  # 미사용(호환)
     debug: bool = False,  # 미사용(호환)
 ) -> List[OCRWord]:
@@ -814,7 +817,14 @@ def ocr_korean_words(
                 top = max(0, min(ys))
                 width = max(1, max(xs) - left)
                 height = max(1, max(ys) - top)
-                if (min_height_px is not None) and height < int(min_height_px):
+                # 크기 필터
+                if (min_height_px is not None) and int(min_height_px) > 0 and height < int(min_height_px):
+                    continue
+                if (max_height_px is not None) and int(max_height_px) > 0 and height > int(max_height_px):
+                    continue
+                if (min_width_px is not None) and int(min_width_px) > 0 and width < int(min_width_px):
+                    continue
+                if (max_width_px is not None) and int(max_width_px) > 0 and width > int(max_width_px):
                     continue
             text = _extract_korean(raw)
             if not text:
@@ -968,7 +978,8 @@ class OCRWatchThread(QThread):
                 else:
                     self.ocr_status.emit("[OCR] PaddleOCR 미설치 또는 초기화 실패. 설치/네트워크 확인이 필요합니다.")
             interval = max(1.0, float(profile.get("interval_sec", 30.0)))
-            telegram_enabled = bool(profile.get("telegram_enabled", False))
+            # 키워드 알림 체크 여부(체크 시 키워드 일치시에만 전송)
+            telegram_keyword_mode = bool(profile.get("telegram_enabled", False))
             send_count = int(profile.get("telegram_send_count", 1))
             send_itv = max(1.0, float(profile.get("telegram_send_interval", 5.0)))
             keywords = profile.get("keywords", []) if isinstance(profile.get("keywords"), list) else []
@@ -982,6 +993,34 @@ class OCRWatchThread(QThread):
                     min_height_px = None if _mhi <= 0 else _mhi
             except (TypeError, ValueError):
                 min_height_px = None
+            try:
+                _xh = profile.get("max_height_px", None)
+                if _xh in (None, ""):
+                    max_height_px = None
+                else:
+                    _xhi = int(_xh)
+                    max_height_px = None if _xhi <= 0 else _xhi
+            except (TypeError, ValueError):
+                max_height_px = None
+            try:
+                _mw = profile.get("min_width_px", None)
+                if _mw in (None, ""):
+                    min_width_px = None
+                else:
+                    _mwi = int(_mw)
+                    min_width_px = None if _mwi <= 0 else _mwi
+            except (TypeError, ValueError):
+                min_width_px = None
+            try:
+                _xw = profile.get("max_width_px", None)
+                if _xw in (None, ""):
+                    max_width_px = None
+                else:
+                    _xwi = int(_xw)
+                    max_width_px = None if _xwi <= 0 else _xwi
+            except (TypeError, ValueError):
+                max_width_px = None
+            save_screenshots = bool(profile.get("save_screenshots", False))
             try:
                 _ct = profile.get("conf_threshold", None)
                 conf_threshold = float(_ct) if _ct not in (None, "") else None
@@ -1033,13 +1072,45 @@ class OCRWatchThread(QThread):
             # 마스킹: 바운딩 내에서 파츠 영역만 남기고 나머지는 흰색 처리
             masked = _apply_parts_mask(frame, rel_parts)
             # 단일 시도: 추가 전처리/재시도 없음
-            words = ocr_korean_words(masked, psm=11, conf_threshold=conf_threshold, min_height_px=min_height_px, preprocess="auto")
+            words = ocr_korean_words(
+                masked,
+                psm=11,
+                conf_threshold=conf_threshold,
+                min_height_px=min_height_px,
+                max_height_px=max_height_px,
+                min_width_px=min_width_px,
+                max_width_px=max_width_px,
+                preprocess="auto",
+            )
             if words:
                 any_detected = True
             all_texts.extend([w.text for w in words])
             self.ocr_detected.emit([
                 {"roi_index": 0, "timestamp": ts, "words": [w.__dict__ for w in words]}
             ])
+
+            # 스크린샷 저장(주기마다, 옵션 켜짐 시)
+            if save_screenshots:
+                try:
+                    log_dir = r"G:\\Coding\\Project_Maple\\log"
+                    try:
+                        os.makedirs(log_dir, exist_ok=True)
+                    except Exception:
+                        pass
+                    annotated = draw_word_boxes(frame, words)
+                    timestr = time.strftime("%y%m%d_%H%M%S", time.localtime(ts))
+                    raw_path = os.path.join(log_dir, f"{timestr}.png")
+                    ocr_path = os.path.join(log_dir, f"{timestr}_OCR.png")
+                    try:
+                        cv2.imwrite(raw_path, frame)
+                    except Exception:
+                        pass
+                    try:
+                        cv2.imwrite(ocr_path, annotated)
+                    except Exception:
+                        pass
+                except Exception:
+                    pass
 
             # 텔레그램 전송 판단
             joined = " ".join(all_texts).strip()
@@ -1049,7 +1120,14 @@ class OCRWatchThread(QThread):
                     matched_keyword = kw.strip()
                     break
 
-            if any_detected and telegram_enabled:
+            # 텔레그램 전송 조건
+            should_send = False
+            if any_detected:
+                if telegram_keyword_mode:
+                    should_send = bool(matched_keyword)
+                else:
+                    should_send = True
+            if should_send:
                 now = time.time()
                 can_send = False
                 if self._last_send_ts is None:
