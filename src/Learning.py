@@ -1245,6 +1245,14 @@ class BaseCanvasLabel(QLabel):
         self.hovered_polygon_idx = -1
         self.panning, self.pan_start_pos = False, QPoint()
         self.setMouseTracking(True)
+        # [NEW] 기본 이미지 스케일 캐시
+        self._scaled_pixmap: Optional[QPixmap] = None
+        # [NEW] 페인트 최적화: 배경 미채움 + 완전 불투명 페인트 플래그
+        try:
+            self.setAutoFillBackground(False)
+            self.setAttribute(Qt.WidgetAttribute.WA_OpaquePaintEvent, True)
+        except Exception:
+            pass
         self.set_zoom(1.0)
 
     def _scaled_pixmap_size(self) -> QSize:
@@ -1271,7 +1279,20 @@ class BaseCanvasLabel(QLabel):
             return
 
         self.zoom_factor = factor
-        self.setFixedSize(self._scaled_pixmap_size())
+        new_size = self._scaled_pixmap_size()
+        # [NEW] 배율 변경 시 원본 픽스맵을 미리 스케일해 캐싱(페인트에서 스케일 제거)
+        try:
+            if not self.pixmap.isNull() and new_size.isValid():
+                self._scaled_pixmap = self.pixmap.scaled(
+                    new_size,
+                    Qt.AspectRatioMode.IgnoreAspectRatio,
+                    Qt.TransformationMode.FastTransformation,
+                )
+            else:
+                self._scaled_pixmap = None
+        except Exception:
+            self._scaled_pixmap = None
+        self.setFixedSize(new_size)
         self.updateGeometry()
         self.update()
 
@@ -1416,7 +1437,11 @@ class CanvasLabel(BaseCanvasLabel):
     def paintEvent(self, event):
         super().paintEvent(event)
         painter = QPainter(self)
-        painter.drawPixmap(self.rect(), self.pixmap)
+        # [NEW] 캐시된 스케일 픽스맵 사용으로 페인트 경량화
+        if getattr(self, '_scaled_pixmap', None) is not None:
+            painter.drawPixmap(QPoint(0, 0), self._scaled_pixmap)
+        else:
+            painter.drawPixmap(self.rect(), self.pixmap)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         self.paint_polygons(painter)
 
@@ -2054,7 +2079,10 @@ class SAMCanvasLabel(BaseCanvasLabel):
     def paintEvent(self, event):
         super().paintEvent(event)
         painter = QPainter(self)
-        painter.drawPixmap(self.rect(), self.pixmap)
+        if getattr(self, '_scaled_pixmap', None) is not None:
+            painter.drawPixmap(QPoint(0, 0), self._scaled_pixmap)
+        else:
+            painter.drawPixmap(self.rect(), self.pixmap)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         self.paint_polygons(painter)
 
@@ -2586,9 +2614,13 @@ class SAMAnnotationEditor(QDialog):
 # --- 4. 위젯: 편집 모드 및 다중 캡처 선택 ---
 class EditModeDialog(QDialog):
     AI_ASSIST, MANUAL, CANCEL = 1, 2, 0
-    def __init__(self, pixmap, sam_ready, parent=None):
+    def __init__(self, pixmap, sam_ready, parent=None, *, index: int | None = None, total: int | None = None):
         super().__init__(parent)
-        self.setWindowTitle("편집 모드 선택")
+        # [NEW] 진행 인덱스 표시를 제목에 반영
+        if isinstance(index, int) and isinstance(total, int) and total >= 1 and 1 <= index <= total:
+            self.setWindowTitle(f"편집 모드 선택 ({index} / {total})")
+        else:
+            self.setWindowTitle("편집 모드 선택")
         self.image_label = QLabel()
         self.image_label.setPixmap(pixmap.scaled(640, 480, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation))
         self.ai_button = QPushButton("AI 어시스트 편집")
@@ -8030,20 +8062,21 @@ class LearningTab(QWidget):
             self.update_status_message("캡처 완료")
 
             if count == 1:
-                self.open_editor_mode_dialog(captured_pixmaps[0], initial_class_name=initial_class_name)
+                self.open_editor_mode_dialog(captured_pixmaps[0], initial_class_name=initial_class_name, index=1, total=1)
             else:
                 multi_dialog = MultiCaptureDialog(captured_pixmaps, self)
                 if multi_dialog.exec():
                     selected_pixmaps = multi_dialog.get_selected_pixmaps()
-                    for pixmap in selected_pixmaps:
-                        self.open_editor_mode_dialog(pixmap, initial_class_name=initial_class_name)
+                    total = len(selected_pixmaps)
+                    for i, pixmap in enumerate(selected_pixmaps, start=1):
+                        self.open_editor_mode_dialog(pixmap, initial_class_name=initial_class_name, index=i, total=total)
         except Exception as e:
             QMessageBox.critical(self, "캡처 오류", str(e))
         finally:
             self.update_status_message("준비")
 
-    def open_editor_mode_dialog(self, pixmap, image_path=None, initial_polygons=None, initial_class_name=None):
-        dialog = EditModeDialog(pixmap, self.sam_predictor is not None, self)
+    def open_editor_mode_dialog(self, pixmap, image_path=None, initial_polygons=None, initial_class_name=None, *, index: int | None = None, total: int | None = None):
+        dialog = EditModeDialog(pixmap, self.sam_predictor is not None, self, index=index, total=total)
         mode_result = dialog.exec()
         if mode_result == EditModeDialog.CANCEL:
             return
@@ -8214,7 +8247,8 @@ class LearningTab(QWidget):
         else: # 카테고리가 선택된 경우는 없음(버튼 비활성화)
             return
 
-        for image_path in image_paths_to_edit:
+        total = len(image_paths_to_edit)
+        for i, image_path in enumerate(image_paths_to_edit, start=1):
             img_bgr = cv2.imread(image_path)
             if img_bgr is None:
                 self.log_viewer.append(f"오류: '{os.path.basename(image_path)}' 파일을 열 수 없습니다.")
@@ -8237,7 +8271,7 @@ class LearningTab(QWidget):
             h, w, ch = img_rgb.shape
             bytes_per_line = ch * w
             q_image = QImage(img_rgb.data, w, h, bytes_per_line, QImage.Format.Format_RGB888)
-            self.open_editor_mode_dialog(QPixmap.fromImage(q_image), image_path=image_path, initial_polygons=initial_polygons, initial_class_name=initial_class_name)
+            self.open_editor_mode_dialog(QPixmap.fromImage(q_image), image_path=image_path, initial_polygons=initial_polygons, initial_class_name=initial_class_name, index=i, total=total)
 
     def start_training(self):
         if len(self.data_manager.get_class_list()) == 0:
