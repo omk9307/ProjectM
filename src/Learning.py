@@ -1244,6 +1244,8 @@ class BaseCanvasLabel(QLabel):
         self.polygons = []
         self.hovered_polygon_idx = -1
         self.panning, self.pan_start_pos = False, QPoint()
+        # [NEW] 글로벌 기준 패닝 기준점(스크롤 중 떨림 방지)
+        self._pan_start_global = QPoint()
         self.setMouseTracking(True)
         # [NEW] 기본 이미지 스케일 캐시
         self._scaled_pixmap: Optional[QPixmap] = None
@@ -1366,11 +1368,19 @@ class BaseCanvasLabel(QLabel):
     def mouseMoveEvent(self, event):
         """마우스 이동 이벤트를 처리합니다. (패닝 또는 하이라이트)"""
         if self.panning:
-            delta = event.pos() - self.pan_start_pos
+            # [CHANGED] 위젯 좌표 대신 글로벌 좌표 차이를 사용해 떨림 방지
+            try:
+                gp = event.globalPosition() if hasattr(event, 'globalPosition') else None
+                current_global = gp.toPoint() if gp is not None else (event.globalPos() if hasattr(event, 'globalPos') else QPoint())
+            except Exception:
+                current_global = QPoint()
+            delta = current_global - self._pan_start_global
             scroll_area = self._scroll_area()
-            scroll_area.horizontalScrollBar().setValue(scroll_area.horizontalScrollBar().value() - delta.x())
-            scroll_area.verticalScrollBar().setValue(scroll_area.verticalScrollBar().value() - delta.y())
-            self.pan_start_pos = event.pos()
+            hbar = scroll_area.horizontalScrollBar()
+            vbar = scroll_area.verticalScrollBar()
+            hbar.setValue(hbar.value() - delta.x())
+            vbar.setValue(vbar.value() - delta.y())
+            self._pan_start_global = current_global
         else:
             original_pos_f = event.pos() / self.zoom_factor
             original_pos = QPoint(int(original_pos_f.x()), int(original_pos_f.y()))
@@ -1498,7 +1508,14 @@ class CanvasLabel(BaseCanvasLabel):
             self.current_sub_points.append(event.pos() / self.zoom_factor)
             self.update()
         elif event.button() == Qt.MouseButton.MiddleButton:
-            self.panning = True; self.pan_start_pos = event.pos(); self.setCursor(Qt.CursorShape.ClosedHandCursor)
+            self.panning = True
+            self.pan_start_pos = event.pos()
+            try:
+                gp = event.globalPosition() if hasattr(event, 'globalPosition') else None
+                self._pan_start_global = gp.toPoint() if gp is not None else (event.globalPos() if hasattr(event, 'globalPos') else QPoint())
+            except Exception:
+                self._pan_start_global = QPoint()
+            self.setCursor(Qt.CursorShape.ClosedHandCursor)
 
     def mouseMoveEvent(self, event):
         super().mouseMoveEvent(event)
@@ -2133,7 +2150,14 @@ class SAMCanvasLabel(BaseCanvasLabel):
             # SAM 포지티브 클릭
             self.parent_dialog.predict_mask(event.pos(), 1)
         elif event.button() == Qt.MouseButton.MiddleButton:
-            self.panning = True; self.pan_start_pos = event.pos(); self.setCursor(Qt.CursorShape.ClosedHandCursor)
+            self.panning = True
+            self.pan_start_pos = event.pos()
+            try:
+                gp = event.globalPosition() if hasattr(event, 'globalPosition') else None
+                self._pan_start_global = gp.toPoint() if gp is not None else (event.globalPos() if hasattr(event, 'globalPos') else QPoint())
+            except Exception:
+                self._pan_start_global = QPoint()
+            self.setCursor(Qt.CursorShape.ClosedHandCursor)
 
     def mouseMoveEvent(self, event):
         super().mouseMoveEvent(event)
