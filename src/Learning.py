@@ -1153,9 +1153,9 @@ class MonsterSettingsDialog(QDialog):
                 if roi.shape[0] < tpl_img.shape[0] or roi.shape[1] < tpl_img.shape[1]:
                     template_details.append(f"{tpl_name}: 비교 불가(크기)")
                     continue
-                result = cv2.matchTemplate(roi, tpl_img, cv2.TM_CCOEFF_NORMED)
-                _, max_val, _, _ = cv2.minMaxLoc(result)
-                score = float(max_val)
+                from utils_cv import safe_match_template
+                mt = safe_match_template(roi, tpl_img, cv2.TM_CCOEFF_NORMED)
+                score = float(mt[0]) if mt is not None else 0.0
                 is_match = score >= threshold
                 template_details.append(f"{tpl_name}: {score:.2f} ({'성공' if is_match else '실패'})")
                 if score > best_score:
