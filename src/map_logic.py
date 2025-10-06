@@ -168,20 +168,11 @@ class AnchorDetectionThread(QThread):
                     continue
 
                 tpl_gray = cv2.cvtColor(template, cv2.COLOR_BGR2GRAY)
-                # 템플릿 원본과 현재 스케일 캐시
-                tpl_small = cv2.resize(
-                    tpl_gray,
-                    (0, 0),
-                    fx=self._downscale,
-                    fy=self._downscale,
-                    interpolation=cv2.INTER_AREA,
-                )
+                tpl_small = cv2.resize(tpl_gray, (0, 0), fx=self._downscale, fy=self._downscale, interpolation=cv2.INTER_AREA)
                 t_h, t_w = tpl_small.shape
 
                 self.feature_templates[fid] = {
-                    "template_gray_orig": tpl_gray,
                     "template_gray_small": tpl_small,
-                    "current_scale": float(self._downscale),
                     "threshold": fdata.get('threshold', MapConfig["detection_threshold_default"]),
                     "size": QSize(template.shape[1], template.shape[0]),
                 }
@@ -202,52 +193,6 @@ class AnchorDetectionThread(QThread):
                 traceback.print_exc()
 
         self.last_positions = {k: None for k in self.feature_templates.keys()}
-
-    @staticmethod
-    def _safe_match_template(img_gray: np.ndarray | None, tpl_gray: np.ndarray | None):
-        try:
-            if img_gray is None or tpl_gray is None:
-                return None
-            if img_gray.ndim != 2:
-                # 이미 루프에서 그레이로 보장되지만, 안전장치
-                img_gray = cv2.cvtColor(img_gray, cv2.COLOR_BGR2GRAY)
-            if tpl_gray.ndim != 2:
-                return None
-            h, w = img_gray.shape[:2]
-            th, tw = tpl_gray.shape[:2]
-            if h < th or w < tw:
-                return None
-            res = cv2.matchTemplate(img_gray, tpl_gray, cv2.TM_CCOEFF_NORMED)
-            _, max_val, _, max_loc = cv2.minMaxLoc(res)
-            return (float(max_val), (int(max_loc[0]), int(max_loc[1])))
-        except cv2.error as e:
-            # 내부 assertion을 사용자 로그로 흘리지 않도록 억제
-            return None
-        except Exception:
-            return None
-
-    def _ensure_template_scale(self, fid: str, tpl_data: dict) -> None:
-        """self._downscale이 바뀌면 템플릿을 현재 스케일로 재생성하고 런타임 반경을 보정."""
-        current = float(self._downscale) if self._downscale else 1.0
-        cached = float(tpl_data.get("current_scale", -1.0))
-        if abs(current - cached) < 1e-6:
-            return
-        orig = tpl_data.get("template_gray_orig")
-        if orig is None:
-            return
-        tpl_small = cv2.resize(orig, (0, 0), fx=current, fy=current, interpolation=cv2.INTER_AREA)
-        tpl_data["template_gray_small"] = tpl_small
-        tpl_data["current_scale"] = current
-
-        # 반경 재계산 및 클램프
-        t_h, t_w = tpl_small.shape[:2]
-        base_radius = max(int(max(t_w, t_h) * 1.2), 16)
-        max_radius = max(int(base_radius * self._roi_max_scale), base_radius + 40)
-        runtime = self._template_runtime.get(fid)
-        if runtime is not None:
-            runtime["base_radius"] = base_radius
-            runtime["max_radius"] = max_radius
-            runtime["roi_radius"] = min(max(runtime.get("roi_radius", base_radius), base_radius), max_radius)
 
     def run(self):
         self.is_running = True
@@ -319,8 +264,6 @@ class AnchorDetectionThread(QThread):
                 perf['skipped_templates'] = 0
 
                 for fid, tpl_data in self.feature_templates.items():
-                    # 현재 다운스케일과 템플릿 스케일 동기화
-                    self._ensure_template_scale(fid, tpl_data)
                     tpl_small = tpl_data["template_gray_small"]
                     t_h, t_w = tpl_small.shape
                     runtime = self._template_runtime.get(fid)
@@ -358,11 +301,8 @@ class AnchorDetectionThread(QThread):
                         roi = frame_gray_small[y1:y2, x1:x2]
 
                         if roi.shape[0] >= t_h and roi.shape[1] >= t_w:
-                            mt = self._safe_match_template(roi, tpl_small)
-                            if mt is not None:
-                                max_val, max_loc = mt
-                            else:
-                                max_val, max_loc = 0.0, (0, 0)
+                            res = cv2.matchTemplate(roi, tpl_small, cv2.TM_CCOEFF_NORMED)
+                            _, max_val, _, max_loc = cv2.minMaxLoc(res)
                             if max_val >= tpl_data["threshold"]:
                                 found_x = (x1 + max_loc[0]) / self._downscale
                                 found_y = (y1 + max_loc[1]) / self._downscale
@@ -411,11 +351,8 @@ class AnchorDetectionThread(QThread):
 
                         if should_attempt_fallback:
                             fallback_attempted = True
-                            mt = self._safe_match_template(frame_gray_small, tpl_small)
-                            if mt is not None:
-                                max_val, max_loc = mt
-                            else:
-                                max_val, max_loc = 0.0, (0, 0)
+                            res = cv2.matchTemplate(frame_gray_small, tpl_small, cv2.TM_CCOEFF_NORMED)
+                            _, max_val, _, max_loc = cv2.minMaxLoc(res)
                             if max_val >= tpl_data["threshold"]:
                                 found_x = max_loc[0] / self._downscale
                                 found_y = max_loc[1] / self._downscale

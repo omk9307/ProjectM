@@ -1153,9 +1153,9 @@ class MonsterSettingsDialog(QDialog):
                 if roi.shape[0] < tpl_img.shape[0] or roi.shape[1] < tpl_img.shape[1]:
                     template_details.append(f"{tpl_name}: 비교 불가(크기)")
                     continue
-                from utils_cv import safe_match_template
-                mt = safe_match_template(roi, tpl_img, cv2.TM_CCOEFF_NORMED)
-                score = float(mt[0]) if mt is not None else 0.0
+                result = cv2.matchTemplate(roi, tpl_img, cv2.TM_CCOEFF_NORMED)
+                _, max_val, _, _ = cv2.minMaxLoc(result)
+                score = float(max_val)
                 is_match = score >= threshold
                 template_details.append(f"{tpl_name}: {score:.2f} ({'성공' if is_match else '실패'})")
                 if score > best_score:
@@ -1244,17 +1244,7 @@ class BaseCanvasLabel(QLabel):
         self.polygons = []
         self.hovered_polygon_idx = -1
         self.panning, self.pan_start_pos = False, QPoint()
-        # [NEW] 글로벌 기준 패닝 기준점(스크롤 중 떨림 방지)
-        self._pan_start_global = QPoint()
         self.setMouseTracking(True)
-        # [NEW] 기본 이미지 스케일 캐시
-        self._scaled_pixmap: Optional[QPixmap] = None
-        # [NEW] 페인트 최적화: 배경 미채움 + 완전 불투명 페인트 플래그
-        try:
-            self.setAutoFillBackground(False)
-            self.setAttribute(Qt.WidgetAttribute.WA_OpaquePaintEvent, True)
-        except Exception:
-            pass
         self.set_zoom(1.0)
 
     def _scaled_pixmap_size(self) -> QSize:
@@ -1281,20 +1271,7 @@ class BaseCanvasLabel(QLabel):
             return
 
         self.zoom_factor = factor
-        new_size = self._scaled_pixmap_size()
-        # [NEW] 배율 변경 시 원본 픽스맵을 미리 스케일해 캐싱(페인트에서 스케일 제거)
-        try:
-            if not self.pixmap.isNull() and new_size.isValid():
-                self._scaled_pixmap = self.pixmap.scaled(
-                    new_size,
-                    Qt.AspectRatioMode.IgnoreAspectRatio,
-                    Qt.TransformationMode.FastTransformation,
-                )
-            else:
-                self._scaled_pixmap = None
-        except Exception:
-            self._scaled_pixmap = None
-        self.setFixedSize(new_size)
+        self.setFixedSize(self._scaled_pixmap_size())
         self.updateGeometry()
         self.update()
 
@@ -1368,19 +1345,11 @@ class BaseCanvasLabel(QLabel):
     def mouseMoveEvent(self, event):
         """마우스 이동 이벤트를 처리합니다. (패닝 또는 하이라이트)"""
         if self.panning:
-            # [CHANGED] 위젯 좌표 대신 글로벌 좌표 차이를 사용해 떨림 방지
-            try:
-                gp = event.globalPosition() if hasattr(event, 'globalPosition') else None
-                current_global = gp.toPoint() if gp is not None else (event.globalPos() if hasattr(event, 'globalPos') else QPoint())
-            except Exception:
-                current_global = QPoint()
-            delta = current_global - self._pan_start_global
+            delta = event.pos() - self.pan_start_pos
             scroll_area = self._scroll_area()
-            hbar = scroll_area.horizontalScrollBar()
-            vbar = scroll_area.verticalScrollBar()
-            hbar.setValue(hbar.value() - delta.x())
-            vbar.setValue(vbar.value() - delta.y())
-            self._pan_start_global = current_global
+            scroll_area.horizontalScrollBar().setValue(scroll_area.horizontalScrollBar().value() - delta.x())
+            scroll_area.verticalScrollBar().setValue(scroll_area.verticalScrollBar().value() - delta.y())
+            self.pan_start_pos = event.pos()
         else:
             original_pos_f = event.pos() / self.zoom_factor
             original_pos = QPoint(int(original_pos_f.x()), int(original_pos_f.y()))
@@ -1437,36 +1406,28 @@ class CanvasLabel(BaseCanvasLabel):
         self.current_pos = QPoint()
         self._last_pressed_button = None  # 최근 포인트 추가 버튼 추적
         self.pending_mask = None  # AI 편집에서 넘어온 임시 마스크
-        # [NEW] pending 마스크 오버레이 캐시
-        self._pending_rgba: Optional[np.ndarray] = None
-        self._pending_qimage: Optional[QImage] = None
-        self._pending_scaled: Optional[QImage] = None
-        self._pending_scaled_dirty: bool = True
-        self._pending_overlay_class_id: Optional[int] = None
 
     def paintEvent(self, event):
         super().paintEvent(event)
         painter = QPainter(self)
-        # [NEW] 캐시된 스케일 픽스맵 사용으로 페인트 경량화
-        if getattr(self, '_scaled_pixmap', None) is not None:
-            painter.drawPixmap(QPoint(0, 0), self._scaled_pixmap)
-        else:
-            painter.drawPixmap(self.rect(), self.pixmap)
+        painter.drawPixmap(self.rect(), self.pixmap)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         self.paint_polygons(painter)
 
-        # [NEW] AI에서 넘어온 임시 마스크 시각화(캐시 사용)
-        if self.pending_mask is not None and hasattr(self.pending_mask, 'shape'):
+        # [NEW] AI에서 넘어온 임시 마스크 시각화
+        if self.pending_mask is not None:
+            h, w = self.pending_mask.shape
+            mask_image = QImage(w, h, QImage.Format.Format_ARGB32)
+            mask_image.fill(Qt.GlobalColor.transparent)
             class_id = self.parent_dialog.get_current_class_id()
-            if class_id != self._pending_overlay_class_id or self._pending_qimage is None:
-                self._rebuild_pending_overlay(class_id)
-            if self._pending_qimage is not None:
-                if self._pending_scaled is None or self._pending_scaled.size() != self.size() or self._pending_scaled_dirty:
-                    self._pending_scaled = self._pending_qimage.scaled(
-                        self.size(), Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.FastTransformation
-                    )
-                    self._pending_scaled_dirty = False
-                painter.drawImage(self.rect(), self._pending_scaled)
+            color = self.parent_dialog.get_color_for_class_id(class_id)
+            for y in range(h):
+                row = self.pending_mask[y]
+                for x in range(w):
+                    if row[x]:
+                        mask_image.setPixelColor(x, y, color)
+            scaled_mask_image = mask_image.scaled(self.size(), Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.FastTransformation)
+            painter.drawImage(self.rect(), scaled_mask_image)
 
         # 현재 그리고 있는 좌/우클릭 다각형 오버레이
         class_id = self.parent_dialog.get_current_class_id()
@@ -1508,24 +1469,12 @@ class CanvasLabel(BaseCanvasLabel):
             self.current_sub_points.append(event.pos() / self.zoom_factor)
             self.update()
         elif event.button() == Qt.MouseButton.MiddleButton:
-            self.panning = True
-            self.pan_start_pos = event.pos()
-            try:
-                gp = event.globalPosition() if hasattr(event, 'globalPosition') else None
-                self._pan_start_global = gp.toPoint() if gp is not None else (event.globalPos() if hasattr(event, 'globalPos') else QPoint())
-            except Exception:
-                self._pan_start_global = QPoint()
-            self.setCursor(Qt.CursorShape.ClosedHandCursor)
+            self.panning = True; self.pan_start_pos = event.pos(); self.setCursor(Qt.CursorShape.ClosedHandCursor)
 
     def mouseMoveEvent(self, event):
         super().mouseMoveEvent(event)
         if not self.panning:
             self.current_pos = event.pos(); self.update()
-
-    # [NEW] BaseCanvasLabel.set_zoom 오버라이드하여 pending 스케일 캐시 무효화
-    def set_zoom(self, factor, focal_point: QPoint | QPointF | None = None):
-        super().set_zoom(factor, focal_point)
-        self._pending_scaled_dirty = True
 
     # [NEW] 유틸: 마지막 포인트 제거(Backspace)
     def remove_last_point(self):
@@ -1544,38 +1493,6 @@ class CanvasLabel(BaseCanvasLabel):
             self.update()
             return True
         return False
-
-    # [NEW] pending 마스크 오버레이(QImage) 재구성
-    def _rebuild_pending_overlay(self, class_id: Optional[int]) -> None:
-        try:
-            self._pending_overlay_class_id = class_id
-            mask = self.pending_mask
-            if mask is None or not hasattr(mask, 'shape'):
-                self._pending_rgba = None
-                self._pending_qimage = None
-                self._pending_scaled = None
-                self._pending_scaled_dirty = True
-                return
-            h, w = mask.shape
-            color = self.parent_dialog.get_color_for_class_id(class_id)
-            r, g, b, a = color.red(), color.green(), color.blue(), color.alpha()
-            rgba = np.zeros((h, w, 4), dtype=np.uint8)
-            m = mask.astype(bool)
-            rgba[m, 0] = r
-            rgba[m, 1] = g
-            rgba[m, 2] = b
-            rgba[m, 3] = a
-            self._pending_rgba = rgba
-            bytes_per_line = w * 4
-            # Use RGBA8888 to avoid per-pixel set
-            self._pending_qimage = QImage(rgba.data, w, h, bytes_per_line, QImage.Format.Format_RGBA8888)
-            self._pending_scaled = None
-            self._pending_scaled_dirty = True
-        except Exception:
-            self._pending_rgba = None
-            self._pending_qimage = None
-            self._pending_scaled = None
-            self._pending_scaled_dirty = True
 
 # --- 3. 위젯: 다각형 편집기 다이얼로그 (공통 로직 추가) ---
 class PolygonAnnotationEditor(QDialog):
@@ -1690,12 +1607,6 @@ class PolygonAnnotationEditor(QDialog):
     def set_pending_ai_mask(self, mask: Optional[np.ndarray]):
         self.pending_ai_mask = None if mask is None else (mask.copy().astype(bool))
         self.canvas.pending_mask = None if mask is None else (mask.copy().astype(bool))
-        # [NEW] 캐시된 오버레이 생성
-        try:
-            class_id = self.get_current_class_id()
-            self.canvas._rebuild_pending_overlay(class_id)
-        except Exception:
-            pass
         self.canvas.update()
 
     def _compute_preferred_size(self, pixmap: QPixmap) -> QSize:
@@ -1991,39 +1902,20 @@ class PolygonAnnotationEditor(QDialog):
             self.canvas.update()
             return False
 
-        # 최종 확정: base(합집합)에 sub가 있으면 빼고, '몬스터' 카테고리인 경우 겹치는 기존 몬스터와 합치기
+        # 최종 확정: base (합집합)에서 sub가 있으면 빼고, 결과를 새 폴리곤으로 추가(기존은 유지)
         if sub_mask is not None:
             inv = cv2.bitwise_not(sub_mask)
             base_mask = cv2.bitwise_and(base_mask, inv)
 
-        # 커밋 대상 마스크
-        commit_mask = base_mask.copy()
-
-        # [CHANGED] 전 카테고리 공통: 같은 클래스의 겹치는 기존 폴리곤과 합집합, 겹치지 않으면 신규 추가
-        merged_mask = commit_mask.copy()
-        new_list = []
-        for poly in self.canvas.polygons:
-            if poly.get('class_id') != class_id or not poly.get('points'):
-                new_list.append(poly)
-                continue
-            single_mask = np.zeros((h, w), dtype=np.uint8)
-            pts = np.array([[int(p.x()), int(p.y())] for p in poly['points']], dtype=np.int32)
-            cv2.fillPoly(single_mask, [pts], 255)
-            # 겹침 여부 확인하여 겹치면 합집합, 아니면 유지 목록에 남김
-            if cv2.countNonZero(cv2.bitwise_and(single_mask, merged_mask)) > 0:
-                merged_mask = cv2.bitwise_or(merged_mask, single_mask)
-            else:
-                new_list.append(poly)
-
-        # 합집합 결과를 컨투어로 폴리곤화하여 추가
-        contours, _ = cv2.findContours(merged_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        contours, _ = cv2.findContours(base_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        new_polys = []
         for c in contours:
             if cv2.contourArea(c) <= 10:
                 continue
             pts = [QPoint(p[0][0], p[0][1]) for p in c]
-            new_list.append({'class_id': class_id, 'points': pts})
+            new_polys.append({'class_id': class_id, 'points': pts})
 
-        self.canvas.polygons = new_list
+        self.canvas.polygons.extend(new_polys)
 
         # 상태 정리
         self.canvas.current_add_points.clear()
@@ -2083,128 +1975,45 @@ class SAMCanvasLabel(BaseCanvasLabel):
     def __init__(self, pixmap, parent_dialog):
         super().__init__(pixmap, parent_dialog)
         self.current_mask, self.input_points, self.input_labels = None, [], []
-        # [NEW] 완료 이후 우클릭으로 수동 차집합 폴리곤을 그리기 위한 상태
-        self.current_sub_points = []
-        self.current_pos = QPoint()
-        # [NEW] 마스크 오버레이/컨투어 캐시
-        self._mask_rgba: Optional[np.ndarray] = None
-        self._mask_qimage: Optional[QImage] = None
-        self._mask_scaled: Optional[QImage] = None
-        self._mask_scaled_dirty: bool = True
-        self._mask_overlay_class_id: Optional[int] = None
-        self._mask_contours: list = []
     def paintEvent(self, event):
         super().paintEvent(event)
         painter = QPainter(self)
-        if getattr(self, '_scaled_pixmap', None) is not None:
-            painter.drawPixmap(QPoint(0, 0), self._scaled_pixmap)
-        else:
-            painter.drawPixmap(self.rect(), self.pixmap)
+        painter.drawPixmap(self.rect(), self.pixmap)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         self.paint_polygons(painter)
 
         if self.current_mask is not None:
             class_id = self.parent_dialog.get_current_class_id()
-            # 오버레이/컨투어 캐시 갱신 필요 시 재구성
-            if class_id != self._mask_overlay_class_id or self._mask_qimage is None or not self._mask_contours:
-                self._rebuild_mask_cache(class_id)
-            if self._mask_qimage is not None:
-                if self._mask_scaled is None or self._mask_scaled.size() != self.size() or self._mask_scaled_dirty:
-                    self._mask_scaled = self._mask_qimage.scaled(
-                        self.size(), Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.FastTransformation
-                    )
-                    self._mask_scaled_dirty = False
-                painter.drawImage(self.rect(), self._mask_scaled)
-            # 외곽선 그리기(캐시된 컨투어 사용)
+            # if class_id is not None: # v1.3: 클래스 없이도 마스크 미리보기 가능하도록 수정
+            # 마스크 영역 채우기
+            color = self.parent_dialog.get_color_for_class_id(class_id) # class_id가 None이면 회색 반환
+            h, w = self.current_mask.shape
+            mask_image = QImage(w, h, QImage.Format.Format_ARGB32)
+            mask_image.fill(Qt.GlobalColor.transparent)
+            for y in range(h):
+                for x in range(w):
+                    if self.current_mask[y, x]: mask_image.setPixelColor(x, y, color)
+            
+            scaled_mask_image = mask_image.scaled(self.size(), Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.FastTransformation)
+            painter.drawImage(self.rect(), scaled_mask_image)
+
+            # 마스크 외곽선 그리기
+            contours, _ = cv2.findContours(self.current_mask.astype(np.uint8), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
             painter.setPen(QPen(HIGHLIGHT_PEN_COLOR, 2, Qt.PenStyle.SolidLine))
             painter.setBrush(Qt.BrushStyle.NoBrush)
-            for contour in self._mask_contours:
+            for contour in contours:
                 poly_points = [QPoint(p[0][0], p[0][1]) * self.zoom_factor for p in contour]
                 painter.drawPolygon(QPolygon([QPoint(int(p.x()), int(p.y())) for p in poly_points]))
-
-        # [NEW] 우클릭 수동 차집합 폴리곤 미리보기
-        if self.current_sub_points:
-            scaled_pts = [p * self.zoom_factor for p in self.current_sub_points]
-            painter.setPen(QPen(HIGHLIGHT_PEN_COLOR, 2, Qt.PenStyle.DashLine))
-            painter.setBrush(QBrush(QColor(255, 0, 0, 60)))
-            painter.drawPolygon(QPolygon([QPoint(int(p.x()), int(p.y())) for p in scaled_pts]))
-            if self.rect().contains(self.current_pos):
-                painter.drawLine(scaled_pts[-1], self.current_pos)
-            for point in scaled_pts:
-                painter.drawEllipse(point, 4, 4)
 
     def mousePressEvent(self, event):
         if self.parent_dialog.is_change_mode and event.button() == Qt.MouseButton.LeftButton:
             if self.change_hovered_polygon_class():
                 return
 
-        if event.button() == Qt.MouseButton.RightButton:
-            # [NEW] 마스크 생성 중이 아니면 우클릭 폴리곤 점 추가(수동 차집합 모드)
-            if self.parent_dialog.canvas.current_mask is None:
-                self.current_sub_points.append(event.pos() / self.zoom_factor)
-                self.update()
-                return
-            # 마스크 진행 중이면 기존 SAM 네거티브 클릭 동작 유지
-            self.parent_dialog.predict_mask(event.pos(), 0)
-        elif event.button() == Qt.MouseButton.LeftButton:
-            # SAM 포지티브 클릭
-            self.parent_dialog.predict_mask(event.pos(), 1)
+        if event.button() in [Qt.MouseButton.LeftButton, Qt.MouseButton.RightButton]:
+            self.parent_dialog.predict_mask(event.pos(), 1 if event.button() == Qt.MouseButton.LeftButton else 0)
         elif event.button() == Qt.MouseButton.MiddleButton:
-            self.panning = True
-            self.pan_start_pos = event.pos()
-            try:
-                gp = event.globalPosition() if hasattr(event, 'globalPosition') else None
-                self._pan_start_global = gp.toPoint() if gp is not None else (event.globalPos() if hasattr(event, 'globalPos') else QPoint())
-            except Exception:
-                self._pan_start_global = QPoint()
-            self.setCursor(Qt.CursorShape.ClosedHandCursor)
-
-    def mouseMoveEvent(self, event):
-        super().mouseMoveEvent(event)
-        if not self.panning:
-            self.current_pos = event.pos(); self.update()
-
-    # [NEW] BaseCanvasLabel.set_zoom 오버라이드하여 마스크 스케일 캐시 무효화
-    def set_zoom(self, factor, focal_point: QPoint | QPointF | None = None):
-        super().set_zoom(factor, focal_point)
-        self._mask_scaled_dirty = True
-        # 우클릭 폴리곤 미리보기는 점 좌표 기반으로 즉시 스케일 적용되므로 별도 캐시 없음
-
-    # [NEW] 마스크 캐시 재구성(마스크→RGBA QImage, 컨투어 저장)
-    def _rebuild_mask_cache(self, class_id: Optional[int]) -> None:
-        try:
-            self._mask_overlay_class_id = class_id
-            mask = self.current_mask
-            if mask is None or not hasattr(mask, 'shape'):
-                self._mask_rgba = None
-                self._mask_qimage = None
-                self._mask_scaled = None
-                self._mask_scaled_dirty = True
-                self._mask_contours = []
-                return
-            h, w = mask.shape
-            color = self.parent_dialog.get_color_for_class_id(class_id)
-            r, g, b, a = color.red(), color.green(), color.blue(), color.alpha()
-            rgba = np.zeros((h, w, 4), dtype=np.uint8)
-            m = mask.astype(bool)
-            rgba[m, 0] = r
-            rgba[m, 1] = g
-            rgba[m, 2] = b
-            rgba[m, 3] = a
-            self._mask_rgba = rgba
-            bytes_per_line = w * 4
-            self._mask_qimage = QImage(rgba.data, w, h, bytes_per_line, QImage.Format.Format_RGBA8888)
-            self._mask_scaled = None
-            self._mask_scaled_dirty = True
-            # 컨투어 캐시
-            contours, _ = cv2.findContours(mask.astype(np.uint8), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-            self._mask_contours = contours or []
-        except Exception:
-            self._mask_rgba = None
-            self._mask_qimage = None
-            self._mask_scaled = None
-            self._mask_scaled_dirty = True
-            self._mask_contours = []
+            self.panning = True; self.pan_start_pos = event.pos(); self.setCursor(Qt.CursorShape.ClosedHandCursor)
 
 class SAMAnnotationEditor(QDialog):
     """AI 어시스트 편집기 메인 창."""
@@ -2478,42 +2287,25 @@ class SAMAnnotationEditor(QDialog):
         input_labels_np = np.array(self.canvas.input_labels)
         masks, _, _ = self.predictor.predict(point_coords=input_points_np, point_labels=input_labels_np, multimask_output=False)
         self.canvas.current_mask = masks[0]
-        # [NEW] 마스크 캐시 즉시 재구성(페인트 시 반복 계산 방지)
-        try:
-            class_id = self.get_current_class_id()
-            self.canvas._rebuild_mask_cache(class_id)
-        except Exception:
-            pass
         self.canvas.update()
 
     def keyPressEvent(self, event):
         if event.key() in [Qt.Key.Key_Return, Qt.Key.Key_Enter]:
-            # [NEW] 우클릭 수동 차집합 폴리곤이 활성 상태이면 우선 적용
-            if getattr(self.canvas, 'current_sub_points', None) and len(self.canvas.current_sub_points) >= 3 and self.canvas.current_mask is None:
-                if self._commit_subtract_polygon():
-                    return
             self.commit_current_mask()
         elif event.key() == Qt.Key.Key_Escape:
             # [NEW] 작업 중일 때만 취소, 아니면 무시
-            if getattr(self.canvas, 'current_sub_points', None):
-                self.canvas.current_sub_points.clear(); self.canvas.update(); return
             if self.canvas.current_mask is not None or self.canvas.input_points:
-                self.reset_current_mask(); return
+                self.reset_current_mask()
             return
         elif event.key() == Qt.Key.Key_T:
             self.on_switch_to_manual()
-        elif event.key() == Qt.Key.Key_R:
-            self.reset_current_mask()
-            if getattr(self.canvas, 'current_sub_points', None):
-                self.canvas.current_sub_points.clear(); self.canvas.update()
+        elif event.key() == Qt.Key.Key_R: self.reset_current_mask()
         elif event.key() == Qt.Key.Key_Z:
             if self.canvas.polygons: self.canvas.polygons.pop(); self.canvas.update()
-        elif event.key() == Qt.Key.Key_D:
-            self.canvas.delete_hovered_polygon()
+        elif event.key() == Qt.Key.Key_D: self.canvas.delete_hovered_polygon()
         elif event.key() == Qt.Key.Key_C:
             self.change_class_btn.setChecked(not self.change_class_btn.isChecked())
-        else:
-            super().keyPressEvent(event)
+        else: super().keyPressEvent(event)
 
     def reset_current_mask(self):
         self.canvas.current_mask = None; self.canvas.input_points.clear(); self.canvas.input_labels.clear(); self.canvas.update()
@@ -2541,49 +2333,6 @@ class SAMAnnotationEditor(QDialog):
         self.canvas.polygons.append({'class_id': class_id, 'points': poly_points})
         self.reset_current_mask()
         return True
-
-    # [NEW] AI 모드에서 완료 후 우클릭 폴리곤 차집합 적용
-    def _commit_subtract_polygon(self) -> bool:
-        sub_pts = getattr(self.canvas, 'current_sub_points', None)
-        if not sub_pts or len(sub_pts) < 3:
-            return False
-        class_id = self.get_current_class_id()
-        if class_id is None:
-            return False
-        qimg = self.pixmap.toImage()
-        w, h = qimg.width(), qimg.height()
-        if w <= 0 or h <= 0:
-            return False
-        sub_mask = np.zeros((h, w), dtype=np.uint8)
-        pts = np.array([[int(p.x()), int(p.y())] for p in sub_pts], dtype=np.int32)
-        cv2.fillPoly(sub_mask, [pts], 255)
-        inv_sub = cv2.bitwise_not(sub_mask)
-        updated = False
-        new_list = []
-        for poly in self.canvas.polygons:
-            if poly.get('class_id') != class_id or not poly.get('points'):
-                new_list.append(poly)
-                continue
-            single_mask = np.zeros((h, w), dtype=np.uint8)
-            pts2 = np.array([[int(p.x()), int(p.y())] for p in poly['points']], dtype=np.int32)
-            cv2.fillPoly(single_mask, [pts2], 255)
-            result_mask = cv2.bitwise_and(single_mask, inv_sub)
-            contours, _ = cv2.findContours(result_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-            found_any = False
-            for c in contours:
-                if cv2.contourArea(c) <= 10:
-                    continue
-                pts3 = [QPoint(p[0][0], p[0][1]) for p in c]
-                new_list.append({'class_id': class_id, 'points': pts3})
-                found_any = True
-            if found_any:
-                updated = True
-        if updated:
-            self.canvas.polygons = new_list
-            self.canvas.current_sub_points.clear()
-            self.canvas.update()
-            return True
-        return False
 
     def on_save(self):
         self.commit_current_mask()
@@ -2630,21 +2379,14 @@ class SAMAnnotationEditor(QDialog):
         self.canvas.polygons = polygons if polygons else []
         self.create_local_color_map()
         self.reset_current_mask()
-        # [NEW] 우클릭 차집합 폴리곤 초기화
-        if hasattr(self.canvas, 'current_sub_points'):
-            self.canvas.current_sub_points.clear()
         self.canvas.update()
 
 # --- 4. 위젯: 편집 모드 및 다중 캡처 선택 ---
 class EditModeDialog(QDialog):
     AI_ASSIST, MANUAL, CANCEL = 1, 2, 0
-    def __init__(self, pixmap, sam_ready, parent=None, *, index: int | None = None, total: int | None = None):
+    def __init__(self, pixmap, sam_ready, parent=None):
         super().__init__(parent)
-        # [NEW] 진행 인덱스 표시를 제목에 반영
-        if isinstance(index, int) and isinstance(total, int) and total >= 1 and 1 <= index <= total:
-            self.setWindowTitle(f"편집 모드 선택 ({index} / {total})")
-        else:
-            self.setWindowTitle("편집 모드 선택")
+        self.setWindowTitle("편집 모드 선택")
         self.image_label = QLabel()
         self.image_label.setPixmap(pixmap.scaled(640, 480, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation))
         self.ai_button = QPushButton("AI 어시스트 편집")
@@ -2756,9 +2498,6 @@ class AnnotationEditorDialog(QDialog):
     def _switch_mode(self, mode, *, initialize=False):
         sam_ready = self.sam_predictor is not None
 
-        # [NEW] 현재 뷰 상태(줌/스크롤) 스냅샷 후, 전환 대상에도 동일 적용
-        prev_state = self._capture_view_state()
-
         if mode == EditModeDialog.AI_ASSIST:
             if self.ai_editor is None:
                 if not initialize:
@@ -2776,9 +2515,6 @@ class AnnotationEditorDialog(QDialog):
             self.manual_editor.update_mode_buttons(False, sam_ready)
             self.ai_editor.update_mode_buttons(True)
             self.setWindowTitle(self.ai_editor.windowTitle())
-            # [NEW] 이전 뷰 상태 적용
-            if prev_state is not None:
-                self._apply_view_state(self.ai_editor, prev_state)
         else:
             if self.ai_editor is not None:
                 # [CHANGED] AI → 수동 전환 시 더 이상 자동 확정하지 않음.
@@ -2800,9 +2536,6 @@ class AnnotationEditorDialog(QDialog):
             self._current_mode = EditModeDialog.MANUAL
             self.manual_editor.update_mode_buttons(True, sam_ready)
             self.setWindowTitle(self.manual_editor.windowTitle())
-            # [NEW] 이전 뷰 상태 적용
-            if prev_state is not None:
-                self._apply_view_state(self.manual_editor, prev_state)
 
         if initialize and self.ai_editor is None:
             self.manual_editor.update_mode_buttons(True, sam_ready)
@@ -2815,47 +2548,6 @@ class AnnotationEditorDialog(QDialog):
             self.resize(new_width, new_height)
             self.setMinimumSize(QSize(640, 480))
             current_widget.setFocus()
-
-    # [NEW] 줌/스크롤 상태를 캡처/적용하는 헬퍼
-    def _capture_view_state(self) -> dict | None:
-        try:
-            current = self.stack.currentWidget()
-            if current is None:
-                return None
-            canvas = getattr(current, 'canvas', None)
-            scroll = getattr(current, 'scroll_area', None)
-            if canvas is None or scroll is None:
-                return None
-            hbar = scroll.horizontalScrollBar()
-            vbar = scroll.verticalScrollBar()
-            return {
-                'zoom': float(getattr(canvas, 'zoom_factor', 1.0) or 1.0),
-                'h': int(hbar.value()),
-                'v': int(vbar.value()),
-            }
-        except Exception:
-            return None
-
-    def _apply_view_state(self, editor_widget, state: dict) -> None:
-        try:
-            if not state:
-                return
-            canvas = getattr(editor_widget, 'canvas', None)
-            scroll = getattr(editor_widget, 'scroll_area', None)
-            if canvas is None or scroll is None:
-                return
-            # 1) 줌 적용 (포컬 지정 없음으로 위치 변화 최소화)
-            zoom = float(state.get('zoom', 1.0) or 1.0)
-            canvas.set_zoom(zoom)
-            # 2) 스크롤바 적용 (범위 클램프)
-            hbar = scroll.horizontalScrollBar()
-            vbar = scroll.verticalScrollBar()
-            hv = int(state.get('h', 0))
-            vv = int(state.get('v', 0))
-            hbar.setValue(max(hbar.minimum(), min(hbar.maximum(), hv)))
-            vbar.setValue(max(vbar.minimum(), min(vbar.maximum(), vv)))
-        except Exception:
-            pass
 
     def _finalize(self, result_code, editor):
         self._result_polygons = self._clone_polygons(editor.get_all_polygons())
@@ -8086,21 +7778,20 @@ class LearningTab(QWidget):
             self.update_status_message("캡처 완료")
 
             if count == 1:
-                self.open_editor_mode_dialog(captured_pixmaps[0], initial_class_name=initial_class_name, index=1, total=1)
+                self.open_editor_mode_dialog(captured_pixmaps[0], initial_class_name=initial_class_name)
             else:
                 multi_dialog = MultiCaptureDialog(captured_pixmaps, self)
                 if multi_dialog.exec():
                     selected_pixmaps = multi_dialog.get_selected_pixmaps()
-                    total = len(selected_pixmaps)
-                    for i, pixmap in enumerate(selected_pixmaps, start=1):
-                        self.open_editor_mode_dialog(pixmap, initial_class_name=initial_class_name, index=i, total=total)
+                    for pixmap in selected_pixmaps:
+                        self.open_editor_mode_dialog(pixmap, initial_class_name=initial_class_name)
         except Exception as e:
             QMessageBox.critical(self, "캡처 오류", str(e))
         finally:
             self.update_status_message("준비")
 
-    def open_editor_mode_dialog(self, pixmap, image_path=None, initial_polygons=None, initial_class_name=None, *, index: int | None = None, total: int | None = None):
-        dialog = EditModeDialog(pixmap, self.sam_predictor is not None, self, index=index, total=total)
+    def open_editor_mode_dialog(self, pixmap, image_path=None, initial_polygons=None, initial_class_name=None):
+        dialog = EditModeDialog(pixmap, self.sam_predictor is not None, self)
         mode_result = dialog.exec()
         if mode_result == EditModeDialog.CANCEL:
             return
@@ -8271,8 +7962,7 @@ class LearningTab(QWidget):
         else: # 카테고리가 선택된 경우는 없음(버튼 비활성화)
             return
 
-        total = len(image_paths_to_edit)
-        for i, image_path in enumerate(image_paths_to_edit, start=1):
+        for image_path in image_paths_to_edit:
             img_bgr = cv2.imread(image_path)
             if img_bgr is None:
                 self.log_viewer.append(f"오류: '{os.path.basename(image_path)}' 파일을 열 수 없습니다.")
@@ -8295,7 +7985,7 @@ class LearningTab(QWidget):
             h, w, ch = img_rgb.shape
             bytes_per_line = ch * w
             q_image = QImage(img_rgb.data, w, h, bytes_per_line, QImage.Format.Format_RGB888)
-            self.open_editor_mode_dialog(QPixmap.fromImage(q_image), image_path=image_path, initial_polygons=initial_polygons, initial_class_name=initial_class_name, index=i, total=total)
+            self.open_editor_mode_dialog(QPixmap.fromImage(q_image), image_path=image_path, initial_polygons=initial_polygons, initial_class_name=initial_class_name)
 
     def start_training(self):
         if len(self.data_manager.get_class_list()) == 0:

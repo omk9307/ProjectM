@@ -1431,11 +1431,8 @@ class DetectionThread(QThread):
                 th, tw = tpl_img.shape[:2]
                 if roi_bin.shape[0] < th or roi_bin.shape[1] < tw:
                     continue
-                from utils_cv import safe_match_template
-                mt = safe_match_template(roi_bin, tpl_img, cv2.TM_CCOEFF_NORMED)
-                if mt is None:
-                    continue
-                max_val, max_loc = mt
+                result = cv2.matchTemplate(roi_bin, tpl_img, cv2.TM_CCOEFF_NORMED)
+                _, max_val, _, max_loc = cv2.minMaxLoc(result)
                 if max_val > best_score:
                     best_score = float(max_val)
                     best_template_id = template.get('id')

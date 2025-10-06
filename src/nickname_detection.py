@@ -175,12 +175,8 @@ class NicknameDetector:
             template = self._last_successful_template
             roi_h, roi_w = roi_gray.shape
             if roi_w >= template.width and roi_h >= template.height:
-                from utils_cv import safe_match_template
-                mt = safe_match_template(roi_gray, template.image, cv2.TM_CCOEFF_NORMED)
-                if mt is not None:
-                    max_val, max_loc = mt
-                else:
-                    max_val, max_loc = 0.0, (0, 0)
+                result = cv2.matchTemplate(roi_gray, template.image, cv2.TM_CCOEFF_NORMED)
+                _, max_val, _, max_loc = cv2.minMaxLoc(result)
                 if max_val >= self.match_threshold:
                     best_score, best_template, best_location = float(max_val), template, max_loc
 
@@ -207,12 +203,8 @@ class NicknameDetector:
                     template = self.templates[self._full_scan_template_index]
                     roi_h, roi_w = roi_gray.shape
                     if roi_w >= template.width and roi_h >= template.height:
-                        from utils_cv import safe_match_template
-                        mt = safe_match_template(roi_gray, template.image, cv2.TM_CCOEFF_NORMED)
-                        if mt is not None:
-                            max_val, max_loc = mt
-                        else:
-                            max_val, max_loc = 0.0, (0, 0)
+                        result = cv2.matchTemplate(roi_gray, template.image, cv2.TM_CCOEFF_NORMED)
+                        _, max_val, _, max_loc = cv2.minMaxLoc(result)
                         if max_val >= self.match_threshold and max_val > best_score:
                             best_score, best_template, best_location = float(max_val), template, max_loc
                 # 다음 프레임을 위해 인덱스 증가 (순환)
@@ -223,12 +215,8 @@ class NicknameDetector:
                 for template in other_templates:
                     roi_h, roi_w = roi_gray.shape
                     if roi_w < template.width or roi_h < template.height: continue
-                    from utils_cv import safe_match_template
-                    mt = safe_match_template(roi_gray, template.image, cv2.TM_CCOEFF_NORMED)
-                    if mt is not None:
-                        max_val, max_loc = mt
-                    else:
-                        max_val, max_loc = 0.0, (0, 0)
+                    result = cv2.matchTemplate(roi_gray, template.image, cv2.TM_CCOEFF_NORMED)
+                    _, max_val, _, max_loc = cv2.minMaxLoc(result)
                     if max_val >= self.match_threshold and max_val > best_score:
                         best_score, best_template, best_location = float(max_val), template, max_loc
 

@@ -10007,15 +10007,6 @@ class MapTab(QWidget):
                     # 지상에서는 실시간 예측 착지 지점을 안내
                     self.guidance_text = landing_terrain_group
                     self.intermediate_target_pos = QPointF(player_x, landing_y)
-                    # [FIX] 안전구간에 이미 진입했으면 아래점프 대기 상태를 해제하여
-                    #       전송 분기에서 걷기로 빠지지 않도록 한다.
-                    if self.navigation_action == 'prepare_to_down_jump':
-                        self.waiting_for_safe_down_jump = False
-                        # 안전 이동 앵커가 남아 있으면 제거하여 should_walk_to_safe 조건을 해제
-                        try:
-                            self.safe_move_anchor = None
-                        except Exception:
-                            pass
 
             else: # 일반 점프/오르기 등 다른 prepare 상태
                 next_node_key = self.current_segment_path[self.current_segment_index + 1] if self.current_segment_index + 1 < len(self.current_segment_path) else None
@@ -10844,12 +10835,8 @@ class MapTab(QWidget):
                         if not same_ctx:
                             known_context, pending_template = contexts.get(known_id), templates.get(pending_id)
                             if known_context is not None and pending_template is not None:
-                                from utils_cv import safe_match_template
-                                mt = safe_match_template(known_context, pending_template, cv2.TM_CCOEFF_NORMED)
-                                if mt is None:
-                                    max_val, max_loc = 0.0, (0, 0)
-                                else:
-                                    max_val, max_loc = mt
+                                res = cv2.matchTemplate(known_context, pending_template, cv2.TM_CCOEFF_NORMED)
+                                _, max_val, _, max_loc = cv2.minMaxLoc(res)
                                 if max_val >= MATCH_THRESHOLD:
                                     known_global_pos = global_positions[known_id]
                                     known_rect = self.key_features[known_id].get('rect_in_context', [0,0,0,0])
@@ -10865,12 +10852,8 @@ class MapTab(QWidget):
                         if not same_ctx:
                             pending_context, known_template = contexts.get(pending_id), templates.get(known_id)
                             if pending_context is not None and known_template is not None:
-                                from utils_cv import safe_match_template
-                                mt = safe_match_template(pending_context, known_template, cv2.TM_CCOEFF_NORMED)
-                                if mt is None:
-                                    max_val, max_loc = 0.0, (0, 0)
-                                else:
-                                    max_val, max_loc = mt
+                                res = cv2.matchTemplate(pending_context, known_template, cv2.TM_CCOEFF_NORMED)
+                                _, max_val, _, max_loc = cv2.minMaxLoc(res)
                                 if max_val >= MATCH_THRESHOLD:
                                     known_global_pos = global_positions[known_id]
                                     pending_rect = self.key_features[pending_id].get('rect_in_context', [0,0,0,0])

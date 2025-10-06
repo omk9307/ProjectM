@@ -174,12 +174,8 @@ class DirectionDetector:
             # 1) 선호 템플릿 우선 검사
             preferred = self._preferred_template.get(side)
             if preferred is not None and roi_gray.shape[0] >= preferred.height and roi_gray.shape[1] >= preferred.width:
-                from utils_cv import safe_match_template
-                mt = safe_match_template(roi_gray, preferred.image, cv2.TM_CCOEFF_NORMED)
-                if mt is not None:
-                    max_val, max_loc = mt
-                else:
-                    max_val, max_loc = 0.0, (0, 0)
+                result = cv2.matchTemplate(roi_gray, preferred.image, cv2.TM_CCOEFF_NORMED)
+                _, max_val, _, max_loc = cv2.minMaxLoc(result)
                 if max_val >= self.match_threshold:
                     side_best_score = float(max_val)
                     side_best_template = preferred
@@ -193,12 +189,8 @@ class DirectionDetector:
                 template = templates[idx]
                 self._scan_index[side] = (idx + 1) % len(templates)
                 if roi_gray.shape[0] >= template.height and roi_gray.shape[1] >= template.width:
-                    from utils_cv import safe_match_template
-                    mt = safe_match_template(roi_gray, template.image, cv2.TM_CCOEFF_NORMED)
-                    if mt is not None:
-                        max_val, max_loc = mt
-                    else:
-                        max_val, max_loc = 0.0, (0, 0)
+                    result = cv2.matchTemplate(roi_gray, template.image, cv2.TM_CCOEFF_NORMED)
+                    _, max_val, _, max_loc = cv2.minMaxLoc(result)
                     if max_val >= self.match_threshold:
                         side_best_score = float(max_val)
                         side_best_template = template

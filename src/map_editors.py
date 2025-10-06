@@ -85,7 +85,6 @@ from PyQt6.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
-from utils_cv import safe_match_template, safe_match_template_matrix
 
 try:
     from .map import (
@@ -424,9 +423,8 @@ class FeatureCropDialog(QDialog):
 
                 h, w = template.shape
                 threshold = feature_data.get('threshold', 0.85)
-                res = safe_match_template_matrix(current_map_gray, template, cv2.TM_CCOEFF_NORMED)
-                if res is None:
-                    continue
+                res = cv2.matchTemplate(current_map_gray, template, cv2.TM_CCOEFF_NORMED)
+                
                 loc = np.where(res >= threshold)
                 for pt in zip(*loc[::-1]):
                     # (위치, 신뢰도) 쌍으로 저장
@@ -864,8 +862,8 @@ class KeyFeatureManagerDialog(QDialog):
                 template = cv2.imdecode(np_arr, cv2.IMREAD_GRAYSCALE)
                 if template is None: continue
 
-                mt = safe_match_template(context_gray, template, cv2.TM_CCOEFF_NORMED)
-                max_val = float(mt[0]) if mt is not None else 0.0
+                res = cv2.matchTemplate(context_gray, template, cv2.TM_CCOEFF_NORMED)
+                _, max_val, _, _ = cv2.minMaxLoc(res)
                 match_results.append((other_id, max_val))
             except Exception:
                 continue
@@ -1175,9 +1173,8 @@ class AdvancedWaypointEditorDialog(QDialog):
                 if template is None: continue
 
                 threshold = feature_data.get('threshold', 0.90)
-                res = safe_match_template_matrix(current_map_gray, template, cv2.TM_CCOEFF_NORMED)
-                if res is None:
-                    continue
+                res = cv2.matchTemplate(current_map_gray, template, cv2.TM_CCOEFF_NORMED)
+
                 loc = np.where(res >= threshold)
                 for pt in zip(*loc[::-1]):
                     h, w = template.shape

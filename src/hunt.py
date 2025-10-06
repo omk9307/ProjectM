@@ -3525,8 +3525,6 @@ class HuntTab(QWidget):
 
         self.auto_request_checkbox = QCheckBox("자동사냥")
         self.auto_request_checkbox.toggled.connect(self._handle_setting_changed)
-        # 자동사냥 해제 시 제어 비허용 모드: 모든 조작 차단 + 즉시 모든 키 해제
-        self.auto_request_checkbox.toggled.connect(self._on_auto_request_toggled)
         for checkbox in (self.screen_output_checkbox, self.auto_request_checkbox):
             checkbox.setSizePolicy(
                 QSizePolicy(QSizePolicy.Policy.Maximum, QSizePolicy.Policy.Fixed)
@@ -5710,35 +5708,6 @@ class HuntTab(QWidget):
         self._save_settings()
         self._update_detection_summary()
 
-    def _on_auto_request_toggled(self, checked: bool) -> None:
-        """자동사냥 토글 시 제어 허용/차단 모드 전환.
-
-        - 체크 해제(차단 모드): 사냥탭에서 발생하는 모든 조작을 차단하고, 즉시 모든 키를 떼어 잔여 입력을 정리.
-        - 체크: 자동사냥 논리 플래그를 활성화하여 조건 충족 시 동작 가능 상태로 복귀.
-        """
-        try:
-            # 내부 자동사냥 플래그도 동기화(로그/저장 포함)
-            self.set_auto_hunt_enabled(bool(checked))
-        except Exception:
-            # set_auto_hunt_enabled 실패 시에도 차단 동작은 보장
-            self.auto_hunt_enabled = bool(checked)
-            try:
-                self._save_settings()
-            except Exception:
-                pass
-
-        if not checked:
-            # 차단 모드 진입: 즉시 모든 키 해제 및(보유 중이면) 권한 반환 시도
-            try:
-                self._issue_all_keys_release("자동사냥 해제")
-            except Exception:
-                pass
-            try:
-                if getattr(self, 'current_authority', None) == 'hunt':
-                    self.release_control("자동사냥 해제")
-            except Exception:
-                pass
-
     def _describe_authority_pending_reasons(
         self,
         failed_codes: Iterable[str],
@@ -6224,26 +6193,6 @@ class HuntTab(QWidget):
             return
         if not normalized:
             return
-
-        # [게이트] 자동사냥 비활성 또는 자동사냥 체크 해제 시: 사냥탭에서의 모든 조작 차단
-        try:
-            auto_request_off = bool(getattr(self, 'auto_request_checkbox', None)) and not bool(self.auto_request_checkbox.isChecked())
-        except Exception:
-            auto_request_off = False
-        auto_hunt_off = not bool(getattr(self, 'auto_hunt_enabled', True))
-
-        if auto_request_off or auto_hunt_off:
-            # 차단 모드: 원칙적으로 모든 조작 차단
-            # 단, 내부 복구 루틴에서 호출된 '모든 키 떼기'는 한 번만 허용(바이패스 플래그)
-            if normalized == "모든 키 떼기" and bool(getattr(self, '_internal_release_bypass', False)):
-                pass  # 허용
-            else:
-                if hasattr(self, '_append_control_log'):
-                    try:
-                        self._append_control_log(f"'{normalized}' 차단: 제어 비허용 모드(자동사냥 해제)", "warn")
-                    except Exception:
-                        pass
-                return
 
         reason_str = str(reason) if isinstance(reason, str) else ""
         is_status_command = reason_str.startswith('status:')
@@ -10633,18 +10582,7 @@ class HuntTab(QWidget):
         self._clear_direction_confirmation()
         send_release = not self._forbidden_priority_active
         if send_release:
-            # 차단 모드여도 내부 복구용 '모든 키 떼기'는 안전하게 한 번만 통과시키기 위해 바이패스 플래그 사용
-            try:
-                self._internal_release_bypass = True
-            except Exception:
-                pass
-            try:
-                self._emit_control_command("모든 키 떼기", reason=reason)
-            finally:
-                try:
-                    self._internal_release_bypass = False
-                except Exception:
-                    pass
+            self._emit_control_command("모든 키 떼기", reason=reason)
             if isinstance(reason, str) and reason.strip():
                 reason_text = reason.strip()
                 if reason_text.startswith('status:'):
