@@ -166,6 +166,8 @@ class AnchorDetectionThread(QThread):
         # 다운스케일 하한 및 시작 강제 매칭 프레임 수
         self._min_downscale = float(MapConfig.get("min_downscale_for_matching", 0.6) or 0.6)
         self._startup_force_match_frames = int(MapConfig.get("startup_force_match_frames", 8) or 0)
+        # 연속 앵커 0프레임 카운터(자가 복구용)
+        self._zero_feature_streak = 0
 
         for fid, fdata in self.all_key_features.items():
             try:
@@ -176,10 +178,17 @@ class AnchorDetectionThread(QThread):
                     continue
 
                 tpl_gray = cv2.cvtColor(template, cv2.COLOR_BGR2GRAY)
-                tpl_small = cv2.resize(tpl_gray, (0, 0), fx=self._downscale, fy=self._downscale, interpolation=cv2.INTER_AREA)
+                tpl_small = cv2.resize(
+                    tpl_gray,
+                    (0, 0),
+                    fx=self._downscale,
+                    fy=self._downscale,
+                    interpolation=cv2.INTER_AREA,
+                )
                 t_h, t_w = tpl_small.shape
 
                 self.feature_templates[fid] = {
+                    "template_gray": tpl_gray,
                     "template_gray_small": tpl_small,
                     "threshold": fdata.get('threshold', MapConfig["detection_threshold_default"]),
                     "size": QSize(template.shape[1], template.shape[0]),
@@ -204,6 +213,7 @@ class AnchorDetectionThread(QThread):
 
     def run(self):
         self.is_running = True
+        last_template_scale = float(self._downscale)
         while self.is_running:
             loop_start = time.perf_counter()
             perf = {
@@ -269,6 +279,9 @@ class AnchorDetectionThread(QThread):
                 if headless and not require_initial and not debug_force and not in_startup_window:
                     if (now_ts - self._last_template_match_ts) < self._min_template_interval:
                         allow_match = False
+                # 연속으로 앵커가 0개면 주기 제한을 일시 해제해 복구 시도
+                if not allow_match and self._zero_feature_streak >= 12:
+                    allow_match = True
 
                 all_detected_features = []
                 perf['fallback_scan_count'] = 0
@@ -430,6 +443,11 @@ class AnchorDetectionThread(QThread):
 
                     perf['feature_match_ms'] = (time.perf_counter() - feature_start) * 1000.0
                     perf['features_detected'] = len(all_detected_features)
+                    # 연속 0 카운터 업데이트
+                    if perf['features_detected'] > 0:
+                        self._zero_feature_streak = 0
+                    else:
+                        self._zero_feature_streak += 1
                     # 최신 탐지 결과 캐시
                     try:
                         self._last_detected_features = list(all_detected_features)
@@ -444,8 +462,10 @@ class AnchorDetectionThread(QThread):
                     if self._last_detected_features:
                         all_detected_features = self._last_detected_features
                         perf['features_detected'] = len(all_detected_features)
+                        self._zero_feature_streak = 0 if perf['features_detected'] > 0 else (self._zero_feature_streak + 1)
                     else:
                         perf['features_detected'] = 0
+                        self._zero_feature_streak += 1
                     perf['avg_roi_radius'] = float(perf.get('avg_roi_radius', 0.0) or 0.0)
                     perf['max_roi_radius'] = float(perf.get('max_roi_radius', 0.0) or 0.0)
 
@@ -462,13 +482,40 @@ class AnchorDetectionThread(QThread):
                     # 연동/시작 강제 매칭 구간에서는 다운스케일 하향을 건너뛰거나 최소 하한을 준수
                     if not link_on and not in_startup_window:
                         old_scale = self._downscale
-                        self._downscale = max(self._min_downscale, old_scale * 0.95)
-                        MapConfig["downscale"] = self._downscale
-                        perf['downscale_adjusted'] = float(self._downscale)
-                        print(
-                            f"[AnchorDetectionThread] 느린 루프 감지 ({loop_time_ms:.1f}ms), "
-                            f"다운스케일 조정: {old_scale:.2f} -> {self._downscale:.2f} (min={self._min_downscale:.2f})"
-                        )
+                        new_scale = max(self._min_downscale, old_scale * 0.95)
+                        if new_scale != old_scale:
+                            self._downscale = new_scale
+                            MapConfig["downscale"] = self._downscale
+                            perf['downscale_adjusted'] = float(self._downscale)
+                            # 템플릿 피라미드 재생성(스케일 불일치로 인한 매칭 실패 방지)
+                            try:
+                                for fid, tpl in self.feature_templates.items():
+                                    tpl_gray = tpl.get("template_gray")
+                                    if tpl_gray is None:
+                                        continue
+                                    tpl_small = cv2.resize(
+                                        tpl_gray,
+                                        (0, 0),
+                                        fx=self._downscale,
+                                        fy=self._downscale,
+                                        interpolation=cv2.INTER_AREA,
+                                    )
+                                    self.feature_templates[fid]["template_gray_small"] = tpl_small
+                                # 런타임 ROI/쿨다운도 초기화하여 재탐색 가속
+                                for fid, runtime in self._template_runtime.items():
+                                    t_h, t_w = self.feature_templates[fid]["template_gray_small"].shape
+                                    base_radius = max(int(max(t_w, t_h) * 1.2), 16)
+                                    runtime['base_radius'] = base_radius
+                                    runtime['roi_radius'] = base_radius
+                                    runtime['failure_count'] = 0
+                                    runtime['skip_until_ts'] = 0.0
+                                    runtime['next_fallback_ts'] = 0.0
+                            except Exception as rebuild_exc:
+                                print(f"[AnchorDetectionThread] 템플릿 스케일 재생성 실패: {rebuild_exc}")
+                            print(
+                                f"[AnchorDetectionThread] 느린 루프 감지 ({loop_time_ms:.1f}ms), "
+                                f"다운스케일 조정 및 템플릿 재생성: {old_scale:.2f} -> {self._downscale:.2f} (min={self._min_downscale:.2f})"
+                            )
 
             except Exception as e:
                 perf['frame_status'] = 'error'

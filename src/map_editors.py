@@ -2370,8 +2370,9 @@ class FullMinimapEditorDialog(QDialog):
         튜플 (background_item, text_item) 형태로 반환합니다.
         [v11.2.8] 텍스트/배경 분리 반환 및 패딩 조정
         """
+        # 더 작은 폰트로 변경(요청 반영): 기본 2 -> 1
         if font is None:
-            fixed_font = QFont("맑은 고딕", 2)
+            fixed_font = QFont("맑은 고딕", 1)
         else:
             fixed_font = font
 
@@ -2379,27 +2380,28 @@ class FullMinimapEditorDialog(QDialog):
         text_item.setFont(fixed_font)
         text_item.setDefaultTextColor(color)
 
+        # 타이트 바운딩으로 배경 크기 산출
         fm = QFontMetricsF(fixed_font)
-        text_rect = fm.boundingRect(text)
+        tight_rect = fm.boundingRect(text)
 
-        # [v11.2.8] 패딩 조정 (좌우 1px, 상하 0px)
+        # 패딩: 좌우 1px, 상하 0px
         pad_x = 1
         pad_y = 0
-
-        bg_width = text_rect.width() + pad_x * 2
-        bg_height = text_rect.height() + pad_y * 2
-        bg_rect_geom = QRectF(0, 0, bg_width, bg_height)
+        bg_rect_geom = QRectF(0, 0, tight_rect.width() + pad_x * 2, tight_rect.height() + pad_y * 2)
 
         background_item = RoundedRectItem(bg_rect_geom, 4, 4)
         background_item.setBrush(QColor(0, 0, 0, 170))
         background_item.setPen(QPen(Qt.GlobalColor.transparent))
+
+        # 스케일 기준점을 중앙으로 고정하여 확대/축소 시 어긋남 방지
+        background_item.setTransformOriginPoint(bg_rect_geom.center())
+        text_item.setTransformOriginPoint(text_item.boundingRect().center())
 
         background_item.setData(0, "coord_text_bg")
         text_item.setData(0, "coord_text")
         background_item.setZValue(11)
         text_item.setZValue(12)
 
-        # [v11.2.8] 두 아이템을 독립적으로 반환
         return background_item, text_item
     
     # --- 좌표 라벨 배치 유틸리티 (겹침 방지 + 재배치 지원) ---
