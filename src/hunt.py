@@ -692,6 +692,8 @@ class HuntTab(QWidget):
         self.floor_hold_seconds = DEFAULT_MAX_FLOOR_HOLD_SEC
         self.last_control_acquired_ts = 0.0
         self.last_release_attempt_ts = 0.0
+        # [접근 차단 로그 쿨다운] 주 스킬 미충족으로 접근을 막을 때 로그 스팸 방지
+        self._last_approach_blocked_log_ts = 0.0
         self.auto_hunt_enabled = True
         self.overlay_preferences = {
             'hunt_area': True,
@@ -9420,7 +9422,16 @@ class HuntTab(QWidget):
                 self.release_control(release_reason, meta=release_meta or None)
             return
 
-        if hunt_ready or primary_ready:
+        # [정책 변경] 권한 요청 조건
+        # - 주 스킬 기준 충족 시 즉시 요청
+        # - 사냥범위 기준만 충족 시에는, "사냥범위 내 몬스터들이 이동 시 주 스킬 범위 기준을 만족하도록 배치 가능"할 때만 요청
+        reachable = False
+        if not primary_ready and hunt_ready:
+            try:
+                reachable = self._is_primary_reachable_from_hunt()
+            except Exception:
+                reachable = False
+        if primary_ready or (hunt_ready and reachable):
             reason_parts = []
             if hunt_ready and hunt_threshold > 0:
                 reason_parts.append(
@@ -9430,6 +9441,8 @@ class HuntTab(QWidget):
                 reason_parts.append(
                     f"주 스킬 {self.latest_primary_monster_count}마리 ≥ 기준 {primary_threshold}"
                 )
+            if not primary_ready and reachable:
+                reason_parts.append("주 스킬 기준 도달 가능(이동)")
             if not reason_parts:
                 reason_parts.append("몬스터 조건 충족")
             reason_text = ", ".join(reason_parts)
@@ -9576,10 +9589,38 @@ class HuntTab(QWidget):
             self._last_monster_seen_ts = time.time()
 
         if self.latest_primary_monster_count < primary_threshold and not allow_cleanup:
-            if self._handle_monster_approach():
-                return
+            # 주 스킬 기준이 아직 미충족인 경우: 사냥범위 내 몬스터들로 주 스킬 기준 도달이 가능한지 평가
+            reachable = False
+            try:
+                reachable = self._is_primary_reachable_from_hunt()
+            except Exception:
+                reachable = False
+
+            if reachable:
+                # 도달 가능하면 기존 접근 로직으로 몬스터 쪽으로 이동 시도
+                if self._handle_monster_approach():
+                    return
+            # 도달 불가하거나 접근 시도가 실패하면 이동 중단 및 권한 반환 시도
             if self.latest_monster_count == 0:
                 self._ensure_idle_keys("감지 범위 몬스터 없음")
+            else:
+                self._ensure_idle_keys("이동 보류: 주 스킬 범위 미충족 → 맵 탭 권한 반환 대기")
+
+            now_try = time.time()
+            if (now_try - self.last_release_attempt_ts) >= 1.0:
+                self.last_release_attempt_ts = now_try
+                try:
+                    hunt_threshold_widget = getattr(self, 'hunt_monster_threshold_spinbox', None)
+                    hunt_threshold = int(hunt_threshold_widget.value()) if hunt_threshold_widget else 0
+                except Exception:
+                    hunt_threshold = 0
+                release_meta = {
+                    "latest_monster_count": int(self.latest_monster_count),
+                    "hunt_monster_threshold": int(hunt_threshold),
+                    "latest_primary_monster_count": int(self.latest_primary_monster_count),
+                    "primary_monster_threshold": int(primary_threshold),
+                }
+                self.release_control("PRIMARY_NOT_READY", meta=release_meta)
             return
         if not self.latest_snapshot or not self.latest_snapshot.character_boxes:
             self._ensure_idle_keys("탐지 데이터 없음")
@@ -9646,6 +9687,58 @@ class HuntTab(QWidget):
             return True
         self._maybe_trigger_walk_teleport(target_side, distance)
         return walk_issued
+
+    def _is_primary_reachable_from_hunt(self) -> bool:
+        """사냥범위 내 몬스터들만 대상으로, 캐릭터가 X축 이동 시 주 스킬 범위 기준을
+        만족할 수 있는지(이론상 배치 가능)를 평가한다.
+
+        - 대칭 모드: 폭 = primary_radius*2
+        - 전/후 비대칭 모드: 폭 = primary_front + primary_back
+        - 후보는 현재 사냥범위와 Y밴드에 교차하는 몬스터만 사용
+        - 슬라이딩 윈도우로 폭 내에 threshold 이상 포함 가능하면 True
+        """
+        if not (self.latest_snapshot and self.current_hunt_area):
+            return False
+        monsters = self._get_recent_monster_boxes()
+        if not monsters:
+            return False
+        hunt_monsters = [box for box in monsters if box.intersects(self.current_hunt_area)]
+        if not hunt_monsters:
+            return False
+
+        # 주 스킬 기준
+        primary_threshold_widget = getattr(self, 'primary_monster_threshold_spinbox', None)
+        primary_threshold = int(primary_threshold_widget.value()) if primary_threshold_widget else 1
+        primary_threshold = max(1, primary_threshold)
+
+        # 폭 계산
+        mode_on = bool(getattr(self, 'facing_range_checkbox', None) and self.facing_range_checkbox.isChecked())
+        if mode_on:
+            try:
+                front = max(0.0, float(self.primary_front_spinbox.value()))
+                back = max(0.0, float(self.primary_back_spinbox.value()))
+                width = max(1.0, front + back)
+            except Exception:
+                width = 0.0
+        else:
+            try:
+                radius = float(self.primary_skill_range_spinbox.value())
+                width = max(1.0, radius * 2.0)
+            except Exception:
+                width = 0.0
+        if width <= 0.0:
+            return False
+
+        xs = sorted(box.center_x for box in hunt_monsters)
+        i = 0
+        n = len(xs)
+        for i in range(n):
+            j = i
+            while j < n and (xs[j] - xs[i]) <= width + 1e-6:
+                j += 1
+            if (j - i) >= primary_threshold:
+                return True
+        return False
 
     def _issue_walk_command(self, side: str, distance: float) -> bool:
         if side not in ('left', 'right'):
