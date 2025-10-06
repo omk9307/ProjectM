@@ -750,6 +750,12 @@ class HuntTab(QWidget):
         self._cached_monster_boxes_ts = 0.0
         self._active_monster_confidence_overrides: dict[int, float] = {}
 
+        # 교전/클린업 상태
+        # - engage_active: 주 스킬 범위 기준 최소 마릿수(스핀박스) 충족하여 교전 상태로 진입한 후 유지
+        # - cleanup_active: 교전 중 마릿수가 기준 미만(>=1)으로 줄었을 때 잔몹 정리 상태
+        self._engage_active: bool = False
+        self._cleanup_active: bool = False
+
         self.detection_thread: Optional[DetectionThread] = None
         self.detection_popup: Optional[DetectionPopup] = None
         self.is_popup_active = False
@@ -9390,9 +9396,15 @@ class HuntTab(QWidget):
 
     def _run_hunt_loop(self) -> None:
         if not self.auto_hunt_enabled:
+            # 교전/클린업 상태 초기화
+            self._engage_active = False
+            self._cleanup_active = False
             self._ensure_idle_keys("자동 사냥 비활성화")
             return
         if self.current_authority != "hunt":
+            # 교전/클린업 상태 초기화
+            self._engage_active = False
+            self._cleanup_active = False
             self._ensure_idle_keys("사냥 권한 없음")
             return
         if self._pending_skill_timer or self._pending_direction_timer:
@@ -9430,7 +9442,35 @@ class HuntTab(QWidget):
             return
         primary_threshold_widget = getattr(self, 'primary_monster_threshold_spinbox', None)
         primary_threshold = max(1, primary_threshold_widget.value()) if primary_threshold_widget else 1
-        if self.latest_primary_monster_count < primary_threshold:
+
+        # 교전/클린업 상태 갱신
+        primary_ready = self.latest_primary_monster_count >= primary_threshold
+        if not self._engage_active:
+            # 기준 충족으로 교전 시작
+            if primary_ready:
+                self._engage_active = True
+                self._cleanup_active = False
+        else:
+            # 교전 중 상태 유지/전환
+            if primary_ready:
+                # 다시 2마리 이상 확보되면 일반 교전
+                self._cleanup_active = False
+            elif self.latest_primary_monster_count >= 1:
+                # 잔몹 1마리 남은 상태 → 클린업 유지
+                self._cleanup_active = True
+            else:
+                # 주 스킬 범위 내 0마리 → 교전 종료
+                self._engage_active = False
+                self._cleanup_active = False
+
+        # 클린업 허용 여부: 교전 중이고 주 스킬 범위에 1마리 이상 존재
+        allow_cleanup = self._engage_active and self.latest_primary_monster_count >= 1
+
+        # 클린업 중에도 최근 몬스터 관측 시간 갱신(권한 자동 반환 방지)
+        if allow_cleanup:
+            self._last_monster_seen_ts = time.time()
+
+        if self.latest_primary_monster_count < primary_threshold and not allow_cleanup:
             if self._handle_monster_approach():
                 return
             if self.latest_monster_count == 0:
@@ -9645,6 +9685,12 @@ class HuntTab(QWidget):
 
     def _skill_meets_monster_conditions(self, skill: AttackSkill, monster_count: int) -> bool:
         min_required = max(1, getattr(skill, 'min_monsters', 1))
+        # 클린업 상태에서는 주 스킬에 한해 최소 마릿수 조건을 1로 완화
+        try:
+            if getattr(self, '_cleanup_active', False) and getattr(skill, 'is_primary', False):
+                min_required = 1
+        except Exception:
+            pass
         if monster_count < min_required:
             return False
         max_allowed = getattr(skill, 'max_monsters', None)

@@ -9205,7 +9205,7 @@ class MapTab(QWidget):
                             self.last_printed_direction = current_direction
 
                     elif current_action_key == 'prepare_to_down_jump':
-                        # 안전지점 안내는 준비과정에서 사용하지 않음. 키 전송 직전 안전성만 판정.
+                        # 안전지점 안내는 준비과정에서 표시하지 않더라도, 키 전송 직전 안전성만 판정한다.
                         can_send = (
                             is_on_ground
                             and self.guidance_text not in ["점프 불가: 안전 지대 없음", "이동할 안전 지대 없음"]
@@ -9238,13 +9238,54 @@ class MapTab(QWidget):
                             except Exception:
                                 dist = None
 
-                            # edgefall 모드이거나 사다리 근접으로 아래점프 금지 시: 안전지점/에지로 걷기 유도
+                            # 기본 안전 조건: 에지낙하 모드 또는 사다리 근접 금지일 때만 걷기 유도
                             should_walk_to_safe = (
                                 getattr(self, 'edgefall_mode_active', False)
                                 or not self._should_issue_down_jump(dist)
-                                or getattr(self, 'waiting_for_safe_down_jump', False)
-                                or getattr(self, 'safe_move_anchor', None) is not None
                             )
+
+                            # 안전 이동 앵커가 있거나, 안전대기 플래그가 올라가 있는 경우 보수적으로 판단
+                            anchor = getattr(self, 'safe_move_anchor', None)
+                            if anchor or getattr(self, 'waiting_for_safe_down_jump', False):
+                                try:
+                                    # 현재 노드 맥락과 동일한 앵커인지 확인 (가능하면 node_key 기준)
+                                    same_context = True
+                                    try:
+                                        action_node_key = self.current_segment_path[self.current_segment_index]
+                                        if anchor and isinstance(anchor, dict):
+                                            ak = anchor.get('node_key')
+                                            if ak is not None:
+                                                same_context = (ak == action_node_key)
+                                    except Exception:
+                                    
+                                        same_context = True
+                                    # 앵커가 있고, 같은 맥락이며, 앵커 X에 이미 근접했다면 대기 해제
+                                    if anchor and same_context and final_player_pos is not None:
+                                        deadzone = float(getattr(self, 'SAFE_MOVE_DIRECTION_DEADZONE', 1.0))
+                                        try:
+                                            anchor_x = float(anchor.get('x'))
+                                            dx_anchor = float(final_player_pos.x()) - anchor_x
+                                            if abs(dx_anchor) <= deadzone:
+                                                # 안전지점 도달로 간주: 대기/앵커를 해제하고 아래점프 허용
+                                                self.waiting_for_safe_down_jump = False
+                                                try:
+                                                    self.safe_move_anchor = None
+                                                except Exception:
+                                                    pass
+                                                should_walk_to_safe = False
+                                            else:
+                                                # 아직 안전지점까지 이동 필요: 걷기 유도 유지
+                                                should_walk_to_safe = True
+                                        except Exception:
+                                            # 앵커 좌표가 유효하지 않으면 보수적으로 걷기 유도
+                                            should_walk_to_safe = True
+                                    else:
+                                        # 앵커가 없거나 맥락이 다르면, 기본 안전 조건만 유지
+                                        # (edgefall/사다리 근접 금지에 한해 걷기 유도, 단순 대기 플래그만으로는 억제하지 않음)
+                                        should_walk_to_safe = bool(should_walk_to_safe)
+                                except Exception:
+                                    # 예외 시 보수적으로 유지
+                                    should_walk_to_safe = True
 
                             if can_send and not getattr(self, 'down_jump_send_latch', False):
                                 if not should_walk_to_safe:
@@ -9254,23 +9295,28 @@ class MapTab(QWidget):
                                     self.down_jump_sent_at = now_time
                                     self.waiting_for_safe_down_jump = False
                                 else:
-                                    # 안전지점/에지로 이동: 내부 목표(intermediate_target_pos) 기준으로 걷기 전송
+                                    # 안전지점/에지로 이동: 안전 앵커 기준으로만 걷기 전송 (없으면 내부 목표 보조)
                                     self.waiting_for_safe_down_jump = True
-                                    target = self.intermediate_target_pos
+                                    target_dx = None
                                     try:
-                                        if target is not None and final_player_pos is not None:
-                                            dx = float(target.x()) - float(final_player_pos.x())
-                                            deadzone = float(getattr(self, 'SAFE_MOVE_DIRECTION_DEADZONE', 1.0))
-                                            if abs(dx) > deadzone:
-                                                # 쿨다운 내 중복 전송 방지
-                                                if (now_time - self.last_safe_move_command_time) >= float(self.SAFE_MOVE_COMMAND_COOLDOWN):
-                                                    command_to_send = "걷기(우)" if dx > 0 else "걷기(좌)"
-                                                    self.last_safe_move_command_time = now_time
-                                                    # 방향 기억(토글 방지 보조)
-                                                    self.last_printed_direction = "→" if dx > 0 else "←"
+                                        if final_player_pos is not None:
+                                            if anchor and isinstance(anchor, dict):
+                                                target_dx = float(anchor.get('x')) - float(final_player_pos.x())
+                                            elif self.intermediate_target_pos is not None:
+                                                # 폴백: 기존 내부 목표 사용 (착지 안내로 바뀌는 문제를 줄이기 위해 앵커 우선)
+                                                target_dx = float(self.intermediate_target_pos.x()) - float(final_player_pos.x())
                                     except Exception:
-                                        # 목표가 없거나 계산 실패 시, 아래점프 전송은 하지 않고 대기만 유지
-                                        pass
+                                        target_dx = None
+
+                                    if target_dx is not None:
+                                        deadzone = float(getattr(self, 'SAFE_MOVE_DIRECTION_DEADZONE', 1.0))
+                                        if abs(target_dx) > deadzone:
+                                            # 쿨다운 내 중복 전송 방지
+                                            if (now_time - self.last_safe_move_command_time) >= float(self.SAFE_MOVE_COMMAND_COOLDOWN):
+                                                command_to_send = "걷기(우)" if target_dx > 0 else "걷기(좌)"
+                                                self.last_safe_move_command_time = now_time
+                                                # 방향 기억(토글 방지 보조)
+                                                self.last_printed_direction = "→" if target_dx > 0 else "←"
                         self.last_printed_direction = None
 
                     elif action_changed:
