@@ -3525,6 +3525,11 @@ class HuntTab(QWidget):
 
         self.auto_request_checkbox = QCheckBox("자동사냥")
         self.auto_request_checkbox.toggled.connect(self._handle_setting_changed)
+        # [연결 강화] 자동사냥 체크박스로 루프 ON/OFF도 함께 제어
+        try:
+            self.auto_request_checkbox.toggled.connect(self.set_auto_hunt_enabled)
+        except Exception:
+            pass
         for checkbox in (self.screen_output_checkbox, self.auto_request_checkbox):
             checkbox.setSizePolicy(
                 QSizePolicy(QSizePolicy.Policy.Maximum, QSizePolicy.Policy.Fixed)
@@ -6239,6 +6244,7 @@ class HuntTab(QWidget):
                 self._set_current_facing('left', save=False)
             elif "key.right" in lower and "key.left" not in lower:
                 self._set_current_facing('right', save=False)
+        
         self.control_command_issued.emit(command, reason)
         # HP 회복 시도 후 다음 탐지 주기에서 회복여부 판단
         if is_status_command and status_resource == 'hp':
@@ -8921,6 +8927,11 @@ class HuntTab(QWidget):
         self._suppress_settings_save = False
         self._suppress_downscale_prompt = False
         self._emit_area_overlays()
+        # [초기 동기화] 자동사냥 체크 상태로 루프 ON/OFF를 일치시킴
+        try:
+            self.set_auto_hunt_enabled(bool(self.auto_request_checkbox.isChecked()))
+        except Exception:
+            pass
         self._save_settings()
 
     def _save_settings(self) -> None:
@@ -9386,7 +9397,8 @@ class HuntTab(QWidget):
             return
         if self._pending_skill_timer or self._pending_direction_timer:
             return
-        if self._get_command_delay_remaining() > 0:
+        remaining_delay = self._get_command_delay_remaining()
+        if remaining_delay > 0:
             return
         if self._direction_confirmation_pending():
             if self._maybe_complete_direction_confirmation():
@@ -9964,6 +9976,7 @@ class HuntTab(QWidget):
         self._pending_skill_timer = timer
         self._pending_skill = skill
         self.hunting_active = True
+        
 
     def _execute_scheduled_skill(self, skill: AttackSkill) -> None:
         pending_skill = self._pending_skill
