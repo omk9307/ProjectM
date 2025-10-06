@@ -241,6 +241,8 @@ class AttackSkill:
     command: str
     enabled: bool = True
     is_primary: bool = False
+    # 방향전환 사용 여부: True면 공격 전 목표 방향으로 캐릭터를 돌린다.
+    use_direction: bool = True
     min_monsters: int = 1
     max_monsters: Optional[int] = None
     probability: int = 100
@@ -305,6 +307,10 @@ class AttackSkillDialog(QDialog):
         self.enabled_checkbox.setChecked(True)
         self.primary_checkbox = QCheckBox("주 공격 스킬로 설정")
         self.primary_checkbox.setChecked(False)
+
+        # 방향전환 사용
+        self.direction_checkbox = QCheckBox("방향전환 사용")
+        self.direction_checkbox.setChecked(True)
 
         self.primary_reset_min_spinbox = QSpinBox()
         self.primary_reset_min_spinbox.setRange(0, 999)
@@ -398,6 +404,10 @@ class AttackSkillDialog(QDialog):
             self.command_input.setText(skill.command)
             self.enabled_checkbox.setChecked(skill.enabled)
             self.primary_checkbox.setChecked(skill.is_primary)
+            try:
+                self.direction_checkbox.setChecked(bool(getattr(skill, 'use_direction', True)))
+            except Exception:
+                self.direction_checkbox.setChecked(True)
             self.min_monsters_spinbox.setValue(skill.min_monsters)
             max_monsters = getattr(skill, 'max_monsters', None)
             if isinstance(max_monsters, int) and max_monsters > 0:
@@ -427,6 +437,7 @@ class AttackSkillDialog(QDialog):
         form.addRow("명령", self.command_input)
         form.addRow("사용", self.enabled_checkbox)
         form.addRow("주 스킬", self.primary_checkbox)
+        form.addRow("방향전환 사용", self.direction_checkbox)
         form.addRow(self.primary_reset_label, self.primary_reset_widget)
         form.addRow(self.primary_release_label, self.primary_release_combo)
         form.addRow("사용 최소 몬스터 수", self.min_monsters_spinbox)
@@ -475,6 +486,7 @@ class AttackSkillDialog(QDialog):
             command=command,
             enabled=self.enabled_checkbox.isChecked(),
             is_primary=is_primary,
+            use_direction=bool(self.direction_checkbox.isChecked()),
             min_monsters=self.min_monsters_spinbox.value(),
             max_monsters=max_monsters_value or None,
             probability=self.probability_spinbox.value(),
@@ -755,6 +767,7 @@ class HuntTab(QWidget):
         # - cleanup_active: 교전 중 마릿수가 기준 미만(>=1)으로 줄었을 때 잔몹 정리 상태
         self._engage_active: bool = False
         self._cleanup_active: bool = False
+        self._cleanup_hold_until_ts: float = 0.0
 
         self.detection_thread: Optional[DetectionThread] = None
         self.detection_popup: Optional[DetectionPopup] = None
@@ -2227,6 +2240,15 @@ class HuntTab(QWidget):
         self.primary_monster_threshold_spinbox.setValue(1)
         condition_form.addRow("주 스킬 범위 몬스터", self.primary_monster_threshold_spinbox)
         self.primary_monster_threshold_spinbox.valueChanged.connect(self._handle_setting_changed)
+
+        # 클린업 유예(ms): 잔몹이 0마리로 잠깐 튈 때 즉시 교전을 종료하지 않도록 유예
+        self.cleanup_grace_spinbox = QSpinBox()
+        self.cleanup_grace_spinbox.setRange(0, 5000)
+        self.cleanup_grace_spinbox.setSingleStep(100)
+        self.cleanup_grace_spinbox.setValue(1000)
+        self.cleanup_grace_spinbox.setSuffix(" ms")
+        condition_form.addRow("클린업 유예(ms)", self.cleanup_grace_spinbox)
+        self.cleanup_grace_spinbox.valueChanged.connect(self._handle_setting_changed)
 
         self.idle_release_spinbox = QDoubleSpinBox()
         self.idle_release_spinbox.setRange(0.5, 30.0)
@@ -8339,6 +8361,7 @@ class HuntTab(QWidget):
             hunt_threshold_val = conditions.get('hunt_monster_threshold')
             primary_threshold_val = conditions.get('primary_monster_threshold')
             legacy_threshold_val = conditions.get('monster_threshold')
+            cleanup_grace_ms = conditions.get('cleanup_grace_ms')
 
             if hunt_threshold_val is None:
                 hunt_threshold_val = legacy_threshold_val
@@ -8354,6 +8377,12 @@ class HuntTab(QWidget):
             try:
                 if primary_threshold_val is not None:
                     self.primary_monster_threshold_spinbox.setValue(int(primary_threshold_val))
+            except (TypeError, ValueError):
+                pass
+
+            try:
+                if cleanup_grace_ms is not None and hasattr(self, 'cleanup_grace_spinbox'):
+                    self.cleanup_grace_spinbox.setValue(int(cleanup_grace_ms))
             except (TypeError, ValueError):
                 pass
 
@@ -8850,6 +8879,7 @@ class HuntTab(QWidget):
                         command=command,
                         enabled=bool(item.get('enabled', True)),
                         is_primary=bool(item.get('is_primary', False)),
+                        use_direction=bool(item.get('use_direction', True)),
                         min_monsters=int(item.get('min_monsters', 1)),
                         max_monsters=self._parse_max_monsters(item.get('max_monsters')),
                         probability=int(item.get('probability', 100)),
@@ -8997,6 +9027,7 @@ class HuntTab(QWidget):
                 'hunt_monster_threshold': self.hunt_monster_threshold_spinbox.value(),
                 'primary_monster_threshold': self.primary_monster_threshold_spinbox.value(),
                 'monster_threshold': self.hunt_monster_threshold_spinbox.value(),
+                'cleanup_grace_ms': int(self.cleanup_grace_spinbox.value()) if hasattr(self, 'cleanup_grace_spinbox') else 0,
                 'auto_request': self.auto_request_checkbox.isChecked(),
                 'idle_release_sec': self.idle_release_spinbox.value(),
                 'max_authority_hold_sec': self.max_authority_hold_spinbox.value(),
@@ -9066,6 +9097,7 @@ class HuntTab(QWidget):
                     'command': skill.command,
                     'enabled': skill.enabled,
                     'is_primary': skill.is_primary,
+                    'use_direction': bool(getattr(skill, 'use_direction', True)),
                     'min_monsters': skill.min_monsters,
                     'max_monsters': skill.max_monsters,
                     'probability': skill.probability,
@@ -9399,12 +9431,14 @@ class HuntTab(QWidget):
             # 교전/클린업 상태 초기화
             self._engage_active = False
             self._cleanup_active = False
+            self._cleanup_hold_until_ts = 0.0
             self._ensure_idle_keys("자동 사냥 비활성화")
             return
         if self.current_authority != "hunt":
             # 교전/클린업 상태 초기화
             self._engage_active = False
             self._cleanup_active = False
+            self._cleanup_hold_until_ts = 0.0
             self._ensure_idle_keys("사냥 권한 없음")
             return
         if self._pending_skill_timer or self._pending_direction_timer:
@@ -9445,26 +9479,86 @@ class HuntTab(QWidget):
 
         # 교전/클린업 상태 갱신
         primary_ready = self.latest_primary_monster_count >= primary_threshold
+        prev_engage = self._engage_active
+        prev_cleanup = self._cleanup_active
+        prev_hold_until = self._cleanup_hold_until_ts
+        now_ts = time.time()
+
         if not self._engage_active:
             # 기준 충족으로 교전 시작
             if primary_ready:
                 self._engage_active = True
                 self._cleanup_active = False
+                self._cleanup_hold_until_ts = 0.0
+                try:
+                    self.append_log(f"교전 시작: 주 스킬 기준 충족(≥{primary_threshold})", "info")
+                except Exception:
+                    pass
         else:
             # 교전 중 상태 유지/전환
             if primary_ready:
                 # 다시 2마리 이상 확보되면 일반 교전
                 self._cleanup_active = False
+                self._cleanup_hold_until_ts = 0.0
+                if prev_cleanup:
+                    try:
+                        self.append_log("클린업 종료: 마릿수 회복(≥기준)", "info")
+                    except Exception:
+                        pass
             elif self.latest_primary_monster_count >= 1:
                 # 잔몹 1마리 남은 상태 → 클린업 유지
                 self._cleanup_active = True
+                self._cleanup_hold_until_ts = 0.0
+                if not prev_cleanup:
+                    try:
+                        self.append_log("클린업 진입: 잔몹 처리", "info")
+                    except Exception:
+                        pass
             else:
-                # 주 스킬 범위 내 0마리 → 교전 종료
-                self._engage_active = False
-                self._cleanup_active = False
+                # 주 스킬 범위 내 0마리 → 클린업 유예 적용 후 종료 판단
+                if self._cleanup_active and self._cleanup_hold_until_ts <= 0.0:
+                    grace_ms = 0
+                    try:
+                        grace_ms = int(getattr(self, 'cleanup_grace_spinbox', None).value()) if hasattr(self, 'cleanup_grace_spinbox') else 0
+                    except Exception:
+                        grace_ms = 0
+                    if grace_ms > 0:
+                        self._cleanup_hold_until_ts = now_ts + (grace_ms / 1000.0)
+                        try:
+                            self.append_log(f"클린업 유예 시작: {grace_ms}ms", "info")
+                        except Exception:
+                            pass
+                if self._cleanup_hold_until_ts > 0.0 and now_ts <= self._cleanup_hold_until_ts:
+                    # 유예 중에는 교전 유지(allow_cleanup에서 반영)
+                    pass
+                else:
+                    # 유예 종료 → 교전 종료
+                    if self._cleanup_hold_until_ts > 0.0 and now_ts > self._cleanup_hold_until_ts:
+                        try:
+                            self.append_log("클린업 유예 종료", "info")
+                        except Exception:
+                            pass
+                    self._engage_active = False
+                    self._cleanup_active = False
+                    self._cleanup_hold_until_ts = 0.0
+                    if prev_engage:
+                        try:
+                            self.append_log("교전 종료: 주 스킬 범위 내 잔몹 없음", "info")
+                        except Exception:
+                            pass
 
-        # 클린업 허용 여부: 교전 중이고 주 스킬 범위에 1마리 이상 존재
-        allow_cleanup = self._engage_active and self.latest_primary_monster_count >= 1
+        # 클린업 허용 여부: 교전 중이고 (1마리 이상) 또는 (클린업 유예 시간 내)
+        allow_cleanup = (
+            self._engage_active
+            and (
+                self.latest_primary_monster_count >= 1
+                or (
+                    self._cleanup_active
+                    and self._cleanup_hold_until_ts > 0.0
+                    and now_ts <= self._cleanup_hold_until_ts
+                )
+            )
+        )
 
         # 클린업 중에도 최근 몬스터 관측 시간 갱신(권한 자동 반환 방지)
         if allow_cleanup:
@@ -9499,9 +9593,11 @@ class HuntTab(QWidget):
             return
 
         target_side = 'left' if target_box.center_x < character_box.center_x else 'right'
-        direction_changed = self._ensure_direction(target_side, skill)
-        if direction_changed:
-            return
+        # 방향전환 사용 설정에 따라 방향 보정 여부 결정
+        if getattr(skill, 'use_direction', True):
+            direction_changed = self._ensure_direction(target_side, skill)
+            if direction_changed:
+                return
 
         self._execute_attack_skill(skill)
 
@@ -10298,7 +10394,8 @@ class HuntTab(QWidget):
             item.setText(2, skill.command)
             item.setText(3, "주 스킬" if skill.is_primary else "-")
             condition_label = self._format_skill_condition(skill)
-            item.setText(4, f"{condition_label} | {skill.probability}%")
+            dir_label = "방향전환" if getattr(skill, 'use_direction', True) else "방향무시"
+            item.setText(4, f"{condition_label} | {dir_label} | {skill.probability}%")
         self.attack_tree.blockSignals(False)
         self._update_attack_buttons()
 
