@@ -5601,8 +5601,25 @@ class MapTab(QWidget):
         except Exception:
             pass
 
+        # 표시용 목록 구성: 변환행렬/내삽 불가(inlier_ids 비어) 시에는 중복 표기를 피하기 위해
+        # inliers는 비워 두고, outliers에 신뢰 피처 전체를 표시한다.
         outlier_list = [f for f in reliable_features if f['id'] not in inlier_ids]
-        self.update_detection_log_from_features(inlier_features, outlier_list)
+        display_inliers = inlier_features if inlier_ids else []
+        display_outliers = outlier_list if inlier_ids else reliable_features
+        # ID 기준 중복 제거(희귀 케이스: 동일 ID가 중복 포함되는 경우 방지)
+        def _dedup_by_id(items):
+            seen = set()
+            result = []
+            for it in items:
+                fid = it.get('id')
+                if fid in seen:
+                    continue
+                seen.add(fid)
+                result.append(it)
+            return result
+        display_inliers = _dedup_by_id(display_inliers)
+        display_outliers = [f for f in _dedup_by_id(display_outliers) if f.get('id') not in {x.get('id') for x in display_inliers}]
+        self.update_detection_log_from_features(display_inliers, display_outliers)
 
     def _notify_other_player_presence(self, count: int) -> None:
         has_other = count > 0
