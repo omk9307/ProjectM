@@ -735,6 +735,7 @@ class HuntTab(QWidget):
         self._visual_tracked_monsters: list[dict] = []
         self._visual_dead_zones: list[dict] = []
         self._last_nameplate_notify_ts: float = 0.0
+        self._nameplate_apply_facing: bool = False
 
         self.attack_interval_sec = 0.35
         self.last_attack_ts = 0.0
@@ -7431,8 +7432,9 @@ class HuntTab(QWidget):
                         and primary_area.y <= box_center_y <= primary_area.bottom
                     ):
                         passes_area = False
+                apply_facing = bool(getattr(self, '_nameplate_apply_facing', False))
                 passes_direction = True
-                if facing and char_center_x is not None:
+                if apply_facing and facing and char_center_x is not None:
                     if facing == 'left' and box_center_x > char_center_x:
                         passes_direction = False
                     elif facing == 'right' and box_center_x < char_center_x:
@@ -8068,6 +8070,10 @@ class HuntTab(QWidget):
         self._show_nameplate_overlay_config = bool(self._nameplate_config.get('show_overlay', True))
         self._nameplate_enabled = bool(self._nameplate_config.get('enabled', False) and self._nameplate_templates)
         try:
+            self._nameplate_apply_facing = bool(self._nameplate_config.get('apply_facing', False))
+        except Exception:
+            self._nameplate_apply_facing = False
+        try:
             dead_zone_value = float(self._nameplate_config.get('dead_zone_sec', 0.2))
         except (TypeError, ValueError):
             dead_zone_value = 0.2
@@ -8195,6 +8201,11 @@ class HuntTab(QWidget):
                 restored = self._nameplate_area_user_pref if isinstance(self._nameplate_area_user_pref, bool) else True
                 self.overlay_preferences['nameplate_area'] = restored
             self._show_nameplate_overlay_config = show_overlay
+            # 캐릭터 방향 적용 상태 반영(없으면 기존 유지)
+            try:
+                self._nameplate_apply_facing = bool(payload.get('apply_facing', self._nameplate_apply_facing))
+            except Exception:
+                pass
             checkbox = getattr(self, 'show_nameplate_checkbox', None)
             if checkbox is not None:
                 previous = checkbox.blockSignals(True)

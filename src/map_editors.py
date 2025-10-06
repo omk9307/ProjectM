@@ -1913,7 +1913,7 @@ class FullMinimapEditorDialog(QDialog):
                 background_rect.setPen(QPen(Qt.GlobalColor.transparent))
                 # 스케일 시 중심 고정을 위해 원점(Transform Origin)을 중앙으로 설정
                 background_rect.setTransformOriginPoint(bg_rect_geom.center())
-                text_item.setTransformOriginPoint(tight_rect.center())
+                text_item.setTransformOriginPoint(text_item.boundingRect().center())
 
                 # 아이템의 로컬 중앙이 best_mid에 오도록 배치
                 bg_pos_x = base_center.x() - bg_rect_geom.center().x()
@@ -1928,8 +1928,9 @@ class FullMinimapEditorDialog(QDialog):
 
                 self.scene.addItem(background_rect)
                 # 텍스트를 중앙 정렬 (배경과 동일한 중앙점 사용)
-                txt_pos_x = base_center.x() - tight_rect.center().x()
-                txt_pos_y = base_center.y() - tight_rect.center().y()
+                txt_rect = text_item.boundingRect()
+                txt_pos_x = base_center.x() - txt_rect.center().x()
+                txt_pos_y = base_center.y() - txt_rect.center().y()
                 text_item.setPos(txt_pos_x, txt_pos_y)
                 self.scene.addItem(text_item)
                 # LOD 제어 대상 등록(가시성만 제어, 스케일은 고정)
@@ -2746,11 +2747,12 @@ class FullMinimapEditorDialog(QDialog):
                             if is_vertical:
                                 # 중앙에 고정 배치 (충돌회피 제외) + 스케일 중심 고정
                                 background_rect.setTransformOriginPoint(bg_rect_geom.center())
-                                text_item.setTransformOriginPoint(tight_rect.center())
+                                text_item.setTransformOriginPoint(text_item.boundingRect().center())
                                 background_rect.setPos(line_center.x() - bg_rect_geom.center().x(),
                                                        line_center.y() - bg_rect_geom.center().y())
-                                text_item.setPos(line_center.x() - tight_rect.center().x(),
-                                                 line_center.y() - tight_rect.center().y())
+                                tr = text_item.boundingRect()
+                                text_item.setPos(line_center.x() - tr.center().x(),
+                                                 line_center.y() - tr.center().y())
                             else:
                                 # 이름 라벨 그룹 등록 (앵커는 선의 중앙, 위 선호)
                                 self._name_label_groups.append({
@@ -2786,7 +2788,7 @@ class FullMinimapEditorDialog(QDialog):
                         text_item.setData(0, "jump_link_name")
                         # 스케일 시 중앙 고정
                         background_rect.setTransformOriginPoint(bg_rect_geom.center())
-                        text_item.setTransformOriginPoint(tight_rect.center())
+                        text_item.setTransformOriginPoint(text_item.boundingRect().center())
 
                         background_rect.setZValue(10)
                         text_item.setZValue(11)
