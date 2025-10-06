@@ -158,6 +158,14 @@ class AnchorDetectionThread(QThread):
         self._roi_failure_before_backoff = 3
         self._roi_max_scale = 3.0
         self._fallback_base_interval = 0.2
+        # [헤드리스 최적화] 표시 OFF 시 템플릿 매칭 최소 간격(초)
+        self._min_template_interval = float(MapConfig.get("headless_min_template_interval_sec", 0.15) or 0.15)
+        self._last_template_match_ts = 0.0
+        # 최근 탐지 결과 캐시(디버그/표시 OFF에서 시각적 공백 방지)
+        self._last_detected_features: list[dict] = []
+        # 다운스케일 하한 및 시작 강제 매칭 프레임 수
+        self._min_downscale = float(MapConfig.get("min_downscale_for_matching", 0.6) or 0.6)
+        self._startup_force_match_frames = int(MapConfig.get("startup_force_match_frames", 8) or 0)
 
         for fid, fdata in self.all_key_features.items():
             try:
@@ -247,48 +255,65 @@ class AnchorDetectionThread(QThread):
                 perf['other_player_icon_ms'] = (time.perf_counter() - other_icon_start) * 1000.0
                 perf['other_player_icon_count'] = len(other_player_rects)
 
-                preprocess_start = time.perf_counter()
-                frame_gray = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2GRAY)
-                frame_gray_small = cv2.resize(
-                    frame_gray,
-                    (0, 0),
-                    fx=self._downscale,
-                    fy=self._downscale,
-                    interpolation=cv2.INTER_AREA,
-                )
-                perf['preprocess_ms'] = (time.perf_counter() - preprocess_start) * 1000.0
+                # [헤드리스 최적화] 표시 OFF일 때 템플릿 매칭 주기를 제한
+                headless = bool(self.parent_tab) and not bool(getattr(self.parent_tab, '_minimap_display_enabled', True))
+                require_initial = not bool(getattr(self.parent_tab, '_last_transform_matrix', None)) if self.parent_tab else False
+                # 디버그 뷰 강제 매칭 플래그(스레드 안전한 단순 bool)를 사용
+                debug_force = bool(self.parent_tab and getattr(self.parent_tab, '_debug_force_matching', False))
+                # 시작 직후 일부 프레임은 무조건 매칭하여 초기 정렬 확보
+                in_startup_window = self._frame_index <= max(1, self._startup_force_match_frames)
+                # 사냥탭 연동 여부(연동 시 가드 강화)
+                link_on = bool(self.parent_tab and getattr(self.parent_tab, 'map_link_enabled', False))
+                now_ts = time.time()
+                allow_match = True
+                if headless and not require_initial and not debug_force and not in_startup_window:
+                    if (now_ts - self._last_template_match_ts) < self._min_template_interval:
+                        allow_match = False
 
                 all_detected_features = []
-                feature_start = time.perf_counter()
                 perf['fallback_scan_count'] = 0
                 perf['skipped_templates'] = 0
 
-                for fid, tpl_data in self.feature_templates.items():
-                    tpl_small = tpl_data["template_gray_small"]
-                    t_h, t_w = tpl_small.shape
-                    runtime = self._template_runtime.get(fid)
-                    if runtime is None:
-                        base_radius = max(int(max(t_w, t_h) * 1.2), 16)
-                        max_radius = max(int(base_radius * self._roi_max_scale), base_radius + 40)
-                        runtime = {
-                            'base_radius': base_radius,
-                            'roi_radius': base_radius,
-                            'max_radius': max_radius,
-                            'failure_count': 0,
-                            'skip_until_ts': 0.0,
-                            'next_fallback_ts': 0.0,
-                            'last_success_ts': 0.0,
-                        }
-                        self._template_runtime[fid] = runtime
+                if allow_match:
+                    preprocess_start = time.perf_counter()
+                    frame_gray = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2GRAY)
+                    frame_gray_small = cv2.resize(
+                        frame_gray,
+                        (0, 0),
+                        fx=self._downscale,
+                        fy=self._downscale,
+                        interpolation=cv2.INTER_AREA,
+                    )
+                    perf['preprocess_ms'] = (time.perf_counter() - preprocess_start) * 1000.0
 
-                    now_ts = time.time()
-                    if now_ts < runtime.get('skip_until_ts', 0.0):
-                        perf['skipped_templates'] += 1
-                        continue
+                    feature_start = time.perf_counter()
+                    for fid, tpl_data in self.feature_templates.items():
+                        tpl_small = tpl_data["template_gray_small"]
+                        t_h, t_w = tpl_small.shape
+                        runtime = self._template_runtime.get(fid)
+                        if runtime is None:
+                            base_radius = max(int(max(t_w, t_h) * 1.2), 16)
+                            max_radius = max(int(base_radius * self._roi_max_scale), base_radius + 40)
+                            runtime = {
+                                'base_radius': base_radius,
+                                'roi_radius': base_radius,
+                                'max_radius': max_radius,
+                                'failure_count': 0,
+                                'skip_until_ts': 0.0,
+                                'next_fallback_ts': 0.0,
+                                'last_success_ts': 0.0,
+                            }
+                            self._template_runtime[fid] = runtime
 
-                    search_result = None
-                    last_pos = self.last_positions.get(fid)
-                    roi_radius = int(runtime.get('roi_radius', runtime.get('base_radius', 24)))
+                        now_ts = time.time()
+                        # 시작 강제 매칭 구간에서는 쿨다운 무시
+                        if (not in_startup_window) and now_ts < runtime.get('skip_until_ts', 0.0):
+                            perf['skipped_templates'] += 1
+                            continue
+
+                        search_result = None
+                        last_pos = self.last_positions.get(fid)
+                        roi_radius = int(runtime.get('roi_radius', runtime.get('base_radius', 24)))
 
                     if last_pos is not None and roi_radius > 0:
                         lx = int(last_pos.x() * self._downscale)
@@ -388,22 +413,41 @@ class AnchorDetectionThread(QThread):
                     elif last_pos is None:
                         runtime['failure_count'] = runtime.get('failure_count', 0) + 1
 
-                if self._template_runtime:
-                    scale = self._downscale if self._downscale else 1.0
-                    scale = scale if scale > 0 else 1.0
-                    radii = [runtime.get('roi_radius', 0.0) / scale for runtime in self._template_runtime.values()]
-                    if radii:
-                        perf['avg_roi_radius'] = float(sum(radii) / len(radii))
-                        perf['max_roi_radius'] = float(max(radii))
+                if allow_match:
+                    if self._template_runtime:
+                        scale = self._downscale if self._downscale else 1.0
+                        scale = scale if scale > 0 else 1.0
+                        radii = [runtime.get('roi_radius', 0.0) / scale for runtime in self._template_runtime.values()]
+                        if radii:
+                            perf['avg_roi_radius'] = float(sum(radii) / len(radii))
+                            perf['max_roi_radius'] = float(max(radii))
+                        else:
+                            perf['avg_roi_radius'] = 0.0
+                            perf['max_roi_radius'] = 0.0
                     else:
                         perf['avg_roi_radius'] = 0.0
                         perf['max_roi_radius'] = 0.0
-                else:
-                    perf['avg_roi_radius'] = 0.0
-                    perf['max_roi_radius'] = 0.0
 
-                perf['feature_match_ms'] = (time.perf_counter() - feature_start) * 1000.0
-                perf['features_detected'] = len(all_detected_features)
+                    perf['feature_match_ms'] = (time.perf_counter() - feature_start) * 1000.0
+                    perf['features_detected'] = len(all_detected_features)
+                    # 최신 탐지 결과 캐시
+                    try:
+                        self._last_detected_features = list(all_detected_features)
+                    except Exception:
+                        pass
+                    self._last_template_match_ts = time.time()
+                else:
+                    # 매칭을 건너뛰는 프레임: 성능 지표만 기본값으로 설정
+                    perf.setdefault('preprocess_ms', 0.0)
+                    perf['feature_match_ms'] = 0.0
+                    # 최근 결과를 재사용하여 디버그/표시 공백 방지
+                    if self._last_detected_features:
+                        all_detected_features = self._last_detected_features
+                        perf['features_detected'] = len(all_detected_features)
+                    else:
+                        perf['features_detected'] = 0
+                    perf['avg_roi_radius'] = float(perf.get('avg_roi_radius', 0.0) or 0.0)
+                    perf['max_roi_radius'] = float(perf.get('max_roi_radius', 0.0) or 0.0)
 
                 dispatch_t0 = time.perf_counter()
                 perf['signal_dispatch_t0'] = dispatch_t0
@@ -415,14 +459,16 @@ class AnchorDetectionThread(QThread):
                 perf['sleep_ms'] = 0.0
 
                 if loop_time_ms > MapConfig["loop_time_fallback_ms"]:
-                    old_scale = self._downscale
-                    self._downscale = max(0.3, old_scale * 0.95)
-                    MapConfig["downscale"] = self._downscale
-                    perf['downscale_adjusted'] = float(self._downscale)
-                    print(
-                        f"[AnchorDetectionThread] 느린 루프 감지 ({loop_time_ms:.1f}ms), "
-                        f"다운스케일 조정: {old_scale:.2f} -> {self._downscale:.2f}"
-                    )
+                    # 연동/시작 강제 매칭 구간에서는 다운스케일 하향을 건너뛰거나 최소 하한을 준수
+                    if not link_on and not in_startup_window:
+                        old_scale = self._downscale
+                        self._downscale = max(self._min_downscale, old_scale * 0.95)
+                        MapConfig["downscale"] = self._downscale
+                        perf['downscale_adjusted'] = float(self._downscale)
+                        print(
+                            f"[AnchorDetectionThread] 느린 루프 감지 ({loop_time_ms:.1f}ms), "
+                            f"다운스케일 조정: {old_scale:.2f} -> {self._downscale:.2f} (min={self._min_downscale:.2f})"
+                        )
 
             except Exception as e:
                 perf['frame_status'] = 'error'

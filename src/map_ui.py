@@ -497,6 +497,8 @@ class MapTab(QWidget):
             self.detection_thread = None
             self.capture_thread = None
             self.debug_dialog = None
+            # 디버그 강제 매칭 플래그(스레드 안전한 단순 bool)
+            self._debug_force_matching = False
             self.editor_dialog = None 
             self.global_positions = {}
             self._player_icon_roi: QRect | None = None
@@ -4412,6 +4414,8 @@ class MapTab(QWidget):
 
     def toggle_debug_view(self, checked):
         """디버그 뷰 체크박스의 상태에 따라 디버그 창을 표시하거나 숨깁니다."""
+        # 탐지 스레드 측에서 안전하게 확인할 수 있도록 플래그로 저장
+        self._debug_force_matching = bool(checked)
         # 탐지가 실행 중일 때만 동작하도록 함
         if not (self.detection_thread and self.detection_thread.isRunning()):
             if self.debug_dialog:
@@ -4734,11 +4738,16 @@ class MapTab(QWidget):
 
                 self._player_icon_roi = None
                 self._player_icon_roi_fail_streak = 0
+                # [헤드리스 최적화] 변환행렬 초기화
+                self._last_transform_matrix = None
+                self._last_transform_update_ts = 0.0
 
                 if self.debug_view_checkbox.isChecked():
                     if not self.debug_dialog:
                         self.debug_dialog = DebugViewDialog(self)
                     self.debug_dialog.show()
+                    # 디버그 강제 매칭 플래그 동기화
+                    self._debug_force_matching = True
 
                 self.capture_thread = MinimapCaptureThread(resolved_minimap)
                 self.capture_thread.start()
@@ -4822,6 +4831,9 @@ class MapTab(QWidget):
 
                 self._player_icon_roi = None
                 self._player_icon_roi_fail_streak = 0
+                # [헤드리스 최적화] 변환행렬 초기화
+                self._last_transform_matrix = None
+                self._last_transform_update_ts = 0.0
 
                 # --- [v12.3.1] 탐지 중지 시에도 상태 초기화 ---
                 self.journey_plan = []
@@ -4846,6 +4858,8 @@ class MapTab(QWidget):
 
                 # [핵심 수정] 탐지 중지 시 딜레이 플래그 비활성화
                 self.initial_delay_active = False
+                # 디버그 강제 매칭 플래그도 해제
+                self._debug_force_matching = False
 
                 if (
                     getattr(self, '_hunt_tab', None)
@@ -5297,6 +5311,12 @@ class MapTab(QWidget):
                     and abs(matrix[1, 2]) < 10000
                 ):
                     transform_matrix = matrix
+                    # 최신 변환행렬을 보관하여 표시 OFF일 때 프레임 간 전역 좌표 추정에 활용
+                    try:
+                        self._last_transform_matrix = transform_matrix
+                        self._last_transform_update_ts = time.time()
+                    except Exception:
+                        pass
                     inliers_mask = inliers_mask.flatten()
                     for i, fid in enumerate(feature_ids):
                         if inliers_mask[i]:
@@ -5326,6 +5346,16 @@ class MapTab(QWidget):
                     w_sum_x += pos.x() * f['conf']
                     w_sum_y += pos.y() * f['conf']
                 avg_player_global_pos = QPointF(w_sum_x / total_conf, w_sum_y / total_conf)
+        else:
+            # [헤드리스 최적화] 템플릿 매칭이 생략된 프레임에서는 직전 변환행렬로 전역 좌표를 추정
+            last_T = getattr(self, '_last_transform_matrix', None)
+            if last_T is not None:
+                try:
+                    px, py = player_anchor_local.x(), player_anchor_local.y()
+                    transformed = (last_T[:, :2] @ np.array([px, py])) + last_T[:, 2]
+                    avg_player_global_pos = QPointF(float(transformed[0]), float(transformed[1]))
+                except Exception:
+                    avg_player_global_pos = None
 
         if avg_player_global_pos is None:
             if self.smoothed_player_pos is not None:

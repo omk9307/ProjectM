@@ -16,6 +16,12 @@ MapConfig = {
     "detection_threshold_default": 0.85,
     "loop_time_fallback_ms": 120,
     "use_new_capture": True,
+    # 표시가 꺼진(헤드리스) 상태에서 템플릿 매칭 최소 간격(초)
+    "headless_min_template_interval_sec": 0.15,
+    # 템플릿 매칭에서 허용할 최소 다운스케일(너무 낮추면 매칭 정확도 급락)
+    "min_downscale_for_matching": 0.6,
+    # 시작/연동 직후 강제 매칭 프레임 수(초기 정렬 확보용)
+    "startup_force_match_frames": 8,
 }
 
 
