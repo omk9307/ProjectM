@@ -2749,8 +2749,6 @@ class MapTab(QWidget):
                     "walk_teleport_probability",
                     self.cfg_walk_teleport_probability,
                 )
-                if probability_percent is not None and probability_percent <= 1.0:
-                    probability_percent *= 100.0
                 self.cfg_walk_teleport_probability = max(
                     min(
                         probability_percent if probability_percent is not None else self.cfg_walk_teleport_probability,

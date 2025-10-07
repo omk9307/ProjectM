@@ -4306,8 +4306,6 @@ class StateConfigDialog(QDialog):
         self.setMinimumWidth(450)
         
         self.config = current_config.copy()
-        if isinstance(self.config.get("walk_teleport_probability"), (int, float)) and self.config["walk_teleport_probability"] <= 1.0:
-            self.config["walk_teleport_probability"] *= 100.0
         self.config.setdefault("walk_teleport_bonus_delay", WALK_TELEPORT_BONUS_DELAY_DEFAULT)
         self.config.setdefault("walk_teleport_bonus_step", WALK_TELEPORT_BONUS_STEP_DEFAULT)
         self.config.setdefault("walk_teleport_bonus_max", WALK_TELEPORT_BONUS_MAX_DEFAULT)
