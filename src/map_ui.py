@@ -1614,6 +1614,20 @@ class MapTab(QWidget):
         right_layout.addLayout(view_header_layout)
         right_layout.addWidget(self.minimap_view_label, 1)
 
+        # --- 템플릿 매칭 간격 설정 (표시/헤드리스 별도 관리) ---
+        interval_row = QHBoxLayout()
+        interval_row.setContentsMargins(0, 4, 0, 0)
+        interval_row.setSpacing(6)
+        self.match_interval_label = QLabel("템플릿 매칭 간격(ms)")
+        self.match_interval_spin = QSpinBox()
+        self.match_interval_spin.setRange(0, 5000)  # 0=매 프레임, 그 외 ms
+        self.match_interval_spin.setSingleStep(10)
+        self.match_interval_spin.valueChanged.connect(self._on_match_interval_changed)
+        interval_row.addWidget(self.match_interval_label)
+        interval_row.addWidget(self.match_interval_spin)
+        interval_row.addStretch(1)
+        right_layout.addLayout(interval_row)
+
         splitter = QSplitter(Qt.Orientation.Horizontal)
         splitter.addWidget(logs_container)
         splitter.addWidget(right_container)
@@ -3200,17 +3214,24 @@ class MapTab(QWidget):
                     self.current_hotkey = settings.get('hotkey', 'None')
                     self._perf_logging_enabled = bool(settings.get('perf_logging_enabled', False))
                     self._minimap_display_enabled = bool(settings.get('minimap_display_enabled', True))
+                    # 템플릿 매칭 간격(표시/헤드리스) 로드
+                    self.template_match_interval_display_ms = int(settings.get('template_match_interval_display_ms', 0))
+                    self.template_match_interval_headless_ms = int(settings.get('template_match_interval_headless_ms', 150))
                     self.initial_delay_ms = int(settings.get('initial_delay_ms', self.initial_delay_ms))
                     return settings.get('active_profile')
             except json.JSONDecodeError:
                 self.current_hotkey = 'None'
                 self._perf_logging_enabled = False
                 self._minimap_display_enabled = True
+                self.template_match_interval_display_ms = 0
+                self.template_match_interval_headless_ms = 150
                 self.initial_delay_ms = 500
                 return None
         self.current_hotkey = 'None'
         self._perf_logging_enabled = False
         self._minimap_display_enabled = True
+        self.template_match_interval_display_ms = 0
+        self.template_match_interval_headless_ms = 150
         self.initial_delay_ms = 500
         return None
 
@@ -3221,6 +3242,8 @@ class MapTab(QWidget):
                 'hotkey': self.current_hotkey, #  단축키 정보 저장
                 'perf_logging_enabled': bool(self._perf_logging_enabled),
                 'minimap_display_enabled': bool(getattr(self, '_minimap_display_enabled', True)),
+                'template_match_interval_display_ms': int(getattr(self, 'template_match_interval_display_ms', 0)),
+                'template_match_interval_headless_ms': int(getattr(self, 'template_match_interval_headless_ms', 150)),
                 'initial_delay_ms': int(getattr(self, 'initial_delay_ms', 500)),
             }
             json.dump(settings, f)
@@ -10393,6 +10416,12 @@ class MapTab(QWidget):
         if hasattr(self, 'minimap_view_label'):
             self.minimap_view_label.set_display_enabled(self._minimap_display_enabled)
 
+        # 표시 상태에 따라 매칭 간격 스핀 값을 전환
+        try:
+            self._refresh_match_interval_ui()
+        except Exception:
+            pass
+
         # 설정 파일에 즉시 반영하여 다음 실행 시 상태를 복원합니다.
         try:
             self.save_global_settings()
@@ -10406,6 +10435,48 @@ class MapTab(QWidget):
 
         if hasattr(self, 'minimap_view_label') and not self.is_detection_running:
             self.minimap_view_label.setText("탐지를 시작하세요.")
+
+    def get_template_match_interval_ms(self) -> int:
+        """현재 표시 상태에 따른 템플릿 매칭 간격(ms)을 반환합니다.
+        - 표시 ON(비-헤드리스): 0이면 매 프레임 매칭, 그 외 값은 ms 간격
+        - 표시 OFF(헤드리스): 기본 150ms, 사용자 변경 가능(0 허용)
+        """
+        headless = not bool(getattr(self, '_minimap_display_enabled', True))
+        if headless:
+            return int(getattr(self, 'template_match_interval_headless_ms', 150))
+        return int(getattr(self, 'template_match_interval_display_ms', 0))
+
+    def _on_match_interval_changed(self, value: int) -> None:
+        value = int(value)
+        headless = not bool(getattr(self, '_minimap_display_enabled', True))
+        if headless:
+            self.template_match_interval_headless_ms = value
+        else:
+            self.template_match_interval_display_ms = value
+        try:
+            self.save_global_settings()
+        except Exception:
+            pass
+
+    def _refresh_match_interval_ui(self) -> None:
+        """표시 상태에 맞춰 라벨/스핀 값을 동기화합니다."""
+        if not hasattr(self, 'match_interval_spin'):
+            return
+        headless = not bool(getattr(self, '_minimap_display_enabled', True))
+        if headless:
+            self.match_interval_label.setText("템플릿 매칭 간격(ms, 헤드리스)")
+            val = int(getattr(self, 'template_match_interval_headless_ms', 150))
+            self.match_interval_spin.blockSignals(True)
+            self.match_interval_spin.setValue(val)
+            self.match_interval_spin.blockSignals(False)
+            self.match_interval_spin.setToolTip("헤드리스(표시 꺼짐)에서 템플릿 매칭 최소 간격(ms). 0=매 프레임")
+        else:
+            self.match_interval_label.setText("템플릿 매칭 간격(ms, 표시 중)")
+            val = int(getattr(self, 'template_match_interval_display_ms', 0))
+            self.match_interval_spin.blockSignals(True)
+            self.match_interval_spin.setValue(val)
+            self.match_interval_spin.blockSignals(False)
+            self.match_interval_spin.setToolTip("미니맵 표시 중 템플릿 매칭 간격(ms). 0=매 프레임")
 
     def _handle_general_log_toggle(self, checked: bool) -> None:
         self._general_log_enabled = bool(checked)

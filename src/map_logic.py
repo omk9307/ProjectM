@@ -265,7 +265,7 @@ class AnchorDetectionThread(QThread):
                 perf['other_player_icon_ms'] = (time.perf_counter() - other_icon_start) * 1000.0
                 perf['other_player_icon_count'] = len(other_player_rects)
 
-                # [헤드리스 최적화] 표시 OFF일 때 템플릿 매칭 주기를 제한
+                # 표시 ON/OFF에 따라 사용자 설정 매칭 간격(ms)을 적용
                 headless = bool(self.parent_tab) and not bool(getattr(self.parent_tab, '_minimap_display_enabled', True))
                 require_initial = not bool(getattr(self.parent_tab, '_last_transform_matrix', None)) if self.parent_tab else False
                 # 디버그 뷰 강제 매칭 플래그(스레드 안전한 단순 bool)를 사용
@@ -276,8 +276,17 @@ class AnchorDetectionThread(QThread):
                 link_on = bool(self.parent_tab and getattr(self.parent_tab, 'map_link_enabled', False))
                 now_ts = time.time()
                 allow_match = True
-                if headless and not require_initial and not debug_force and not in_startup_window:
-                    if (now_ts - self._last_template_match_ts) < self._min_template_interval:
+                # 사용자 지정 매칭 간격(ms). 표시 ON(비-헤드리스)와 표시 OFF(헤드리스)를 분리 관리
+                user_interval_ms = 0
+                try:
+                    if self.parent_tab and hasattr(self.parent_tab, 'get_template_match_interval_ms'):
+                        user_interval_ms = int(self.parent_tab.get_template_match_interval_ms())
+                except Exception:
+                    user_interval_ms = 0
+
+                if not require_initial and not debug_force and not in_startup_window:
+                    eff_interval_sec = max(0.0, float(user_interval_ms) / 1000.0)
+                    if eff_interval_sec > 0.0 and (now_ts - self._last_template_match_ts) < eff_interval_sec:
                         allow_match = False
                 # 연속으로 앵커가 0개면 주기 제한을 일시 해제해 복구 시도
                 if not allow_match and self._zero_feature_streak >= 12:
