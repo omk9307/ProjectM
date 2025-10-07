@@ -72,6 +72,8 @@ class ResourceConfig:
     command_profile: Optional[str] = None
     enabled: bool = True
     maximum_value: Optional[int] = None
+    # [NEW] 단독사용(사냥/맵 미실행 시에도 캡처/동작 허용)
+    standalone: bool = False
     # HP 전용 긴급모드 설정 (기타 리소스는 무시)
     emergency_enabled: bool = False
     emergency_trigger_failures: int = 3
@@ -102,6 +104,8 @@ class ResourceConfig:
             data["recovery_threshold"] = int(self.recovery_threshold)
         if self.command_profile is not None:
             data["command_profile"] = self.command_profile
+        # 단독사용 플래그 저장
+        data["standalone"] = bool(self.standalone)
         # 긴급모드 설정은 hp에서만 사용하지만 저장은 공통 키로 둔다
         data["emergency_enabled"] = bool(self.emergency_enabled)
         data["emergency_trigger_failures"] = int(max(1, self.emergency_trigger_failures))
@@ -159,6 +163,8 @@ class ResourceConfig:
             else:
                 if parsed > 0:
                     max_value = parsed
+        # 단독사용 플래그
+        standalone_flag = bool(source.get("standalone", False))
         # 긴급모드 설정 읽기 (없으면 기본값 유지)
         emergency_enabled = bool(source.get("emergency_enabled", False))
         try:
@@ -205,6 +211,7 @@ class ResourceConfig:
             command_profile=command,
             enabled=enabled,
             maximum_value=max_value,
+            standalone=standalone_flag,
             emergency_enabled=emergency_enabled,
             emergency_trigger_failures=emergency_trigger_failures,
             emergency_max_duration_sec=emergency_max_duration_sec,
@@ -386,9 +393,14 @@ class StatusMonitorThread(QThread):
             if not getattr(cfg, 'enabled', True):
                 self._unregister_resource(resource)
                 continue
+            # HP/MP는 기본적으로 사냥/맵 탭이 활성일 때만 캡처.
+            # 단, MP는 'standalone'이 활성인 경우 예외적으로 단독 캡처 허용.
             if resource in {"hp", "mp"} and not (active_hunt or active_map):
-                self._unregister_resource(resource)
-                continue
+                if resource == "mp" and bool(getattr(cfg, 'standalone', False)):
+                    pass  # 단독사용: 캡처 계속 진행
+                else:
+                    self._unregister_resource(resource)
+                    continue
             if resource == "exp" and not active_hunt:
                 self._unregister_resource(resource)
                 continue

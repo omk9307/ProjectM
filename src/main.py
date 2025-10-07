@@ -307,6 +307,14 @@ class MainWindow(QMainWindow):
                         map_tab_instance = self.loaded_tabs['맵']
                         if hasattr(map_tab_instance, 'attach_status_monitor'):
                             map_tab_instance.attach_status_monitor(self.status_monitor_thread, data_manager)
+                    # [NEW] 학습탭에도 상태 모니터 연결 (MP 단독사용용)
+                    if '학습' in self.loaded_tabs:
+                        learning_tab_instance = self.loaded_tabs['학습']
+                        if hasattr(learning_tab_instance, 'attach_status_monitor'):
+                            try:
+                                learning_tab_instance.attach_status_monitor(self.status_monitor_thread)
+                            except Exception:
+                                pass
                     self.status_monitor_thread.start()
 
                 # OCR 프로파일 공급자 준비 (학습탭의 이름표 OCR 설정 사용)
@@ -386,6 +394,13 @@ class MainWindow(QMainWindow):
 
             if hasattr(map_tab, 'attach_auto_control_tab'):
                 map_tab.attach_auto_control_tab(auto_control_tab)
+            # [NEW] 학습탭 → 자동제어 연결 (MP 단독사용 명령 전달)
+            learning_tab = self.loaded_tabs.get('학습')
+            if learning_tab and hasattr(learning_tab, 'control_command_issued'):
+                try:
+                    learning_tab.control_command_issued.connect(auto_control_tab.receive_control_command)
+                except Exception:
+                    pass
 
             print("성공: '맵' 탭과 '자동 제어' 탭을 연결했습니다.")
 
@@ -586,12 +601,26 @@ class MainWindow(QMainWindow):
         self._update_global_hotkey_state()
         self._refresh_tab_colors()
         self._update_ocr_watch_state()
+        # [NEW] 학습탭에 탭 상태 전달 (MP 단독사용 게이트)
+        learning_tab = self.loaded_tabs.get('학습')
+        if learning_tab and hasattr(learning_tab, 'update_tabs_activity'):
+            try:
+                learning_tab.update_tabs_activity(self._hunt_detection_active, self._map_detection_active)
+            except Exception:
+                pass
 
     def _on_map_detection_status_changed(self, active: bool) -> None:
         self._map_detection_active = bool(active)
         self._update_global_hotkey_state()
         self._refresh_tab_colors()
         self._update_ocr_watch_state()
+        # [NEW] 학습탭에 탭 상태 전달 (MP 단독사용 게이트)
+        learning_tab = self.loaded_tabs.get('학습')
+        if learning_tab and hasattr(learning_tab, 'update_tabs_activity'):
+            try:
+                learning_tab.update_tabs_activity(self._hunt_detection_active, self._map_detection_active)
+            except Exception:
+                pass
 
     def _refresh_tab_colors(self) -> None:
         tab_bar = self.tab_widget.tabBar()

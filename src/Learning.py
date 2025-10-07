@@ -4053,6 +4053,12 @@ class DataManager:
                     val = None
                 if val is not None and val > 0:
                     target.interval_sec = max(0.1, val)
+            # [NEW] 단독사용 토글 (mp 전용 의미, 공통 키로 수용)
+            if 'standalone' in payload:
+                try:
+                    target.standalone = bool(payload.get('standalone'))
+                except Exception:
+                    pass
             if allow_threshold and 'recovery_threshold' in payload:
                 threshold = payload.get('recovery_threshold')
                 if threshold is None:
@@ -4684,6 +4690,8 @@ class ExportThread(QThread):
 
 # --- 7. GUI 클래스 (프론트엔드) ---
 class LearningTab(QWidget):
+    # 자동 제어 탭으로 명령 전달 시그널
+    control_command_issued = pyqtSignal(str, object)
     def __init__(self):
         super().__init__()
         # (v1.2) DataManager를 새로운 workspace 경로 기준으로 초기화
@@ -4704,6 +4712,10 @@ class LearningTab(QWidget):
         self.nameplate_config = self.data_manager.get_monster_nameplate_config()
         self._nameplate_ui_updating = False
         self._status_config = self.data_manager.load_status_monitor_config()
+        # [NEW] MP 단독사용 런타임 상태
+        self._mp_standalone_last_ts: float = 0.0
+        self._hunt_active: bool = False
+        self._map_active: bool = False
         self._status_ui_updating = False
         self._status_command_options: list[tuple[str, str]] = []
         self._thumbnail_cache = OrderedDict()
@@ -5894,6 +5906,11 @@ class LearningTab(QWidget):
         header_layout.addWidget(title_label)
         enabled_checkbox = QCheckBox('사용')
         header_layout.addWidget(enabled_checkbox)
+        # [NEW] MP 전용 단독사용 체크박스
+        standalone_checkbox = None
+        if resource == 'mp':
+            standalone_checkbox = QCheckBox('단독사용')
+            header_layout.addWidget(standalone_checkbox)
         # [NEW] HP 카드 전용: 저체력 텔레그램 알림 토글 + 설정 버튼
         telegram_checkbox = None
         telegram_settings_btn = None
@@ -5987,6 +6004,7 @@ class LearningTab(QWidget):
                 self.hp_lowhp_settings_btn.clicked.connect(self._open_low_hp_settings_dialog)
         else:
             self.mp_enabled_checkbox = enabled_checkbox
+            self.mp_standalone_checkbox = standalone_checkbox
             self.mp_roi_button = roi_button
             self.mp_roi_label = roi_label
             self.mp_max_input = max_input
@@ -5995,6 +6013,8 @@ class LearningTab(QWidget):
             self.mp_interval_input = interval_input
             self.mp_preview_button = preview_button
             self.mp_enabled_checkbox.toggled.connect(lambda checked: self._on_status_enabled_changed('mp', checked))
+            if self.mp_standalone_checkbox is not None:
+                self.mp_standalone_checkbox.toggled.connect(self._on_mp_standalone_toggled)
             self.mp_max_input.editingFinished.connect(lambda: self._on_status_max_changed('mp'))
             self.mp_threshold_input.editingFinished.connect(lambda: self._on_status_threshold_changed('mp'))
             self.mp_command_combo.currentIndexChanged.connect(lambda _: self._on_status_command_changed('mp'))
@@ -6148,6 +6168,12 @@ class LearningTab(QWidget):
 
             self._set_checkbox_state(self.hp_enabled_checkbox, self._status_config.hp.enabled)
             self._set_checkbox_state(self.mp_enabled_checkbox, self._status_config.mp.enabled)
+            # [NEW] MP 단독사용 UI 반영
+            if hasattr(self, 'mp_standalone_checkbox') and self.mp_standalone_checkbox is not None:
+                try:
+                    self._set_checkbox_state(self.mp_standalone_checkbox, bool(getattr(self._status_config.mp, 'standalone', False)))
+                except Exception:
+                    self._set_checkbox_state(self.mp_standalone_checkbox, False)
             self._set_checkbox_state(self.exp_enabled_checkbox, self._status_config.exp.enabled)
 
             self._set_status_controls_enabled('hp', self._status_config.hp.enabled)
@@ -6496,6 +6522,14 @@ class LearningTab(QWidget):
         self._status_config = self.data_manager.update_status_monitor_config(updates)
         self._apply_status_config_to_ui()
 
+    # [NEW] MP 단독사용 토글 핸들러
+    def _on_mp_standalone_toggled(self, checked: bool) -> None:
+        if self._status_ui_updating:
+            return
+        updates = {'mp': {'standalone': bool(checked)}}
+        self._status_config = self.data_manager.update_status_monitor_config(updates)
+        self._apply_status_config_to_ui()
+
     def _on_status_enabled_changed(self, resource: str, checked: bool) -> None:
         if self._status_ui_updating:
             return
@@ -6578,6 +6612,62 @@ class LearningTab(QWidget):
         self._status_config = config
         self._load_status_command_options()
         self._apply_status_config_to_ui()
+
+    # [NEW] 자동 제어 명령 전달 헬퍼
+    def _emit_control_command(self, command: str, reason: object = None) -> None:
+        try:
+            if hasattr(self, 'control_command_issued') and callable(getattr(self, 'control_command_issued').emit):
+                self.control_command_issued.emit(command, reason)
+        except Exception:
+            pass
+
+    # [NEW] 상태 모니터 연결 및 MP 단독 동작 처리
+    def attach_status_monitor(self, thread: StatusMonitorThread) -> None:
+        try:
+            self._status_thread = thread
+            thread.status_captured.connect(self._handle_status_snapshot_for_mp_standalone)
+        except Exception:
+            pass
+
+    def update_tabs_activity(self, hunt_active: bool, map_active: bool) -> None:
+        self._hunt_active = bool(hunt_active)
+        self._map_active = bool(map_active)
+
+    def _handle_status_snapshot_for_mp_standalone(self, payload: dict) -> None:
+        try:
+            cfg = getattr(self, '_status_config', None)
+            if not cfg or not hasattr(cfg, 'mp'):
+                return
+            mp_cfg = cfg.mp
+            # 필수 조건: 사용 + 단독사용 켜짐 + 명령/임계/주기 유효
+            if not getattr(mp_cfg, 'enabled', True):
+                return
+            if not bool(getattr(mp_cfg, 'standalone', False)):
+                return
+            # 사냥/맵이 실행 중이면 단독 동작은 보류
+            if self._hunt_active or self._map_active:
+                return
+            threshold = getattr(mp_cfg, 'recovery_threshold', None)
+            command = (getattr(mp_cfg, 'command_profile', None) or '').strip()
+            if not isinstance(threshold, int) or not command:
+                return
+            mp_info = payload.get('mp') if isinstance(payload, dict) else None
+            if not isinstance(mp_info, dict) or not isinstance(mp_info.get('percentage'), (int, float)):
+                return
+            percent = float(mp_info.get('percentage'))
+            if percent > float(threshold):
+                return
+            now = float(payload.get('timestamp', time.time())) if isinstance(payload.get('timestamp'), (int, float)) else time.time()
+            interval = max(0.1, float(getattr(mp_cfg, 'interval_sec', 1.0) or 1.0))
+            if (now - float(getattr(self, '_mp_standalone_last_ts', 0.0))) < interval:
+                return
+            self._mp_standalone_last_ts = now
+            # 원인에 현재 퍼센트를 포함해 전달
+            percent_text = max(0, min(100, int(round(percent))))
+            reason = f'status:mp:{percent_text}'
+            self._emit_control_command(command, reason)
+        except Exception:
+            pass
 
     # ----- [NEW] 이름표 OCR 보조 메서드들 -----
     def _apply_ocr_config_to_ui(self) -> None:
