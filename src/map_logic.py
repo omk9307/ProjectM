@@ -267,7 +267,8 @@ class AnchorDetectionThread(QThread):
 
                 # 표시 ON/OFF에 따라 사용자 설정 매칭 간격(ms)을 적용
                 headless = bool(self.parent_tab) and not bool(getattr(self.parent_tab, '_minimap_display_enabled', True))
-                require_initial = not bool(getattr(self.parent_tab, '_last_transform_matrix', None)) if self.parent_tab else False
+                matrix = getattr(self.parent_tab, '_last_transform_matrix', None) if self.parent_tab else None
+                require_initial = bool(self.parent_tab) and (matrix is None)
                 # 디버그 뷰 강제 매칭 플래그(스레드 안전한 단순 bool)를 사용
                 debug_force = bool(self.parent_tab and getattr(self.parent_tab, '_debug_force_matching', False))
                 # 시작 직후 일부 프레임은 무조건 매칭하여 초기 정렬 확보

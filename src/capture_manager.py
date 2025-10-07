@@ -47,7 +47,8 @@ class CaptureManager:
     _instance_lock = threading.Lock()
 
     def __init__(self, *, target_fps: float = 30.0) -> None:
-        self._target_fps = max(1.0, float(target_fps))
+        self._default_target_fps = max(1.0, float(target_fps))
+        self._target_fps = self._default_target_fps
         self._backend = _MSSBackend()
         self._consumers: Dict[str, Dict[str, object]] = {}
         self._consumers_lock = threading.Lock()
@@ -87,6 +88,30 @@ class CaptureManager:
         self._running.clear()
         self._wake_event.set()
         self._backend.close()
+
+    # 동적으로 캡처 FPS를 조절하기 위한 간단한 API
+    def set_target_fps(self, fps: Optional[float]) -> None:
+        """
+        캡처 루프의 목표 FPS를 설정합니다.
+        - fps가 None 또는 0 이하이면 기본값으로 복원합니다.
+        - 유효 범위는 [1.0, 60.0]로 클램프합니다.
+        """
+        new_fps: float
+        if fps is None or float(fps) <= 0.0:
+            new_fps = self._default_target_fps
+        else:
+            new_fps = max(1.0, min(60.0, float(fps)))
+        # 경합 최소화를 위해 잠금 하에서 변경
+        with self._consumers_lock:
+            self._target_fps = new_fps
+        # 즉시 반영되도록 웨이크 업
+        self._wake_event.set()
+
+    def restore_target_fps(self) -> None:
+        self.set_target_fps(None)
+
+    def get_target_fps(self) -> float:
+        return float(self._target_fps)
 
     def register_region(self, name: str, region: MonitorRegion) -> None:
         norm_region = self._normalize_region(region)

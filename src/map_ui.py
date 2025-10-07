@@ -1614,7 +1614,7 @@ class MapTab(QWidget):
         right_layout.addLayout(view_header_layout)
         right_layout.addWidget(self.minimap_view_label, 1)
 
-        # --- 템플릿 매칭 간격 설정 (표시/헤드리스 별도 관리) ---
+        # --- 템플릿/캡처 간격 설정 (표시/헤드리스 별도 관리) ---
         interval_row = QHBoxLayout()
         interval_row.setContentsMargins(0, 4, 0, 0)
         interval_row.setSpacing(6)
@@ -1625,6 +1625,14 @@ class MapTab(QWidget):
         self.match_interval_spin.valueChanged.connect(self._on_match_interval_changed)
         interval_row.addWidget(self.match_interval_label)
         interval_row.addWidget(self.match_interval_spin)
+        # 캡처 간격 추가(0=기본, 그 외 ms)
+        self.capture_interval_label = QLabel("캡처 간격(ms)")
+        self.capture_interval_spin = QSpinBox()
+        self.capture_interval_spin.setRange(0, 5000)
+        self.capture_interval_spin.setSingleStep(10)
+        self.capture_interval_spin.valueChanged.connect(self._on_capture_interval_changed)
+        interval_row.addWidget(self.capture_interval_label)
+        interval_row.addWidget(self.capture_interval_spin)
         interval_row.addStretch(1)
         right_layout.addLayout(interval_row)
 
@@ -3217,6 +3225,9 @@ class MapTab(QWidget):
                     # 템플릿 매칭 간격(표시/헤드리스) 로드
                     self.template_match_interval_display_ms = int(settings.get('template_match_interval_display_ms', 0))
                     self.template_match_interval_headless_ms = int(settings.get('template_match_interval_headless_ms', 150))
+                    # 캡처 간격(표시/헤드리스) 로드 (0=기본)
+                    self.capture_interval_display_ms = int(settings.get('capture_interval_display_ms', 0))
+                    self.capture_interval_headless_ms = int(settings.get('capture_interval_headless_ms', 0))
                     self.initial_delay_ms = int(settings.get('initial_delay_ms', self.initial_delay_ms))
                     return settings.get('active_profile')
             except json.JSONDecodeError:
@@ -3225,6 +3236,8 @@ class MapTab(QWidget):
                 self._minimap_display_enabled = True
                 self.template_match_interval_display_ms = 0
                 self.template_match_interval_headless_ms = 150
+                self.capture_interval_display_ms = 0
+                self.capture_interval_headless_ms = 0
                 self.initial_delay_ms = 500
                 return None
         self.current_hotkey = 'None'
@@ -3232,6 +3245,8 @@ class MapTab(QWidget):
         self._minimap_display_enabled = True
         self.template_match_interval_display_ms = 0
         self.template_match_interval_headless_ms = 150
+        self.capture_interval_display_ms = 0
+        self.capture_interval_headless_ms = 0
         self.initial_delay_ms = 500
         return None
 
@@ -3244,6 +3259,8 @@ class MapTab(QWidget):
                 'minimap_display_enabled': bool(getattr(self, '_minimap_display_enabled', True)),
                 'template_match_interval_display_ms': int(getattr(self, 'template_match_interval_display_ms', 0)),
                 'template_match_interval_headless_ms': int(getattr(self, 'template_match_interval_headless_ms', 150)),
+                'capture_interval_display_ms': int(getattr(self, 'capture_interval_display_ms', 0)),
+                'capture_interval_headless_ms': int(getattr(self, 'capture_interval_headless_ms', 0)),
                 'initial_delay_ms': int(getattr(self, 'initial_delay_ms', 500)),
             }
             json.dump(settings, f)
@@ -4774,6 +4791,11 @@ class MapTab(QWidget):
 
                 self.capture_thread = MinimapCaptureThread(resolved_minimap)
                 self.capture_thread.start()
+                # 표시 상태별 캡처 간격을 CaptureManager에 적용(0이면 기본 유지)
+                try:
+                    self._apply_capture_interval_to_manager()
+                except Exception:
+                    pass
 
                 self.detection_thread = AnchorDetectionThread(self.key_features, capture_thread=self.capture_thread, parent_tab=self)
                 self.detection_thread.detection_ready.connect(self.on_detection_ready)
@@ -4832,6 +4854,12 @@ class MapTab(QWidget):
                 if self.capture_thread and self.capture_thread.isRunning():
                     self.capture_thread.stop()
                     self.capture_thread.wait()
+                # 캡처 FPS를 기본으로 복원
+                try:
+                    from capture_manager import get_capture_manager
+                    get_capture_manager().restore_target_fps()
+                except Exception:
+                    pass
                     
                 # <<< [수정] 자동 제어 테스트 모드에선 로그만 남김(상단에서 즉시 전송 처리됨)
                 if self.debug_auto_control_checkbox.isChecked():
@@ -10419,6 +10447,7 @@ class MapTab(QWidget):
         # 표시 상태에 따라 매칭 간격 스핀 값을 전환
         try:
             self._refresh_match_interval_ui()
+            self._refresh_capture_interval_ui()
         except Exception:
             pass
 
@@ -10435,6 +10464,12 @@ class MapTab(QWidget):
 
         if hasattr(self, 'minimap_view_label') and not self.is_detection_running:
             self.minimap_view_label.setText("탐지를 시작하세요.")
+        # 표시 상태 바뀌면 캡처 간격도 재적용
+        if getattr(self, 'is_detection_running', False):
+            try:
+                self._apply_capture_interval_to_manager()
+            except Exception:
+                pass
 
     def get_template_match_interval_ms(self) -> int:
         """현재 표시 상태에 따른 템플릿 매칭 간격(ms)을 반환합니다.
@@ -10445,6 +10480,16 @@ class MapTab(QWidget):
         if headless:
             return int(getattr(self, 'template_match_interval_headless_ms', 150))
         return int(getattr(self, 'template_match_interval_display_ms', 0))
+
+    def get_capture_interval_ms(self) -> int:
+        """현재 표시 상태에 따른 캡처 간격(ms)을 반환합니다.
+        - 0이면 CaptureManager 기본 FPS를 사용(변경 없음)
+        - 그 외 값은 ms 간격으로 캡처 목표 FPS를 역산하여 적용
+        """
+        headless = not bool(getattr(self, '_minimap_display_enabled', True))
+        if headless:
+            return int(getattr(self, 'capture_interval_headless_ms', 0))
+        return int(getattr(self, 'capture_interval_display_ms', 0))
 
     def _on_match_interval_changed(self, value: int) -> None:
         value = int(value)
@@ -10457,6 +10502,24 @@ class MapTab(QWidget):
             self.save_global_settings()
         except Exception:
             pass
+
+    def _on_capture_interval_changed(self, value: int) -> None:
+        value = int(value)
+        headless = not bool(getattr(self, '_minimap_display_enabled', True))
+        if headless:
+            self.capture_interval_headless_ms = value
+        else:
+            self.capture_interval_display_ms = value
+        try:
+            self.save_global_settings()
+        except Exception:
+            pass
+        # 탐지 실행 중이면 즉시 반영
+        if getattr(self, 'is_detection_running', False):
+            try:
+                self._apply_capture_interval_to_manager()
+            except Exception:
+                pass
 
     def _refresh_match_interval_ui(self) -> None:
         """표시 상태에 맞춰 라벨/스핀 값을 동기화합니다."""
@@ -10477,6 +10540,42 @@ class MapTab(QWidget):
             self.match_interval_spin.setValue(val)
             self.match_interval_spin.blockSignals(False)
             self.match_interval_spin.setToolTip("미니맵 표시 중 템플릿 매칭 간격(ms). 0=매 프레임")
+
+    def _refresh_capture_interval_ui(self) -> None:
+        """표시 상태에 맞춰 캡처 간격 라벨/스핀을 동기화합니다."""
+        if not hasattr(self, 'capture_interval_spin'):
+            return
+        headless = not bool(getattr(self, '_minimap_display_enabled', True))
+        if headless:
+            self.capture_interval_label.setText("캡처 간격(ms, 헤드리스)")
+            val = int(getattr(self, 'capture_interval_headless_ms', 0))
+            self.capture_interval_spin.blockSignals(True)
+            self.capture_interval_spin.setValue(val)
+            self.capture_interval_spin.blockSignals(False)
+            self.capture_interval_spin.setToolTip("헤드리스(표시 꺼짐)에서 캡처 간격(ms). 0=기본 FPS 유지")
+        else:
+            self.capture_interval_label.setText("캡처 간격(ms, 표시 중)")
+            val = int(getattr(self, 'capture_interval_display_ms', 0))
+            self.capture_interval_spin.blockSignals(True)
+            self.capture_interval_spin.setValue(val)
+            self.capture_interval_spin.blockSignals(False)
+            self.capture_interval_spin.setToolTip("미니맵 표시 중 캡처 간격(ms). 0=기본 FPS 유지")
+
+    def _apply_capture_interval_to_manager(self) -> None:
+        """현재 설정된 캡처 간격(ms)을 CaptureManager에 반영합니다.
+        0이면 기본 FPS를 사용하고, 그 외에는 ms→fps로 변환하여 설정합니다.
+        """
+        try:
+            from capture_manager import get_capture_manager
+        except Exception:
+            return
+        interval_ms = int(self.get_capture_interval_ms())
+        mgr = get_capture_manager()
+        if interval_ms <= 0:
+            mgr.restore_target_fps()
+            return
+        fps = 1000.0 / max(1.0, float(interval_ms))
+        mgr.set_target_fps(fps)
 
     def _handle_general_log_toggle(self, checked: bool) -> None:
         self._general_log_enabled = bool(checked)
