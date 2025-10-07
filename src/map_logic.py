@@ -337,103 +337,103 @@ class AnchorDetectionThread(QThread):
                         last_pos = self.last_positions.get(fid)
                         roi_radius = int(runtime.get('roi_radius', runtime.get('base_radius', 24)))
 
-                    if last_pos is not None and roi_radius > 0:
-                        lx = int(last_pos.x() * self._downscale)
-                        ly = int(last_pos.y() * self._downscale)
-                        x1, y1 = max(0, lx - roi_radius), max(0, ly - roi_radius)
-                        x2, y2 = (
-                            min(frame_gray_small.shape[1], lx + roi_radius),
-                            min(frame_gray_small.shape[0], ly + roi_radius),
-                        )
-                        roi = frame_gray_small[y1:y2, x1:x2]
+                        if last_pos is not None and roi_radius > 0:
+                            lx = int(last_pos.x() * self._downscale)
+                            ly = int(last_pos.y() * self._downscale)
+                            x1, y1 = max(0, lx - roi_radius), max(0, ly - roi_radius)
+                            x2, y2 = (
+                                min(frame_gray_small.shape[1], lx + roi_radius),
+                                min(frame_gray_small.shape[0], ly + roi_radius),
+                            )
+                            roi = frame_gray_small[y1:y2, x1:x2]
 
-                        if roi.shape[0] >= t_h and roi.shape[1] >= t_w:
-                            res = cv2.matchTemplate(roi, tpl_small, cv2.TM_CCOEFF_NORMED)
-                            _, max_val, _, max_loc = cv2.minMaxLoc(res)
-                            if max_val >= tpl_data["threshold"]:
-                                found_x = (x1 + max_loc[0]) / self._downscale
-                                found_y = (y1 + max_loc[1]) / self._downscale
-                                search_result = {
-                                    'id': fid,
-                                    'local_pos': QPointF(found_x, found_y),
-                                    'conf': max_val,
-                                    'size': tpl_data['size'],
-                                }
-                                runtime['failure_count'] = 0
-                                runtime['roi_radius'] = runtime.get('base_radius', roi_radius)
-                                runtime['skip_until_ts'] = 0.0
-                                runtime['next_fallback_ts'] = now_ts + self._fallback_base_interval
-                                runtime['last_success_ts'] = now_ts
+                            if roi.shape[0] >= t_h and roi.shape[1] >= t_w:
+                                res = cv2.matchTemplate(roi, tpl_small, cv2.TM_CCOEFF_NORMED)
+                                _, max_val, _, max_loc = cv2.minMaxLoc(res)
+                                if max_val >= tpl_data["threshold"]:
+                                    found_x = (x1 + max_loc[0]) / self._downscale
+                                    found_y = (y1 + max_loc[1]) / self._downscale
+                                    search_result = {
+                                        'id': fid,
+                                        'local_pos': QPointF(found_x, found_y),
+                                        'conf': max_val,
+                                        'size': tpl_data['size'],
+                                    }
+                                    runtime['failure_count'] = 0
+                                    runtime['roi_radius'] = runtime.get('base_radius', roi_radius)
+                                    runtime['skip_until_ts'] = 0.0
+                                    runtime['next_fallback_ts'] = now_ts + self._fallback_base_interval
+                                    runtime['last_success_ts'] = now_ts
+                                else:
+                                    runtime['failure_count'] = runtime.get('failure_count', 0) + 1
+                                    runtime['roi_radius'] = min(
+                                        runtime.get('roi_radius', roi_radius) + runtime.get('base_radius', roi_radius),
+                                        runtime.get('max_radius', roi_radius * 2),
+                                    )
                             else:
                                 runtime['failure_count'] = runtime.get('failure_count', 0) + 1
-                                runtime['roi_radius'] = min(
-                                    runtime.get('roi_radius', roi_radius) + runtime.get('base_radius', roi_radius),
-                                    runtime.get('max_radius', roi_radius * 2),
-                                )
                         else:
+                            runtime['roi_radius'] = runtime.get('base_radius', max(int(max(t_w, t_h) * 1.2), 16))
+
+                        fallback_attempted = False
+                        if search_result is None:
+                            failure_count = runtime.get('failure_count', 0)
+
+                            should_attempt_fallback = last_pos is None or failure_count >= self._roi_failure_before_backoff
+
+                            if not should_attempt_fallback:
+                                last_success_ts = runtime.get('last_success_ts', 0.0)
+                                if (now_ts - last_success_ts) >= 0.8:
+                                    should_attempt_fallback = True
+
+                            if should_attempt_fallback:
+                                next_allowed = runtime.get('next_fallback_ts', 0.0)
+                                if now_ts < next_allowed:
+                                    should_attempt_fallback = False
+                                else:
+                                    runtime['next_fallback_ts'] = now_ts + min(
+                                        1.5,
+                                        self._fallback_base_interval * max(1, failure_count),
+                                    )
+
+                            if should_attempt_fallback:
+                                fallback_attempted = True
+                                res = cv2.matchTemplate(frame_gray_small, tpl_small, cv2.TM_CCOEFF_NORMED)
+                                _, max_val, _, max_loc = cv2.minMaxLoc(res)
+                                if max_val >= tpl_data["threshold"]:
+                                    found_x = max_loc[0] / self._downscale
+                                    found_y = max_loc[1] / self._downscale
+                                    search_result = {
+                                        'id': fid,
+                                        'local_pos': QPointF(found_x, found_y),
+                                        'conf': max_val,
+                                        'size': tpl_data['size'],
+                                    }
+                                    runtime['failure_count'] = 0
+                                    runtime['roi_radius'] = runtime.get('base_radius', roi_radius)
+                                    runtime['skip_until_ts'] = 0.0
+                                    ts_now = time.time()
+                                    runtime['last_success_ts'] = ts_now
+                                    runtime['next_fallback_ts'] = ts_now + self._fallback_base_interval
+                                else:
+                                    runtime['failure_count'] = max(runtime.get('failure_count', 0), 1)
+                                    if runtime['failure_count'] >= self._roi_failure_before_backoff:
+                                        cooldown = min(1.5, self._fallback_base_interval * runtime['failure_count'])
+                                        runtime['skip_until_ts'] = time.time() + cooldown
+                                    self.last_positions[fid] = None
+                            else:
+                                perf['skipped_templates'] += 1
+
+                        if fallback_attempted:
+                            perf['fallback_scan_count'] += 1
+
+                        if search_result:
+                            all_detected_features.append(search_result)
+                            self.last_positions[fid] = search_result['local_pos']
+                        elif runtime.get('failure_count', 0) >= self._roi_failure_before_backoff:
+                            self.last_positions[fid] = None
+                        elif last_pos is None:
                             runtime['failure_count'] = runtime.get('failure_count', 0) + 1
-                    else:
-                        runtime['roi_radius'] = runtime.get('base_radius', max(int(max(t_w, t_h) * 1.2), 16))
-
-                    fallback_attempted = False
-                    if search_result is None:
-                        failure_count = runtime.get('failure_count', 0)
-
-                        should_attempt_fallback = last_pos is None or failure_count >= self._roi_failure_before_backoff
-
-                        if not should_attempt_fallback:
-                            last_success_ts = runtime.get('last_success_ts', 0.0)
-                            if (now_ts - last_success_ts) >= 0.8:
-                                should_attempt_fallback = True
-
-                        if should_attempt_fallback:
-                            next_allowed = runtime.get('next_fallback_ts', 0.0)
-                            if now_ts < next_allowed:
-                                should_attempt_fallback = False
-                            else:
-                                runtime['next_fallback_ts'] = now_ts + min(
-                                    1.5,
-                                    self._fallback_base_interval * max(1, failure_count),
-                                )
-
-                        if should_attempt_fallback:
-                            fallback_attempted = True
-                            res = cv2.matchTemplate(frame_gray_small, tpl_small, cv2.TM_CCOEFF_NORMED)
-                            _, max_val, _, max_loc = cv2.minMaxLoc(res)
-                            if max_val >= tpl_data["threshold"]:
-                                found_x = max_loc[0] / self._downscale
-                                found_y = max_loc[1] / self._downscale
-                                search_result = {
-                                    'id': fid,
-                                    'local_pos': QPointF(found_x, found_y),
-                                    'conf': max_val,
-                                    'size': tpl_data['size'],
-                                }
-                                runtime['failure_count'] = 0
-                                runtime['roi_radius'] = runtime.get('base_radius', roi_radius)
-                                runtime['skip_until_ts'] = 0.0
-                                ts_now = time.time()
-                                runtime['last_success_ts'] = ts_now
-                                runtime['next_fallback_ts'] = ts_now + self._fallback_base_interval
-                            else:
-                                runtime['failure_count'] = max(runtime.get('failure_count', 0), 1)
-                                if runtime['failure_count'] >= self._roi_failure_before_backoff:
-                                    cooldown = min(1.5, self._fallback_base_interval * runtime['failure_count'])
-                                    runtime['skip_until_ts'] = time.time() + cooldown
-                                self.last_positions[fid] = None
-                        else:
-                            perf['skipped_templates'] += 1
-
-                    if fallback_attempted:
-                        perf['fallback_scan_count'] += 1
-
-                    if search_result:
-                        all_detected_features.append(search_result)
-                        self.last_positions[fid] = search_result['local_pos']
-                    elif runtime.get('failure_count', 0) >= self._roi_failure_before_backoff:
-                        self.last_positions[fid] = None
-                    elif last_pos is None:
-                        runtime['failure_count'] = runtime.get('failure_count', 0) + 1
 
                 if allow_match:
                     if self._template_runtime:
