@@ -2512,6 +2512,13 @@ class AutoControlTab(QWidget):
 
     @pyqtSlot(str, object)
     def receive_control_command(self, command_text, reason=None):
+        # '모든 키 떼기'는 병렬 시퀀스까지 즉시 중단하여 잔여 입력을 없앤다.
+        if command_text == "모든 키 떼기":
+            try:
+                self._stop_all_parallel_sequences(forced=True)
+            except Exception:
+                pass
+
         sequence = self.mappings.get(command_text)
         if not sequence:
             print(f"[AutoControl] 경고: '{command_text}'에 대한 매핑이 없습니다.")

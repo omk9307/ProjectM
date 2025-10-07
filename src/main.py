@@ -558,7 +558,8 @@ class MainWindow(QMainWindow):
             except Exception as exc:
                 print(f"경고: '모든 키 떼기' 명령 전송 실패: {exc}")
 
-        QTimer.singleShot(500, _send_release)
+        # ESC 즉시 정지 요구에 따라 지연 없이 즉시 전송
+        _send_release()
 
     def _handle_tab_moved(self, from_index: int, to_index: int) -> None:  # noqa: ARG002
         self._reapply_tab_colors()

@@ -4796,6 +4796,13 @@ class MapTab(QWidget):
                 if self.status_monitor:
                     self.status_monitor.set_tab_active(map_tab=False)
 
+                # 탐지 중단 즉시 키 해제(테스트 모드가 아닌 경우에만 전송)
+                try:
+                    if not self.debug_auto_control_checkbox.isChecked() and self.auto_control_checkbox.isChecked():
+                        self._emit_control_command("모든 키 떼기", None)
+                except Exception:
+                    pass
+
                 if self.detection_thread and self.detection_thread.isRunning():
                     self.detection_thread.stop()
                     self.detection_thread.wait()
@@ -4803,11 +4810,9 @@ class MapTab(QWidget):
                     self.capture_thread.stop()
                     self.capture_thread.wait()
                     
-                # <<< [수정] 자동 제어 테스트 모드 또는 실제 자동 제어 모드에 따라 분기 처리
+                # <<< [수정] 자동 제어 테스트 모드에선 로그만 남김(상단에서 즉시 전송 처리됨)
                 if self.debug_auto_control_checkbox.isChecked():
                     print("[자동 제어 테스트] 모든 키 떼기")
-                elif self.auto_control_checkbox.isChecked():
-                    self._emit_control_command("모든 키 떼기", None)
 
                 stop_reason = self._forced_detection_stop_reason or 'manual'
                 self._forced_detection_stop_reason = None

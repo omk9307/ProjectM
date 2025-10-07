@@ -4395,6 +4395,12 @@ class HuntTab(QWidget):
         else:
             thread_active = self.detection_thread is not None and self.detection_thread.isRunning()
             self._release_pending = True
+            # 탐지 중단을 누른 즉시 모든 키를 해제해 캐릭터가 바로 멈추도록 함
+            try:
+                self._issue_all_keys_release("사냥중지")
+                self._release_pending = False
+            except Exception:
+                pass
             self._stop_perf_logging()
             self._stop_detection_thread()
             self._set_detection_status(False)
