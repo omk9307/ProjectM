@@ -261,9 +261,9 @@ class AttackSkill:
     jump_attack_probability: int = 50
     jump_profile_left: str = ""
     jump_profile_right: str = ""
-    # 점프공격 전용 스킬 발동 전 대기(기본 스킬 pre-delay와 별도 적용)
-    jump_pre_delay_min: float = 0.0
-    jump_pre_delay_max: float = 0.0
+    # 점프공격 전용 스킬 발동 후 대기(기본 스킬 post-delay와 분리 적용)
+    jump_post_delay_min: float = 0.0
+    jump_post_delay_max: float = 0.0
 
 
 @dataclass
@@ -390,19 +390,19 @@ class AttackSkillDialog(QDialog):
         for name in self._skill_command_options:
             self.jump_right_combo.addItem(name, name)
 
-        self.jump_pre_delay_min_spinbox = QDoubleSpinBox()
-        self.jump_pre_delay_min_spinbox.setRange(0.0, 5.0)
-        self.jump_pre_delay_min_spinbox.setSingleStep(0.05)
-        self.jump_pre_delay_min_spinbox.setDecimals(3)
-        self.jump_pre_delay_min_spinbox.setValue(0.0)
-        self.jump_pre_delay_min_spinbox.setSuffix(" s")
+        self.jump_post_delay_min_spinbox = QDoubleSpinBox()
+        self.jump_post_delay_min_spinbox.setRange(0.0, 5.0)
+        self.jump_post_delay_min_spinbox.setSingleStep(0.05)
+        self.jump_post_delay_min_spinbox.setDecimals(3)
+        self.jump_post_delay_min_spinbox.setValue(0.0)
+        self.jump_post_delay_min_spinbox.setSuffix(" s")
 
-        self.jump_pre_delay_max_spinbox = QDoubleSpinBox()
-        self.jump_pre_delay_max_spinbox.setRange(0.0, 5.0)
-        self.jump_pre_delay_max_spinbox.setSingleStep(0.05)
-        self.jump_pre_delay_max_spinbox.setDecimals(3)
-        self.jump_pre_delay_max_spinbox.setValue(0.0)
-        self.jump_pre_delay_max_spinbox.setSuffix(" s")
+        self.jump_post_delay_max_spinbox = QDoubleSpinBox()
+        self.jump_post_delay_max_spinbox.setRange(0.0, 5.0)
+        self.jump_post_delay_max_spinbox.setSingleStep(0.05)
+        self.jump_post_delay_max_spinbox.setDecimals(3)
+        self.jump_post_delay_max_spinbox.setValue(0.0)
+        self.jump_post_delay_max_spinbox.setSuffix(" s")
 
         self.pre_delay_min_spinbox = QDoubleSpinBox()
         self.pre_delay_min_spinbox.setRange(0.0, 5.0)
@@ -506,8 +506,8 @@ class AttackSkillDialog(QDialog):
             if ri >= 0:
                 self.jump_right_combo.setCurrentIndex(ri)
             try:
-                self.jump_pre_delay_min_spinbox.setValue(float(getattr(skill, 'jump_pre_delay_min', 0.0)))
-                self.jump_pre_delay_max_spinbox.setValue(float(getattr(skill, 'jump_pre_delay_max', 0.0)))
+                self.jump_post_delay_min_spinbox.setValue(float(getattr(skill, 'jump_post_delay_min', 0.0)))
+                self.jump_post_delay_max_spinbox.setValue(float(getattr(skill, 'jump_post_delay_max', 0.0)))
             except Exception:
                 pass
         
@@ -527,8 +527,8 @@ class AttackSkillDialog(QDialog):
         form.addRow("점프 사용확률", self.jump_probability_spinbox)
         form.addRow("좌측 명령프로필", self.jump_left_combo)
         form.addRow("우측 명령프로필", self.jump_right_combo)
-        form.addRow("점프 발동 전 대기 최소", self.jump_pre_delay_min_spinbox)
-        form.addRow("점프 발동 전 대기 최대", self.jump_pre_delay_max_spinbox)
+        form.addRow("점프 발동 후 대기 최소", self.jump_post_delay_min_spinbox)
+        form.addRow("점프 발동 후 대기 최대", self.jump_post_delay_max_spinbox)
         form.addRow("스킬 발동 전 대기 최소", self.pre_delay_min_spinbox)
         form.addRow("스킬 발동 전 대기 최대", self.pre_delay_max_spinbox)
         form.addRow("스킬 발동 후 대기 최소", self.delay_min_spinbox)
@@ -555,8 +555,8 @@ class AttackSkillDialog(QDialog):
             self.jump_probability_spinbox,
             self.jump_left_combo,
             self.jump_right_combo,
-            self.jump_pre_delay_min_spinbox,
-            self.jump_pre_delay_max_spinbox,
+            self.jump_post_delay_min_spinbox,
+            self.jump_post_delay_max_spinbox,
         )
         state = bool(checked)
         for w in widgets:
@@ -620,8 +620,8 @@ class AttackSkillDialog(QDialog):
             jump_attack_probability=int(self.jump_probability_spinbox.value()),
             jump_profile_left=str(self.jump_left_combo.currentData() or ''),
             jump_profile_right=str(self.jump_right_combo.currentData() or ''),
-            jump_pre_delay_min=min(self.jump_pre_delay_min_spinbox.value(), self.jump_pre_delay_max_spinbox.value()),
-            jump_pre_delay_max=max(self.jump_pre_delay_min_spinbox.value(), self.jump_pre_delay_max_spinbox.value()),
+            jump_post_delay_min=min(self.jump_post_delay_min_spinbox.value(), self.jump_post_delay_max_spinbox.value()),
+            jump_post_delay_max=max(self.jump_post_delay_min_spinbox.value(), self.jump_post_delay_max_spinbox.value()),
         )
 
     def _sync_primary_reset_bounds(self) -> None:
@@ -9039,8 +9039,8 @@ class HuntTab(QWidget):
                         jump_attack_probability=int(item.get('jump_attack_probability', 50)),
                         jump_profile_left=str(item.get('jump_profile_left', '') or ''),
                         jump_profile_right=str(item.get('jump_profile_right', '') or ''),
-                        jump_pre_delay_min=float(item.get('jump_pre_delay_min', 0.0)),
-                        jump_pre_delay_max=float(item.get('jump_pre_delay_max', 0.0)),
+                        jump_post_delay_min=float(item.get('jump_post_delay_min', 0.0)),
+                        jump_post_delay_max=float(item.get('jump_post_delay_max', 0.0)),
                     )
                 )
             self._ensure_primary_skill()
@@ -9264,8 +9264,8 @@ class HuntTab(QWidget):
                     'jump_attack_probability': int(getattr(skill, 'jump_attack_probability', 50)),
                     'jump_profile_left': str(getattr(skill, 'jump_profile_left', '') or ''),
                     'jump_profile_right': str(getattr(skill, 'jump_profile_right', '') or ''),
-                    'jump_pre_delay_min': float(getattr(skill, 'jump_pre_delay_min', 0.0)),
-                    'jump_pre_delay_max': float(getattr(skill, 'jump_pre_delay_max', 0.0)),
+                    'jump_post_delay_min': float(getattr(skill, 'jump_post_delay_min', 0.0)),
+                    'jump_post_delay_max': float(getattr(skill, 'jump_post_delay_max', 0.0)),
                 }
                 for skill in self.attack_skills
             ],
@@ -9839,7 +9839,7 @@ class HuntTab(QWidget):
         - 조건: 점프공격 On, 주 스킬 범위 교차 몬스터 ≥ 2, 거리 ≥ 설정 px, 확률 성공
         - 실행: 중심의 좌/우에 따라 반대 방향이 아닌, 중심을 향하는 방향 프로필 실행
         - 방향전환은 무시(점프 실행 시 자체적으로 방향 포함된 프로필 가정)
-        - 지연: pre-delay는 점프 전용(jump_pre_delay_*), post/완료 지연은 기존 스킬 값 사용
+        - 지연: pre-delay는 기본 스킬 값 사용, post-delay는 점프 전용(jump_post_delay_*), 완료 지연은 기본 스킬 값 사용
         """
         try:
             if not getattr(skill, 'jump_attack_enabled', False):
@@ -9877,10 +9877,8 @@ class HuntTab(QWidget):
             direction_text = '우' if side == 'right' else '좌'
             usage_reason = f"{base_reason} | 점프공격({direction_text}, 중심거리 {int(round(distance))}px)"
 
-            # 점프 전용 pre-delay
-            pre_min = float(getattr(skill, 'jump_pre_delay_min', 0.0) or 0.0)
-            pre_max = float(getattr(skill, 'jump_pre_delay_max', 0.0) or 0.0)
-            pre_delay = self._sample_delay(pre_min, pre_max)
+            # 점프 전에는 기본 스킬 pre-delay를 그대로 적용
+            pre_delay = self._sample_delay(getattr(skill, 'pre_delay_min', 0.0), getattr(skill, 'pre_delay_max', 0.0))
 
             def emit() -> None:
                 exec_time = time.time()
@@ -9896,13 +9894,14 @@ class HuntTab(QWidget):
                 )
                 self.last_attack_ts = exec_time
                 self.hunting_active = True
-                post_delay = self._sample_delay(getattr(skill, 'post_delay_min', 0.0), getattr(skill, 'post_delay_max', 0.0))
+                # 점프 발동 후 대기(점프 전용 post-delay)
+                post_delay = self._sample_delay(getattr(skill, 'jump_post_delay_min', 0.0), getattr(skill, 'jump_post_delay_max', 0.0))
                 if post_delay > 0.0:
                     self._set_command_cooldown(post_delay)
-                    self._log_delay_message(f"스킬 '{skill.name}'", post_delay)
+                    self._log_delay_message(f"점프공격 '{skill.name}'", post_delay)
 
             if pre_delay > 0.0:
-                if self._start_pre_delay(profile, pre_delay, f"점프공격 '{skill.name}' 발동 전", emit):
+                if self._start_pre_delay(profile, pre_delay, f"스킬 '{skill.name}' 발동 전", emit):
                     return True
             emit()
             return True
