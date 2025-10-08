@@ -890,6 +890,9 @@ class MapTab(QWidget):
             self._active_waypoint_threshold_key = None
             self._active_waypoint_threshold_value = None
 
+            # 내비게이션 그래프 변경 감지 시그니처
+            self._nav_graph_signature: Optional[str] = None
+
             # --- [v.1810] 좁은 발판 착지 판단 유예 플래그 ---
             self.just_landed_on_narrow_terrain = False
             
@@ -2107,7 +2110,7 @@ class MapTab(QWidget):
         if not active_route:
             return
         waypoint_ids = self._collect_all_route_waypoint_ids(active_route)
-        self._build_navigation_graph(waypoint_ids)
+        self._request_graph_rebuild(waypoint_ids)
 
     def _on_forward_slot_changed(self, index):
         slot = ROUTE_SLOT_IDS[index] if 0 <= index < len(ROUTE_SLOT_IDS) else ROUTE_SLOT_IDS[0]
@@ -2457,6 +2460,8 @@ class MapTab(QWidget):
         self.route_profiles = {}
         self.active_route_profile_name = None
         self.reference_anchor_id = None
+        # 그래프 시그니처 초기화
+        self._nav_graph_signature = None
         
         self.global_positions = {}
         self.feature_offsets = {}
@@ -2890,7 +2895,7 @@ class MapTab(QWidget):
             # --- v12.0.0 수정: 현재 경로 기준으로 그래프 생성 ---
             active_route = self.route_profiles.get(self.active_route_profile_name, {})
             wp_ids = self._collect_all_route_waypoint_ids(active_route)
-            self._build_navigation_graph(wp_ids)
+            self._request_graph_rebuild(wp_ids)
             # [신규] 맵 데이터 저장 후에도 헌트 탭과 대기 웨이포인트 정합성 동기화
             try:
                 if getattr(self, '_hunt_tab', None) and hasattr(self._hunt_tab, 'map_active_profile_changed'):
@@ -3203,10 +3208,10 @@ class MapTab(QWidget):
             # save 후에 뷰 업데이트
             self._build_line_floor_map() # [v11.4.5] 맵 데이터 저장 후 캐시 빌드 및 뷰 업데이트
             self._update_map_data_and_views()
-            # --- v12.0.0 수정: 현재 경로 기준으로 그래프 재생성 ---
+            # --- v12.0.0 수정: 현재 경로 기준으로 그래프 재생성 (변경 감지 기반) ---
             active_route = self.route_profiles.get(self.active_route_profile_name, {})
             wp_ids = self._collect_all_route_waypoint_ids(active_route)
-            self._build_navigation_graph(wp_ids)
+            self._request_graph_rebuild(wp_ids)
             
         except Exception as e:
             self.update_general_log(f"프로필 저장 오류: {e}", "red")
@@ -3356,6 +3361,8 @@ class MapTab(QWidget):
         self.route_profiles.clear()
         self.key_features.clear()
         self.geometry_data.clear()
+        # 그래프 시그니처 초기화
+        self._nav_graph_signature = None
         self.forward_wp_list.clear()
         self.backward_wp_list.clear()
         self.route_profile_selector.clear()
@@ -3429,7 +3436,7 @@ class MapTab(QWidget):
             # --- v12.0.0 추가: 경로 프로필 변경 시 그래프 재생성 ---
             active_route = self.route_profiles.get(self.active_route_profile_name, {})
             wp_ids = self._collect_all_route_waypoint_ids(active_route)
-            self._build_navigation_graph(wp_ids)
+            self._request_graph_rebuild(wp_ids)
             # --- 추가 끝 ---
             self.save_profile_data()
 
@@ -6273,7 +6280,7 @@ class MapTab(QWidget):
             wp_ids = self._collect_all_route_waypoint_ids(active_route)
             if waypoint_id not in wp_ids:
                 wp_ids = list(wp_ids) + [waypoint_id]
-            self._build_navigation_graph(wp_ids)
+            self._request_graph_rebuild(wp_ids)
         except Exception:
             # 그래프 재구성이 실패하더라도 이후 로직이 자체적으로 실패를 처리한다.
             pass
@@ -11248,7 +11255,101 @@ class MapTab(QWidget):
                     closest_node_key = key
 
         return closest_node_key, math.sqrt(min_dist_sq) if closest_node_key else float('inf')
-    
+
+    # 변경 감지 기반 그래프 재생성 헬퍼들
+    def _calc_nav_graph_signature(self, waypoint_ids_in_route=None, extra_wp_ids=None) -> str:
+        """
+        활성 경로의 웨이포인트와 핵심 지오메트리 정보를 요약하여 해시 시그니처를 생성합니다.
+        동일 시그니처면 그래프 재생성을 생략합니다.
+        """
+        try:
+            route_wp_ids = [str(w) for w in (waypoint_ids_in_route or []) if isinstance(w, str)]
+            extra_ids = [str(w) for w in (extra_wp_ids or []) if isinstance(w, str)]
+            combined_ids = sorted(set(route_wp_ids + extra_ids))
+
+            geom = self.geometry_data or {}
+            terrain_lines = geom.get("terrain_lines", []) or []
+            transition_objects = geom.get("transition_objects", []) or []
+            jump_links = geom.get("jump_links", []) or []
+            waypoints = geom.get("waypoints", []) or []
+
+            wp_lookup = {wp.get('id'): wp for wp in waypoints if isinstance(wp, dict)}
+
+            def _simp_points(points):
+                try:
+                    return [[float(p[0]), float(p[1])] for p in (points or [])]
+                except Exception:
+                    return []
+
+            lines_s = sorted([
+                {
+                    "id": line.get("id"),
+                    "floor": line.get("floor"),
+                    "points": _simp_points(line.get("points")),
+                }
+                for line in terrain_lines if isinstance(line, dict)
+            ], key=lambda d: str(d.get("id")))
+
+            transitions_s = sorted([
+                {
+                    "id": obj.get("id"),
+                    "start_line_id": obj.get("start_line_id"),
+                    "end_line_id": obj.get("end_line_id"),
+                    "points": _simp_points(obj.get("points")),
+                }
+                for obj in transition_objects if isinstance(obj, dict)
+            ], key=lambda d: str(d.get("id")))
+
+            jumps_s = sorted([
+                {
+                    "id": j.get("id"),
+                    "start": list(j.get("start_vertex_pos", [])),
+                    "end": list(j.get("end_vertex_pos", [])),
+                }
+                for j in jump_links if isinstance(j, dict)
+            ], key=lambda d: str(d.get("id")))
+
+            route_wps_s = sorted([
+                {
+                    "id": wp_id,
+                    "pos": list(wp_lookup.get(wp_id, {}).get("pos", [])),
+                    "floor": wp_lookup.get(wp_id, {}).get("floor"),
+                }
+                for wp_id in combined_ids
+            ], key=lambda d: d["id"])
+
+            payload = {
+                "wp_ids": combined_ids,
+                "route_waypoints": route_wps_s,
+                "terrain_lines": lines_s,
+                "transition_objects": transitions_s,
+                "jump_links": jumps_s,
+            }
+            s = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+            return hashlib.sha256(s.encode("utf-8")).hexdigest()
+        except Exception:
+            return str(time.time())
+
+    def _request_graph_rebuild(self, waypoint_ids_in_route=None, extra_wp_ids=None, force: bool = False) -> None:
+        """변경 감지 기반으로 내비게이션 그래프 재생성을 요청합니다.
+        - force=True면 시그니처 관계없이 한 번 재생성합니다.
+        - extra_wp_ids: 일시적으로 포함해야 하는 추가 웨이포인트 IDs
+        """
+        if not self.geometry_data:
+            return
+
+        route_wp_ids = [str(w) for w in (waypoint_ids_in_route or []) if isinstance(w, str)]
+        if extra_wp_ids:
+            extra_ids = [str(w) for w in extra_wp_ids if isinstance(w, str)]
+            route_wp_ids = sorted(set(route_wp_ids + extra_ids))
+
+        new_sig = self._calc_nav_graph_signature(route_wp_ids)
+        if force or getattr(self, "_nav_graph_signature", None) != new_sig:
+            self._nav_graph_signature = new_sig
+            self._build_navigation_graph(route_wp_ids)
+            return
+        # 변경 없음: 재생성 생략
+        
     def _build_navigation_graph(self, waypoint_ids_in_route=None):
         """
         [DEBUG] v13.1.9: 노드 생성 시 그룹 할당 과정과, 노드 간 엣지(연결) 생성
