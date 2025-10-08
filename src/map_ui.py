@@ -214,6 +214,11 @@ if 'WALK_TELEPORT_BONUS_STEP_DEFAULT' not in globals():
 if 'WALK_TELEPORT_BONUS_MAX_DEFAULT' not in globals():
     WALK_TELEPORT_BONUS_MAX_DEFAULT = 50.0
 
+# --- 사다리 링크(ㅡ자) 경로 비용/정책 상수 (다른 로직에 영향 없도록 국소 적용) ---
+LADDER_LINK_ENTRY_PENALTY_BASE = 200.0   # 기본: 항상 비선호
+LADDER_LINK_ENTRY_PENALTY_PREFER = 20.0  # 선호 조건 충족 시: 낮은 패널티
+LADDER_JUMP_COST_MULTIPLIER = 2.5        # 링크→사다리(climb) 비용 가중치
+
 try:
     from . import map as _map_module  # type: ignore
 except ImportError:
@@ -851,6 +856,7 @@ class MapTab(QWidget):
             self.render_options = {
                 'background': True, 'features': True, 'waypoints': True,
                 'terrain': True, 'objects': True, 'jump_links': True,
+                'ladder_links': True,
                 'forbidden_walls': True,
             }
             
@@ -3071,6 +3077,8 @@ class MapTab(QWidget):
         # v10.0.0 마이그레이션: geometry 데이터 필드 추가
         if "waypoints" not in geometry: geometry["waypoints"] = []; geometry_updated = True
         if "jump_links" not in geometry: geometry["jump_links"] = []; geometry_updated = True
+        # [신규] ladder_links 필드 기본 보장
+        if "ladder_links" not in geometry: geometry["ladder_links"] = []; geometry_updated = True
         if "forbidden_walls" not in geometry: geometry["forbidden_walls"] = []; geometry_updated = True
 
         for wall in geometry.get("forbidden_walls", []):
@@ -8264,9 +8272,22 @@ class MapTab(QWidget):
         entry_pos = entry_node.get('pos')
 
         entry_x = None
-        if isinstance(entry_pos, QPointF):
+        # ladder_link이면 실제 사다리 X(출구 노드)를 우선 사용
+        try:
+            if entry_node.get('type') == 'ladder_link':
+                obj_id = entry_node.get('obj_id')
+                if obj_id:
+                    exit_key = f"ladder_exit_{obj_id}"
+                    exit_node = self.nav_nodes.get(exit_key, {})
+                    exit_pos = exit_node.get('pos')
+                    if isinstance(exit_pos, QPointF):
+                        entry_x = float(exit_pos.x())
+        except Exception:
+            pass
+
+        if entry_x is None and isinstance(entry_pos, QPointF):
             entry_x = entry_pos.x()
-        elif isinstance(entry_pos, (list, tuple)) and len(entry_pos) >= 2:
+        elif entry_x is None and isinstance(entry_pos, (list, tuple)) and len(entry_pos) >= 2:
             try:
                 entry_x = float(entry_pos[0])
             except (TypeError, ValueError):
@@ -9786,6 +9807,14 @@ class MapTab(QWidget):
                 if x_range and x_range[0] <= final_player_pos.x() <= x_range[1] and floor_matches:
                     if (self.locked_djump_area_key is None) or (self.locked_djump_area_key == current_node_key):
                         arrived = True
+            elif current_node.get('type') == 'ladder_link':
+                # ladder_link는 x_range 기반 도착 판정(+여유 tol)과 층 일치 필요
+                x_range = current_node.get('x_range')
+                if isinstance(x_range, (list, tuple)) and len(x_range) >= 2 and floor_matches:
+                    tol = float(getattr(self, 'cfg_jump_link_arrival_x_threshold', JUMP_LINK_ARRIVAL_X_THRESHOLD))
+                    x1, x2 = float(x_range[0]), float(x_range[1])
+                    if (min(x1, x2) - tol) <= float(final_player_pos.x()) <= (max(x1, x2) + tol):
+                        arrived = True
             else:
                 distance_to_target = abs(final_player_pos.x() - self.intermediate_target_pos.x())
                 if not self.event_in_progress:
@@ -10014,6 +10043,14 @@ class MapTab(QWidget):
                     next_action_state = None
                     # --- [신규] 좁은 발판 감지 및 정렬 상태 전환 로직 ---
                     if action == 'climb':
+                        # 사다리 출구쪽으로 안내점을 업데이트하여 정렬 대상 X를 사다리 X로 고정
+                        try:
+                            next_node = self.nav_nodes.get(next_node_key, {})
+                            next_pos = next_node.get('pos')
+                            if isinstance(next_pos, QPointF):
+                                self.intermediate_target_pos = next_pos
+                        except Exception:
+                            pass
                         contact_terrain = self._get_contact_terrain(final_player_pos)
                         if contact_terrain:
                             points = contact_terrain.get('points', [])
@@ -11581,6 +11618,7 @@ class MapTab(QWidget):
             terrain_lines = geom.get("terrain_lines", []) or []
             transition_objects = geom.get("transition_objects", []) or []
             jump_links = geom.get("jump_links", []) or []
+            ladder_links = geom.get("ladder_links", []) or []
             waypoints = geom.get("waypoints", []) or []
 
             wp_lookup = {wp.get('id'): wp for wp in waypoints if isinstance(wp, dict)}
@@ -11646,6 +11684,16 @@ class MapTab(QWidget):
                 for j in jump_links if isinstance(j, dict)
             ], key=lambda d: str(d.get("id")))
 
+            llinks_s = sorted([
+                {
+                    "id": l.get("id"),
+                    "source_line_id": l.get("source_line_id"),
+                    "ladder_id": l.get("ladder_id"),
+                    "points": _simp_points(l.get("points")),
+                }
+                for l in ladder_links if isinstance(l, dict)
+            ], key=lambda d: str(d.get("id")))
+
             route_wps_s = sorted([
                 {
                     "id": wp_id,
@@ -11661,6 +11709,7 @@ class MapTab(QWidget):
                 "terrain_lines": lines_s,
                 "transition_objects": transitions_s,
                 "jump_links": jumps_s,
+                "ladder_links": llinks_s,
             }
             s = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
             return hashlib.sha256(s.encode("utf-8")).hexdigest()
@@ -11771,6 +11820,43 @@ class MapTab(QWidget):
                 cost_up, cost_down = (y_diff * CLIMB_UP_COST_MULTIPLIER) + FLOOR_CHANGE_PENALTY, (y_diff * CLIMB_DOWN_COST_MULTIPLIER) + FLOOR_CHANGE_PENALTY
                 self.nav_graph[entry_key][exit_key] = {'cost': cost_up, 'action': 'climb'}
                 self.nav_graph[exit_key][entry_key] = {'cost': cost_down, 'action': 'climb_down'}
+
+            # --- [신규] 사다리 링크(ladder_links) 노드 생성 ---
+            for link in (self.geometry_data.get("ladder_links", []) or []):
+                try:
+                    if not link or not bool(link.get('enabled', True)):
+                        continue
+                    pts = link.get('points') or []
+                    if len(pts) != 2:
+                        continue
+                    p1 = QPointF(float(pts[0][0]), float(pts[0][1]))
+                    p2 = QPointF(float(pts[1][0]), float(pts[1][1]))
+                    mid = QPointF((p1.x() + p2.x()) / 2.0, (p1.y() + p2.y()) / 2.0)
+
+                    source_line_id = link.get('source_line_id')
+                    ladder_id = link.get('ladder_id')
+                    link_id = link.get('id') or f"llink-{uuid.uuid4()}"
+                    x_range = link.get('x_range') or [min(p1.x(), p2.x()), max(p1.x(), p2.x())]
+
+                    src_line = next((L for L in terrain_lines if L.get('id') == source_line_id), None)
+                    link_group = src_line.get('dynamic_name') if src_line else None
+                    link_floor = src_line.get('floor') if src_line else None
+
+                    node_key = f"ladder_link_{link_id}"
+                    self.nav_nodes[node_key] = {
+                        'type': 'ladder_link',
+                        'pos': mid,
+                        'obj_id': ladder_id,
+                        'name': link.get('dynamic_name') or '사다리 링크',
+                        'group': link_group,
+                        'walkable': False,
+                        'floor': link_floor,
+                        'x_range': [float(x_range[0]), float(x_range[1])],
+                        'entry_penalty_base': float(LADDER_LINK_ENTRY_PENALTY_BASE),
+                        'entry_penalty_prefer': float(LADDER_LINK_ENTRY_PENALTY_PREFER),
+                    }
+                except Exception:
+                    continue
 
             for link in self.geometry_data.get("jump_links", []):
                 start_pos, end_pos = QPointF(*link['start_vertex_pos']), QPointF(*link['end_vertex_pos'])
@@ -11896,12 +11982,30 @@ class MapTab(QWidget):
                 for w_key in walkable_nodes_in_group:
                     for a_key in action_nodes_in_group:
                         pos1, pos2 = self.nav_nodes[w_key]['pos'], self.nav_nodes[a_key]['pos']
-                        # <<< [수정] 아래 cost 계산식 변경
-                        cost = math.hypot(pos1.x() - pos2.x(), pos1.y() - pos2.y())
-                        self.nav_graph[w_key][a_key] = {'cost': cost, 'action': 'walk'}
+                        base_cost = math.hypot(pos1.x() - pos2.x(), pos1.y() - pos2.y())
+                        edge = {'cost': base_cost, 'action': 'walk'}
+                        if self.nav_nodes[a_key].get('type') == 'ladder_link':
+                            edge['ladder_link_key'] = a_key
+                        self.nav_graph[w_key][a_key] = edge
                         name1 = self.nav_nodes[w_key]['name']
                         name2 = self.nav_nodes[a_key]['name']
-                        debug_print(f"      - 연결: '{name1}' -> '{name2}' (cost: {cost:.1f})")
+                        debug_print(f"      - 연결: '{name1}' -> '{name2}' (base_cost: {base_cost:.1f})")
+
+            # --- [신규] ladder_link -> ladder_exit 간선(climb) 생성 ---
+            for node_key, node in list(self.nav_nodes.items()):
+                if node.get('type') != 'ladder_link':
+                    continue
+                obj_id = node.get('obj_id')
+                if not obj_id:
+                    continue
+                exit_key = f"ladder_exit_{obj_id}"
+                if exit_key not in self.nav_nodes:
+                    continue
+                pos_from = node.get('pos')
+                pos_to = self.nav_nodes[exit_key]['pos']
+                y_diff = abs(pos_from.y() - pos_to.y())
+                cost = (y_diff * LADDER_JUMP_COST_MULTIPLIER) + FLOOR_CHANGE_PENALTY
+                self.nav_graph[node_key][exit_key] = {'cost': cost, 'action': 'climb'}
 
             debug_print("\n" + "="*20 + f" 그래프 생성 완료 (노드: {len(self.nav_nodes)}개) " + "="*20)
             self.update_general_log(f"내비게이션 그래프 생성 완료. (노드: {len(self.nav_nodes)}개)", "purple")
@@ -12009,6 +12113,51 @@ class MapTab(QWidget):
                 neighbor_name = self.nav_nodes.get(neighbor_key, {}).get('name', '???')
                 action_to_neighbor = edge_data.get('action', 'N/A')
                 cost = edge_data.get('cost', float('inf'))
+                # [신규] ladder_link 진입 비용은 런타임 상황에 따라 동적으로 적용
+                try:
+                    link_key = edge_data.get('ladder_link_key') if isinstance(edge_data, dict) else None
+                    if action_to_neighbor == 'walk' and link_key:
+                        link_node = self.nav_nodes.get(link_key, {})
+                        # 기본은 비선호
+                        penalty_base = float(link_node.get('entry_penalty_base', LADDER_LINK_ENTRY_PENALTY_BASE))
+                        penalty_prefer = float(link_node.get('entry_penalty_prefer', LADDER_LINK_ENTRY_PENALTY_PREFER))
+
+                        prefer = False
+                        player_floor = getattr(self, 'current_player_floor', None)
+                        player_pos = getattr(self, 'last_player_pos', None)
+                        # 위층 조건 및 현재 링크 지형에 도달했는지 확인
+                        if player_floor is not None and isinstance(player_pos, QPointF):
+                            link_floor = link_node.get('floor')
+                            x_range = link_node.get('x_range') or []
+                            tol = float(getattr(self, 'cfg_jump_link_arrival_x_threshold', JUMP_LINK_ARRIVAL_X_THRESHOLD))
+                            in_x_range = False
+                            if isinstance(x_range, (list, tuple)) and len(x_range) >= 2:
+                                x1, x2 = float(x_range[0]), float(x_range[1])
+                                in_x_range = (min(x1, x2) - tol) <= float(player_pos.x()) <= (max(x1, x2) + tol)
+
+                            # 링크 대상 사다리의 '상층' 판정
+                            obj_id = link_node.get('obj_id')
+                            to_upper = False
+                            if obj_id:
+                                try:
+                                    obj = next((o for o in (self.geometry_data.get('transition_objects', []) or []) if o.get('id') == obj_id), None)
+                                    if obj:
+                                        s_id, e_id = obj.get('start_line_id'), obj.get('end_line_id')
+                                        s_fl = self.line_id_to_floor_map.get(s_id)
+                                        e_fl = self.line_id_to_floor_map.get(e_id)
+                                        if isinstance(s_fl, (int, float)) and isinstance(e_fl, (int, float)):
+                                            upper_fl = max(s_fl, e_fl)
+                                            to_upper = (upper_fl is not None and upper_fl > float(player_floor))
+                                except Exception:
+                                    to_upper = False
+
+                            # 최종 선호 조건: 같은(또는 매우 근접) 층에서 링크 구간에 "이미" 있고 + 위층으로 가는 사다리
+                            if (link_floor is None or abs(float(player_floor) - float(link_floor)) < 0.1) and in_x_range and to_upper:
+                                prefer = True
+
+                        cost += (penalty_prefer if prefer else penalty_base)
+                except Exception:
+                    pass
                 
                 if is_debug_enabled:
                     print(f"    -> '{neighbor_name}' ({neighbor_key}) | action: {action_to_neighbor}, cost: {cost:.1f}")

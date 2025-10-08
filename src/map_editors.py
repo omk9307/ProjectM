@@ -1993,6 +1993,8 @@ class FullMinimapEditorDialog(QDialog):
         self.forbidden_wall_mode_radio = QRadioButton("금지벽 추가 (F)")
         # [신규] 사냥범위 조절칸 추가 모드
         self.hunt_zone_mode_radio = QRadioButton("사냥범위 조절칸 추가 (H)")
+        # [신규] 사다리 링크 모드
+        self.ladder_link_mode_radio = QRadioButton("사다리 링크 (L)")
         self.select_mode_radio.setChecked(True)
         self.select_mode_radio.toggled.connect(lambda: self.set_mode("select"))
         self.terrain_mode_radio.toggled.connect(lambda: self.set_mode("terrain"))
@@ -2001,6 +2003,7 @@ class FullMinimapEditorDialog(QDialog):
         self.jump_mode_radio.toggled.connect(lambda: self.set_mode("jump"))
         self.forbidden_wall_mode_radio.toggled.connect(lambda: self.set_mode("forbidden_wall"))
         self.hunt_zone_mode_radio.toggled.connect(lambda: self.set_mode("hunt_zone"))
+        self.ladder_link_mode_radio.toggled.connect(lambda: self.set_mode("ladder_link"))
         mode_layout.addWidget(self.select_mode_radio)
         mode_layout.addWidget(self.terrain_mode_radio)
         mode_layout.addWidget(self.object_mode_radio)
@@ -2008,6 +2011,7 @@ class FullMinimapEditorDialog(QDialog):
         mode_layout.addWidget(self.jump_mode_radio)
         mode_layout.addWidget(self.forbidden_wall_mode_radio)
         mode_layout.addWidget(self.hunt_zone_mode_radio)
+        mode_layout.addWidget(self.ladder_link_mode_radio)
         mode_box.setLayout(mode_layout)
 
         # 지형 입력 옵션
@@ -2052,6 +2056,10 @@ class FullMinimapEditorDialog(QDialog):
         self.chk_show_jump_links = QCheckBox("지형 점프 연결")
         self.chk_show_jump_links.setChecked(self.render_options.get('jump_links', True))
         self.chk_show_jump_links.stateChanged.connect(self._update_visibility)
+        # [신규] 사다리 링크 보기
+        self.chk_show_ladder_links = QCheckBox("사다리 링크")
+        self.chk_show_ladder_links.setChecked(self.render_options.get('ladder_links', True))
+        self.chk_show_ladder_links.stateChanged.connect(self._update_visibility)
         # 좌표 라벨 표시 옵션 (LOD 대신)
         self.chk_show_coords = QCheckBox("좌표 라벨")
         self.chk_show_coords.setChecked(self.render_options.get('coords', True))
@@ -2089,6 +2097,7 @@ class FullMinimapEditorDialog(QDialog):
         view_opts_layout.addWidget(self.chk_show_terrain)
         view_opts_layout.addWidget(self.chk_show_objects)
         view_opts_layout.addWidget(self.chk_show_jump_links)
+        view_opts_layout.addWidget(self.chk_show_ladder_links)
         view_opts_layout.addWidget(self.chk_show_coords)
         view_opts_layout.addWidget(self.chk_show_forbidden_walls)
         view_opts_layout.addWidget(self.chk_show_hunt_zones)
@@ -2133,6 +2142,7 @@ class FullMinimapEditorDialog(QDialog):
             'terrain': self.chk_show_terrain.isChecked(),
             'objects': self.chk_show_objects.isChecked(),
             'jump_links': self.chk_show_jump_links.isChecked(),
+            'ladder_links': self.chk_show_ladder_links.isChecked() if hasattr(self, 'chk_show_ladder_links') else True,
             'coords': getattr(self, 'chk_show_coords', None).isChecked() if hasattr(self, 'chk_show_coords') else True,
             'forbidden_walls': self.chk_show_forbidden_walls.isChecked(),
             'hunt_zones': self.chk_show_hunt_zones.isChecked() if hasattr(self, 'chk_show_hunt_zones') else True,
@@ -2799,6 +2809,42 @@ class FullMinimapEditorDialog(QDialog):
                         self.scene.addItem(text_item)
 
                         self.lod_text_items.append(text_item)
+
+                # [신규] 사다리 링크 렌더링
+                for lnk in self.geometry_data.get("ladder_links", []) or []:
+                    pts = lnk.get('points') or []
+                    if not (isinstance(pts, list) and len(pts) == 2):
+                        continue
+                    p1 = QPointF(float(pts[0][0]), float(pts[0][1]))
+                    p2 = QPointF(float(pts[1][0]), float(pts[1][1]))
+                    line_item = self._add_ladder_link_line(p1, p2, lnk.get('id') or "")
+                    name = lnk.get('dynamic_name') or '사다리 링크'
+
+                    text_item = QGraphicsTextItem(name)
+                    font = QFont("맑은 고딕", 3, QFont.Weight.Bold)
+                    text_item.setFont(font)
+                    text_item.setDefaultTextColor(QColor("#00AAFF"))
+
+                    fm = QFontMetricsF(font)
+                    tight_rect = fm.boundingRect(name)
+                    pad_x, pad_y = 1, 0
+                    bg_rect_geom = QRectF(0, 0, tight_rect.width() + pad_x * 2, tight_rect.height() + pad_y * 2)
+
+                    line_center = line_item.boundingRect().center()
+
+                    background_rect = RoundedRectItem(QRectF(0, 0, bg_rect_geom.width(), bg_rect_geom.height()), 3, 3)
+                    background_rect.setBrush(QColor(0, 0, 0, 120))
+                    background_rect.setPen(QPen(Qt.GlobalColor.transparent))
+                    background_rect.setData(0, "ladder_link_name_bg")
+                    text_item.setData(0, "ladder_link_name")
+                    background_rect.setTransformOriginPoint(bg_rect_geom.center())
+                    text_item.setTransformOriginPoint(text_item.boundingRect().center())
+                    background_rect.setZValue(10)
+                    text_item.setZValue(11)
+
+                    self.scene.addItem(background_rect)
+                    self.scene.addItem(text_item)
+                    self.lod_text_items.append(text_item)
                         self.lod_text_items.append(background_rect)
                         # 이름 라벨 그룹 등록 (앵커는 선의 중앙, 아래 선호 + 아래만 허용)
                         line_rect = line_item.boundingRect()
@@ -2890,6 +2936,7 @@ class FullMinimapEditorDialog(QDialog):
         show_jump_links = self.chk_show_jump_links.isChecked()
         show_forbidden_walls = self.chk_show_forbidden_walls.isChecked()
         show_hunt_zones = self.chk_show_hunt_zones.isChecked()
+        show_ladder_links = self.chk_show_ladder_links.isChecked() if hasattr(self, 'chk_show_ladder_links') else True
 
         for item in self.scene.items():
             item_type = item.data(0)
@@ -2913,6 +2960,10 @@ class FullMinimapEditorDialog(QDialog):
                 item.setVisible(show_jump_links)
             elif item_type in ["jump_link_name", "jump_link_name_bg", "jump_link_name_leader"]: # 수정: _bg/leader 타입 추가
                 item.setVisible(show_jump_links)
+            elif item_type == "ladder_link":
+                item.setVisible(show_ladder_links)
+            elif item_type in ["ladder_link_name", "ladder_link_name_bg", "ladder_link_name_leader"]:
+                item.setVisible(show_ladder_links)
             elif item_type in ["coord_text", "coord_text_bg", "coord_text_leader"]:
                 # 좌표 라벨은 전역 체크박스/핀 정책으로 관리하므로, 기본 True. 이후 _enforce_coord_visibility에서 제어
                 item.setVisible(True)
@@ -2937,6 +2988,8 @@ class FullMinimapEditorDialog(QDialog):
                 base_visible = self.chk_show_objects.isChecked()
             elif item_type in ["jump_link_name", "jump_link_name_bg"]:
                 base_visible = self.chk_show_jump_links.isChecked()
+            elif item_type in ["ladder_link_name", "ladder_link_name_bg"]:
+                base_visible = self.chk_show_ladder_links.isChecked() if hasattr(self, 'chk_show_ladder_links') else True
             elif item_type in ["floor_text", "floor_text_bg"]:
                 base_visible = self.chk_show_terrain.isChecked()
             elif item_type == "waypoint_lod_text":
@@ -3346,6 +3399,69 @@ class FullMinimapEditorDialog(QDialog):
                         self.geometry_data["waypoints"].append(new_wp)
                         self.populate_scene()
         
+        elif self.current_mode == "ladder_link":
+            if button == Qt.MouseButton.LeftButton:
+                # 1) 지형선 위 스냅 포인트를 얻음
+                terrain_info = self._get_closest_point_on_terrain(scene_pos)
+                if not terrain_info:
+                    QMessageBox.information(self, "사다리 링크", "지형선 위에서 클릭해주세요.")
+                    return
+                snap_pos, source_line_id = terrain_info
+                snap_x, snap_y = float(snap_pos.x()), float(snap_pos.y())
+
+                # 2) 자동 사다리 선택: 같은 y 대역(사다리 세로 구간 내) + 수평거리 최소
+                ladders = self.geometry_data.get("transition_objects", []) or []
+                best = None
+                best_dx = float('inf')
+                for obj in ladders:
+                    pts = obj.get('points') or []
+                    if len(pts) != 2:
+                        continue
+                    x_ladder = float(pts[0][0])
+                    y1, y2 = float(pts[0][1]), float(pts[1][1])
+                    y_min, y_max = (min(y1, y2), max(y1, y2))
+                    if y_min - 1e-6 <= snap_y <= y_max + 1e-6:  # 세로 범위 포함
+                        dx = abs(x_ladder - snap_x)
+                        if dx < best_dx:
+                            best_dx = dx
+                            best = (obj.get('id'), x_ladder)
+
+                if best is None:
+                    QMessageBox.warning(self, "사다리 링크", "해당 높이에서 연결할 수 있는 사다리를 찾지 못했습니다.")
+                    return
+
+                ladder_id, ladder_x = best
+                # 3) 거리 제약(1~20px) 검증
+                if not (1.0 <= best_dx <= 20.0):
+                    QMessageBox.warning(self, "사다리 링크", "사다리와의 수평 거리는 1~20px 이어야 합니다.")
+                    return
+
+                # 4) 링크 생성 및 저장
+                link_id = f"llink-{uuid.uuid4()}"
+                new_link = {
+                    'id': link_id,
+                    'source_line_id': source_line_id,
+                    'ladder_id': ladder_id,
+                    'points': [[snap_x, snap_y], [float(ladder_x), snap_y]],
+                    'x_range': [min(snap_x, float(ladder_x)), max(snap_x, float(ladder_x))],
+                    'floor': self.floor_spinbox.value(),
+                    'enabled': True,
+                    'dynamic_name': '사다리 링크',
+                }
+                self.geometry_data.setdefault('ladder_links', []).append(new_link)
+                if self.parent_map_tab:
+                    try:
+                        self.parent_map_tab.save_profile_data()
+                    except Exception:
+                        pass
+                self.populate_scene()
+            elif button == Qt.MouseButton.RightButton:
+                items_at_pos = self.view.items(self.view.mapFromScene(scene_pos))
+                for item in items_at_pos:
+                    if item.data(0) == 'ladder_link':
+                        self._delete_ladder_link_by_id(item.data(1))
+                        break
+        
         elif self.current_mode == "jump":
             if button == Qt.MouseButton.LeftButton:
                 snapped_vertex_pos = self._get_snap_point(scene_pos)
@@ -3595,6 +3711,20 @@ class FullMinimapEditorDialog(QDialog):
                 rect = QRectF(self.hunt_zone_start_pos, scene_pos).normalized()
                 self.preview_hunt_zone_item = self.scene.addRect(rect, pen, brush)
                 self.preview_hunt_zone_item.setZValue(500)
+
+    def _delete_ladder_link_by_id(self, link_id: str) -> None:
+        if not link_id:
+            return
+        lst = self.geometry_data.get('ladder_links', []) or []
+        before = len(lst)
+        self.geometry_data['ladder_links'] = [lnk for lnk in lst if lnk.get('id') != link_id]
+        if len(self.geometry_data['ladder_links']) != before:
+            if self.parent_map_tab:
+                try:
+                    self.parent_map_tab.save_profile_data()
+                except Exception:
+                    pass
+            self.populate_scene()
     
     def _add_waypoint_rect(self, pos, wp_id, name, order_text, is_event=False):
             """씬에 웨이포인트 사각형과 순서를 추가합니다."""
@@ -3743,6 +3873,14 @@ class FullMinimapEditorDialog(QDialog):
         pen = QPen(QColor(0, 255, 0, 200), 2, Qt.PenStyle.DashLine)
         line_item = self.scene.addLine(p1.x(), p1.y(), p2.x(), p2.y(), pen)
         line_item.setData(0, "jump_link")
+        line_item.setData(1, link_id)
+        return line_item
+
+    def _add_ladder_link_line(self, p1, p2, link_id):
+        """씬에 사다리 링크(ㅡ자 연결) 선을 추가합니다."""
+        pen = QPen(QColor(0, 170, 255, 200), 2, Qt.PenStyle.DashLine)
+        line_item = self.scene.addLine(p1.x(), p1.y(), p2.x(), p2.y(), pen)
+        line_item.setData(0, "ladder_link")
         line_item.setData(1, link_id)
         return line_item
 
@@ -3900,6 +4038,13 @@ class FullMinimapEditorDialog(QDialog):
                 self.geometry_data["forbidden_walls"] = [
                     wall for wall in self.geometry_data.get("forbidden_walls", [])
                     if wall.get("line_id") not in ids_in_group
+                ]
+
+            # 2e. 사다리 링크 삭제 (원본 지형 기반)
+            if "ladder_links" in self.geometry_data:
+                self.geometry_data["ladder_links"] = [
+                    lnk for lnk in (self.geometry_data.get("ladder_links", []) or [])
+                    if lnk.get("source_line_id") not in ids_in_group
                 ]
 
             # --- 단계 3: UI 전체 갱신 ---
