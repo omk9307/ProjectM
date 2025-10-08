@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from typing import Optional
+import time
 import re
 
 import cv2
@@ -57,7 +58,7 @@ class LogListWidget(QListWidget):
             return
         super().keyPressEvent(event)
 
-    def append_line(self, text: str, color: str | None = None) -> None:
+    def append_line(self, text: str, color: str | None = None, *, preserve_color: bool = False) -> None:
         if not text:
             return
         item = QListWidgetItem(text)
@@ -65,10 +66,11 @@ class LogListWidget(QListWidget):
         if color and QColor.isValidColor(color):
             q = QColor(color)
             if q.isValid():
-                # Y' = 0.299R + 0.587G + 0.114B (0~255)
-                y = 0.299 * q.red() + 0.587 * q.green() + 0.114 * q.blue()
-                if y < 150:  # 어두우면 밝게 보정
-                    q = q.lighter(170)
+                if not preserve_color:
+                    # Y' = 0.299R + 0.587G + 0.114B (0~255)
+                    y = 0.299 * q.red() + 0.587 * q.green() + 0.114 * q.blue()
+                    if y < 150:  # 어두우면 밝게 보정
+                        q = q.lighter(170)
                 item.setForeground(q)
         else:
             # 색 정보 없으면 기본 밝은 색상
@@ -110,6 +112,8 @@ class MonitoringTab(QWidget):
         self._hunt_preview_enabled: bool = False
 
         self._init_ui()
+        # AutoControl 실시간 로그와 동일한 Δ 및 구분선 처리를 위해 마지막 키로그 시각 저장
+        self._last_key_log_ts: float = 0.0
 
     def _init_ui(self) -> None:
         root = QVBoxLayout(self)
@@ -518,8 +522,32 @@ class MonitoringTab(QWidget):
 
     @pyqtSlot(str, str)
     def _on_key_log(self, text: str, color: str) -> None:
-        ts = datetime.now().strftime("%H:%M:%S.%f")[:-3]
-        self.key_log.append_line(f"{ts} {text}", self._brighten_color(color))
+        now = time.time()
+        # 5초 이상 공백 시 구분선 추가(가운데 정렬, 회색)
+        try:
+            if self._last_key_log_ts and (now - self._last_key_log_ts) > 5:
+                sep = QListWidgetItem("──────────")
+                sep.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+                sep.setForeground(QColor("#888"))
+                self.key_log.addItem(sep)
+        except Exception:
+            pass
+
+        # AutoControl 탭과 동일한 타임스탬프 포맷: [HH:MM:SS:ms]
+        ts = datetime.now().strftime("%H:%M:%S:%f")[:-3]
+        # 이전 로그와의 간격 Δ 표시
+        delta_text = ""
+        try:
+            if self._last_key_log_ts:
+                delta_ms = int((now - self._last_key_log_ts) * 1000)
+                delta_text = f" (Δ {delta_ms}ms)"
+        except Exception:
+            delta_text = ""
+
+        line = f"[{ts}] {text}{delta_text}"
+        # 색상은 원색 유지
+        self.key_log.append_line(line, color, preserve_color=True)
+        self._last_key_log_ts = now
 
     # --- 표시 도우미 ---
     @staticmethod
