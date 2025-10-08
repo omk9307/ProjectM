@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from typing import Optional
+import re
 
 import cv2
 import numpy as np
@@ -503,8 +504,13 @@ class MonitoringTab(QWidget):
     # --- 로그 핸들러 ---
     @pyqtSlot(str, str)
     def _on_map_log(self, line: str, color: str) -> None:
+        # 선행 타임스탬프([HH:MM:SS] 또는 [HH:MM:SS.mmm])가 있으면 제거 후, 모니터링에서만 밀리초 TS 추가
+        try:
+            cleaned = re.sub(r"^\s*\[(\d{2}:\d{2}:\d{2}(?:\.\d{1,3})?)\]\s*", "", line)
+        except Exception:
+            cleaned = line
         ts = datetime.now().strftime("%H:%M:%S.%f")[:-3]
-        self.map_log.append_line(f"{ts} {line}", self._brighten_color(color))
+        self.map_log.append_line(f"{ts} {cleaned}", self._brighten_color(color))
 
     @pyqtSlot(str, str)
     def _on_hunt_log(self, line: str, color: str) -> None:

@@ -168,6 +168,9 @@ class AnchorDetectionThread(QThread):
         self._startup_force_match_frames = int(MapConfig.get("startup_force_match_frames", 8) or 0)
         # 연속 앵커 0프레임 카운터(자가 복구용)
         self._zero_feature_streak = 0
+        # [NEW] 아이콘 탐지 간격 가드용 캐시/타임스탬프
+        self._last_my_icon_scan_ts = 0.0
+        self._last_my_player_rects: list = []
 
         for fid, fdata in self.all_key_features.items():
             try:
@@ -253,10 +256,32 @@ class AnchorDetectionThread(QThread):
                 if self.parent_tab:
                     frame_hsv = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2HSV)
 
+                # 내 캐릭터 아이콘 탐지: 사용자 간격(ms) 존중 + 캐시 재사용
                 player_icon_start = time.perf_counter()
-                if self.parent_tab:
+                my_player_rects = []
+                icon_interval_ms = 0
+                try:
+                    if self.parent_tab and hasattr(self.parent_tab, 'get_player_icon_interval_ms'):
+                        icon_interval_ms = int(self.parent_tab.get_player_icon_interval_ms())
+                except Exception:
+                    icon_interval_ms = 0
+
+                now_ts = time.time()
+                can_reuse_icon = bool(self._last_my_player_rects)
+                need_scan_icon = True
+                if icon_interval_ms > 0 and can_reuse_icon:
+                    if (now_ts - self._last_my_icon_scan_ts) < (icon_interval_ms / 1000.0):
+                        need_scan_icon = False
+
+                if self.parent_tab and need_scan_icon:
                     my_player_rects = self.parent_tab.find_player_icon(frame_bgr, frame_hsv)
-                perf['player_icon_ms'] = (time.perf_counter() - player_icon_start) * 1000.0
+                    self._last_my_player_rects = list(my_player_rects) if my_player_rects else []
+                    self._last_my_icon_scan_ts = now_ts
+                    perf['player_icon_ms'] = (time.perf_counter() - player_icon_start) * 1000.0
+                else:
+                    # 간격 내 재사용(또는 캐시만 사용 가능한 경우)
+                    my_player_rects = list(self._last_my_player_rects) if self._last_my_player_rects else []
+                    perf['player_icon_ms'] = 0.0
                 perf['player_icon_count'] = len(my_player_rects)
 
                 other_icon_start = time.perf_counter()
