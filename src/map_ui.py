@@ -1115,6 +1115,26 @@ class MapTab(QWidget):
             self._clear_authority_resume_state()
             return
 
+        # [추가] 권한 회수 시 경로를 현재 위치 기준으로 재계산하도록 예약
+        # - FORBIDDEN_WALL 케이스는 상단에서 조기 반환됨
+        # - 탐지 비활성/강제중지 상황은 위에서 처리됨
+        try:
+            if getattr(self, 'is_detection_running', False) and not getattr(self, 'route_logic_suppressed', False):
+                # 기존 상세 경로를 비워 다음 틱에서 _calculate_segment_path가 실행되도록 유도
+                self.current_segment_path = []
+                self.current_segment_index = 0
+                # 재탐색 쿨다운을 우회하기 위해 타임스탬프 초기화
+                self.last_path_recalculation_time = 0.0
+                # 진단을 위한 로그 남김
+                try:
+                    self.pending_nav_recalc_reason = 'authority_regain'
+                except Exception:
+                    pass
+                self.update_general_log("[권한] 회수 직후: 현재 위치 기준 경로 재계산을 예약합니다.", "purple")
+        except Exception:
+            # 경로 재계산 예약 로직은 치명적이지 않으므로, 실패해도 전체 흐름을 막지 않음
+            pass
+
         if command_to_resume:
             def _resend_last_command() -> None:
                 priority_guard_active = bool(
