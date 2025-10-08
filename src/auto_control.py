@@ -2806,6 +2806,9 @@ class AutoControlTab(QWidget):
     def _add_log_entry(self, message, color_str):
         if not self.log_checkbox.isChecked():
             return
+        # 비가시 시 UI 누적 생략
+        if not getattr(self, '_ui_runtime_visible', True):
+            return
 
         now = time.time()
         
@@ -2842,6 +2845,9 @@ class AutoControlTab(QWidget):
         log_text = f"[{timestamp}] ({action}) {key_name}"
         
         item = QListWidgetItem(log_text)
+        # 비가시 시 UI 누적 생략
+        if not getattr(self, '_ui_runtime_visible', True):
+            return
         self.key_log_list.addItem(item)
         
         # 로그가 200줄을 넘어가면 가장 오래된 로그를 삭제하여 메모리 관리
@@ -2860,12 +2866,19 @@ class AutoControlTab(QWidget):
         item = QListWidgetItem(full_log)
         # 실행 로그는 다른 색상으로 구분 (예: 파란색)
         item.setForeground(Qt.GlobalColor.cyan)
+        # 비가시 시 UI 누적 생략
+        if not getattr(self, '_ui_runtime_visible', True):
+            return
         self.key_log_list.addItem(item)
 
         if not self.log_persist_checkbox.isChecked() and self.key_log_list.count() > 200:
             self.key_log_list.takeItem(0)
 
         self.key_log_list.scrollToBottom()
+
+    # [NEW] 탭 가시성 전파(비가시 시 UI 로그 생략)
+    def set_tab_visible(self, visible: bool) -> None:
+        self._ui_runtime_visible = bool(visible)
 
     def _translate_reason_for_logging(self, raw_reason, current_display=None):
         """내부 코드용 원인 문자열을 사용자 친화적인 문구로 변환합니다."""

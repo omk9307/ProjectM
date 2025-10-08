@@ -424,6 +424,8 @@ class MapTab(QWidget):
     # [MODIFIED] v14.3.0: 점프 프로파일링 관련 시그널로 변경 및 추가
     jump_profile_measured_signal = pyqtSignal(float, float) # duration, y_offset
     jump_profile_progress_signal = pyqtSignal(int)
+    # [NEW] 외부(모니터링 탭)용 일반 로그 시그널
+    general_log_emitted = pyqtSignal(str, str)
 
     EVENT_WAYPOINT_THRESHOLD = 8.0
     AUTHORITY_NON_RESUMABLE_COMMANDS = {
@@ -910,6 +912,8 @@ class MapTab(QWidget):
 
             # 3. 나머지 초기화 작업을 수행합니다.
             self.perform_initial_setup()
+            # [NEW] 런타임 가시성 상태
+            self._ui_runtime_visible: bool = True
 
     def collect_authority_snapshot(self) -> Optional[PlayerStatusSnapshot]:
         """ControlAuthorityManager가 요구하는 맵 상태 스냅샷을 구성한다."""
@@ -10444,10 +10448,21 @@ class MapTab(QWidget):
         if not self._general_log_enabled:
             return
 
+        # 외부(모니터링) 전달용 라인 구성(맵 로그는 여기서 타임스탬프 부여)
+        try:
+            timestamp = time.strftime("%H:%M:%S")
+            display_message = f"[{timestamp}] {message}"
+            self.general_log_emitted.emit(display_message, normalized_color)
+        except Exception:
+            pass
+
         self._write_general_log_to_viewer(message, normalized_color)
 
     def _write_general_log_to_viewer(self, message: str, color: str) -> None:
         if not self._general_log_enabled:
+            return
+        # [NEW] 탭 비가시 시 UI 출력 생략(성능 최소화)
+        if not getattr(self, '_ui_runtime_visible', True):
             return
 
         normalized_color = self._normalize_general_log_color(color)
@@ -10461,6 +10476,68 @@ class MapTab(QWidget):
         self.general_log_viewer.verticalScrollBar().setValue(
             self.general_log_viewer.verticalScrollBar().maximum()
         )
+
+    # [NEW] 탭 가시성 전파(비가시 시 UI 표시 억제)
+    def set_tab_visible(self, visible: bool) -> None:
+        self._ui_runtime_visible = bool(visible)
+        try:
+            if hasattr(self, 'minimap_view_label') and hasattr(self, '_minimap_display_enabled'):
+                self.minimap_view_label.set_display_enabled(bool(visible and self._minimap_display_enabled))
+        except Exception:
+            pass
+
+    # [NEW] 외부에서 미니맵 ROI 절대좌표 조회
+    def api_get_minimap_region_absolute(self) -> dict | None:
+        try:
+            return self._resolve_minimap_region(require_window=False)
+        except Exception:
+            return None
+
+    # [NEW] 모니터링 탭용: 정적 미니맵 데이터(지형/키피처/글로벌좌표/바운딩박스) 내보내기
+    def api_export_static_minimap_data(self) -> dict:
+        try:
+            geom = dict(self.geometry_data) if isinstance(self.geometry_data, dict) else {}
+        except Exception:
+            geom = {}
+        try:
+            kf = dict(self.key_features) if isinstance(self.key_features, dict) else {}
+        except Exception:
+            kf = {}
+        try:
+            gpos = dict(getattr(self, 'global_positions', {}) or {})
+        except Exception:
+            gpos = {}
+        bbox = getattr(self, 'full_map_bounding_rect', None)
+        return {
+            'geometry_data': geom,
+            'key_features': kf,
+            'global_positions': gpos,
+            'bounding_rect': bbox,
+        }
+
+    # [NEW] 모니터링 탭용: 동적 미니맵 상태(플레이어/타겟/카메라 등) 내보내기
+    def api_export_minimap_view_state(self) -> dict | None:
+        view = getattr(self, 'minimap_view_label', None)
+        if view is None:
+            return None
+        try:
+            state = {
+                'camera_center': getattr(view, 'camera_center_global', None),
+                'active_features': list(getattr(view, 'active_features', []) or []),
+                'my_players': list(getattr(view, 'my_player_rects', []) or []),
+                'other_players': list(getattr(view, 'other_player_rects', []) or []),
+                'target_wp_id': getattr(view, 'target_waypoint_id', None),
+                'reached_wp_id': getattr(view, 'last_reached_waypoint_id', None),
+                'final_player_pos': getattr(view, 'final_player_pos_global', None),
+                'is_forward': bool(getattr(view, 'is_forward', True)),
+                'intermediate_pos': getattr(view, 'intermediate_target_pos', None),
+                'intermediate_type': getattr(view, 'intermediate_target_type', None),
+                'nav_action': getattr(view, 'navigation_action', 'move_to_target'),
+                'intermediate_node_type': getattr(view, 'intermediate_node_type', None),
+            }
+            return state
+        except Exception:
+            return None
 
     def _render_detection_log(self, body_html: str | None, *, force: bool = False) -> None:
         self._last_detection_log_body = body_html or ""

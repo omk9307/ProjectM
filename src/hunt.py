@@ -792,6 +792,9 @@ class HuntTab(QWidget):
     primary_skill_area_updated = pyqtSignal(object)
     monster_stats_updated = pyqtSignal(int, int)
     detection_status_changed = pyqtSignal(bool)
+    # [NEW] 외부(모니터링 탭)용 로그/프리뷰 시그널
+    hunt_log_emitted = pyqtSignal(str, str)
+    preview_frame_ready = pyqtSignal(object)
 
     def __init__(self) -> None:
         super().__init__()
@@ -1090,6 +1093,10 @@ class HuntTab(QWidget):
 
         # EXP 정체(1분 주기 연속 동일) 감지 후 재시작 중복 방지용 플래그
         self._exp_stagnation_restart_pending: bool = False
+        # [NEW] 런타임 가시성/프리뷰 상태
+        self._ui_runtime_visible: bool = True
+        self._monitor_preview_enabled: bool = False
+        self._monitor_preview_interval_sec: float = 0.0
 
     def _check_character_presence_watchdog(self) -> None:
         """캐릭터가 10초 이상 미검출 시 ESC 효과로 전체 정지 후 2초 뒤 사냥 재시작.
@@ -4655,6 +4662,8 @@ class HuntTab(QWidget):
         self.clear_detection_snapshot()
         self._active_monster_confidence_overrides = {}
         self._set_detection_status(False)
+        # 프리뷰 재동기화(스레드 종료 시 초기화)
+        self._sync_detection_thread_status()
 
     def _handle_detection_log(self, messages: List[str]) -> None:
         for msg in messages:
@@ -4663,12 +4672,25 @@ class HuntTab(QWidget):
     def _handle_detection_frame(self, q_image) -> None:
         if not self._is_screen_output_enabled():
             return
+        # 탭이 보이지 않고 팝업도 없으면 UI 업데이트 생략
+        if not getattr(self, '_ui_runtime_visible', True) and not bool(getattr(self, 'is_popup_active', False)):
+            # 그래도 프리뷰 신호는 방출
+            try:
+                self.preview_frame_ready.emit(q_image)
+            except Exception:
+                pass
+            return
         image = q_image.copy()
         self._paint_overlays(image)
         if self.is_popup_active and self.detection_popup:
             self.detection_popup.update_frame(image)
         elif self.detection_view:
             self._update_detection_frame(image)
+        # [NEW] 모니터링 프리뷰로도 전달
+        try:
+            self.preview_frame_ready.emit(image)
+        except Exception:
+            pass
 
     def _paint_overlays(self, image) -> None:
         if image is None or image.isNull():
@@ -5091,6 +5113,9 @@ class HuntTab(QWidget):
         )
 
     def _is_screen_output_enabled(self) -> bool:
+        # 모니터링 프리뷰가 활성화되면 강제로 화면출력을 허용
+        if bool(getattr(self, '_monitor_preview_enabled', False)):
+            return True
         checkbox = getattr(self, 'screen_output_checkbox', None)
         if checkbox is None:
             return True
@@ -5768,6 +5793,41 @@ class HuntTab(QWidget):
             self.detection_thread.set_facing(self.last_facing)
         except AttributeError:
             pass
+        # [NEW] 모니터링 프리뷰 설정을 런타임에 반영
+        try:
+            if hasattr(self.detection_thread, 'set_frame_emit_min_interval'):
+                if self._monitor_preview_enabled:
+                    # 프리뷰 ON: 화면출력 강제 활성 + 저주기 배출
+                    self.detection_thread.set_screen_output_enabled(True)
+                    self.detection_thread.set_frame_emit_min_interval(max(0.1, float(self._monitor_preview_interval_sec)))
+                else:
+                    # 프리뷰 OFF: 체크박스 상태로 복원 + 제한 해제
+                    checkbox = getattr(self, 'screen_output_checkbox', None)
+                    base_enabled = bool(checkbox.isChecked()) if checkbox is not None else True
+                    self.detection_thread.set_screen_output_enabled(base_enabled)
+                    self.detection_thread.set_frame_emit_min_interval(0.0)
+        except Exception:
+            pass
+
+    # [NEW] 외부에서 모니터링 프리뷰를 요청/해제
+    def api_set_preview_enabled(self, enabled: bool, min_interval_sec: float = 1.0) -> None:
+        self._monitor_preview_enabled = bool(enabled)
+        try:
+            self._monitor_preview_interval_sec = float(min_interval_sec)
+        except (TypeError, ValueError):
+            self._monitor_preview_interval_sec = 1.0
+        self._sync_detection_thread_status()
+
+    # [NEW] 탭 가시성 전파(비가시 시 팝업 자동 닫기)
+    def set_tab_visible(self, visible: bool) -> None:
+        self._ui_runtime_visible = bool(visible)
+        if not self._ui_runtime_visible and bool(getattr(self, 'is_popup_active', False)):
+            try:
+                self._closing_popup_programmatically = True
+                self._popup_close_reason = 'auto_hide'
+                self._toggle_detection_popup()
+            except Exception:
+                pass
 
     def set_overlay_preferences(self, options: dict | None) -> None:
         if not isinstance(options, dict):
@@ -9436,6 +9496,11 @@ class HuntTab(QWidget):
             self.last_control_acquired_ts = time.time()
             self.last_release_attempt_ts = 0.0
             self._last_monster_seen_ts = time.time()
+            # 권한 획득 즉시 키 상태를 안전하게 초기화하여 잔여 입력으로 인한 충돌 방지
+            try:
+                self._emit_control_command("모든 키 떼기", reason="authority:reset")
+            except Exception:
+                pass
         else:
             self.last_control_acquired_ts = 0.0
             self.last_release_attempt_ts = 0.0
@@ -11006,6 +11071,11 @@ class HuntTab(QWidget):
             and self._is_log_enabled('main_log_checkbox')
         ):
             self._append_colored_text(self.log_view, line, color_map.get(level))
+        # [NEW] 모니터링 탭으로 전달(현재 수준의 메인 로그만)
+        try:
+            self.hunt_log_emitted.emit(line, color_map.get(level, 'white'))
+        except Exception:
+            pass
 
     def _append_log_detail(self, message: str) -> None:
         if (

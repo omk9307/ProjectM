@@ -123,6 +123,8 @@ class MultiScreenSnipper(QDialog):
             painter.drawPixmap(selected_rect, self._screenshot, selected_rect)
             painter.setPen(QPen(Qt.GlobalColor.red, 2, Qt.PenStyle.SolidLine))
             painter.drawRect(selected_rect)
+        # 명시적으로 종료하여 활성 페인터 잔존 방지
+        painter.end()
 
     def _resolve_target_screen(self, global_rect):
         best_screen = None
@@ -374,6 +376,8 @@ class NavigatorDisplay(QWidget):
             painter.setPen(QColor("yellow"))
             action_text_rect = QRect(right_rect.x(), 55, right_rect.width(), 25)
             painter.drawText(action_text_rect, Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, self.nav_action_text)
+            # 명시적으로 종료하여 활성 페인터 잔존 방지
+            painter.end()
 
 # --- 위젯 클래스 ---
 
@@ -845,6 +849,7 @@ class RealtimeMinimapView(QLabel):
         if not map_bg or map_bg.isNull() or bounding_rect.isNull():
             painter.setPen(Qt.GlobalColor.white)
             painter.drawText(self.rect(), Qt.AlignmentFlag.AlignCenter, self.text())
+            painter.end()
             return
 
         view_w, view_h = self.width(), self.height()
@@ -1166,6 +1171,8 @@ class RealtimeMinimapView(QLabel):
         self._last_painted_camera_center = QPointF(self.camera_center_global)
         player_point = self._to_pointf(self.final_player_pos_global)
         self._last_painted_player_center = player_point
+        # 명시적으로 종료하여 활성 페인터 잔존 방지
+        painter.end()
 
     def _draw_text_with_outline(self, painter, rect, flags, text, font, text_color, outline_color):
         """지정한 사각형 영역에 테두리가 있는 텍스트를 그립니다."""

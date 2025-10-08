@@ -216,6 +216,7 @@ class MainWindow(QMainWindow):
         미리 정의된 탭 모듈 목록을 순서대로 로드합니다.
         """
         tabs_to_load = [
+            ('monitoring', 'MonitoringTab', '모니터링'),  # 시작 탭
             ('Learning', 'LearningTab', '학습'),
             ('hunt', 'HuntTab', '사냥'),
             ('map', 'MapTab', '맵'),
@@ -247,12 +248,38 @@ class MainWindow(QMainWindow):
         except Exception:
             pass
 
+        # 탭 전환 시 가시성 전파 연결
+        try:
+            self.tab_widget.currentChanged.connect(self._on_current_tab_changed)
+        except Exception:
+            pass
+
+        # 시작 탭을 '모니터링'으로 고정
+        try:
+            mon_widget = self.loaded_tabs.get('모니터링')
+            if mon_widget is not None:
+                idx = self.tab_widget.indexOf(mon_widget)
+                if idx >= 0:
+                    self.tab_widget.setCurrentIndex(idx)
+                    # 초기 가시성 전파
+                    self._on_current_tab_changed(idx)
+        except Exception:
+            pass
+
     def load_tab(self, module_name, class_name, tab_title):
         """
         주어진 정보를 바탕으로 모듈을 동적으로 임포트하고 탭을 추가합니다.
         """
         try:
-            module = importlib.import_module(module_name)
+            module = None
+            try:
+                module = importlib.import_module(module_name)
+            except ImportError:
+                # 패키지 실행(-m src.main) 환경 호환을 위한 폴백
+                try:
+                    module = importlib.import_module(f"src.{module_name}")
+                except ImportError as e2:
+                    raise ImportError(str(e2))
             TabClass = getattr(module, class_name)
             tab_instance = TabClass()
             self.tab_widget.addTab(tab_instance, tab_title)
@@ -278,6 +305,17 @@ class MainWindow(QMainWindow):
         """
         로드된 탭들 간의 필요한 시그널-슬롯을 연결합니다.
         """
+        # 모니터링 탭 ↔ 다른 탭 연결
+        monitoring_tab = self.loaded_tabs.get('모니터링')
+        if monitoring_tab:
+            try:
+                map_tab = self.loaded_tabs.get('맵')
+                hunt_tab = self.loaded_tabs.get('사냥')
+                auto_tab = self.loaded_tabs.get('자동 제어')
+                if hasattr(monitoring_tab, 'attach_tabs'):
+                    monitoring_tab.attach_tabs(map_tab, hunt_tab, auto_tab)
+            except Exception:
+                pass
         if '학습' in self.loaded_tabs and '사냥' in self.loaded_tabs:
             learning_tab = self.loaded_tabs['학습']
             hunt_tab = self.loaded_tabs['사냥']
@@ -439,6 +477,22 @@ class MainWindow(QMainWindow):
             if self.tab_widget.tabText(index) == title:
                 return index
         return None
+
+    # [NEW] 탭 전환 시 각 탭에 가시성 전파
+    def _on_current_tab_changed(self, index: int) -> None:
+        try:
+            current_widget = self.tab_widget.widget(index)
+        except Exception:
+            current_widget = None
+        for title, widget in list(self.loaded_tabs.items()):
+            if not widget:
+                continue
+            visible = (widget is current_widget)
+            if hasattr(widget, 'set_tab_visible'):
+                try:
+                    widget.set_tab_visible(visible)
+                except Exception:
+                    pass
 
     def add_error_tab(self, title, message):
         """

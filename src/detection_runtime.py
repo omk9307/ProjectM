@@ -277,6 +277,9 @@ class DetectionThread(QThread):
         self.current_authority: str = "map"
         self.current_facing: Optional[str] = None
         self.nms_iou = max(0.05, min(0.95, float(nms_iou)))
+        # [NEW] 모니터링 프리뷰를 위한 프레임 배출 최소 간격(초)
+        self._emit_min_interval: float = 0.0
+        self._last_emit_ts: float = 0.0
         try:
             self.max_det = max(1, int(max_det))
         except (TypeError, ValueError):
@@ -443,6 +446,14 @@ class DetectionThread(QThread):
 
     def set_screen_output_enabled(self, enabled: bool) -> None:
         self.screen_output_enabled = bool(enabled)
+
+    # [NEW] 프레임 배출 최소 간격(초) 설정: 0이면 제한 없음
+    def set_frame_emit_min_interval(self, seconds: float) -> None:
+        try:
+            value = float(seconds)
+        except (TypeError, ValueError):
+            value = 0.0
+        self._emit_min_interval = max(0.0, value)
 
     def run(self) -> None:  # noqa: D401
         consumer_name = f"detection:{id(self)}"
@@ -666,7 +677,13 @@ class DetectionThread(QThread):
                 payload["direction"] = direction_info
 
                 annotated_frame: Optional[np.ndarray] = None
-                if self.screen_output_enabled:
+                allow_render = bool(self.screen_output_enabled)
+                if allow_render and self._emit_min_interval > 0.0:
+                    now_for_emit = time.time()
+                    if (now_for_emit - self._last_emit_ts) < self._emit_min_interval:
+                        allow_render = False
+
+                if allow_render:
                     annotated_frame = frame
                     if not annotated_frame.flags.writeable:
                         annotated_frame = annotated_frame.copy()
@@ -976,6 +993,7 @@ class DetectionThread(QThread):
                 self.detections_ready.emit(payload)
 
                 if qt_image is not None:
+                    self._last_emit_ts = time.time()
                     self.frame_ready.emit(qt_image.copy())
                 emit_end = time.perf_counter()
                 self.perf_stats["emit_ms"] = (emit_end - emit_start) * 1000
