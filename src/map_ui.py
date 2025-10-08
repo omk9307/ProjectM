@@ -11295,9 +11295,36 @@ class MapTab(QWidget):
 
             wp_lookup = {wp.get('id'): wp for wp in waypoints if isinstance(wp, dict)}
 
+            def _to_float(v):
+                try:
+                    f = float(v)
+                    if not math.isfinite(f):
+                        return 0.0
+                    return f
+                except Exception:
+                    return 0.0
+
+            def _norm_xy(val):
+                try:
+                    # dict with x/y
+                    if isinstance(val, dict) and 'x' in val and 'y' in val:
+                        return [_to_float(val['x']), _to_float(val['y'])]
+                    # sequence [x, y]
+                    if isinstance(val, (list, tuple)) and len(val) >= 2:
+                        return [_to_float(val[0]), _to_float(val[1])]
+                except Exception:
+                    pass
+                return []
+
             def _simp_points(points):
                 try:
-                    return [[float(p[0]), float(p[1])] for p in (points or [])]
+                    result = []
+                    for p in (points or []):
+                        if isinstance(p, (list, tuple)) and len(p) >= 2:
+                            result.append([_to_float(p[0]), _to_float(p[1])])
+                        elif isinstance(p, dict) and 'x' in p and 'y' in p:
+                            result.append([_to_float(p['x']), _to_float(p['y'])])
+                    return result
                 except Exception:
                     return []
 
@@ -11323,8 +11350,8 @@ class MapTab(QWidget):
             jumps_s = sorted([
                 {
                     "id": j.get("id"),
-                    "start": list(j.get("start_vertex_pos", [])),
-                    "end": list(j.get("end_vertex_pos", [])),
+                    "start": _norm_xy(j.get("start_vertex_pos")),
+                    "end": _norm_xy(j.get("end_vertex_pos")),
                 }
                 for j in jump_links if isinstance(j, dict)
             ], key=lambda d: str(d.get("id")))
@@ -11332,7 +11359,7 @@ class MapTab(QWidget):
             route_wps_s = sorted([
                 {
                     "id": wp_id,
-                    "pos": list(wp_lookup.get(wp_id, {}).get("pos", [])),
+                    "pos": _norm_xy(wp_lookup.get(wp_id, {}).get("pos")),
                     "floor": wp_lookup.get(wp_id, {}).get("floor"),
                 }
                 for wp_id in combined_ids
