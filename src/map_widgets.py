@@ -841,338 +841,365 @@ class RealtimeMinimapView(QLabel):
             return
 
         painter = QPainter(self)
-        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        try:
+            painter.setRenderHint(QPainter.RenderHint.Antialiasing)
 
-        map_bg = self.parent_tab.full_map_pixmap
-        bounding_rect = self.parent_tab.full_map_bounding_rect
+            map_bg = self.parent_tab.full_map_pixmap
+            bounding_rect = self.parent_tab.full_map_bounding_rect
 
-        if not map_bg or map_bg.isNull() or bounding_rect.isNull():
-            painter.setPen(Qt.GlobalColor.white)
-            painter.drawText(self.rect(), Qt.AlignmentFlag.AlignCenter, self.text())
-            painter.end()
-            return
+            if not map_bg or map_bg.isNull() or bounding_rect.isNull():
+                painter.setPen(Qt.GlobalColor.white)
+                painter.drawText(self.rect(), Qt.AlignmentFlag.AlignCenter, self.text())
+                return
 
-        view_w, view_h = self.width(), self.height()
-        source_w = view_w / self.zoom_level
-        source_h = view_h / self.zoom_level
-        
-        source_rect = QRectF(
-            self.camera_center_global.x() - source_w / 2,
-            self.camera_center_global.y() - source_h / 2,
-            source_w,
-            source_h
-        )
-        
-        image_source_rect = source_rect.translated(-bounding_rect.topLeft())
-        
-        target_rect = QRectF(self.rect())
-        painter.drawPixmap(target_rect, map_bg, image_source_rect)
+            view_w, view_h = self.width(), self.height()
+            source_w = view_w / self.zoom_level
+            source_h = view_h / self.zoom_level
+            
+            source_rect = QRectF(
+                self.camera_center_global.x() - source_w / 2,
+                self.camera_center_global.y() - source_h / 2,
+                source_w,
+                source_h
+            )
+            
+            image_source_rect = source_rect.translated(-bounding_rect.topLeft())
+            
+            target_rect = QRectF(self.rect())
+            painter.drawPixmap(target_rect, map_bg, image_source_rect)
 
-        render_opts = self.parent_tab.render_options
-        self._ensure_static_overlay(render_opts, bounding_rect)
-        if self._cached_static_pixmap and not self._cached_static_pixmap.isNull():
-            painter.drawPixmap(target_rect, self._cached_static_pixmap, image_source_rect)
+            render_opts = self.parent_tab.render_options
+            self._ensure_static_overlay(render_opts, bounding_rect)
+            if self._cached_static_pixmap and not self._cached_static_pixmap.isNull():
+                painter.drawPixmap(target_rect, self._cached_static_pixmap, image_source_rect)
 
-        def global_to_local(global_pos):
-            point = self._to_pointf(global_pos)
-            if point is None:
-                point = QPointF(0.0, 0.0)
-            relative_pos = point - source_rect.topLeft()
-            return relative_pos * self.zoom_level
+            def global_to_local(global_pos):
+                point = self._to_pointf(global_pos)
+                if point is None:
+                    point = QPointF(0.0, 0.0)
+                relative_pos = point - source_rect.topLeft()
+                return relative_pos * self.zoom_level
 
-        #핵심 지형 렌더링 (텍스트 스타일 변경) ---
-        if render_opts.get('features', True):
-            painter.save()
-            realtime_conf_map = {f['id']: f['conf'] for f in self.active_features}
+            #핵심 지형 렌더링 (텍스트 스타일 변경) ---
+            if render_opts.get('features', True):
+                painter.save()
+                realtime_conf_map = {f['id']: f['conf'] for f in self.active_features}
 
-            global_positions = self._cached_global_positions if isinstance(self._cached_global_positions, dict) else self.parent_tab.global_positions
+                global_positions = self._cached_global_positions if isinstance(self._cached_global_positions, dict) else self.parent_tab.global_positions
 
-            for feature_id, feature_data in self.parent_tab.key_features.items():
-                global_pos = global_positions.get(feature_id) if isinstance(global_positions, dict) else None
-                if global_pos is None:
-                    continue
+                for feature_id, feature_data in self.parent_tab.key_features.items():
+                    global_pos = global_positions.get(feature_id) if isinstance(global_positions, dict) else None
+                    if global_pos is None:
+                        continue
 
-                pixmap = self._cached_feature_pixmaps.get(feature_id)
-                if not pixmap or pixmap.isNull():
-                    continue
+                    pixmap = self._cached_feature_pixmaps.get(feature_id)
+                    if not pixmap or pixmap.isNull():
+                        continue
 
-                if not isinstance(global_pos, QPointF):
+                    if not isinstance(global_pos, QPointF):
+                        try:
+                            global_pos = QPointF(float(global_pos[0]), float(global_pos[1]))
+                        except Exception:
+                            continue
+
+                    global_rect = QRectF(global_pos, QSizeF(pixmap.size()))
+                    local_top_left = global_to_local(global_rect.topLeft())
+                    local_rect = QRectF(local_top_left, global_rect.size() * self.zoom_level)
+                    painter.setBrush(Qt.BrushStyle.NoBrush)
+
+                    realtime_conf = realtime_conf_map.get(feature_id, 0.0)
+                    threshold = feature_data.get('threshold', 0.85)
+                    is_detected = realtime_conf >= threshold
+
+                    font_name = QFont("맑은 고딕", 9, QFont.Weight.Bold)
+
+                    if is_detected:
+                        painter.setPen(QPen(QColor(0, 180, 255), 2, Qt.PenStyle.SolidLine))
+                        self._draw_text_with_outline(
+                            painter,
+                            local_rect.toRect(),
+                            Qt.AlignmentFlag.AlignCenter,
+                            feature_id,
+                            font_name,
+                            Qt.GlobalColor.white,
+                            Qt.GlobalColor.black,
+                        )
+                    else:
+                        painter.setPen(QPen(QColor("gray"), 2, Qt.PenStyle.DashLine))
+                        self._draw_text_with_outline(
+                            painter,
+                            local_rect.toRect(),
+                            Qt.AlignmentFlag.AlignCenter,
+                            feature_id,
+                            font_name,
+                            QColor("#AAAAAA"),
+                            Qt.GlobalColor.black,
+                        )
+
+                    conf_text = f"{realtime_conf:.2f}"
+                    font_conf = QFont("맑은 고딕", 10)
+
+                    tm_conf = QFontMetrics(font_conf)
+                    conf_rect = tm_conf.boundingRect(conf_text)
+                    conf_rect.moveCenter(local_rect.center().toPoint())
+                    conf_rect.moveTop(int(local_rect.top()) - conf_rect.height() - 2)
+
+                    color = Qt.GlobalColor.yellow if is_detected else QColor("#AAAAAA")
+                    self._draw_text_with_outline(
+                        painter,
+                        conf_rect,
+                        Qt.AlignmentFlag.AlignCenter,
+                        conf_text,
+                        font_conf,
+                        color,
+                        Qt.GlobalColor.black,
+                    )
+
+                    painter.drawRect(local_rect)
+                painter.restore()
+
+            
+            # 웨이포인트 (줌 레벨 연동 크기) ---
+            if render_opts.get('waypoints', True):
+                painter.save()
+                WAYPOINT_SIZE = 12.0 # 전역 좌표계 기준 크기
+
+                # 웨이포인트 순서 맵 생성(안전한 속성 접근)
+                wp_order_map: dict[str, str] = {}
+                path_ids: list[str] = []
+                parent = getattr(self, 'parent_tab', None)
+                try:
+                    if parent and hasattr(parent, 'journey_plan') and parent.journey_plan:
+                        path_ids = list(parent.journey_plan)
+                    elif parent and hasattr(parent, 'active_route_profile_name') and getattr(parent, 'active_route_profile_name', None):
+                        route_profiles = getattr(parent, 'route_profiles', {}) or {}
+                        route = route_profiles.get(getattr(parent, 'active_route_profile_name'), {}) or {}
+                        if parent and self.is_forward and hasattr(parent, '_get_route_slot_waypoints') and hasattr(parent, '_get_enabled_slot_ids'):
+                            slot_id = getattr(parent, "current_forward_slot", "1") or "1"
+                            path_ids = parent._get_route_slot_waypoints(route, "forward", slot_id) or []
+                            if not path_ids:
+                                enabled_slots = parent._get_enabled_slot_ids(route, "forward") or []
+                                if enabled_slots:
+                                    path_ids = parent._get_route_slot_waypoints(route, "forward", enabled_slots[0]) or []
+                        elif parent and (not self.is_forward) and hasattr(parent, '_get_route_slot_waypoints') and hasattr(parent, '_get_enabled_slot_ids'):
+                            slot_id = getattr(parent, "current_backward_slot", "1") or "1"
+                            path_ids = parent._get_route_slot_waypoints(route, "backward", slot_id) or []
+                            if not path_ids:
+                                enabled_slots = parent._get_enabled_slot_ids(route, "backward") or []
+                                if enabled_slots:
+                                    path_ids = parent._get_route_slot_waypoints(route, "backward", enabled_slots[0]) or []
+                                else:
+                                    forward_slot = getattr(parent, "last_selected_forward_slot", None) or getattr(parent, "current_forward_slot", "1")
+                                    forward_path = parent._get_route_slot_waypoints(route, "forward", forward_slot) or []
+                                    if forward_path:
+                                        path_ids = list(reversed(forward_path))
+                                    else:
+                                        enabled_forward = parent._get_enabled_slot_ids(route, "forward") or []
+                                        if enabled_forward:
+                                            forward_path = parent._get_route_slot_waypoints(route, "forward", enabled_forward[0]) or []
+                                            path_ids = list(reversed(forward_path))
+                except Exception:
+                    path_ids = []
+
+                if path_ids:
+                    for i, wp_id in enumerate(path_ids):
+                        try:
+                            wp_order_map[str(wp_id)] = f"{i+1}"
+                        except Exception:
+                            continue
+                    if len(path_ids) > 1:
+                        wp_order_map[str(path_ids[0])] = "출발지"
+                        wp_order_map[str(path_ids[-1])] = "목적지"
+                    elif len(path_ids) == 1:
+                        wp_order_map[str(path_ids[0])] = "목적지"
+
+                # 웨이포인트 반복: 캐시된 지오메트리 우선 사용, 없으면 parent_tab.geometry_data 폴백
+                geometry = {}
+                if isinstance(self._cached_geometry, dict):
+                    geometry = self._cached_geometry
+                elif parent and hasattr(parent, 'geometry_data') and isinstance(parent.geometry_data, dict):
+                    geometry = parent.geometry_data
+
+                for wp_data in geometry.get("waypoints", []) or []:
                     try:
-                        global_pos = QPointF(float(global_pos[0]), float(global_pos[1]))
+                        gid = str(wp_data['id'])
+                        pos = wp_data.get('pos') or wp_data.get('position')
+                        if not pos:
+                            continue
+                        global_pos = QPointF(float(pos[0]), float(pos[1]))
                     except Exception:
                         continue
 
-                global_rect = QRectF(global_pos, QSizeF(pixmap.size()))
-                local_top_left = global_to_local(global_rect.topLeft())
-                local_rect = QRectF(local_top_left, global_rect.size() * self.zoom_level)
-                painter.setBrush(Qt.BrushStyle.NoBrush)
+                    local_pos = global_to_local(global_pos)
+                    scaled_size = WAYPOINT_SIZE * self.zoom_level
+                    local_rect = QRectF(local_pos.x() - scaled_size/2, local_pos.y() - scaled_size, scaled_size, scaled_size)
 
-                realtime_conf = realtime_conf_map.get(feature_id, 0.0)
-                threshold = feature_data.get('threshold', 0.85)
-                is_detected = realtime_conf >= threshold
+                    if gid == str(self.target_waypoint_id):
+                        painter.setPen(QPen(Qt.GlobalColor.red, 2))
+                        painter.setBrush(QBrush(QColor(255, 0, 0, 80)))
+                    elif bool(wp_data.get('is_event')):
+                        painter.setPen(QPen(QColor(0, 135, 255), 2))
+                        painter.setBrush(QBrush(QColor(0, 135, 255, 80)))
+                    else:
+                        painter.setPen(QPen(QColor(0, 255, 0), 2))
+                        painter.setBrush(QBrush(QColor(0, 255, 0, 80)))
 
-                font_name = QFont("맑은 고딕", 9, QFont.Weight.Bold)
+                    painter.drawRect(local_rect)
 
-                if is_detected:
-                    painter.setPen(QPen(QColor(0, 180, 255), 2, Qt.PenStyle.SolidLine))
-                    self._draw_text_with_outline(
-                        painter,
-                        local_rect.toRect(),
-                        Qt.AlignmentFlag.AlignCenter,
-                        feature_id,
-                        font_name,
-                        Qt.GlobalColor.white,
-                        Qt.GlobalColor.black,
-                    )
-                else:
-                    painter.setPen(QPen(QColor("gray"), 2, Qt.PenStyle.DashLine))
-                    self._draw_text_with_outline(
-                        painter,
-                        local_rect.toRect(),
-                        Qt.AlignmentFlag.AlignCenter,
-                        feature_id,
-                        font_name,
-                        QColor("#AAAAAA"),
-                        Qt.GlobalColor.black,
-                    )
+                    order_text = wp_order_map.get(gid, "")
+                    if order_text:
+                        font_order = QFont("맑은 고딕", 10, QFont.Weight.Bold)
+                        self._draw_text_with_outline(
+                            painter,
+                            local_rect.toRect(),
+                            Qt.AlignmentFlag.AlignCenter,
+                            order_text,
+                            font_order,
+                            Qt.GlobalColor.white,
+                            Qt.GlobalColor.black,
+                        )
 
-                conf_text = f"{realtime_conf:.2f}"
-                font_conf = QFont("맑은 고딕", 10)
+                    name_text = wp_data.get('name', '')
+                    if name_text:
+                        font_name = QFont("맑은 고딕", 8)
+                        tm = QFontMetrics(font_name)
+                        text_bounding_rect = tm.boundingRect(name_text)
+                        padding_x = 4
+                        name_render_rect = text_bounding_rect.adjusted(0, 0, padding_x, 0)
+                        new_bottom_left_f = local_rect.topLeft() + QPointF(0, -2)
+                        name_render_rect.moveBottomLeft(new_bottom_left_f.toPoint())
+                        self._draw_text_with_outline(
+                            painter,
+                            name_render_rect,
+                            Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignBottom,
+                            name_text,
+                            font_name,
+                            Qt.GlobalColor.white,
+                            Qt.GlobalColor.black,
+                        )
 
-                tm_conf = QFontMetrics(font_conf)
-                conf_rect = tm_conf.boundingRect(conf_text)
-                conf_rect.moveCenter(local_rect.center().toPoint())
-                conf_rect.moveTop(int(local_rect.top()) - conf_rect.height() - 2)
+                    if gid == str(self.last_reached_waypoint_id):
+                        font_arrival = QFont("맑은 고딕", 8, QFont.Weight.Bold)
+                        arrival_rect = QRectF(local_rect.x(), local_rect.y(), local_rect.width(), local_rect.height() / 2).toRect()
+                        arrival_rect.translate(0, -4)
+                        self._draw_text_with_outline(
+                            painter,
+                            arrival_rect,
+                            Qt.AlignmentFlag.AlignCenter,
+                            "도착",
+                            font_arrival,
+                            Qt.GlobalColor.yellow,
+                            Qt.GlobalColor.black,
+                        )
 
-                color = Qt.GlobalColor.yellow if is_detected else QColor("#AAAAAA")
-                self._draw_text_with_outline(
-                    painter,
-                    conf_rect,
-                    Qt.AlignmentFlag.AlignCenter,
-                    conf_text,
-                    font_conf,
-                    color,
-                    Qt.GlobalColor.black,
+                painter.restore()
+
+            # ==================== v11.6.2 시각적 보정 로직 추가 시작 ====================
+            if self.intermediate_target_pos and self.final_player_pos_global:
+                painter.save()
+                
+                # --- 시작/끝점 좌표 계산 ---
+                # 시작점: 플레이어 아이콘의 중앙
+                p1_global = self.final_player_pos_global
+                # [MODIFIED] IndexError 방지를 위해 조건문 추가
+                if self.my_player_rects:
+                    p1_global = self.my_player_rects[0].center()
+
+                # 끝점: 타입에 따라 보정
+                p2_global = self.intermediate_target_pos
+                if self.intermediate_node_type == 'waypoint':
+                    WAYPOINT_SIZE = 12.0
+                    target_wp_rect = QRectF(p2_global.x() - WAYPOINT_SIZE/2, p2_global.y() - WAYPOINT_SIZE, WAYPOINT_SIZE, WAYPOINT_SIZE)
+                    p2_global = target_wp_rect.center()
+
+                # 1. 경로 안내선 (Guidance Line) - 굵기 3px로 변경
+                pen = QPen(QColor("cyan"), 3, Qt.PenStyle.DashLine)
+                painter.setPen(pen)
+                
+                p1_local = global_to_local(p1_global)
+                p2_local = global_to_local(p2_global)
+                painter.drawLine(p1_local, p2_local)
+                
+                # 2. 중간 목표 아이콘 (Target Icon) - 스타일 변경
+                icon_center_local = p2_local
+                TARGET_ICON_SIZE = 5.0
+                scaled_size = TARGET_ICON_SIZE * self.zoom_level
+                
+                icon_rect = QRectF(
+                    icon_center_local.x() - scaled_size / 2,
+                    icon_center_local.y() - scaled_size / 2,
+                    scaled_size,
+                    scaled_size
                 )
+                
+                painter.setPen(Qt.PenStyle.NoPen)
+                painter.setBrush(QBrush(Qt.GlobalColor.red))
+                painter.drawEllipse(icon_rect)
+                
+                painter.setPen(QPen(Qt.GlobalColor.white, 1.5))
+                painter.setBrush(Qt.BrushStyle.NoBrush)
+                painter.drawEllipse(icon_rect)
 
-                painter.drawRect(local_rect)
-            painter.restore()
+                painter.setPen(QPen(Qt.GlobalColor.white, 1))
+                painter.drawLine(icon_rect.topLeft(), icon_rect.bottomRight())
+                painter.drawLine(icon_rect.topRight(), icon_rect.bottomLeft())
+                
+                painter.restore()
 
-            
-        # 웨이포인트 (줌 레벨 연동 크기) ---
-        if render_opts.get('waypoints', True):
+            # 내 캐릭터, 다른 유저 
             painter.save()
-            WAYPOINT_SIZE = 12.0 # 전역 좌표계 기준 크기
+            painter.setPen(QPen(Qt.GlobalColor.yellow, 2)); painter.setBrush(Qt.BrushStyle.NoBrush)
+            if self.final_player_pos_global and self.my_player_rects:
+                base_rect = self.my_player_rects[0]
+                rect_bottom_center_global = base_rect.center() + QPointF(0, base_rect.height() / 2)
+                offset = self.final_player_pos_global - rect_bottom_center_global
+                
+                for rect in self.my_player_rects:
+                    corrected_rect_global = rect.translated(offset)
+                    local_top_left = global_to_local(corrected_rect_global.topLeft())
+                    local_rect = QRectF(local_top_left, corrected_rect_global.size() * self.zoom_level)
+                    painter.drawRect(local_rect)
+            else:
+                for rect in self.my_player_rects:
+                    local_top_left = global_to_local(rect.topLeft())
+                    local_rect = QRectF(local_top_left, rect.size() * self.zoom_level)
+                    painter.drawRect(local_rect)
             
-            # 웨이포인트 순서 맵 생성 (현재 실행 중인 여정 우선)
-            wp_order_map = {}
-            path_ids = []
-
-            if self.parent_tab.journey_plan:
-                path_ids = list(self.parent_tab.journey_plan)
-            elif self.parent_tab.active_route_profile_name:
-                route = self.parent_tab.route_profiles.get(self.parent_tab.active_route_profile_name, {}) or {}
-
-                if self.is_forward:
-                    slot_id = getattr(self.parent_tab, "current_forward_slot", "1") or "1"
-                    path_ids = self.parent_tab._get_route_slot_waypoints(route, "forward", slot_id)
-                    if not path_ids:
-                        enabled_slots = self.parent_tab._get_enabled_slot_ids(route, "forward")
-                        if enabled_slots:
-                            fallback_slot = enabled_slots[0]
-                            path_ids = self.parent_tab._get_route_slot_waypoints(route, "forward", fallback_slot)
-                else:
-                    slot_id = getattr(self.parent_tab, "current_backward_slot", "1") or "1"
-                    path_ids = self.parent_tab._get_route_slot_waypoints(route, "backward", slot_id)
-                    if not path_ids:
-                        enabled_slots = self.parent_tab._get_enabled_slot_ids(route, "backward")
-                        if enabled_slots:
-                            fallback_slot = enabled_slots[0]
-                            path_ids = self.parent_tab._get_route_slot_waypoints(route, "backward", fallback_slot)
-                        else:
-                            forward_slot = getattr(self.parent_tab, "last_selected_forward_slot", None) or getattr(self.parent_tab, "current_forward_slot", "1")
-                            forward_path = self.parent_tab._get_route_slot_waypoints(route, "forward", forward_slot)
-                            if forward_path:
-                                path_ids = list(reversed(forward_path))
-                            else:
-                                enabled_forward = self.parent_tab._get_enabled_slot_ids(route, "forward")
-                                if enabled_forward:
-                                    forward_path = self.parent_tab._get_route_slot_waypoints(route, "forward", enabled_forward[0])
-                                    path_ids = list(reversed(forward_path))
-
-            if path_ids:
-                for i, wp_id in enumerate(path_ids):
-                    wp_order_map[wp_id] = f"{i+1}"
-
-                if len(path_ids) > 1:
-                    wp_order_map[path_ids[0]] = "출발지"
-                    wp_order_map[path_ids[-1]] = "목적지"
-                elif len(path_ids) == 1:
-                    wp_order_map[path_ids[0]] = "목적지"
-                    
-            for wp_data in self.parent_tab.geometry_data.get("waypoints", []):
-                global_pos = QPointF(wp_data['pos'][0], wp_data['pos'][1])
-                local_pos = global_to_local(global_pos)
-                
-                # 줌 레벨에 따라 크기 변경 ---
-                scaled_size = WAYPOINT_SIZE * self.zoom_level
-                local_rect = QRectF(local_pos.x() - scaled_size/2, local_pos.y() - scaled_size, scaled_size, scaled_size)
-
-                if wp_data['id'] == self.target_waypoint_id:
-                    # 목표 웨이포인트는 빨간색으로 강조
-                    painter.setPen(QPen(Qt.GlobalColor.red, 2))
-                    painter.setBrush(QBrush(QColor(255, 0, 0, 80)))
-                elif wp_data.get('is_event'):
-                    painter.setPen(QPen(QColor(0, 135, 255), 2))
-                    painter.setBrush(QBrush(QColor(0, 135, 255, 80)))
-                else:
-                    # 일반 웨이포인트는 초록색
-                    painter.setPen(QPen(QColor(0, 255, 0), 2))
-                    painter.setBrush(QBrush(QColor(0, 255, 0, 80)))
-                
-                painter.drawRect(local_rect)
-                
-                #  순서와 이름 렌더링 로직 변경 ---
-                # 1. 중앙에 순서 표시
-                order_text = wp_order_map.get(wp_data['id'], "")
-                if order_text:
-                    font_order = QFont("맑은 고딕", 10, QFont.Weight.Bold) # 실시간 미니맵 뷰 순서 폰트 크기
-                    text_color = Qt.GlobalColor.white #목표 웨이포인트의 폰트 색상을 항상 흰색으로 ---
-                    self._draw_text_with_outline(painter, local_rect.toRect(), Qt.AlignmentFlag.AlignCenter, order_text, font_order, text_color, Qt.GlobalColor.black)
-
-                # 2. 바깥쪽 좌측 상단에 이름 표시
-                name_text = wp_data.get('name', '')
-                if name_text:
-                    #  이름 폰트 크기 8pt로 변경 ---
-                    font_name = QFont("맑은 고딕", 8)
-                    
-                    #  텍스트 너비 계산에 여유 공간(패딩) 추가 ---
-                    tm = QFontMetrics(font_name)
-                    # boundingRect는 정수 기반 QRect를 반환합니다.
-                    text_bounding_rect = tm.boundingRect(name_text)
-                    
-                    # 렌더링에 사용할 사각형의 너비를 약간 늘려줍니다.
-                    padding_x = 4 # 좌우 2px씩 총 4px의 여유 공간
-                    name_render_rect = text_bounding_rect.adjusted(0, 0, padding_x, 0)
-                    
-                    # 위치를 부동소수점 기반으로 정밀하게 계산
-                    new_bottom_left_f = local_rect.topLeft() + QPointF(0, -2)
-                    name_render_rect.moveBottomLeft(new_bottom_left_f.toPoint())
-                    self._draw_text_with_outline(painter, name_render_rect, Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignBottom, name_text, font_name, Qt.GlobalColor.white, Qt.GlobalColor.black)
-                
-                # 3. "도착" 표시
-                # [MODIFIED] 오타 수정: self.last_reached_wp_id -> self.last_reached_waypoint_id
-                if wp_data['id'] == self.last_reached_waypoint_id:
-                    font_arrival = QFont("맑은 고딕", 8, QFont.Weight.Bold)
-                    arrival_rect = QRectF(local_rect.x(), local_rect.y(), local_rect.width(), local_rect.height() / 2).toRect()
-                    # y축으로 1px 정도 살짝 내려서 중앙에 더 가깝게 보이도록 조정
-                    arrival_rect.translate(0, -4)
-                    
-                    self._draw_text_with_outline(painter, arrival_rect, Qt.AlignmentFlag.AlignCenter, "도착", font_arrival, Qt.GlobalColor.yellow, Qt.GlobalColor.black)
-
             painter.restore()
-
-        # ==================== v11.6.2 시각적 보정 로직 추가 시작 ====================
-        if self.intermediate_target_pos and self.final_player_pos_global:
+            
             painter.save()
-            
-            # --- 시작/끝점 좌표 계산 ---
-            # 시작점: 플레이어 아이콘의 중앙
-            p1_global = self.final_player_pos_global
-            # [MODIFIED] IndexError 방지를 위해 조건문 추가
-            if self.my_player_rects:
-                p1_global = self.my_player_rects[0].center()
-
-            # 끝점: 타입에 따라 보정
-            p2_global = self.intermediate_target_pos
-            if self.intermediate_node_type == 'waypoint':
-                WAYPOINT_SIZE = 12.0
-                target_wp_rect = QRectF(p2_global.x() - WAYPOINT_SIZE/2, p2_global.y() - WAYPOINT_SIZE, WAYPOINT_SIZE, WAYPOINT_SIZE)
-                p2_global = target_wp_rect.center()
-
-            # 1. 경로 안내선 (Guidance Line) - 굵기 3px로 변경
-            pen = QPen(QColor("cyan"), 3, Qt.PenStyle.DashLine)
-            painter.setPen(pen)
-            
-            p1_local = global_to_local(p1_global)
-            p2_local = global_to_local(p2_global)
-            painter.drawLine(p1_local, p2_local)
-            
-            # 2. 중간 목표 아이콘 (Target Icon) - 스타일 변경
-            icon_center_local = p2_local
-            TARGET_ICON_SIZE = 5.0
-            scaled_size = TARGET_ICON_SIZE * self.zoom_level
-            
-            icon_rect = QRectF(
-                icon_center_local.x() - scaled_size / 2,
-                icon_center_local.y() - scaled_size / 2,
-                scaled_size,
-                scaled_size
-            )
-            
-            painter.setPen(Qt.PenStyle.NoPen)
-            painter.setBrush(QBrush(Qt.GlobalColor.red))
-            painter.drawEllipse(icon_rect)
-            
-            painter.setPen(QPen(Qt.GlobalColor.white, 1.5))
-            painter.setBrush(Qt.BrushStyle.NoBrush)
-            painter.drawEllipse(icon_rect)
-
-            painter.setPen(QPen(Qt.GlobalColor.white, 1))
-            painter.drawLine(icon_rect.topLeft(), icon_rect.bottomRight())
-            painter.drawLine(icon_rect.topRight(), icon_rect.bottomLeft())
-            
-            painter.restore()
-
-        # 내 캐릭터, 다른 유저 
-        painter.save()
-        painter.setPen(QPen(Qt.GlobalColor.yellow, 2)); painter.setBrush(Qt.BrushStyle.NoBrush)
-        if self.final_player_pos_global and self.my_player_rects:
-            base_rect = self.my_player_rects[0]
-            rect_bottom_center_global = base_rect.center() + QPointF(0, base_rect.height() / 2)
-            offset = self.final_player_pos_global - rect_bottom_center_global
-            
-            for rect in self.my_player_rects:
-                corrected_rect_global = rect.translated(offset)
-                local_top_left = global_to_local(corrected_rect_global.topLeft())
-                local_rect = QRectF(local_top_left, corrected_rect_global.size() * self.zoom_level)
-                painter.drawRect(local_rect)
-        else:
-            for rect in self.my_player_rects:
+            painter.setPen(QPen(Qt.GlobalColor.red, 2)); painter.setBrush(Qt.BrushStyle.NoBrush)
+            for rect in self.other_player_rects:
                 local_top_left = global_to_local(rect.topLeft())
                 local_rect = QRectF(local_top_left, rect.size() * self.zoom_level)
                 painter.drawRect(local_rect)
-        
-        painter.restore()
-        
-        painter.save()
-        painter.setPen(QPen(Qt.GlobalColor.red, 2)); painter.setBrush(Qt.BrushStyle.NoBrush)
-        for rect in self.other_player_rects:
-            local_top_left = global_to_local(rect.topLeft())
-            local_rect = QRectF(local_top_left, rect.size() * self.zoom_level)
-            painter.drawRect(local_rect)
-        painter.restore()
-
-        # ---  정확한 플레이어 발밑 위치 표시 ---
-        if self.final_player_pos_global:
-            local_player_pos = global_to_local(self.final_player_pos_global)
-
-            painter.save()
-            pen = QPen(QColor(255, 255, 0, 200), 1.5)
-            painter.setPen(pen)
-            painter.drawLine(local_player_pos + QPointF(-5, 0), local_player_pos + QPointF(5, 0))
-            painter.drawLine(local_player_pos + QPointF(0, -5), local_player_pos + QPointF(0, 5))
-
-            painter.setBrush(QBrush(Qt.GlobalColor.yellow))
-            painter.drawEllipse(local_player_pos, 2, 2)
             painter.restore()
 
-        self._last_paint_time = time.perf_counter()
-        self._last_painted_camera_center = QPointF(self.camera_center_global)
-        player_point = self._to_pointf(self.final_player_pos_global)
-        self._last_painted_player_center = player_point
+            # ---  정확한 플레이어 발밑 위치 표시 ---
+            if self.final_player_pos_global:
+                local_player_pos = global_to_local(self.final_player_pos_global)
+
+                painter.save()
+                pen = QPen(QColor(255, 255, 0, 200), 1.5)
+                painter.setPen(pen)
+                painter.drawLine(local_player_pos + QPointF(-5, 0), local_player_pos + QPointF(5, 0))
+                painter.drawLine(local_player_pos + QPointF(0, -5), local_player_pos + QPointF(0, 5))
+
+                painter.setBrush(QBrush(Qt.GlobalColor.yellow))
+                painter.drawEllipse(local_player_pos, 2, 2)
+                painter.restore()
+
+            self._last_paint_time = time.perf_counter()
+            self._last_painted_camera_center = QPointF(self.camera_center_global)
+            player_point = self._to_pointf(self.final_player_pos_global)
+            self._last_painted_player_center = player_point
         # 명시적으로 종료하여 활성 페인터 잔존 방지
-        painter.end()
+        finally:
+            try:
+                if painter.isActive():
+                    painter.end()
+            except Exception:
+                pass
 
     def _draw_text_with_outline(self, painter, rect, flags, text, font, text_color, outline_color):
         """지정한 사각형 영역에 테두리가 있는 텍스트를 그립니다."""

@@ -630,6 +630,11 @@ class MapTab(QWidget):
             self._authority_manager = ControlAuthorityManager.instance()
             self._authority_manager.register_map_provider(self)
             self._authority_manager.authority_changed.connect(self._handle_authority_changed)
+            # [추가] 권한 요청 평가 결과 구독(사냥 요청 '대기' 상태 추적)
+            try:
+                self._authority_manager.request_evaluated.connect(self._on_authority_request_evaluated_from_manager)
+            except Exception:
+                pass
             self._last_authority_snapshot_ts = 0.0
             self._authority_priority_override = False
             self.current_authority_owner = "map"
@@ -642,6 +647,10 @@ class MapTab(QWidget):
             self._authority_resume_candidate = None
             self._forbidden_takeover_context = None
             self._forbidden_takeover_active = False
+            # [추가] 사냥 권한 요청 '대기' 관리 플래그/마감
+            self._hunt_request_pending = False
+            self._hunt_request_seen_during_forbidden = False
+            self._hunt_request_wait_deadline_ts = 0.0
             self._suppress_authority_resume = False  # ESC 등으로 탐지를 중단한 직후 재실행 차단 플래그
 
             # [v11.3.7] 설정 변수 선언만 하고 값 할당은 load_profile_data로 위임
@@ -1010,6 +1019,25 @@ class MapTab(QWidget):
 
         if self._last_authority_command_entry:
             self._authority_resume_candidate = dict(self._last_authority_command_entry)
+
+    def _on_authority_request_evaluated_from_manager(self, requester: str, payload: dict) -> None:
+        """중앙 권한 매니저가 평가한 요청 결과(사냥 포함)를 수신한다.
+
+        - 요청자가 'hunt'이고 상태가 '대기'이면 플래그를 세워 금지벽 종료 직후 재실행을 보류한다.
+        - 'accepted' 또는 'rejected'이면 플래그를 해제한다.
+        """
+        try:
+            if requester != 'hunt':
+                return
+            status = str(payload.get('status', '')).lower()
+            if status == 'pending':  # '대기'
+                self._hunt_request_pending = True
+                if getattr(self, 'forbidden_wall_in_progress', False):
+                    self._hunt_request_seen_during_forbidden = True
+            elif status in {'accepted', 'rejected'}:
+                self._hunt_request_pending = False
+        except Exception:
+            pass
 
     def _handle_map_authority_regained(self, payload: dict, previous: Optional[str]) -> None:
         reason = payload.get('reason') if isinstance(payload, dict) else None
@@ -1601,10 +1629,24 @@ class MapTab(QWidget):
 
         self.detection_log_viewer = QTextEdit()
         self.detection_log_viewer.setReadOnly(True)
-        self.detection_log_viewer.setFixedHeight(70)
+        # 기존 고정 높이(70px)에 폰트 lineSpacing 기준으로 3줄만큼 추가
+        try:
+            line_h = int(self.detection_log_viewer.fontMetrics().lineSpacing())
+            delta_h = max(0, line_h * 3)
+        except Exception:
+            # 폰트 메트릭스를 얻지 못하면 대략 18px * 3줄로 가정
+            delta_h = 54
+        self.detection_log_viewer.setFixedHeight(70 + delta_h)
         self.detection_log_viewer.setMinimumWidth(360)
         self.detection_log_viewer.document().setDocumentMargin(6)
         logs_layout.addWidget(self.detection_log_viewer)
+        # 일반 로그 최소 높이를 동일 픽셀만큼 줄임(가독성을 위해 하한 100px)
+        try:
+            current_min = int(self.general_log_viewer.minimumHeight())
+        except Exception:
+            current_min = 200
+        new_min = max(100, current_min - delta_h)
+        self.general_log_viewer.setMinimumHeight(new_min)
 
         self._walk_teleport_probability_text = "텔레포트 확률: 0.0%"
         self._last_detection_log_body = ""
@@ -4079,37 +4121,81 @@ class MapTab(QWidget):
         if pending and not self.event_in_progress:
             command, pending_reason = pending
             if self._emit_control_command(command, pending_reason):
-                self.update_general_log(
-                    "금지벽 종료 후 보류된 명령을 재전송했습니다.",
-                    "gray",
-                )
+                self.update_general_log("금지벽 종료 후 보류된 명령을 재전송했습니다.", "gray")
 
-        if takeover_context and current_owner == 'map':
+        # 금지벽 종료 직후: 사냥 권한 요청 '대기'가 관측되었거나 진행 중이면
+        # 맵 명령 재실행을 최대 1.0초 보류하고, 그 사이에 사냥 권한을 우선 처리한다.
+        prefer_handover = bool(getattr(self, '_hunt_request_pending', False) or getattr(self, '_hunt_request_seen_during_forbidden', False))
+
+        # 우선 이벤트 해제(즉시 재평가 유도)
+        if self._authority_manager:
+            try:
+                self._authority_manager.clear_priority_event("FORBIDDEN_WALL")
+            except Exception:
+                pass
+
+        def _resume_previous_command() -> None:
+            if not (takeover_context and current_owner == 'map'):
+                return
             resume_command = takeover_context.get('resume_command')
             resume_reason = takeover_context.get('resume_reason')
-            if resume_command:
-                success = self._emit_control_command(resume_command, resume_reason)
-                result_text = "성공" if success else "보류"
-                self.update_general_log(
-                    f"[금지벽] 이전 맵 명령 '{resume_command}' 재실행 {result_text}.",
-                    "gray" if success else "orange",
-                )
-                self._record_authority_event(
-                    "forbidden_resume",
-                    message=f"금지벽 종료 후 '{resume_command}' 재실행 {result_text}.",
-                    reason="FORBIDDEN_WALL",
-                    source="map_tab",
-                    previous_owner=getattr(self, 'current_authority_owner', None),
-                    command=resume_command,
-                    command_success=success,
-                )
+            if not resume_command:
+                return
+            sent_ok = self._emit_control_command(resume_command, resume_reason)
+            result_text = "성공" if sent_ok else "보류"
+            self.update_general_log(
+                f"[금지벽] 이전 맵 명령 '{resume_command}' 재실행 {result_text}.",
+                "gray" if sent_ok else "orange",
+            )
+            self._record_authority_event(
+                "forbidden_resume",
+                message=f"금지벽 종료 후 '{resume_command}' 재실행 {result_text}.",
+                reason="FORBIDDEN_WALL",
+                source="map_tab",
+                previous_owner=getattr(self, 'current_authority_owner', None),
+                command=resume_command,
+                command_success=sent_ok,
+            )
 
-        # 우선 이벤트 해제는 재실행 시도 이후로 지연해 권한이 유지된 상태에서 명령을 보낼 수 있게 한다.
-        if self._authority_manager:
-            self._authority_manager.clear_priority_event("FORBIDDEN_WALL")
+        if prefer_handover:
+            # 잔여 입력 제거 후, 사냥 위임을 기다리는 보류 창 진입
+            try:
+                self._emit_control_command("모든 키 떼기", "authority:reset", allow_forbidden=True)
+            except Exception:
+                pass
+            import time as _time
+            start_ts = _time.time()
+            self._hunt_request_wait_deadline_ts = start_ts + 1.0
+
+            def _await_handover() -> None:
+                # 사냥으로 넘어갔으면 종료
+                if getattr(self, 'current_authority_owner', 'map') != 'map':
+                    return
+                now_ts = _time.time()
+                if now_ts < float(getattr(self, '_hunt_request_wait_deadline_ts', 0.0)):
+                    try:
+                        from PyQt6.QtCore import QTimer
+                        QTimer.singleShot(100, _await_handover)
+                    except Exception:
+                        pass
+                    return
+                # 마감: 여전히 맵이 보유 중이면 기존 동작대로 재실행 수행
+                _resume_previous_command()
+
+            try:
+                from PyQt6.QtCore import QTimer
+                QTimer.singleShot(0, _await_handover)
+            except Exception:
+                # 타이머 실패 시 즉시 재실행으로 폴백
+                _resume_previous_command()
+        else:
+            # 사냥 요청 대기 없으면 기존 동작 유지(즉시 재실행)
+            _resume_previous_command()
 
         self._forbidden_takeover_context = None
         self._forbidden_takeover_active = False
+        # 금지벽 기간 중 관측된 사냥 요청 '대기' 플래그 초기화
+        self._hunt_request_seen_during_forbidden = False
 
         self._sync_authority_snapshot("forbidden_finished")
 
@@ -10541,9 +10627,22 @@ class MapTab(QWidget):
 
     def _render_detection_log(self, body_html: str | None, *, force: bool = False) -> None:
         self._last_detection_log_body = body_html or ""
+        # [상단 표시] FPS만 출력
+        fps_text = "--"
+        try:
+            stats = getattr(self, 'latest_perf_stats', {}) or {}
+            fps_val = stats.get('fps')
+            if isinstance(fps_val, (int, float)):
+                fps_text = f"{fps_val:.1f}"
+        except Exception:
+            pass
+        fps_html = f"<span>FPS: {fps_text}</span>"
+
         probability_html = f"<span>{self._walk_teleport_probability_text}</span>"
         status_html = "<br>".join(self._status_log_lines) if getattr(self, '_status_log_lines', None) else ""
         parts = []
+        # 맨 위에 FPS 고정 표기
+        parts.append(fps_html)
         if status_html:
             parts.append(status_html)
         parts.append(probability_html)
