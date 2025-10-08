@@ -9972,6 +9972,18 @@ class MapTab(QWidget):
         [MODIFIED] 2025-08-27 17:42 (KST): 'prepare_to_climb' 상태에서 점프 시 안내가 시작점으로 돌아가는 문제 수정
         [MODIFIED] 2025-08-27 17:47 (KST): 'climbing_up' 상태가 되었을 때 안내가 초기화되는 문제 수정
         """
+        # [안정화 가드] 경로/인덱스 유효성 확인 (준비 단계에서도 동일하게 방어)
+        if not (self.current_segment_path and 0 <= self.current_segment_index < len(self.current_segment_path)):
+            try:
+                self.update_general_log("[안정화] 준비 상태에서 경로가 유효하지 않아 재탐색합니다.", "orange")
+            except Exception:
+                pass
+            self.navigation_action = 'move_to_target'
+            self.navigation_state_locked = False
+            self.current_segment_path = []
+            self.expected_terrain_group = None
+            self.waiting_for_safe_down_jump = False
+            return
         # [PATCH] v14.3.15: 플레이어 상태에 따른 로직 분기 시작
         # --- [신규] 낭떠러지 낙하 모드 유지/종료 처리 ---
         try:
@@ -10221,6 +10233,18 @@ class MapTab(QWidget):
 
     def _handle_action_in_progress(self, final_player_pos):
         """'..._in_progress' 상태일 때의 로직을 담당합니다."""
+        # [안정화 가드] 경로/인덱스 유효성 확인
+        if not (self.current_segment_path and 0 <= self.current_segment_index < len(self.current_segment_path)):
+            try:
+                self.update_general_log("[안정화] 진행 중 상태에서 경로가 유효하지 않아 재탐색합니다.", "orange")
+            except Exception:
+                pass
+            self.navigation_state_locked = False
+            self.navigation_action = 'move_to_target'
+            self.current_segment_path = []
+            self.expected_terrain_group = None
+            self.waiting_for_safe_down_jump = False
+            return
         # <<< [수정] 아래 로직 전체 추가
         # 1. 등반 중 이탈 감지 (사다리에서 떨어졌는지 추가 검증)
         if self.navigation_action == 'climb_in_progress':
