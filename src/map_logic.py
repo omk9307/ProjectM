@@ -171,6 +171,12 @@ class AnchorDetectionThread(QThread):
         # [NEW] 아이콘 탐지 간격 가드용 캐시/타임스탬프
         self._last_my_icon_scan_ts = 0.0
         self._last_my_player_rects: list = []
+        # [NEW] 신호(emit) 스로틀링: 최소 발행 간격(초)
+        try:
+            self._min_emit_interval_sec = float(MapConfig.get("min_emit_interval_sec", 0.03) or 0.03)
+        except Exception:
+            self._min_emit_interval_sec = 0.03
+        self._last_emit_ts = 0.0
 
         for fid, fdata in self.all_key_features.items():
             try:
@@ -504,10 +510,29 @@ class AnchorDetectionThread(QThread):
                     perf['avg_roi_radius'] = float(perf.get('avg_roi_radius', 0.0) or 0.0)
                     perf['max_roi_radius'] = float(perf.get('max_roi_radius', 0.0) or 0.0)
 
-                dispatch_t0 = time.perf_counter()
-                perf['signal_dispatch_t0'] = dispatch_t0
-                self.detection_ready.emit(frame_bgr, all_detected_features, my_player_rects, other_player_rects)
-                perf['emit_ms'] = (time.perf_counter() - dispatch_t0) * 1000.0
+                # 신호 발행(emit) 스로틀링/최신 1개화: 캡처 간격을 고려해 최소 간격을 보장
+                emit_allowed = True
+                eff_min_emit_sec = float(self._min_emit_interval_sec)
+                try:
+                    if self.parent_tab and hasattr(self.parent_tab, 'get_capture_interval_ms'):
+                        cap_ms = int(self.parent_tab.get_capture_interval_ms())
+                        if cap_ms > 0:
+                            eff_min_emit_sec = max(eff_min_emit_sec, cap_ms / 1000.0)
+                except Exception:
+                    pass
+                now_emit = time.time()
+                if (now_emit - self._last_emit_ts) < eff_min_emit_sec:
+                    emit_allowed = False
+
+                if emit_allowed:
+                    dispatch_t0 = time.perf_counter()
+                    perf['signal_dispatch_t0'] = dispatch_t0
+                    self.detection_ready.emit(frame_bgr, all_detected_features, my_player_rects, other_player_rects)
+                    perf['emit_ms'] = (time.perf_counter() - dispatch_t0) * 1000.0
+                    self._last_emit_ts = now_emit
+                else:
+                    # 발행 건너뛰기: emit 시간 0으로 처리
+                    perf['emit_ms'] = 0.0
 
                 loop_time_ms = (time.perf_counter() - loop_start) * 1000.0
                 perf['loop_total_ms'] = loop_time_ms

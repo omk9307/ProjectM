@@ -1714,19 +1714,19 @@ class MapTab(QWidget):
         interval_row.addWidget(self.capture_interval_label)
         interval_row.addWidget(self.capture_interval_spin)
 
-        # [NEW] 내 캐릭터 아이콘 탐지 간격(ms)
-        self.player_icon_interval_label = QLabel("아이콘 탐지 간격")
+        # [NEW] 내 캐릭터 탐지 간격(ms)
+        self.player_icon_interval_label = QLabel("캐릭터 탐지 간격")
         self.player_icon_interval_spin = QSpinBox()
-        self.player_icon_interval_spin.setRange(0, 1000)  # 0=매 프레임
+        self.player_icon_interval_spin.setRange(0, 5000)  # 0=매 프레임, 상한 확대
         self.player_icon_interval_spin.setSingleStep(5)
         self.player_icon_interval_spin.valueChanged.connect(self._on_player_icon_interval_changed)
         interval_row.addWidget(self.player_icon_interval_label)
         interval_row.addWidget(self.player_icon_interval_spin)
 
-        # [NEW] 타 캐릭터 전체 스캔 간격(프레임)
-        self.other_icon_fullscan_label = QLabel("타 캐릭터 스캔")
+        # [NEW] 타 캐릭터 탐지 간격(전체 스캔 주기, 프레임)
+        self.other_icon_fullscan_label = QLabel("타 캐릭터 탐지")
         self.other_icon_fullscan_spin = QSpinBox()
-        self.other_icon_fullscan_spin.setRange(1, 60)
+        self.other_icon_fullscan_spin.setRange(1, 600)  # 상한 확대(프레임)
         self.other_icon_fullscan_spin.setSingleStep(1)
         self.other_icon_fullscan_spin.valueChanged.connect(self._on_other_icon_fullscan_changed)
         interval_row.addWidget(self.other_icon_fullscan_label)
@@ -1737,21 +1737,7 @@ class MapTab(QWidget):
         try:
             self._refresh_match_interval_ui()
             self._refresh_capture_interval_ui()
-        except Exception:
-            pass
-        try:
-            self.player_icon_interval_spin.blockSignals(True)
-            self.player_icon_interval_spin.setValue(int(getattr(self, 'player_icon_interval_ms', 0)))
-            self.player_icon_interval_spin.blockSignals(False)
-        except Exception:
-            pass
-        try:
-            default_other = int(getattr(self, 'other_icon_fullscan_interval', getattr(self, '_other_player_icon_fullscan_interval', 12)))
-            self.other_icon_fullscan_spin.blockSignals(True)
-            self.other_icon_fullscan_spin.setValue(default_other)
-            self.other_icon_fullscan_spin.blockSignals(False)
-            # 내부 탐지 로직에 즉시 반영
-            self._other_player_icon_fullscan_interval = default_other
+            self._refresh_icon_interval_ui()
         except Exception:
             pass
 
@@ -3362,11 +3348,35 @@ class MapTab(QWidget):
                     self.current_hotkey = settings.get('hotkey', 'None')
                     self._perf_logging_enabled = bool(settings.get('perf_logging_enabled', False))
                     self._minimap_display_enabled = bool(settings.get('minimap_display_enabled', True))
-                    # 아이콘 탐지 간격(내/타) 로드
-                    self.player_icon_interval_ms = int(settings.get('player_icon_interval_ms', 0))
-                    self.other_icon_fullscan_interval = int(settings.get('other_icon_fullscan_interval', 12))
-                    # 내부 탐지 로직에 즉시 반영
-                    self._other_player_icon_fullscan_interval = int(self.other_icon_fullscan_interval)
+                    # 캐릭터 탐지(내) 간격: 표시/헤드리스 분리 저장 (마이그레이션 지원)
+                    if 'player_icon_interval_display_ms' in settings:
+                        self.player_icon_interval_display_ms = int(settings.get('player_icon_interval_display_ms', 0))
+                    else:
+                        # 구키 호환
+                        self.player_icon_interval_display_ms = int(settings.get('player_icon_interval_ms', 0))
+                    if 'player_icon_interval_headless_ms' in settings:
+                        self.player_icon_interval_headless_ms = int(settings.get('player_icon_interval_headless_ms', 60))
+                    else:
+                        # 구키 호환: 별도 값 없으면 display 값을 재사용
+                        self.player_icon_interval_headless_ms = int(settings.get('player_icon_interval_ms', 60))
+
+                    # 타 캐릭터 탐지(전체 스캔 주기, 프레임): 표시/헤드리스 분리 저장 (마이그레이션 지원)
+                    if 'other_icon_fullscan_interval_display' in settings:
+                        self.other_icon_fullscan_interval_display = int(settings.get('other_icon_fullscan_interval_display', 12))
+                    else:
+                        self.other_icon_fullscan_interval_display = int(settings.get('other_icon_fullscan_interval', 12))
+                    if 'other_icon_fullscan_interval_headless' in settings:
+                        self.other_icon_fullscan_interval_headless = int(settings.get('other_icon_fullscan_interval_headless', 60))
+                    else:
+                        self.other_icon_fullscan_interval_headless = int(settings.get('other_icon_fullscan_interval', 60))
+
+                    # 내부 탐지 로직에 즉시 반영(현재 표시 상태 기준)
+                    headless_now = not bool(getattr(self, '_minimap_display_enabled', True))
+                    self._other_player_icon_fullscan_interval = (
+                        int(self.other_icon_fullscan_interval_headless)
+                        if headless_now
+                        else int(self.other_icon_fullscan_interval_display)
+                    )
                     # 템플릿 매칭 간격(표시/헤드리스) 로드
                     self.template_match_interval_display_ms = int(settings.get('template_match_interval_display_ms', 0))
                     self.template_match_interval_headless_ms = int(settings.get('template_match_interval_headless_ms', 150))
@@ -3379,8 +3389,10 @@ class MapTab(QWidget):
                 self.current_hotkey = 'None'
                 self._perf_logging_enabled = False
                 self._minimap_display_enabled = True
-                self.player_icon_interval_ms = 0
-                self.other_icon_fullscan_interval = 12
+                self.player_icon_interval_display_ms = 0
+                self.player_icon_interval_headless_ms = 60
+                self.other_icon_fullscan_interval_display = 12
+                self.other_icon_fullscan_interval_headless = 60
                 self._other_player_icon_fullscan_interval = 12
                 self.template_match_interval_display_ms = 0
                 self.template_match_interval_headless_ms = 150
@@ -3391,8 +3403,10 @@ class MapTab(QWidget):
         self.current_hotkey = 'None'
         self._perf_logging_enabled = False
         self._minimap_display_enabled = True
-        self.player_icon_interval_ms = 0
-        self.other_icon_fullscan_interval = 12
+        self.player_icon_interval_display_ms = 0
+        self.player_icon_interval_headless_ms = 60
+        self.other_icon_fullscan_interval_display = 12
+        self.other_icon_fullscan_interval_headless = 60
         self._other_player_icon_fullscan_interval = 12
         self.template_match_interval_display_ms = 0
         self.template_match_interval_headless_ms = 150
@@ -3408,8 +3422,15 @@ class MapTab(QWidget):
                 'hotkey': self.current_hotkey, #  단축키 정보 저장
                 'perf_logging_enabled': bool(self._perf_logging_enabled),
                 'minimap_display_enabled': bool(getattr(self, '_minimap_display_enabled', True)),
-                'player_icon_interval_ms': int(getattr(self, 'player_icon_interval_ms', 0)),
-                'other_icon_fullscan_interval': int(getattr(self, 'other_icon_fullscan_interval', getattr(self, '_other_player_icon_fullscan_interval', 12))),
+                # 내 캐릭터 탐지 간격(표시/헤드리스)
+                'player_icon_interval_display_ms': int(getattr(self, 'player_icon_interval_display_ms', 0)),
+                'player_icon_interval_headless_ms': int(getattr(self, 'player_icon_interval_headless_ms', 60)),
+                # 타 캐릭터 전체 스캔 주기(표시/헤드리스)
+                'other_icon_fullscan_interval_display': int(getattr(self, 'other_icon_fullscan_interval_display', 12)),
+                'other_icon_fullscan_interval_headless': int(getattr(self, 'other_icon_fullscan_interval_headless', 60)),
+                # 구버전 호환(선택): 현재 모드 값을 구키에도 써둠
+                'player_icon_interval_ms': int(self.get_player_icon_interval_ms()),
+                'other_icon_fullscan_interval': int(self.get_other_player_icon_fullscan_interval()),
                 'template_match_interval_display_ms': int(getattr(self, 'template_match_interval_display_ms', 0)),
                 'template_match_interval_headless_ms': int(getattr(self, 'template_match_interval_headless_ms', 150)),
                 'capture_interval_display_ms': int(getattr(self, 'capture_interval_display_ms', 0)),
@@ -10875,10 +10896,11 @@ class MapTab(QWidget):
         if hasattr(self, 'minimap_view_label'):
             self.minimap_view_label.set_display_enabled(self._minimap_display_enabled)
 
-        # 표시 상태에 따라 매칭 간격 스핀 값을 전환
+        # 표시 상태에 따라 간격 스핀 값을 전환
         try:
             self._refresh_match_interval_ui()
             self._refresh_capture_interval_ui()
+            self._refresh_icon_interval_ui()
         except Exception:
             pass
 
@@ -10914,10 +10936,16 @@ class MapTab(QWidget):
 
     # [NEW] 플레이어 아이콘/타 플레이어 스캔 설정 Getter
     def get_player_icon_interval_ms(self) -> int:
-        return int(getattr(self, 'player_icon_interval_ms', 0))
+        headless = not bool(getattr(self, '_minimap_display_enabled', True))
+        if headless:
+            return int(getattr(self, 'player_icon_interval_headless_ms', 60))
+        return int(getattr(self, 'player_icon_interval_display_ms', 0))
 
     def get_other_player_icon_fullscan_interval(self) -> int:
-        return int(getattr(self, 'other_icon_fullscan_interval', getattr(self, '_other_player_icon_fullscan_interval', 12)))
+        headless = not bool(getattr(self, '_minimap_display_enabled', True))
+        if headless:
+            return int(getattr(self, 'other_icon_fullscan_interval_headless', 60))
+        return int(getattr(self, 'other_icon_fullscan_interval_display', 12))
 
     def get_capture_interval_ms(self) -> int:
         """현재 표시 상태에 따른 캡처 간격(ms)을 반환합니다.
@@ -10961,16 +10989,26 @@ class MapTab(QWidget):
 
     # [NEW] 아이콘 탐지 간격/전체 스캔 주기 변경 핸들러
     def _on_player_icon_interval_changed(self, value: int) -> None:
-        self.player_icon_interval_ms = int(value)
+        value = int(value)
+        headless = not bool(getattr(self, '_minimap_display_enabled', True))
+        if headless:
+            self.player_icon_interval_headless_ms = value
+        else:
+            self.player_icon_interval_display_ms = value
         try:
             self.save_global_settings()
         except Exception:
             pass
 
     def _on_other_icon_fullscan_changed(self, value: int) -> None:
-        self.other_icon_fullscan_interval = int(value)
-        # 내부 탐지 로직에서 사용되는 간격도 갱신
-        self._other_player_icon_fullscan_interval = int(value)
+        value = int(value)
+        headless = not bool(getattr(self, '_minimap_display_enabled', True))
+        if headless:
+            self.other_icon_fullscan_interval_headless = value
+        else:
+            self.other_icon_fullscan_interval_display = value
+        # 내부 탐지 로직에서 사용되는 간격도 현재 모드 값으로 갱신
+        self._other_player_icon_fullscan_interval = value
         try:
             self.save_global_settings()
         except Exception:
@@ -11015,6 +11053,31 @@ class MapTab(QWidget):
             self.capture_interval_spin.setValue(val)
             self.capture_interval_spin.blockSignals(False)
             self.capture_interval_spin.setToolTip("미니맵 표시 중 캡처 간격. 0=기본 FPS 유지")
+
+    def _refresh_icon_interval_ui(self) -> None:
+        """표시 상태에 맞춰 캐릭터/타 캐릭터 탐지 간격 UI를 동기화합니다."""
+        if not hasattr(self, 'player_icon_interval_spin') or not hasattr(self, 'other_icon_fullscan_spin'):
+            return
+        headless = not bool(getattr(self, '_minimap_display_enabled', True))
+        # 캐릭터 탐지 간격(ms)
+        if headless:
+            val_player = int(getattr(self, 'player_icon_interval_headless_ms', 60))
+        else:
+            val_player = int(getattr(self, 'player_icon_interval_display_ms', 0))
+        self.player_icon_interval_spin.blockSignals(True)
+        self.player_icon_interval_spin.setValue(val_player)
+        self.player_icon_interval_spin.blockSignals(False)
+
+        # 타 캐릭터 탐지(전체 스캔 주기, 프레임)
+        if headless:
+            val_other = int(getattr(self, 'other_icon_fullscan_interval_headless', 60))
+        else:
+            val_other = int(getattr(self, 'other_icon_fullscan_interval_display', 12))
+        self.other_icon_fullscan_spin.blockSignals(True)
+        self.other_icon_fullscan_spin.setValue(val_other)
+        self.other_icon_fullscan_spin.blockSignals(False)
+        # 내부 간격도 현재 모드 값으로 반영
+        self._other_player_icon_fullscan_interval = val_other
 
     def _apply_capture_interval_to_manager(self) -> None:
         """현재 설정된 캡처 간격(ms)을 CaptureManager에 반영합니다.
