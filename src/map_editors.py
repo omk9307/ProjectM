@@ -2845,17 +2845,6 @@ class FullMinimapEditorDialog(QDialog):
                     self.scene.addItem(background_rect)
                     self.scene.addItem(text_item)
                     self.lod_text_items.append(text_item)
-                        self.lod_text_items.append(background_rect)
-                        # 이름 라벨 그룹 등록 (앵커는 선의 중앙, 아래 선호 + 아래만 허용)
-                        line_rect = line_item.boundingRect()
-                        self._name_label_groups.append({
-                            "anchor": line_center,
-                            "bg": background_rect,
-                            "text": text_item,
-                            "preferred": "below",
-                            "type": "jump_link_name",
-                            "fixed_base": {"center_x": line_rect.center().x(), "bottom_y": line_rect.bottom()}
-                        })
 
                 # 좌표/이름 라벨 초기 배치 수행 (통합 충돌회피)
                 self._relayout_all_labels()

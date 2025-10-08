@@ -838,6 +838,8 @@ class HuntTab(QWidget):
         self._nameplate_tracking_user_pref = False
         self.downscale_enabled = False
         self.downscale_factor = 0.5
+        # 로그 수치 표기 형식 기본값: a(기준 b) 사용
+        self._metric_format_parentheses = True
         self._suppress_downscale_prompt = False
         self._last_character_boxes: List[DetectionBox] = []
         self._last_character_details: List[dict] = []
@@ -3743,6 +3745,10 @@ class HuntTab(QWidget):
         self.show_monster_confidence_checkbox = QCheckBox("몬스터 신뢰도 표시")
         self.show_monster_confidence_checkbox.setChecked(self.overlay_preferences.get('monster_confidence', True))
         self.show_monster_confidence_checkbox.toggled.connect(self._on_monster_confidence_toggle_changed)
+        # 로그 수치 표기 토글: a(기준 b) 표기 사용
+        self.metric_parentheses_checkbox = QCheckBox("수치 표기 a(기준 b)")
+        self.metric_parentheses_checkbox.setChecked(True)
+        self.metric_parentheses_checkbox.toggled.connect(self._on_metric_parentheses_toggled)
 
         for checkbox in (
             self.show_hunt_area_checkbox,
@@ -3752,6 +3758,7 @@ class HuntTab(QWidget):
             self.show_nameplate_checkbox,
             self.show_nameplate_tracking_checkbox,
             self.show_monster_confidence_checkbox,
+            self.metric_parentheses_checkbox,
         ):
             checkbox.setSizePolicy(
                 QSizePolicy(QSizePolicy.Policy.Maximum, QSizePolicy.Policy.Fixed)
@@ -3766,6 +3773,7 @@ class HuntTab(QWidget):
         button_row.addWidget(self.show_nameplate_checkbox)
         button_row.addWidget(self.show_nameplate_tracking_checkbox)
         button_row.addWidget(self.show_monster_confidence_checkbox)
+        button_row.addWidget(self.metric_parentheses_checkbox)
 
         button_row.addStretch(1)
         control_layout.addLayout(button_row)
@@ -5765,6 +5773,19 @@ class HuntTab(QWidget):
         self.overlay_preferences['monster_confidence'] = state
         self._update_detection_thread_overlay_flags()
         self._save_settings()
+
+    def _on_metric_parentheses_toggled(self, checked: bool) -> None:
+        """로그 수치 표기 형식 토글 핸들러."""
+        self._metric_format_parentheses = bool(checked)
+        try:
+            self._save_settings()
+        except Exception:
+            pass
+        # 즉시 반영: 이후 로그부터 새로운 형식 적용
+        try:
+            self._handle_setting_changed()
+        except Exception:
+            pass
 
     def _update_detection_thread_overlay_flags(self) -> None:
         if not self.detection_thread:
@@ -8158,6 +8179,68 @@ class HuntTab(QWidget):
         if save and not from_direction:
             self._save_settings()
 
+    # ----------------------- 로그 포맷 유틸 -----------------------
+    def _is_metric_parentheses_enabled(self) -> bool:
+        cb = getattr(self, 'metric_parentheses_checkbox', None)
+        if cb is not None:
+            return bool(cb.isChecked())
+        return bool(getattr(self, '_metric_format_parentheses', True))
+
+    def _format_metric(self, label: str, value: int, threshold: int, *, ready: bool | None = None) -> str:
+        try:
+            v = int(value)
+            t = int(threshold)
+        except Exception:
+            v = value
+            t = threshold
+        if t <= 0:
+            # 기준 미사용 시 단순 표기
+            return f"{label} {v}마리"
+        if ready is None:
+            ready = v >= t
+        if self._is_metric_parentheses_enabled():
+            suffix = "충족" if ready else "부족"
+            return f"{label} {v}(기준 {t}) {suffix}"
+        else:
+            comp = "≥" if ready else "<"
+            return f"{label} {v}마리 {comp} 기준 {t}"
+
+    def _format_current_ranges_lr(self) -> str:
+        """사냥범위/주 스킬 범위의 좌/우 값을 한 줄 문자열로 반환한다.
+        - 전/후(방향 기반) 모드에서는 캐릭터 방향에 따라 좌=back/우=front 또는 좌=front/우=back 매핑
+        - 대칭 모드에서는 좌=우=반경
+        """
+        try:
+            mode_on = bool(getattr(self, 'facing_range_checkbox', None) and self.facing_range_checkbox.isChecked())
+            facing = getattr(self, 'last_facing', None)
+            # 사냥범위 좌/우
+            if mode_on and facing in ('left', 'right'):
+                e_front = int(self.enemy_front_spinbox.value()) if hasattr(self, 'enemy_front_spinbox') else int(self.enemy_range_spinbox.value())
+                e_back = int(self.enemy_back_spinbox.value()) if hasattr(self, 'enemy_back_spinbox') else int(self.enemy_range_spinbox.value())
+                if facing == 'left':
+                    e_left, e_right = e_front, e_back
+                else:
+                    e_left, e_right = e_back, e_front
+            else:
+                r = int(self.enemy_range_spinbox.value())
+                e_left = e_right = r
+
+            # 주 스킬 좌/우
+            if mode_on and facing in ('left', 'right'):
+                p_front = int(self.primary_front_spinbox.value()) if hasattr(self, 'primary_front_spinbox') else int(self.primary_skill_range_spinbox.value())
+                p_back = int(self.primary_back_spinbox.value()) if hasattr(self, 'primary_back_spinbox') else int(self.primary_skill_range_spinbox.value())
+                if facing == 'left':
+                    p_left, p_right = p_front, p_back
+                else:
+                    p_left, p_right = p_back, p_front
+            else:
+                pr = int(self.primary_skill_range_spinbox.value())
+                p_left = p_right = pr
+
+            return f"사냥범위(좌 {e_left}, 우 {e_right}) · 주 스킬(좌 {p_left}, 우 {p_right})"
+        except Exception:
+            return ""
+
     def _setup_timers(self) -> None:
         self.condition_timer = QTimer(self)
         self.condition_timer.setInterval(2000)
@@ -8681,6 +8764,7 @@ class HuntTab(QWidget):
                 )
             )
             summary_confidence = bool(display.get('summary_confidence', self.show_confidence_summary_checkbox.isChecked()))
+            metric_parentheses = bool(display.get('metric_parentheses', True))
             summary_frame = bool(display.get('summary_frame', self.show_frame_summary_checkbox.isChecked()))
             summary_info = bool(display.get('summary_info', self.show_info_summary_checkbox.isChecked()))
             summary_frame_detail = bool(
@@ -8702,6 +8786,9 @@ class HuntTab(QWidget):
                 self.show_nameplate_tracking_checkbox.setChecked(show_nameplate_tracking)
             if hasattr(self, 'show_monster_confidence_checkbox'):
                 self.show_monster_confidence_checkbox.setChecked(show_monster_confidence)
+            if hasattr(self, 'metric_parentheses_checkbox'):
+                self.metric_parentheses_checkbox.setChecked(metric_parentheses)
+            self._metric_format_parentheses = metric_parentheses
             self.screen_output_checkbox.setChecked(screen_output_enabled)
             self.show_confidence_summary_checkbox.setChecked(summary_confidence)
             self.show_frame_summary_checkbox.setChecked(summary_frame)
@@ -9261,6 +9348,11 @@ class HuntTab(QWidget):
                 ) if hasattr(self, 'show_monster_confidence_checkbox') else bool(
                     self.overlay_preferences.get('monster_confidence', True)
                 ),
+                'metric_parentheses': bool(
+                    self.metric_parentheses_checkbox.isChecked()
+                ) if hasattr(self, 'metric_parentheses_checkbox') else bool(
+                    getattr(self, '_metric_format_parentheses', True)
+                ),
                 'screen_output': self.screen_output_checkbox.isChecked(),
                 'summary_confidence': self.show_confidence_summary_checkbox.isChecked(),
                 'summary_frame': self.show_frame_summary_checkbox.isChecked(),
@@ -9519,12 +9611,19 @@ class HuntTab(QWidget):
                 message = "사냥 탭이 조작 권한을 획득했습니다."
                 if display_reason:
                     message += f" (사유: {display_reason})"
+                # 현재 범위 정보를 함께 표기(좌/우)
+                range_text = self._format_current_ranges_lr()
+                if range_text:
+                    message += f" | {range_text}"
                 self.append_log(message, "success")
         elif owner == "map":
             if not silent:
                 message = "맵 탭으로 권한이 반환되었습니다."
                 if display_reason:
                     message += f" (사유: {display_reason})"
+                range_text = self._format_current_ranges_lr()
+                if range_text:
+                    message += f" | {range_text}"
                 self.append_log(message, "info")
         else:
             if not silent:
@@ -9613,18 +9712,21 @@ class HuntTab(QWidget):
                     release_meta.setdefault("reason", release_reason_code)
 
                 reason_parts = []
-                if not primary_ready and primary_threshold > 0:
+                if primary_threshold > 0:
                     reason_parts.append(
-                        f"주 스킬 {self.latest_primary_monster_count}마리 < 기준 {primary_threshold}"
+                        self._format_metric("주 스킬", self.latest_primary_monster_count, primary_threshold, ready=False)
                     )
-                if not hunt_ready and hunt_threshold > 0:
+                if hunt_threshold > 0:
                     reason_parts.append(
-                        f"사냥범위 {self.latest_monster_count}마리 < 기준 {hunt_threshold}"
+                        self._format_metric("사냥범위", self.latest_monster_count, hunt_threshold, ready=False)
                     )
                 reason_parts.append(f"최근 몬스터 미탐지 {idle_elapsed:.1f}s (기준 {idle_limit:.1f}s)")
                 if timeout and elapsed >= timeout:
                     reason_parts.append(f"타임아웃 {timeout}s 초과")
                 reason_text = ", ".join(reason_parts)
+                range_text = self._format_current_ranges_lr()
+                if range_text:
+                    reason_text = f"{reason_text} | {range_text}"
                 self.append_log(f"자동 조건 해제 → 사냥 권한 반환 ({reason_text})", "info")
                 release_reason = release_reason_code if (self.map_link_enabled and release_reason_code) else reason_text
                 self.release_control(release_reason, meta=release_meta or None)
@@ -9641,19 +9743,22 @@ class HuntTab(QWidget):
                 reachable = False
         if primary_ready or (hunt_ready and reachable):
             reason_parts = []
-            if hunt_ready and hunt_threshold > 0:
+            if hunt_threshold > 0 and hunt_ready:
                 reason_parts.append(
-                    f"사냥범위 {self.latest_monster_count}마리 ≥ 기준 {hunt_threshold}"
+                    self._format_metric("사냥범위", self.latest_monster_count, hunt_threshold, ready=True)
                 )
-            if primary_ready and primary_threshold > 0:
+            if primary_threshold > 0 and primary_ready:
                 reason_parts.append(
-                    f"주 스킬 {self.latest_primary_monster_count}마리 ≥ 기준 {primary_threshold}"
+                    self._format_metric("주 스킬", self.latest_primary_monster_count, primary_threshold, ready=True)
                 )
             if not primary_ready and reachable:
                 reason_parts.append("주 스킬 기준 도달 가능(이동)")
             if not reason_parts:
                 reason_parts.append("몬스터 조건 충족")
             reason_text = ", ".join(reason_parts)
+            range_text = self._format_current_ranges_lr()
+            if range_text:
+                reason_text = f"{reason_text} | {range_text}"
             self.append_log(f"자동 조건 충족 → 사냥 권한 요청 ({reason_text})", "info")
             request_reason = "MONSTER_READY" if self.map_link_enabled else reason_text
             self.request_control(request_reason)
@@ -9723,7 +9828,9 @@ class HuntTab(QWidget):
                 self._cleanup_active = False
                 self._cleanup_hold_until_ts = 0.0
                 try:
-                    self.append_log(f"교전 시작: 주 스킬 기준 충족(≥{primary_threshold})", "info")
+                    # 교전 시작 시 수치 표기를 토글 형식에 맞춰 출력
+                    msg_metric = self._format_metric("주 스킬", self.latest_primary_monster_count, primary_threshold, ready=True)
+                    self.append_log(f"교전 시작 | {msg_metric}", "info")
                 except Exception:
                     pass
         else:

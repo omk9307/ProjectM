@@ -4016,6 +4016,10 @@ class MapTab(QWidget):
             def _await_event_handover() -> None:
                 # 사냥으로 넘어갔으면 종료
                 if getattr(self, 'current_authority_owner', 'map') != 'map':
+                    try:
+                        self._handover_suppress_until_ts = 0.0
+                    except Exception:
+                        pass
                     return
                 try:
                     import time as _time2
@@ -4030,6 +4034,10 @@ class MapTab(QWidget):
                         pass
                     return
                 # 마감: 여전히 맵이 보유 중이면 이후 로직을 정상 재개
+                try:
+                    self._handover_suppress_until_ts = 0.0
+                except Exception:
+                    pass
                 _resume_after_event()
 
             def _resume_after_event() -> None:
@@ -4209,12 +4217,9 @@ class MapTab(QWidget):
         current_owner = getattr(self, 'current_authority_owner', 'map')
         takeover_context = self._forbidden_takeover_context if self._forbidden_takeover_active else None
 
-        pending = getattr(self, 'pending_forbidden_command', None)
+        # 보류되었던 명령은 일단 꺼내어 보관만 하고, 사냥 권한 대기 창 처리 이후에 필요 시 전송한다.
+        pending_local = getattr(self, 'pending_forbidden_command', None)
         self.pending_forbidden_command = None
-        if pending and not self.event_in_progress:
-            command, pending_reason = pending
-            if self._emit_control_command(command, pending_reason):
-                self.update_general_log("금지벽 종료 후 보류된 명령을 재전송했습니다.", "gray")
 
         # 금지벽 종료 직후: 사냥 권한 요청 '대기'가 관측되었거나 진행 중이면
         # 맵 명령 재실행을 최대 0.5초 보류하고, 그 사이에 사냥 권한을 우선 처리한다.
@@ -4250,6 +4255,19 @@ class MapTab(QWidget):
                 command_success=sent_ok,
             )
 
+        def _resume_pending_then_previous() -> None:
+            # 보류 명령을 먼저 처리하고, 이어서 이전 명령을 재실행한다.
+            if pending_local and not self.event_in_progress and getattr(self, 'current_authority_owner', 'map') == 'map':
+                try:
+                    command, pending_reason = pending_local
+                except Exception:
+                    command, pending_reason = None, None
+                if command:
+                    sent_ok = self._emit_control_command(command, pending_reason)
+                    if sent_ok:
+                        self.update_general_log("금지벽 종료 후 보류된 명령을 재전송했습니다.", "gray")
+            _resume_previous_command()
+
         if prefer_handover:
             # 잔여 입력 제거 후, 사냥 위임을 기다리는 보류 창 진입
             try:
@@ -4268,6 +4286,10 @@ class MapTab(QWidget):
             def _await_handover() -> None:
                 # 사냥으로 넘어갔으면 종료
                 if getattr(self, 'current_authority_owner', 'map') != 'map':
+                    try:
+                        self._handover_suppress_until_ts = 0.0
+                    except Exception:
+                        pass
                     return
                 now_ts = _time.time()
                 if now_ts < float(getattr(self, '_hunt_request_wait_deadline_ts', 0.0)):
@@ -4278,7 +4300,11 @@ class MapTab(QWidget):
                         pass
                     return
                 # 마감: 여전히 맵이 보유 중이면 기존 동작대로 재실행 수행
-                _resume_previous_command()
+                try:
+                    self._handover_suppress_until_ts = 0.0
+                except Exception:
+                    pass
+                _resume_pending_then_previous()
 
             try:
                 from PyQt6.QtCore import QTimer
@@ -4287,8 +4313,8 @@ class MapTab(QWidget):
                 # 타이머 실패 시 즉시 재실행으로 폴백
                 _resume_previous_command()
         else:
-            # 사냥 요청 대기 없으면 기존 동작 유지(즉시 재실행)
-            _resume_previous_command()
+            # 사냥 요청 대기 없으면 기존 동작 유지(즉시: 보류명령 → 이전명령)
+            _resume_pending_then_previous()
 
         self._forbidden_takeover_context = None
         self._forbidden_takeover_active = False
