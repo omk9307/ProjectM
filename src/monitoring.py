@@ -6,7 +6,7 @@ import cv2
 import numpy as np
 from PyQt6.QtCore import Qt, QTimer, QThread, QRectF, pyqtSlot, pyqtSignal, QSettings
 from datetime import datetime
-from PyQt6.QtGui import QImage, QPixmap, QColor
+from PyQt6.QtGui import QImage, QPixmap, QColor, QKeySequence
 from PyQt6.QtWidgets import (
     QWidget,
     QVBoxLayout,
@@ -47,7 +47,7 @@ class LogListWidget(QListWidget):
         )
 
     def keyPressEvent(self, event):
-        if event.matches(event.StandardKey.Copy):
+        if event.matches(QKeySequence.StandardKey.Copy):
             selected = self.selectedItems()
             if selected:
                 text = "\n".join(item.text() for item in selected)

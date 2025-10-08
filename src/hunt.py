@@ -9608,9 +9608,9 @@ class HuntTab(QWidget):
         silent = bool(payload.get('silent'))
         if owner == "hunt":
             if not silent:
-                message = "사냥 탭이 조작 권한을 획득했습니다."
+                message = "권한 획득"
                 if display_reason:
-                    message += f" (사유: {display_reason})"
+                    message += f" | 사유 {display_reason}"
                 # 현재 범위 정보를 함께 표기(좌/우)
                 range_text = self._format_current_ranges_lr()
                 if range_text:
@@ -9618,9 +9618,9 @@ class HuntTab(QWidget):
                 self.append_log(message, "success")
         elif owner == "map":
             if not silent:
-                message = "맵 탭으로 권한이 반환되었습니다."
+                message = "권한 반납"
                 if display_reason:
-                    message += f" (사유: {display_reason})"
+                    message += f" | 사유 {display_reason}"
                 range_text = self._format_current_ranges_lr()
                 if range_text:
                     message += f" | {range_text}"
@@ -9720,14 +9720,14 @@ class HuntTab(QWidget):
                     reason_parts.append(
                         self._format_metric("사냥범위", self.latest_monster_count, hunt_threshold, ready=False)
                     )
-                reason_parts.append(f"최근 몬스터 미탐지 {idle_elapsed:.1f}s (기준 {idle_limit:.1f}s)")
+                reason_parts.append(f"최근 미탐지 {idle_elapsed:.1f}초 (기준 {idle_limit:.1f}초)")
                 if timeout and elapsed >= timeout:
-                    reason_parts.append(f"타임아웃 {timeout}s 초과")
+                    reason_parts.append(f"타임아웃 {timeout}초 초과")
                 reason_text = ", ".join(reason_parts)
                 range_text = self._format_current_ranges_lr()
                 if range_text:
                     reason_text = f"{reason_text} | {range_text}"
-                self.append_log(f"자동 조건 해제 → 사냥 권한 반환 ({reason_text})", "info")
+                self.append_log(f"권한 반납 | {reason_text}", "info")
                 release_reason = release_reason_code if (self.map_link_enabled and release_reason_code) else reason_text
                 self.release_control(release_reason, meta=release_meta or None)
             return
@@ -9759,7 +9759,7 @@ class HuntTab(QWidget):
             range_text = self._format_current_ranges_lr()
             if range_text:
                 reason_text = f"{reason_text} | {range_text}"
-            self.append_log(f"자동 조건 충족 → 사냥 권한 요청 ({reason_text})", "info")
+            self.append_log(f"권한 요청 | {reason_text}", "info")
             request_reason = "MONSTER_READY" if self.map_link_enabled else reason_text
             self.request_control(request_reason)
 
@@ -9841,7 +9841,7 @@ class HuntTab(QWidget):
                 self._cleanup_hold_until_ts = 0.0
                 if prev_cleanup:
                     try:
-                        self.append_log("클린업 종료: 마릿수 회복(≥기준)", "info")
+                        self.append_log("클린업 종료", "info")
                     except Exception:
                         pass
             elif self.latest_primary_monster_count >= 1:
@@ -9850,7 +9850,7 @@ class HuntTab(QWidget):
                 self._cleanup_hold_until_ts = 0.0
                 if not prev_cleanup:
                     try:
-                        self.append_log("클린업 진입: 잔몹 처리", "info")
+                        self.append_log("클린업 진입", "info")
                     except Exception:
                         pass
             else:
@@ -9864,7 +9864,7 @@ class HuntTab(QWidget):
                     if grace_ms > 0:
                         self._cleanup_hold_until_ts = now_ts + (grace_ms / 1000.0)
                         try:
-                            self.append_log(f"클린업 유예 시작: {grace_ms}ms", "info")
+                            self.append_log(f"클린업 유예 시작 | {grace_ms}밀리초", "info")
                         except Exception:
                             pass
                 if self._cleanup_hold_until_ts > 0.0 and now_ts <= self._cleanup_hold_until_ts:
@@ -9882,7 +9882,7 @@ class HuntTab(QWidget):
                     self._cleanup_hold_until_ts = 0.0
                     if prev_engage:
                         try:
-                            self.append_log("교전 종료: 주 스킬 범위 내 잔몹 없음", "info")
+                            self.append_log("교전 종료", "info")
                         except Exception:
                             pass
 
@@ -10047,7 +10047,7 @@ class HuntTab(QWidget):
                 total_monster_count=self.latest_monster_count,
             )
             direction_text = '우' if side == 'right' else '좌'
-            usage_reason = f"{base_reason} | 점프공격({direction_text}, 중심거리 {int(round(distance))}px)"
+            usage_reason = f"{base_reason} | 점프공격({direction_text}, 중심거리 {int(round(distance))}픽셀)"
 
             # 점프 전에는 기본 스킬 pre-delay를 그대로 적용
             pre_delay = self._sample_delay(getattr(skill, 'pre_delay_min', 0.0), getattr(skill, 'pre_delay_max', 0.0))
@@ -10140,7 +10140,7 @@ class HuntTab(QWidget):
             self._mark_walk_teleport_started(side)
             return True
         command = "걷기(좌)" if side == 'left' else "걷기(우)"
-        reason = f"몬스터 접근 ({'좌' if side == 'left' else '우'}, {distance:.0f}px)"
+        reason = f"몬스터 접근 ({'좌' if side == 'left' else '우'}, {distance:.0f}픽셀)"
         self._emit_control_command(command, reason=reason)
         self._movement_mode = mode_key
         self.hunting_active = True
@@ -10157,7 +10157,7 @@ class HuntTab(QWidget):
             candidates = [self.teleport_command_right, self.teleport_command_right_v2]
         available = [cmd for cmd in candidates if isinstance(cmd, str) and cmd.strip()]
         command = random.choice(available) if available else (self.teleport_command_left if side == 'left' else self.teleport_command_right)
-        reason = f"몬스터에게 이동 ({distance:.0f}px)"
+        reason = f"몬스터에게 이동 ({distance:.0f}픽셀)"
         self._emit_control_command(command, reason=reason)
         self._movement_mode = None
         self._reset_walk_teleport_state()
@@ -10232,7 +10232,7 @@ class HuntTab(QWidget):
             return False
 
         direction_text = '좌' if side == 'left' else '우'
-        reason = f"걷기({direction_text}, {distance:.0f}px) 유지"
+        reason = f"걷기({direction_text}, {distance:.0f}픽셀) 유지"
         self._emit_control_command(self.walk_teleport_command, reason=reason)
         self._update_detection_summary()
         return True
@@ -10324,7 +10324,7 @@ class HuntTab(QWidget):
         if target_side in ('left', 'right'):
             direction_label = '좌' if target_side == 'left' else '우'
             if isinstance(target_distance, (int, float)) and target_distance > 0:
-                detail_parts.append(f"목표 {direction_label} {int(round(target_distance))}px")
+                detail_parts.append(f"목표 {direction_label} {int(round(target_distance))}픽셀")
             else:
                 detail_parts.append(f"목표 {direction_label}측")
 
