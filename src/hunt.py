@@ -8241,6 +8241,73 @@ class HuntTab(QWidget):
         except Exception:
             return ""
 
+    def _get_latest_map_snapshot_payload(self) -> Optional[dict]:
+        """권한 매니저의 최신 맵 스냅샷을 payload(dict) 형태로 가져온다.
+        사용가능 시 as_payload()를 반환, 없으면 None.
+        """
+        try:
+            manager = self._authority_manager
+            # 내부 헬퍼 접근(가용 시)
+            if hasattr(manager, '_get_map_snapshot'):
+                snap = manager._get_map_snapshot()
+                if snap:
+                    return snap.as_payload()
+        except Exception:
+            pass
+        return None
+
+    def _format_character_state_for_log(self, map_snapshot: Optional[dict]) -> str:
+        """캐릭터 상태 요약을 한 줄로 구성한다(문장 없이).
+        포함 후보: 층, 상태, 이동, 방향
+        """
+        parts: list[str] = []
+        # 층
+        try:
+            if map_snapshot and map_snapshot.get('floor') is not None:
+                parts.append(f"층 {int(map_snapshot['floor'])}")
+        except Exception:
+            pass
+        # 상태
+        state_ko = None
+        if map_snapshot and isinstance(map_snapshot.get('player_state'), str):
+            ps = map_snapshot.get('player_state')
+            mapping = {
+                'idle': '대기',
+                'on_terrain': '지면',
+                'jumping': '점프',
+                'falling': '낙하',
+                'climbing_up': '오르기',
+                'climbing_down': '내리기',
+                'on_ladder_idle': '사다리 대기',
+            }
+            state_ko = mapping.get(ps, None)
+            if state_ko:
+                parts.append(f"상태 {state_ko}")
+        # 이동
+        if map_snapshot and isinstance(map_snapshot.get('navigation_action'), str):
+            na = map_snapshot.get('navigation_action')
+            mapping = {
+                'move_to_target': '이동',
+                'prepare_to_down_jump': '하강 준비',
+                'prepare_to_climb': '오르기 준비',
+                'align_for_climb': '정렬',
+                'climb_in_progress': '오르기 중',
+                'idle': '대기',
+            }
+            nav_ko = mapping.get(na, None)
+            if nav_ko:
+                parts.append(f"행동 {nav_ko}")
+        # 방향
+        facing = None
+        if self.last_facing in ('left', 'right'):
+            facing = self.last_facing
+        elif getattr(self, '_direction_last_side', None) in ('left', 'right'):
+            facing = getattr(self, '_direction_last_side')
+        if facing:
+            parts.append(f"방향 {'좌' if facing == 'left' else '우'}")
+
+        return ("캐릭터(" + ", ".join(parts) + ")") if parts else "캐릭터(정보 없음)"
+
     def _setup_timers(self) -> None:
         self.condition_timer = QTimer(self)
         self.condition_timer.setInterval(2000)
@@ -9611,10 +9678,14 @@ class HuntTab(QWidget):
                 message = "권한 획득"
                 if display_reason:
                     message += f" | 사유 {display_reason}"
-                # 현재 범위 정보를 함께 표기(좌/우)
+                # 현재 범위/캐릭터 상태(좌/우, 층/상태/이동/방향) 함께 표기
                 range_text = self._format_current_ranges_lr()
                 if range_text:
                     message += f" | {range_text}"
+                map_snapshot = payload.get('map_snapshot') if isinstance(payload, dict) else None
+                char_text = self._format_character_state_for_log(map_snapshot)
+                if char_text:
+                    message += f" | {char_text}"
                 self.append_log(message, "success")
         elif owner == "map":
             if not silent:
@@ -9624,6 +9695,10 @@ class HuntTab(QWidget):
                 range_text = self._format_current_ranges_lr()
                 if range_text:
                     message += f" | {range_text}"
+                map_snapshot = payload.get('map_snapshot') if isinstance(payload, dict) else None
+                char_text = self._format_character_state_for_log(map_snapshot)
+                if char_text:
+                    message += f" | {char_text}"
                 self.append_log(message, "info")
         else:
             if not silent:
@@ -9757,8 +9832,11 @@ class HuntTab(QWidget):
                 reason_parts.append("몬스터 조건 충족")
             reason_text = ", ".join(reason_parts)
             range_text = self._format_current_ranges_lr()
+            char_text = self._format_character_state_for_log(self._get_latest_map_snapshot_payload())
             if range_text:
                 reason_text = f"{reason_text} | {range_text}"
+            if char_text:
+                reason_text = f"{reason_text} | {char_text}"
             self.append_log(f"권한 요청 | {reason_text}", "info")
             request_reason = "MONSTER_READY" if self.map_link_enabled else reason_text
             self.request_control(request_reason)
