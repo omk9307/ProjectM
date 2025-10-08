@@ -255,6 +255,15 @@ class AttackSkill:
     primary_reset_min: int = 0
     primary_reset_max: int = 0
     primary_reset_command: str = ""
+    # 점프이동 공격(주 스킬 범위 2마리 이상일 때 확률적으로 중심에 가까워지며 공격)
+    jump_attack_enabled: bool = False
+    jump_attack_distance_px: int = 120
+    jump_attack_probability: int = 50
+    jump_profile_left: str = ""
+    jump_profile_right: str = ""
+    # 점프공격 전용 스킬 발동 전 대기(기본 스킬 pre-delay와 별도 적용)
+    jump_pre_delay_min: float = 0.0
+    jump_pre_delay_max: float = 0.0
 
 
 @dataclass
@@ -295,11 +304,13 @@ class AttackSkillDialog(QDialog):
         parent: Optional[QWidget] = None,
         skill: Optional[AttackSkill] = None,
         misc_commands: Optional[List[str]] = None,
+        skill_commands: Optional[List[str]] = None,
     ) -> None:
         super().__init__(parent)
         self.setWindowTitle("공격 스킬")
 
         self._misc_command_options = sorted({str(name) for name in misc_commands or [] if isinstance(name, str)})
+        self._skill_command_options = sorted({str(name) for name in skill_commands or [] if isinstance(name, str)})
 
         self.name_input = QLineEdit()
         self.command_input = QLineEdit()
@@ -354,6 +365,44 @@ class AttackSkillDialog(QDialog):
         self.probability_spinbox.setRange(0, 100)
         self.probability_spinbox.setValue(100)
         self.probability_spinbox.setSuffix(" %")
+
+        # 점프공격 옵션
+        self.jump_enabled_checkbox = QCheckBox("점프공격")
+        self.jump_enabled_checkbox.setChecked(False)
+
+        self.jump_distance_spinbox = QSpinBox()
+        self.jump_distance_spinbox.setRange(1, 2000)
+        self.jump_distance_spinbox.setValue(120)
+        self.jump_distance_spinbox.setSuffix(" px")
+
+        self.jump_probability_spinbox = QSpinBox()
+        self.jump_probability_spinbox.setRange(0, 100)
+        self.jump_probability_spinbox.setValue(50)
+        self.jump_probability_spinbox.setSuffix(" %")
+
+        self.jump_left_combo = QComboBox()
+        self.jump_left_combo.addItem("프로필 선택", "")
+        for name in self._skill_command_options:
+            self.jump_left_combo.addItem(name, name)
+
+        self.jump_right_combo = QComboBox()
+        self.jump_right_combo.addItem("프로필 선택", "")
+        for name in self._skill_command_options:
+            self.jump_right_combo.addItem(name, name)
+
+        self.jump_pre_delay_min_spinbox = QDoubleSpinBox()
+        self.jump_pre_delay_min_spinbox.setRange(0.0, 5.0)
+        self.jump_pre_delay_min_spinbox.setSingleStep(0.05)
+        self.jump_pre_delay_min_spinbox.setDecimals(3)
+        self.jump_pre_delay_min_spinbox.setValue(0.0)
+        self.jump_pre_delay_min_spinbox.setSuffix(" s")
+
+        self.jump_pre_delay_max_spinbox = QDoubleSpinBox()
+        self.jump_pre_delay_max_spinbox.setRange(0.0, 5.0)
+        self.jump_pre_delay_max_spinbox.setSingleStep(0.05)
+        self.jump_pre_delay_max_spinbox.setDecimals(3)
+        self.jump_pre_delay_max_spinbox.setValue(0.0)
+        self.jump_pre_delay_max_spinbox.setSuffix(" s")
 
         self.pre_delay_min_spinbox = QDoubleSpinBox()
         self.pre_delay_min_spinbox.setRange(0.0, 5.0)
@@ -431,6 +480,36 @@ class AttackSkillDialog(QDialog):
             index = self.primary_release_combo.findData(stored_command)
             if index >= 0:
                 self.primary_release_combo.setCurrentIndex(index)
+            # 점프공격 로드
+            try:
+                self.jump_enabled_checkbox.setChecked(bool(getattr(skill, 'jump_attack_enabled', False)))
+            except Exception:
+                pass
+            try:
+                self.jump_distance_spinbox.setValue(int(getattr(skill, 'jump_attack_distance_px', 120)))
+            except Exception:
+                pass
+            try:
+                self.jump_probability_spinbox.setValue(int(getattr(skill, 'jump_attack_probability', 50)))
+            except Exception:
+                pass
+            left_prof = str(getattr(skill, 'jump_profile_left', '') or '')
+            right_prof = str(getattr(skill, 'jump_profile_right', '') or '')
+            if left_prof and left_prof not in self._skill_command_options:
+                self.jump_left_combo.addItem(left_prof, left_prof)
+            if right_prof and right_prof not in self._skill_command_options:
+                self.jump_right_combo.addItem(right_prof, right_prof)
+            li = self.jump_left_combo.findData(left_prof)
+            if li >= 0:
+                self.jump_left_combo.setCurrentIndex(li)
+            ri = self.jump_right_combo.findData(right_prof)
+            if ri >= 0:
+                self.jump_right_combo.setCurrentIndex(ri)
+            try:
+                self.jump_pre_delay_min_spinbox.setValue(float(getattr(skill, 'jump_pre_delay_min', 0.0)))
+                self.jump_pre_delay_max_spinbox.setValue(float(getattr(skill, 'jump_pre_delay_max', 0.0)))
+            except Exception:
+                pass
         
         form = QFormLayout()
         form.addRow("이름", self.name_input)
@@ -443,6 +522,13 @@ class AttackSkillDialog(QDialog):
         form.addRow("사용 최소 몬스터 수", self.min_monsters_spinbox)
         form.addRow("사용 최대 몬스터 수", self.max_monsters_spinbox)
         form.addRow("사용 확률", self.probability_spinbox)
+        form.addRow("점프공격", self.jump_enabled_checkbox)
+        form.addRow("점프 사용거리(px)", self.jump_distance_spinbox)
+        form.addRow("점프 사용확률", self.jump_probability_spinbox)
+        form.addRow("좌측 명령프로필", self.jump_left_combo)
+        form.addRow("우측 명령프로필", self.jump_right_combo)
+        form.addRow("점프 발동 전 대기 최소", self.jump_pre_delay_min_spinbox)
+        form.addRow("점프 발동 전 대기 최대", self.jump_pre_delay_max_spinbox)
         form.addRow("스킬 발동 전 대기 최소", self.pre_delay_min_spinbox)
         form.addRow("스킬 발동 전 대기 최대", self.pre_delay_max_spinbox)
         form.addRow("스킬 발동 후 대기 최소", self.delay_min_spinbox)
@@ -460,12 +546,42 @@ class AttackSkillDialog(QDialog):
         self.setLayout(layout)
 
         self._update_primary_reset_controls(self.primary_checkbox.isChecked())
+        self.jump_enabled_checkbox.toggled.connect(self._update_jump_controls)
+        self._update_jump_controls(self.jump_enabled_checkbox.isChecked())
+
+    def _update_jump_controls(self, checked: bool) -> None:
+        widgets = (
+            self.jump_distance_spinbox,
+            self.jump_probability_spinbox,
+            self.jump_left_combo,
+            self.jump_right_combo,
+            self.jump_pre_delay_min_spinbox,
+            self.jump_pre_delay_max_spinbox,
+        )
+        state = bool(checked)
+        for w in widgets:
+            w.setEnabled(state)
+
+    def accept(self) -> None:
+        # 점프공격 유효성 검사: 좌/우 프로필이 모두 선택되어야 저장 가능
+        try:
+            if self.jump_enabled_checkbox.isChecked():
+                if not (self.jump_left_combo.currentData() and self.jump_right_combo.currentData()):
+                    QMessageBox.warning(self, "오류", "점프공격이 켜져 있습니다. 좌/우 명령 프로필을 모두 선택하세요.")
+                    return
+        except Exception:
+            pass
+        return super().accept()
 
     def get_skill(self) -> Optional[AttackSkill]:
         name = self.name_input.text().strip()
         command = self.command_input.text().strip()
         if not name or not command:
             return None
+        if self.jump_enabled_checkbox.isChecked():
+            if not (self.jump_left_combo.currentData() and self.jump_right_combo.currentData()):
+                QMessageBox.warning(self, "오류", "점프공격이 켜져 있습니다. 좌/우 명령 프로필을 모두 선택하세요.")
+                return None
         is_primary = self.primary_checkbox.isChecked()
         reset_min = self.primary_reset_min_spinbox.value() if is_primary else 0
         reset_max = self.primary_reset_max_spinbox.value() if is_primary else 0
@@ -499,6 +615,13 @@ class AttackSkillDialog(QDialog):
             primary_reset_min=reset_min if is_primary else 0,
             primary_reset_max=reset_max if is_primary else 0,
             primary_reset_command=reset_command,
+            jump_attack_enabled=self.jump_enabled_checkbox.isChecked(),
+            jump_attack_distance_px=int(self.jump_distance_spinbox.value()),
+            jump_attack_probability=int(self.jump_probability_spinbox.value()),
+            jump_profile_left=str(self.jump_left_combo.currentData() or ''),
+            jump_profile_right=str(self.jump_right_combo.currentData() or ''),
+            jump_pre_delay_min=min(self.jump_pre_delay_min_spinbox.value(), self.jump_pre_delay_max_spinbox.value()),
+            jump_pre_delay_max=max(self.jump_pre_delay_min_spinbox.value(), self.jump_pre_delay_max_spinbox.value()),
         )
 
     def _sync_primary_reset_bounds(self) -> None:
@@ -8911,6 +9034,13 @@ class HuntTab(QWidget):
                         primary_reset_min=reset_min,
                         primary_reset_max=reset_max,
                         primary_reset_command=reset_command,
+                        jump_attack_enabled=bool(item.get('jump_attack_enabled', False)),
+                        jump_attack_distance_px=int(item.get('jump_attack_distance_px', 120)),
+                        jump_attack_probability=int(item.get('jump_attack_probability', 50)),
+                        jump_profile_left=str(item.get('jump_profile_left', '') or ''),
+                        jump_profile_right=str(item.get('jump_profile_right', '') or ''),
+                        jump_pre_delay_min=float(item.get('jump_pre_delay_min', 0.0)),
+                        jump_pre_delay_max=float(item.get('jump_pre_delay_max', 0.0)),
                     )
                 )
             self._ensure_primary_skill()
@@ -9129,6 +9259,13 @@ class HuntTab(QWidget):
                     'primary_reset_min': getattr(skill, 'primary_reset_min', 0),
                     'primary_reset_max': getattr(skill, 'primary_reset_max', 0),
                     'primary_reset_command': getattr(skill, 'primary_reset_command', ''),
+                    'jump_attack_enabled': bool(getattr(skill, 'jump_attack_enabled', False)),
+                    'jump_attack_distance_px': int(getattr(skill, 'jump_attack_distance_px', 120)),
+                    'jump_attack_probability': int(getattr(skill, 'jump_attack_probability', 50)),
+                    'jump_profile_left': str(getattr(skill, 'jump_profile_left', '') or ''),
+                    'jump_profile_right': str(getattr(skill, 'jump_profile_right', '') or ''),
+                    'jump_pre_delay_min': float(getattr(skill, 'jump_pre_delay_min', 0.0)),
+                    'jump_pre_delay_max': float(getattr(skill, 'jump_pre_delay_max', 0.0)),
                 }
                 for skill in self.attack_skills
             ],
@@ -9645,6 +9782,9 @@ class HuntTab(QWidget):
             return
 
         character_box = self._select_reference_character_box(self.latest_snapshot.character_boxes)
+        # 점프공격(주 스킬 범위 중심 기준) 시도: 성공 시 방향전환 무시하고 종료
+        if self._try_jump_attack(skill, character_box):
+            return
         target_box = self._select_target_monster(character_box)
         if not target_box:
             self._ensure_idle_keys("목표 몬스터 탐지 실패")
@@ -9693,6 +9833,81 @@ class HuntTab(QWidget):
             return True
         self._maybe_trigger_walk_teleport(target_side, distance)
         return walk_issued
+
+    def _try_jump_attack(self, skill: AttackSkill, character_box: DetectionBox) -> bool:
+        """주 스킬 범위 군집 중심을 기준으로 점프공격을 시도.
+        - 조건: 점프공격 On, 주 스킬 범위 교차 몬스터 ≥ 2, 거리 ≥ 설정 px, 확률 성공
+        - 실행: 중심의 좌/우에 따라 반대 방향이 아닌, 중심을 향하는 방향 프로필 실행
+        - 방향전환은 무시(점프 실행 시 자체적으로 방향 포함된 프로필 가정)
+        - 지연: pre-delay는 점프 전용(jump_pre_delay_*), post/완료 지연은 기존 스킬 값 사용
+        """
+        try:
+            if not getattr(skill, 'jump_attack_enabled', False):
+                return False
+            if not self.current_primary_area:
+                return False
+            monsters = self._get_recent_monster_boxes()
+            if not monsters:
+                return False
+            primary_monsters = [m for m in monsters if m.intersects(self.current_primary_area)]
+            if len(primary_monsters) < 2:
+                return False
+            char_x = character_box.center_x
+            center_x = sum(m.center_x for m in primary_monsters) / float(len(primary_monsters))
+            side = 'left' if center_x < char_x else 'right'
+            distance = abs(center_x - char_x)
+            threshold = max(1, int(getattr(skill, 'jump_attack_distance_px', 120)))
+            if distance < threshold:
+                return False
+            prob = max(0, min(100, int(getattr(skill, 'jump_attack_probability', 50))))
+            roll = random.randint(1, 100)
+            if roll > prob:
+                return False
+
+            profile = str(getattr(skill, 'jump_profile_right', '') if side == 'right' else getattr(skill, 'jump_profile_left', '') or '').strip()
+            if not profile:
+                return False
+
+            # 사유 문자열
+            base_reason = self._build_attack_usage_reason(
+                skill,
+                monster_count=self.latest_primary_monster_count,
+                total_monster_count=self.latest_monster_count,
+            )
+            direction_text = '우' if side == 'right' else '좌'
+            usage_reason = f"{base_reason} | 점프공격({direction_text}, 중심거리 {int(round(distance))}px)"
+
+            # 점프 전용 pre-delay
+            pre_min = float(getattr(skill, 'jump_pre_delay_min', 0.0) or 0.0)
+            pre_max = float(getattr(skill, 'jump_pre_delay_max', 0.0) or 0.0)
+            pre_delay = self._sample_delay(pre_min, pre_max)
+
+            def emit() -> None:
+                exec_time = time.time()
+                self._next_command_ready_ts = max(self._next_command_ready_ts, exec_time)
+                self._emit_control_command(profile, reason=usage_reason)
+                # 완료 지연/카운팅은 스킬의 completion 지연을 그대로 사용
+                self._queue_completion_delay(
+                    profile,
+                    getattr(skill, 'completion_delay_min', 0.0),
+                    getattr(skill, 'completion_delay_max', 0.0),
+                    f"스킬 '{skill.name}'",
+                    payload={'type': 'attack', 'skill': skill},
+                )
+                self.last_attack_ts = exec_time
+                self.hunting_active = True
+                post_delay = self._sample_delay(getattr(skill, 'post_delay_min', 0.0), getattr(skill, 'post_delay_max', 0.0))
+                if post_delay > 0.0:
+                    self._set_command_cooldown(post_delay)
+                    self._log_delay_message(f"스킬 '{skill.name}'", post_delay)
+
+            if pre_delay > 0.0:
+                if self._start_pre_delay(profile, pre_delay, f"점프공격 '{skill.name}' 발동 전", emit):
+                    return True
+            emit()
+            return True
+        except Exception:
+            return False
 
     def _is_primary_reachable_from_hunt(self) -> bool:
         """사냥범위 내 몬스터들만 대상으로, 캐릭터가 X축 이동 시 주 스킬 범위 기준을
@@ -10353,7 +10568,11 @@ class HuntTab(QWidget):
         self._save_settings()
 
     def add_attack_skill(self) -> None:
-        dialog = AttackSkillDialog(self, misc_commands=self._get_misc_command_profiles())
+        dialog = AttackSkillDialog(
+            self,
+            misc_commands=self._get_misc_command_profiles(),
+            skill_commands=self._get_skill_command_profiles(),
+        )
         if dialog.exec() == QDialog.DialogCode.Accepted:
             skill = dialog.get_skill()
             if not skill:
@@ -10376,6 +10595,7 @@ class HuntTab(QWidget):
             self,
             skill=self.attack_skills[index],
             misc_commands=self._get_misc_command_profiles(),
+            skill_commands=self._get_skill_command_profiles(),
         )
         if dialog.exec() == QDialog.DialogCode.Accepted:
             updated = dialog.get_skill()
@@ -10505,7 +10725,13 @@ class HuntTab(QWidget):
             item.setText(3, "주 스킬" if skill.is_primary else "-")
             condition_label = self._format_skill_condition(skill)
             dir_label = "방향전환" if getattr(skill, 'use_direction', True) else "방향무시"
-            item.setText(4, f"{condition_label} | {dir_label} | {skill.probability}%")
+            jump_label = ""
+            if getattr(skill, 'jump_attack_enabled', False):
+                try:
+                    jump_label = f" | 점프 d={int(getattr(skill, 'jump_attack_distance_px', 0))}px@{int(getattr(skill, 'jump_attack_probability', 0))}%"
+                except Exception:
+                    jump_label = " | 점프"
+            item.setText(4, f"{condition_label} | {dir_label} | {skill.probability}%{jump_label}")
         self.attack_tree.blockSignals(False)
         self._update_attack_buttons()
 
@@ -10564,6 +10790,19 @@ class HuntTab(QWidget):
             return []
         if isinstance(profiles, dict):
             names = profiles.get('기타', [])
+        else:
+            names = []
+        return [str(name) for name in names if isinstance(name, str) and name]
+
+    def _get_skill_command_profiles(self) -> List[str]:
+        if not self.data_manager or not hasattr(self.data_manager, 'list_command_profiles'):
+            return []
+        try:
+            profiles = self.data_manager.list_command_profiles(('스킬',))
+        except Exception:
+            return []
+        if isinstance(profiles, dict):
+            names = profiles.get('스킬', [])
         else:
             names = []
         return [str(name) for name in names if isinstance(name, str) and name]
