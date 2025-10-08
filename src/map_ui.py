@@ -650,7 +650,9 @@ class MapTab(QWidget):
             # [추가] 사냥 권한 요청 '대기' 관리 플래그/마감
             self._hunt_request_pending = False
             self._hunt_request_seen_during_forbidden = False
+            self._hunt_request_seen_during_event = False
             self._hunt_request_wait_deadline_ts = 0.0
+            self._handover_suppress_until_ts = 0.0
             self._suppress_authority_resume = False  # ESC 등으로 탐지를 중단한 직후 재실행 차단 플래그
 
             # [v11.3.7] 설정 변수 선언만 하고 값 할당은 load_profile_data로 위임
@@ -1034,6 +1036,8 @@ class MapTab(QWidget):
                 self._hunt_request_pending = True
                 if getattr(self, 'forbidden_wall_in_progress', False):
                     self._hunt_request_seen_during_forbidden = True
+                if getattr(self, 'event_in_progress', False):
+                    self._hunt_request_seen_during_event = True
             elif status in {'accepted', 'rejected'}:
                 self._hunt_request_pending = False
         except Exception:
@@ -1982,6 +1986,22 @@ class MapTab(QWidget):
             }
             return _wrap_result(False, "forbidden_wall_active", detail)
 
+        # [추가] 사냥 권한 대기 보류창: 보류창 동안 모든 명령을 지연(예외: '모든 키 떼기'와 authority:* 사유)
+        try:
+            suppress_until = float(getattr(self, '_handover_suppress_until_ts', 0.0) or 0.0)
+        except Exception:
+            suppress_until = 0.0
+        if suppress_until > 0.0:
+            try:
+                import time as _time
+                now_ts = _time.time()
+            except Exception:
+                now_ts = suppress_until
+            if now_ts < suppress_until:
+                if command != "모든 키 떼기" and not (isinstance(reason, str) and reason.startswith('authority:')):
+                    detail = {"until": suppress_until, "command": command}
+                    return _wrap_result(False, "handover_wait_active", detail)
+
         self.control_command_issued.emit(command, reason)
 
         # [대기 모드] '모든 키 떼기' 이후 다음 틱에 즉시 이동 재킥
@@ -2041,6 +2061,9 @@ class MapTab(QWidget):
 
         if reason_code == "empty_command":
             return "재실행할 명령이 비어 있음"
+
+        if reason_code == "handover_wait_active":
+            return "사냥 권한 대기 처리 중"
 
         # 알 수 없는 사유는 디버깅 용도로 코드 그대로 노출
         return reason_code
@@ -3957,15 +3980,77 @@ class MapTab(QWidget):
         self.active_event_reason = ""
         self.event_started_at = 0.0
         self._authority_priority_override = False
+
+        # 우선 이벤트 해제(즉시 재평가 유도)
         if self._authority_manager:
-            self._authority_manager.clear_priority_event("WAYPOINT_EVENT")
-        self.navigation_action = 'move_to_target'
-        self.guidance_text = '없음'
-        self.recovery_cooldown_until = time.time() + 1.0
-        self.current_segment_path = []
-        self.current_segment_index = 0
-        self._try_execute_pending_event()
-        self._sync_authority_snapshot("event_finished")
+            try:
+                self._authority_manager.clear_priority_event("WAYPOINT_EVENT")
+            except Exception:
+                pass
+
+        # 웨이포인트 종료 직후 사냥 권한 요청이 '대기'였다면, 0.5초 동안 모든 맵 명령 재실행을 보류하고
+        # 그 사이에 사냥 권한 위임을 우선 처리한다.
+        prefer_handover = bool(getattr(self, '_hunt_request_pending', False) or getattr(self, '_hunt_request_seen_during_event', False))
+
+        if prefer_handover:
+            try:
+                self._emit_control_command("모든 키 떼기", "authority:reset", allow_forbidden=True)
+            except Exception:
+                pass
+            try:
+                import time as _time
+                start_ts = _time.time()
+                self._hunt_request_wait_deadline_ts = start_ts + 0.5
+                self._handover_suppress_until_ts = start_ts + 0.5
+            except Exception:
+                self._hunt_request_wait_deadline_ts = 0.0
+
+            def _await_event_handover() -> None:
+                # 사냥으로 넘어갔으면 종료
+                if getattr(self, 'current_authority_owner', 'map') != 'map':
+                    return
+                try:
+                    import time as _time2
+                    now_ts = _time2.time()
+                except Exception:
+                    now_ts = float(getattr(self, '_hunt_request_wait_deadline_ts', 0.0))
+                if now_ts < float(getattr(self, '_hunt_request_wait_deadline_ts', 0.0)):
+                    try:
+                        from PyQt6.QtCore import QTimer
+                        QTimer.singleShot(100, _await_event_handover)
+                    except Exception:
+                        pass
+                    return
+                # 마감: 여전히 맵이 보유 중이면 이후 로직을 정상 재개
+                _resume_after_event()
+
+            def _resume_after_event() -> None:
+                # 이벤트 종료 후 안내/경로 초기화 및 다음 로직 재개(기존 동작)
+                self.navigation_action = 'move_to_target'
+                self.guidance_text = '없음'
+                self.recovery_cooldown_until = time.time() + 1.0
+                self.current_segment_path = []
+                self.current_segment_index = 0
+                self._try_execute_pending_event()
+                self._sync_authority_snapshot("event_finished")
+
+            try:
+                from PyQt6.QtCore import QTimer
+                QTimer.singleShot(0, _await_event_handover)
+            except Exception:
+                _resume_after_event()
+        else:
+            # 사냥 요청 '대기'가 아니면 기존 동작을 즉시 수행
+            self.navigation_action = 'move_to_target'
+            self.guidance_text = '없음'
+            self.recovery_cooldown_until = time.time() + 1.0
+            self.current_segment_path = []
+            self.current_segment_index = 0
+            self._try_execute_pending_event()
+            self._sync_authority_snapshot("event_finished")
+
+        # 이벤트 기간 중 관측된 '대기' 플래그 초기화
+        self._hunt_request_seen_during_event = False
 
     def _refresh_forbidden_wall_states(self) -> None:
         refreshed: Dict[str, dict] = {}
@@ -4124,7 +4209,7 @@ class MapTab(QWidget):
                 self.update_general_log("금지벽 종료 후 보류된 명령을 재전송했습니다.", "gray")
 
         # 금지벽 종료 직후: 사냥 권한 요청 '대기'가 관측되었거나 진행 중이면
-        # 맵 명령 재실행을 최대 1.0초 보류하고, 그 사이에 사냥 권한을 우선 처리한다.
+        # 맵 명령 재실행을 최대 0.5초 보류하고, 그 사이에 사냥 권한을 우선 처리한다.
         prefer_handover = bool(getattr(self, '_hunt_request_pending', False) or getattr(self, '_hunt_request_seen_during_forbidden', False))
 
         # 우선 이벤트 해제(즉시 재평가 유도)
@@ -4165,7 +4250,12 @@ class MapTab(QWidget):
                 pass
             import time as _time
             start_ts = _time.time()
-            self._hunt_request_wait_deadline_ts = start_ts + 1.0
+            self._hunt_request_wait_deadline_ts = start_ts + 0.5
+            # 전역 명령 보류창(모든 명령 지연) 설정
+            try:
+                self._handover_suppress_until_ts = start_ts + 0.5
+            except Exception:
+                pass
 
             def _await_handover() -> None:
                 # 사냥으로 넘어갔으면 종료
