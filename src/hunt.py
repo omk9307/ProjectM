@@ -167,7 +167,9 @@ DIRECTION_MATCH_EDGE_LEFT = QPen(QColor(0, 200, 255, 220), 2, Qt.PenStyle.SolidL
 DIRECTION_MATCH_EDGE_RIGHT = QPen(QColor(255, 200, 0, 220), 2, Qt.PenStyle.SolidLine)
 NAMEPLATE_ROI_EDGE = QPen(QColor(255, 255, 255, 240), 3, Qt.PenStyle.SolidLine)
 NAMEPLATE_MATCH_EDGE = QPen(QColor(0, 255, 120, 240), 3, Qt.PenStyle.SolidLine)
-MONSTER_LOSS_GRACE_SEC = 0.1  # 단기 미검출 시 방향 유지용 유예시간(초)
+ MONSTER_LOSS_GRACE_SEC = 0.1  # 단기 미검출 시 방향 유지용 유예시간(초)
+ # 클린업 상태에서 주 스킬 범위로부터 허용할 추격 밴드(전/후 각 px)
+ CLEANUP_CHASE_MARGIN_PX = 150
 NAMEPLATE_TRACK_EDGE = QPen(QColor(255, 64, 64, 255), 3, Qt.PenStyle.SolidLine)
 NAMEPLATE_TRACK_BRUSH = QBrush(QColor(255, 32, 32, 40))
 NAMEPLATE_DEADZONE_EDGE = QPen(QColor(20, 20, 20, 230), 3, Qt.PenStyle.SolidLine)
@@ -10033,6 +10035,24 @@ class HuntTab(QWidget):
                 }
                 self.release_control("PRIMARY_NOT_READY", meta=release_meta)
             return
+
+        # [클린업 추격] 교전 유지 중(allow_cleanup)이며 주 스킬 범위 내 마릿수가 0일 때,
+        # 주 스킬 범위로부터 전/후 각 CLEANUP_CHASE_MARGIN_PX(px) 확장한 밴드 내의 몬스터를 향해 이동 시도
+        if allow_cleanup and self.latest_primary_monster_count == 0:
+            try:
+                primary_area = getattr(self, 'current_primary_area', None)
+                if primary_area is not None and isinstance(primary_area, AreaRect):
+                    margin = float(CLEANUP_CHASE_MARGIN_PX)
+                    chase_area = AreaRect(
+                        x=primary_area.x - margin,
+                        y=primary_area.y,
+                        width=primary_area.width + (margin * 2.0),
+                        height=primary_area.height,
+                    )
+                    if self._handle_monster_approach(restrict_area=chase_area):
+                        return
+            except Exception:
+                pass
         if not self.latest_snapshot or not self.latest_snapshot.character_boxes:
             self._ensure_idle_keys("탐지 데이터 없음")
             return
@@ -10067,21 +10087,23 @@ class HuntTab(QWidget):
 
         self._execute_attack_skill(skill)
 
-    def _handle_monster_approach(self) -> bool:
+    def _handle_monster_approach(self, restrict_area: Optional[AreaRect] = None) -> bool:
         if not self.latest_snapshot or not self.latest_snapshot.character_boxes:
             return False
-        if not self.current_hunt_area:
+        # 접근 대상 영역: 기본은 사냥범위, 전달되면 지정 영역 사용(예: 클린업 추격 밴드)
+        target_area = restrict_area if restrict_area is not None else self.current_hunt_area
+        if not target_area:
             return False
         monsters = self._get_recent_monster_boxes()
         if not monsters:
             return False
 
-        hunt_monsters = [box for box in monsters if box.intersects(self.current_hunt_area)]
-        if not hunt_monsters:
+        candidates = [box for box in monsters if box.intersects(target_area)]
+        if not candidates:
             return False
 
         character_box = self._select_reference_character_box(self.latest_snapshot.character_boxes)
-        target = min(hunt_monsters, key=lambda box: abs(box.center_x - character_box.center_x))
+        target = min(candidates, key=lambda box: abs(box.center_x - character_box.center_x))
         target_side = 'left' if target.center_x < character_box.center_x else 'right'
         distance = abs(target.center_x - character_box.center_x)
 
