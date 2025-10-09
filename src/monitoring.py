@@ -21,6 +21,7 @@ from PyQt6.QtWidgets import (
     QListWidgetItem,
     QSplitter,
     QPushButton,
+    QAbstractItemView,
 )
 
 try:
@@ -75,11 +76,18 @@ class LogListWidget(QListWidget):
         else:
             # 색 정보 없으면 기본 밝은 색상
             item.setForeground(QColor("#EEEEEE"))
+        # 현재 바닥 여부 체크(바닥이면 자동 스크롤 유지)
+        try:
+            sb = self.verticalScrollBar()
+            at_bottom = (sb.value() >= sb.maximum() - 2)
+        except Exception:
+            at_bottom = True
         self.addItem(item)
-        # 롤링(200개 유지)
-        if self.count() > 200:
+        # 롤링(400개 유지)
+        if self.count() > 400:
             self.takeItem(0)
-        self.scrollToBottom()
+        if at_bottom:
+            self.scrollToBottom()
 
 
 class MonitoringTab(QWidget):
@@ -229,6 +237,14 @@ class MonitoringTab(QWidget):
         self.map_log = LogListWidget(); self.map_log.setToolTip("맵 로그")
         self.hunt_log = LogListWidget(); self.hunt_log.setToolTip("사냥 로그")
         self.key_log = LogListWidget(); self.key_log.setToolTip("키보드 입력 로그")
+
+        # 로그 더블클릭 → 다른 로그를 가까운 시간대로 스크롤 동기화
+        try:
+            self.map_log.itemDoubleClicked.connect(lambda item: self._on_log_item_double_clicked(self.map_log, item))
+            self.hunt_log.itemDoubleClicked.connect(lambda item: self._on_log_item_double_clicked(self.hunt_log, item))
+            self.key_log.itemDoubleClicked.connect(lambda item: self._on_log_item_double_clicked(self.key_log, item))
+        except Exception:
+            pass
 
         map_group = QGroupBox("맵 로그")
         map_group_layout = QVBoxLayout(map_group)
@@ -588,6 +604,61 @@ class MonitoringTab(QWidget):
         # 색상은 원색 유지
         self.key_log.append_line(line, color, preserve_color=True)
         self._last_key_log_ts = now
+
+    # --- 로그 동기화(더블클릭) ---
+    def _on_log_item_double_clicked(self, source_widget: QListWidget, item: QListWidgetItem) -> None:
+        try:
+            ts = self._parse_ts_to_seconds(item.text())
+        except Exception:
+            ts = None
+        if ts is None:
+            return
+
+        targets = [w for w in (self.map_log, self.hunt_log, self.key_log) if w is not source_widget]
+        for w in targets:
+            idx = self._find_nearest_index_by_ts(w, ts)
+            if idx is None:
+                continue
+            try:
+                w.clearSelection()
+                w.setCurrentRow(idx)
+                w.scrollToItem(w.item(idx))
+            except Exception:
+                pass
+
+    def _parse_ts_to_seconds(self, text: str) -> Optional[float]:
+        """문자열 앞부분의 타임스탬프를 초 단위(float)로 변환.
+        지원 포맷:
+          - "[HH:MM:SS.mmm] ..."
+          - "[HH:MM:SS:mmm] ..." (ms 앞 구분자 콜론)
+          - "HH:MM:SS.mmm ..."
+        """
+        try:
+            m = re.match(r"^\s*\[?(\d{2}):(\d{2}):(\d{2})(?:[\.:](\d{1,3}))?\]?\s*", text)
+            if not m:
+                return None
+            h = int(m.group(1)); mnt = int(m.group(2)); s = int(m.group(3))
+            ms = int(m.group(4)) if m.group(4) is not None else 0
+            return h * 3600.0 + mnt * 60.0 + s + (ms / 1000.0)
+        except Exception:
+            return None
+
+    def _find_nearest_index_by_ts(self, widget: QListWidget, target_ts: float) -> Optional[int]:
+        best_idx: Optional[int] = None
+        best_diff: float = float('inf')
+        try:
+            for i in range(widget.count()):
+                it = widget.item(i)
+                ts = self._parse_ts_to_seconds(it.text())
+                if ts is None:
+                    continue
+                diff = abs(ts - target_ts)
+                if diff < best_diff:
+                    best_diff = diff
+                    best_idx = i
+        except Exception:
+            return best_idx
+        return best_idx
 
     # --- 표시 도우미 ---
     @staticmethod
