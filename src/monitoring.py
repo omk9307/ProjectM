@@ -6,7 +6,7 @@ import re
 
 import cv2
 import numpy as np
-from PyQt6.QtCore import Qt, QTimer, QThread, QRectF, pyqtSlot, pyqtSignal, QSettings
+from PyQt6.QtCore import Qt, QTimer, QThread, QRectF, pyqtSlot, pyqtSignal, QSettings, QSize
 from datetime import datetime
 from PyQt6.QtGui import QImage, QPixmap, QColor, QKeySequence
 from PyQt6.QtWidgets import (
@@ -45,6 +45,14 @@ class LogListWidget(QListWidget):
         # 행 교차색 비활성화
         self.setAlternatingRowColors(False)
         self.setDragEnabled(True)
+        # 가로 스크롤 제거 + 자동 줄바꿈 유지(여백은 현 상태 유지)
+        self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        try:
+            # QListView 속성: 단어 단위 줄바꿈 활성화
+            self.setWordWrap(True)
+            self.setUniformItemSizes(False)
+        except Exception:
+            pass
         # AutoControl 로그 스타일과 유사한 다크 테마 적용
         self.setStyleSheet(
             """
@@ -91,11 +99,43 @@ class LogListWidget(QListWidget):
         except Exception:
             at_bottom = True
         self.addItem(item)
+        # 줄바꿈 후 적절한 높이로 보정
+        try:
+            h = self._calc_wrapped_height(text)
+            item.setSizeHint(QSize(self.viewport().width(), h))
+        except Exception:
+            pass
         # 롤링(400개 유지)
         if self.count() > 400:
             self.takeItem(0)
         if at_bottom:
             self.scrollToBottom()
+
+    # 리스트 뷰포트 너비 기준 줄바꿈 높이 계산
+    def _calc_wrapped_height(self, text: str) -> int:
+        try:
+            # 여백은 기존 상태를 보전하기 위해 소폭(8px)만 내부 패딩으로 가정
+            avail = max(1, self.viewport().width() - 8)
+            fm = self.fontMetrics()
+            flags = int(Qt.TextFlag.TextWordWrap)
+            rect = fm.boundingRect(0, 0, avail, 0, flags, text)
+            # 위아래 약간의 패딩 추가
+            return max(rect.height() + 6, fm.height() + 6)
+        except Exception:
+            return self.fontMetrics().height() + 6
+
+    # 리사이즈 시 모든 항목 줄바꿈 높이 재계산
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        try:
+            for i in range(self.count()):
+                it = self.item(i)
+                if it is None:
+                    continue
+                h = self._calc_wrapped_height(it.text())
+                it.setSizeHint(QSize(self.viewport().width(), h))
+        except Exception:
+            pass
 
 
 class InfoListWidget(QListWidget):
@@ -206,7 +246,9 @@ class MonitoringTab(QWidget):
         # 좌측: 맵 미니맵
         map_box = QGroupBox("맵 미니맵 미리보기(맵탭 스타일)")
         map_layout = QVBoxLayout(map_box)
-        map_ctrl = QHBoxLayout()
+        # 컨트롤 높이를 참조할 수 있도록 위젯 래퍼 사용
+        map_ctrl_widget = QWidget()
+        map_ctrl = QHBoxLayout(map_ctrl_widget)
         # 시작/정지 버튼 + 연동 체크박스
         self.map_start_btn = QPushButton("시작")
         self.map_start_btn.clicked.connect(self._on_click_map_start)
@@ -232,7 +274,7 @@ class MonitoringTab(QWidget):
         map_ctrl.addWidget(self.map_interval_spin)
         map_ctrl.addStretch(1)
         map_ctrl.addWidget(self.map_preview_checkbox)
-        map_layout.addLayout(map_ctrl)
+        map_layout.addWidget(map_ctrl_widget)
         self.map_view = RealtimeMinimapView(self)
         self.map_view.setText("미리보기를 켜세요.")
         map_layout.addWidget(self.map_view, 1)
@@ -240,13 +282,20 @@ class MonitoringTab(QWidget):
         # 중앙: 정보칸(로그 스타일, 고정 행)
         info_box = QGroupBox("정보")
         info_layout = QVBoxLayout(info_box)
+        # 좌우 컨트롤 바 높이에 맞추기 위한 더미 컨트롤 바
+        info_ctrl_widget = QWidget()
+        info_ctrl_layout = QHBoxLayout(info_ctrl_widget)
+        info_ctrl_layout.setContentsMargins(0, 0, 0, 0)
+        info_ctrl_layout.addStretch(1)
         self.info_list = InfoListWidget(self)
-        info_layout.addWidget(self.info_list)
+        info_layout.addWidget(info_ctrl_widget)
+        info_layout.addWidget(self.info_list, 1)
 
         # 우측: 사냥 미리보기
         hunt_box = QGroupBox("사냥 미리보기")
         hunt_layout = QVBoxLayout(hunt_box)
-        hunt_ctrl = QHBoxLayout()
+        hunt_ctrl_widget = QWidget()
+        hunt_ctrl = QHBoxLayout(hunt_ctrl_widget)
         # 시작/정지 버튼 + 연동 체크박스(동일 상태 동기화)
         self.hunt_start_btn = QPushButton("시작")
         self.hunt_start_btn.clicked.connect(self._on_click_hunt_start)
@@ -289,7 +338,14 @@ class MonitoringTab(QWidget):
             hunt_ctrl.addWidget(_cb)
         hunt_ctrl.addStretch(1)
         hunt_ctrl.addWidget(self.hunt_preview_checkbox)
-        hunt_layout.addLayout(hunt_ctrl)
+        hunt_layout.addWidget(hunt_ctrl_widget)
+
+        # 중앙 정보 컨트롤바 높이를 좌우 컨트롤바와 동일하게 보정
+        try:
+            ctrl_h = max(map_ctrl_widget.sizeHint().height(), hunt_ctrl_widget.sizeHint().height())
+            info_ctrl_widget.setFixedHeight(ctrl_h)
+        except Exception:
+            pass
         self.hunt_preview_label = QLabel("탐지 대기 중 또는 미리보기 꺼짐.")
         self.hunt_preview_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.hunt_preview_label.setStyleSheet("background: black; color: white; min-height: 220px;")
