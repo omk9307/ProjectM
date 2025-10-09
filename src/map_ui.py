@@ -10250,23 +10250,33 @@ class MapTab(QWidget):
                                 self.intermediate_target_pos = next_pos
                         except Exception:
                             pass
-                        contact_terrain = self._get_contact_terrain(final_player_pos)
-                        if contact_terrain:
-                            points = contact_terrain.get('points', [])
-                            if len(points) >= 2:
-                                terrain_width = abs(points[0][0] - points[-1][0])
-                                if terrain_width < 10.0:
-                                    # 좁은 발판이므로 '정렬' 상태로 진입
-                                    self.navigation_action = 'align_for_climb'
-                                    self.alignment_target_x = self.intermediate_target_pos.x() # 사다리의 X좌표를 목표로 설정
-                                    self.alignment_expected_floor = contact_terrain.get('floor', self.current_player_floor)
-                                    self.alignment_expected_group = contact_terrain.get('dynamic_name')
-                                    self.verify_alignment_start_time = 0.0
-                                    self.update_general_log(f"좁은 발판 감지 (너비: {terrain_width:.1f}px). 사다리 앞 정렬을 시작합니다.", "gray")
-                                    return # 상태 전환 후 즉시 종료
-                        
-                        # 넓은 발판이거나, 발판 정보가 없으면 기존 로직 수행
-                        next_action_state = 'prepare_to_climb'
+
+                        # [변경] ladder_link 경유 시에는 정렬 단계(align_for_climb)를 생략하고 바로 등반 준비로 전환
+                        if current_node.get('type') == 'ladder_link':
+                            try:
+                                self.update_general_log("사다리 링크 구간: 정렬 생략. 바로 사다리 오르기 준비.", "gray")
+                            except Exception:
+                                pass
+                            next_action_state = 'prepare_to_climb'
+                        else:
+                            # 일반 사다리 접근 시 좁은 발판에서는 정렬 사용
+                            contact_terrain = self._get_contact_terrain(final_player_pos)
+                            if contact_terrain:
+                                points = contact_terrain.get('points', [])
+                                if len(points) >= 2:
+                                    terrain_width = abs(points[0][0] - points[-1][0])
+                                    if terrain_width < 10.0:
+                                        # 좁은 발판이므로 '정렬' 상태로 진입
+                                        self.navigation_action = 'align_for_climb'
+                                        self.alignment_target_x = self.intermediate_target_pos.x() # 사다리의 X좌표를 목표로 설정
+                                        self.alignment_expected_floor = contact_terrain.get('floor', self.current_player_floor)
+                                        self.alignment_expected_group = contact_terrain.get('dynamic_name')
+                                        self.verify_alignment_start_time = 0.0
+                                        self.update_general_log(f"좁은 발판 감지 (너비: {terrain_width:.1f}px). 사다리 앞 정렬을 시작합니다.", "gray")
+                                        return # 상태 전환 후 즉시 종료
+                            
+                            # 넓은 발판이거나, 발판 정보가 없으면 기존 로직 수행
+                            next_action_state = 'prepare_to_climb'
                     # --- 로직 끝 ---
 
                     elif action == 'jump':

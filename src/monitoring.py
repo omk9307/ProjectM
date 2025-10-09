@@ -28,6 +28,14 @@ try:
     from .map_widgets import RealtimeMinimapView
 except ImportError:
     from map_widgets import RealtimeMinimapView  # type: ignore
+try:
+    from control_authority_manager import ControlAuthorityManager
+except Exception:
+    ControlAuthorityManager = None  # type: ignore
+try:
+    from capture_manager import get_capture_manager
+except Exception:
+    get_capture_manager = None  # type: ignore
 
 
 class LogListWidget(QListWidget):
@@ -90,6 +98,62 @@ class LogListWidget(QListWidget):
             self.scrollToBottom()
 
 
+class InfoListWidget(QListWidget):
+    """중앙 정보칸: 고정 행(한 줄당 한 항목), 드래그/복사 가능, 갱신시 선택 유지."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setSelectionMode(QListWidget.SelectionMode.ExtendedSelection)
+        self.setAlternatingRowColors(False)
+        self.setDragEnabled(True)
+        self.setStyleSheet(
+            """
+            QListWidget {
+                background-color: #2E2E2E;
+                color: #EEEEEE;
+                border: 1px solid #555;
+            }
+            QListWidget::item:selected { background: #444; }
+            """
+        )
+        # 초기 8행 준비
+        for _ in range(8):
+            self.addItem(QListWidgetItem(""))
+
+    def keyPressEvent(self, event):
+        if event.matches(QKeySequence.StandardKey.Copy):
+            selected = self.selectedItems()
+            if selected:
+                text = "\n".join(item.text() for item in selected)
+                from PyQt6.QtWidgets import QApplication
+                QApplication.clipboard().setText(text)
+            return
+        super().keyPressEvent(event)
+
+    def set_lines(self, lines: list[str]) -> None:
+        # 선택 상태 보존
+        selected_rows = {i for i in range(self.count()) if self.item(i).isSelected()}
+        # 아이템 개수 보정(증감 최소화)
+        if self.count() < len(lines):
+            for _ in range(len(lines) - self.count()):
+                self.addItem(QListWidgetItem(""))
+        elif self.count() > len(lines):
+            # 뒤에서부터 제거
+            for _ in range(self.count() - len(lines)):
+                self.takeItem(self.count() - 1)
+        # 인플레이스 갱신
+        for i, text in enumerate(lines):
+            it = self.item(i)
+            if it is None:
+                it = QListWidgetItem("")
+                self.insertItem(i, it)
+            if it.text() != text:
+                it.setText(text)
+        # 선택 복원
+        for i in range(self.count()):
+            self.item(i).setSelected(i in selected_rows)
+
+
 class MonitoringTab(QWidget):
     """좌측: 맵 미니맵 미리보기, 우측: 사냥 미리보기, 하단: 로그 3분할."""
 
@@ -118,6 +182,12 @@ class MonitoringTab(QWidget):
         self._map_static_bound_synced: bool = False
         self._map_preview_enabled: bool = False
         self._hunt_preview_enabled: bool = False
+        # 정보칸 표시용 캐시
+        self._current_authority_owner: str = "map"
+        self._latest_hp: float | None = None
+        self._latest_mp: float | None = None
+        self._latest_exp_amount: str | None = None
+        self._latest_exp_percent: float | None = None
 
         self._init_ui()
         # AutoControl 실시간 로그와 동일한 Δ 및 구분선 처리를 위해 마지막 키로그 시각 저장
@@ -166,6 +236,12 @@ class MonitoringTab(QWidget):
         self.map_view = RealtimeMinimapView(self)
         self.map_view.setText("미리보기를 켜세요.")
         map_layout.addWidget(self.map_view, 1)
+
+        # 중앙: 정보칸(로그 스타일, 고정 행)
+        info_box = QGroupBox("정보")
+        info_layout = QVBoxLayout(info_box)
+        self.info_list = InfoListWidget(self)
+        info_layout.addWidget(self.info_list)
 
         # 우측: 사냥 미리보기
         hunt_box = QGroupBox("사냥 미리보기")
@@ -223,9 +299,11 @@ class MonitoringTab(QWidget):
         self._top_hsplitter = QSplitter(Qt.Orientation.Horizontal)
         self._top_hsplitter.setChildrenCollapsible(False)
         self._top_hsplitter.addWidget(map_box)
+        self._top_hsplitter.addWidget(info_box)
         self._top_hsplitter.addWidget(hunt_box)
         self._top_hsplitter.setStretchFactor(0, 1)
-        self._top_hsplitter.setStretchFactor(1, 1)
+        self._top_hsplitter.setStretchFactor(1, 0)
+        self._top_hsplitter.setStretchFactor(2, 1)
 
         top_container = QWidget()
         _top_layout = QVBoxLayout(top_container)
@@ -296,20 +374,26 @@ class MonitoringTab(QWidget):
         except Exception:
             self._vertical_splitter.setSizes([600, 300])
 
-        # 상단 좌우 스플리터 복원
+        # 상단 좌우 스플리터 복원 (2개/3개 구성 모두 호환)
         try:
             settings = QSettings("Gemini Inc.", "Maple AI Trainer")
             sizes = settings.value("monitoring/top_hsplitter_sizes")
-            if isinstance(sizes, list) and len(sizes) == 2:
+            if isinstance(sizes, list):
                 try:
                     sizes = [int(x) for x in sizes]
                 except Exception:
-                    sizes = [400, 400]
-                self._top_hsplitter.setSizes(sizes)  # type: ignore[arg-type]
+                    sizes = []
+                if len(sizes) == 3:
+                    self._top_hsplitter.setSizes(sizes)  # type: ignore[arg-type]
+                elif len(sizes) == 2:
+                    left, right = sizes
+                    self._top_hsplitter.setSizes([left, 280, right])
+                else:
+                    self._top_hsplitter.setSizes([400, 280, 400])
             else:
-                self._top_hsplitter.setSizes([400, 400])
+                self._top_hsplitter.setSizes([400, 280, 400])
         except Exception:
-            self._top_hsplitter.setSizes([400, 400])
+            self._top_hsplitter.setSizes([400, 280, 400])
 
         # 하단 좌우 스플리터 복원
         try:
@@ -370,12 +454,29 @@ class MonitoringTab(QWidget):
         self._map_preview_timer = QTimer(self)
         self._map_preview_timer.setSingleShot(False)
         self._map_preview_timer.timeout.connect(self._tick_map_preview)
+        # 정보칸 주기 갱신 타이머(0.5초)
+        self._info_timer = QTimer(self)
+        self._info_timer.setSingleShot(False)
+        self._info_timer.setInterval(500)
+        self._info_timer.timeout.connect(self._tick_info_update)
+        self._info_timer.start()
 
     # --- 탭 간 연결 ---
     def attach_tabs(self, map_tab, hunt_tab, auto_control_tab) -> None:
         self._map_tab = map_tab
         self._hunt_tab = hunt_tab
         self._auto_tab = auto_control_tab
+        # 상태 모니터 연결(가능 시)
+        try:
+            monitor = None
+            if map_tab and hasattr(map_tab, 'status_monitor'):
+                monitor = getattr(map_tab, 'status_monitor', None)
+            if monitor is None and hunt_tab and hasattr(hunt_tab, 'status_monitor'):
+                monitor = getattr(hunt_tab, 'status_monitor', None)
+            if monitor and hasattr(monitor, 'status_captured'):
+                monitor.status_captured.connect(self._on_status_snapshot)
+        except Exception:
+            pass
 
         # 로그 구독
         try:
@@ -429,6 +530,18 @@ class MonitoringTab(QWidget):
         # [NEW] 오버레이 선반영: 기본 OFF를 사냥 탭에 즉시 적용
         try:
             self._on_monitor_overlay_toggled(False)
+        except Exception:
+            pass
+        # 권한 변경 구독 및 초기 상태
+        try:
+            if ControlAuthorityManager is not None:
+                mgr = ControlAuthorityManager.instance()
+                try:
+                    state = mgr.current_state()
+                    self._current_authority_owner = getattr(state, 'owner', 'map')
+                except Exception:
+                    pass
+                mgr.authority_changed.connect(self._on_authority_changed)
         except Exception:
             pass
 
@@ -605,6 +718,35 @@ class MonitoringTab(QWidget):
         self.key_log.append_line(line, color, preserve_color=True)
         self._last_key_log_ts = now
 
+    # --- 상태 모니터 스냅샷 수신 ---
+    @pyqtSlot(dict)
+    def _on_status_snapshot(self, payload: dict) -> None:
+        if not isinstance(payload, dict):
+            return
+        try:
+            hp = payload.get('hp', {})
+            if isinstance(hp, dict) and isinstance(hp.get('percentage'), (int, float)):
+                self._latest_hp = float(hp['percentage'])
+        except Exception:
+            pass
+        try:
+            mp = payload.get('mp', {})
+            if isinstance(mp, dict) and isinstance(mp.get('percentage'), (int, float)):
+                self._latest_mp = float(mp['percentage'])
+        except Exception:
+            pass
+        try:
+            exp = payload.get('exp', {})
+            if isinstance(exp, dict):
+                amt = exp.get('amount')
+                per = exp.get('percent')
+                if isinstance(amt, str):
+                    self._latest_exp_amount = amt
+                if isinstance(per, (int, float)):
+                    self._latest_exp_percent = float(per)
+        except Exception:
+            pass
+
     # --- 로그 동기화(더블클릭) ---
     def _on_log_item_double_clicked(self, source_widget: QListWidget, item: QListWidgetItem) -> None:
         try:
@@ -674,6 +816,102 @@ class MonitoringTab(QWidget):
                 Qt.TransformationMode.SmoothTransformation,
             )
             label.setPixmap(pix)
+        except Exception:
+            pass
+
+    # --- 권한/정보칸 갱신 ---
+    @pyqtSlot()
+    def _tick_info_update(self) -> None:
+        # FPS: 권한 소유자 기준 선호, 없으면 폴백
+        fps_text = self._collect_fps_text()
+        # 이동권한
+        owner_text = "맵" if (self._current_authority_owner or "map") == "map" else "사냥"
+        # 스킬범위/ X축 범위(사냥탭 캐시 사용)
+        try:
+            skill_cnt = getattr(self._hunt_tab, 'latest_primary_monster_count', None)
+        except Exception:
+            skill_cnt = None
+        try:
+            x_cnt = getattr(self._hunt_tab, 'latest_monster_count', None)
+        except Exception:
+            x_cnt = None
+        # 텔레포트 확률: 권한 소유자 우선
+        teleport_percent = self._collect_teleport_percent()
+        # HP/MP/EXP
+        hp_line = f"HP: {self._latest_hp:.1f}%" if isinstance(self._latest_hp, float) else "HP: --%"
+        mp_line = f"MP: {self._latest_mp:.1f}%" if isinstance(self._latest_mp, float) else "MP: --%"
+        if isinstance(self._latest_exp_amount, str) and isinstance(self._latest_exp_percent, float):
+            exp_line = f"EXP: {self._latest_exp_amount} / {self._latest_exp_percent:.2f}%"
+        else:
+            exp_line = "EXP: -- / --"
+
+        lines = [
+            f"FPS: {fps_text}",
+            f"이동권한: {owner_text}",
+            f"스킬범위: {int(skill_cnt)}" if isinstance(skill_cnt, (int, float)) else "스킬범위: --",
+            f"X축 범위: {int(x_cnt)}" if isinstance(x_cnt, (int, float)) else "X축 범위: --",
+            f"텔레포트 확률: {teleport_percent}",
+            hp_line,
+            mp_line,
+            exp_line,
+        ]
+        self.info_list.set_lines(lines)
+
+    def _collect_fps_text(self) -> str:
+        owner = (self._current_authority_owner or "map").lower()
+        fps: float | None = None
+        try:
+            if owner == 'map' and self._map_tab is not None:
+                stats = getattr(self._map_tab, 'latest_perf_stats', {}) or {}
+                val = stats.get('fps')
+                if isinstance(val, (int, float)):
+                    fps = float(val)
+        except Exception:
+            pass
+        try:
+            if fps is None and self._hunt_tab is not None:
+                stats = getattr(self._hunt_tab, 'latest_perf_stats', {}) or {}
+                val = stats.get('fps')
+                if isinstance(val, (int, float)):
+                    fps = float(val)
+        except Exception:
+            pass
+        if fps is None and get_capture_manager is not None:
+            try:
+                mgr = get_capture_manager()
+                fps = float(getattr(mgr, 'get_target_fps')())
+            except Exception:
+                fps = None
+        return f"{fps:.1f}" if isinstance(fps, float) else "--"
+
+    def _collect_teleport_percent(self) -> str:
+        owner = (self._current_authority_owner or "map").lower()
+        percent: float | None = None
+        # 권한 기준 우선 수집
+        if owner == 'map' and self._map_tab is not None:
+            try:
+                text = getattr(self._map_tab, '_walk_teleport_probability_text', '') or ''
+                m = re.search(r"([0-9]+(?:\.[0-9]+)?)%", text)
+                if m:
+                    percent = float(m.group(1))
+            except Exception:
+                percent = None
+        if percent is None and self._hunt_tab is not None:
+            try:
+                if hasattr(self._hunt_tab, '_get_walk_teleport_display_percent'):
+                    percent = float(self._hunt_tab._get_walk_teleport_display_percent())
+                else:
+                    val = getattr(self._hunt_tab, '_walk_teleport_display_percent', None)
+                    percent = float(val) if isinstance(val, (int, float)) else None
+            except Exception:
+                percent = None
+        return f"{max(percent, 0.0):.1f}%" if isinstance(percent, float) else "--%"
+
+    @pyqtSlot(str, dict)
+    def _on_authority_changed(self, owner: str, payload: dict) -> None:
+        try:
+            if owner in ("map", "hunt"):
+                self._current_authority_owner = owner
         except Exception:
             pass
 
