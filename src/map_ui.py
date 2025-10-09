@@ -12368,15 +12368,15 @@ class MapTab(QWidget):
                 else:
                     cost_to_node = math.hypot(start_pos.x() - node_pos.x(), start_pos.y() - node_pos.y())
         
-            g_score[node_key] = cost_to_node
-            h_score = math.hypot(node_pos.x() - goal_pos.x(), node_pos.y() - goal_pos.y())
-            f_score[node_key] = cost_to_node + h_score
-            heapq.heappush(open_set, (f_score[node_key], node_key))
-            came_from[node_key] = ("__START__", None)
-            
-            if is_debug_enabled:
-                print(f"  - 추가: '{node_data['name']}' ({node_key})")
-                print(f"    - G(시작->노드): {cost_to_node:.1f}, H(노드->목표): {h_score:.1f}, F: {f_score[node_key]:.1f}")
+                g_score[node_key] = cost_to_node
+                h_score = math.hypot(node_pos.x() - goal_pos.x(), node_pos.y() - goal_pos.y())
+                f_score[node_key] = cost_to_node + h_score
+                heapq.heappush(open_set, (f_score[node_key], node_key))
+                came_from[node_key] = ("__START__", None)
+                
+                if is_debug_enabled:
+                    print(f"  - 추가: '{node_data['name']}' ({node_key})")
+                    print(f"    - G(시작->노드): {cost_to_node:.1f}, H(노드->목표): {h_score:.1f}, F: {f_score[node_key]:.1f}")
         
         iter_count = 0
         while open_set:
