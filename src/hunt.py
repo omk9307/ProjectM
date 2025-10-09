@@ -167,9 +167,9 @@ DIRECTION_MATCH_EDGE_LEFT = QPen(QColor(0, 200, 255, 220), 2, Qt.PenStyle.SolidL
 DIRECTION_MATCH_EDGE_RIGHT = QPen(QColor(255, 200, 0, 220), 2, Qt.PenStyle.SolidLine)
 NAMEPLATE_ROI_EDGE = QPen(QColor(255, 255, 255, 240), 3, Qt.PenStyle.SolidLine)
 NAMEPLATE_MATCH_EDGE = QPen(QColor(0, 255, 120, 240), 3, Qt.PenStyle.SolidLine)
- MONSTER_LOSS_GRACE_SEC = 0.1  # 단기 미검출 시 방향 유지용 유예시간(초)
- # 클린업 상태에서 주 스킬 범위로부터 허용할 추격 밴드(전/후 각 px)
- CLEANUP_CHASE_MARGIN_PX = 150
+MONSTER_LOSS_GRACE_SEC = 0.1  # 단기 미검출 시 방향 유지용 유예시간(초)
+# 클린업 상태에서 주 스킬 범위로부터 허용할 추격 밴드(전/후 각 px)
+CLEANUP_CHASE_MARGIN_PX = 150
 NAMEPLATE_TRACK_EDGE = QPen(QColor(255, 64, 64, 255), 3, Qt.PenStyle.SolidLine)
 NAMEPLATE_TRACK_BRUSH = QBrush(QColor(255, 32, 32, 40))
 NAMEPLATE_DEADZONE_EDGE = QPen(QColor(20, 20, 20, 230), 3, Qt.PenStyle.SolidLine)
