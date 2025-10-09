@@ -10109,18 +10109,31 @@ class HuntTab(QWidget):
                 self._cleanup_hold_until_ts = 0.0
                 if prev_cleanup:
                     try:
-                        self.append_log("클린업 종료", "info")
+                        # 원인: 주 스킬 기준 충족
+                        msg_metric = self._format_metric("주 스킬", self.latest_primary_monster_count, primary_threshold, ready=True)
+                        reason_text = msg_metric
+                        range_text = self._format_current_ranges_lr()
+                        if range_text:
+                            reason_text = f"{reason_text} | {range_text}"
+                        self.append_log(f"클린업 종료 | {reason_text}", "info")
                     except Exception:
-                        pass
+                        # 포맷 실패 시 기본 로그 유지
+                        self.append_log("클린업 종료", "info")
             elif self.latest_primary_monster_count >= 1:
                 # 잔몹 1마리 남은 상태 → 클린업 유지
                 self._cleanup_active = True
                 self._cleanup_hold_until_ts = 0.0
                 if not prev_cleanup:
                     try:
-                        self.append_log("클린업 진입", "info")
+                        # 원인: 주 스킬 미충족(잔몹 정리)
+                        msg_metric = self._format_metric("주 스킬", self.latest_primary_monster_count, primary_threshold, ready=False)
+                        reason_text = msg_metric
+                        range_text = self._format_current_ranges_lr()
+                        if range_text:
+                            reason_text = f"{reason_text} | {range_text}"
+                        self.append_log(f"클린업 진입 | {reason_text}", "info")
                     except Exception:
-                        pass
+                        self.append_log("클린업 진입", "info")
             else:
                 # 주 스킬 범위 내 0마리 → 클린업 유예 적용 후 종료 판단
                 if self._cleanup_active and self._cleanup_hold_until_ts <= 0.0:
