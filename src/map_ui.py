@@ -12251,7 +12251,8 @@ class MapTab(QWidget):
                 pos_from = node.get('pos')
                 pos_to = self.nav_nodes[exit_key]['pos']
                 y_diff = abs(pos_from.y() - pos_to.y())
-                cost = (y_diff * LADDER_JUMP_COST_MULTIPLIER) + FLOOR_CHANGE_PENALTY
+                # [변경] ladder_link 경유 등반 비용을 일반 사다리 등반과 동일한 가중치를 사용
+                cost = (y_diff * CLIMB_UP_COST_MULTIPLIER) + FLOOR_CHANGE_PENALTY
                 self.nav_graph[node_key][exit_key] = {'cost': cost, 'action': 'climb'}
 
             debug_print("\n" + "="*20 + f" 그래프 생성 완료 (노드: {len(self.nav_nodes)}개) " + "="*20)
@@ -12300,21 +12301,71 @@ class MapTab(QWidget):
             print("-" * 70)
             print("[A* INIT] 초기 Open Set 구성:")
         
-        for node_key in candidate_keys:
-            node_data = self.nav_nodes[node_key]
-            node_pos = node_data['pos']
-            cost_to_node = 0.0
+            for node_key in candidate_keys:
+                node_data = self.nav_nodes[node_key]
+                node_pos = node_data['pos']
+                cost_to_node = 0.0
 
-            # <<< [수정] 아래 if-else 블록 추가
-            if node_data.get('type') == 'djump_area':
-                x_range = node_data.get('x_range')
-                if x_range and x_range[0] <= start_pos.x() <= x_range[1]:
-                    cost_to_node = 0.0 # 범위 안에 있으면 비용 0
+                # <<< [수정] 아래 if-else 블록 추가
+                if node_data.get('type') == 'djump_area':
+                    x_range = node_data.get('x_range')
+                    if x_range and x_range[0] <= start_pos.x() <= x_range[1]:
+                        cost_to_node = 0.0 # 범위 안에 있으면 비용 0
+                    else:
+                        # 범위 밖이면 가장 가까운 경계까지의 거리
+                        cost_to_node = min(abs(start_pos.x() - x_range[0]), abs(start_pos.x() - x_range[1]))
+                elif node_data.get('type') == 'ladder_link':
+                    # [신규] ladder_link는 "링크 범위 안 + 위층으로 향함 + (분수층 사이 혹은 링크층 근접)"일 때
+                    # 로컬 트리거로 간주하여 초기 진입 비용을 0으로 설정합니다.
+                    try:
+                        x_range = node_data.get('x_range')
+                        tol = float(getattr(self, 'cfg_jump_link_arrival_x_threshold', JUMP_LINK_ARRIVAL_X_THRESHOLD))
+                        in_x_range = False
+                        if isinstance(x_range, (list, tuple)) and len(x_range) >= 2:
+                            x1, x2 = float(x_range[0]), float(x_range[1])
+                            in_x_range = (min(x1, x2) - tol) <= float(start_pos.x()) <= (max(x1, x2) + tol)
+
+                        player_floor = getattr(self, 'current_player_floor', None)
+                        link_floor = node_data.get('floor')
+                        floor_close = False
+                        if player_floor is not None and link_floor is not None:
+                            try:
+                                floor_close = abs(float(player_floor) - float(link_floor)) < 0.1
+                            except Exception:
+                                floor_close = False
+
+                        # to_upper 및 between_floors 판정
+                        to_upper = False
+                        between_floors = False
+                        obj_id = node_data.get('obj_id')
+                        if obj_id and player_floor is not None:
+                            try:
+                                obj = next((o for o in (self.geometry_data.get('transition_objects', []) or []) if o.get('id') == obj_id), None)
+                                if obj:
+                                    s_id, e_id = obj.get('start_line_id'), obj.get('end_line_id')
+                                    s_fl = self.line_id_to_floor_map.get(s_id)
+                                    e_fl = self.line_id_to_floor_map.get(e_id)
+                                    if s_fl is not None and e_fl is not None:
+                                        lower_fl = min(float(s_fl), float(e_fl))
+                                        upper_fl = max(float(s_fl), float(e_fl))
+                                        try:
+                                            pf = float(player_floor)
+                                        except Exception:
+                                            pf = player_floor
+                                        to_upper = upper_fl > pf
+                                        between_floors = (lower_fl < pf < upper_fl)
+                            except Exception:
+                                to_upper = False
+                                between_floors = False
+
+                        if in_x_range and to_upper and (between_floors or floor_close):
+                            cost_to_node = 0.0
+                        else:
+                            cost_to_node = math.hypot(start_pos.x() - node_pos.x(), start_pos.y() - node_pos.y())
+                    except Exception:
+                        cost_to_node = math.hypot(start_pos.x() - node_pos.x(), start_pos.y() - node_pos.y())
                 else:
-                    # 범위 밖이면 가장 가까운 경계까지의 거리
-                    cost_to_node = min(abs(start_pos.x() - x_range[0]), abs(start_pos.x() - x_range[1]))
-            else:
-                cost_to_node = math.hypot(start_pos.x() - node_pos.x(), start_pos.y() - node_pos.y())
+                    cost_to_node = math.hypot(start_pos.x() - node_pos.x(), start_pos.y() - node_pos.y())
             
             g_score[node_key] = cost_to_node
             h_score = math.hypot(node_pos.x() - goal_pos.x(), node_pos.y() - goal_pos.y())
@@ -12385,6 +12436,7 @@ class MapTab(QWidget):
                             # 링크 대상 사다리의 '상층' 판정
                             obj_id = link_node.get('obj_id')
                             to_upper = False
+                            between_floors = False
                             if obj_id:
                                 try:
                                     obj = next((o for o in (self.geometry_data.get('transition_objects', []) or []) if o.get('id') == obj_id), None)
@@ -12394,15 +12446,20 @@ class MapTab(QWidget):
                                         e_fl = self.line_id_to_floor_map.get(e_id)
                                         if isinstance(s_fl, (int, float)) and isinstance(e_fl, (int, float)):
                                             upper_fl = max(s_fl, e_fl)
+                                            lower_fl = min(s_fl, e_fl)
+                                            between_floors = (float(lower_fl) < float(player_floor) < float(upper_fl))
                                             to_upper = (upper_fl is not None and upper_fl > float(player_floor))
                                 except Exception:
                                     to_upper = False
+                                    between_floors = False
 
-                            # 최종 선호 조건: 같은(또는 매우 근접) 층에서 링크 구간에 "이미" 있고 + 위층으로 가는 사다리
-                            if (link_floor is None or abs(float(player_floor) - float(link_floor)) < 0.1) and in_x_range and to_upper:
+                            # 최종 선호 조건: 같은(또는 매우 근접) 층/분수층 구간에 있고 + 링크 범위 내 + 위층으로 향함
+                            floor_ok = (link_floor is None or abs(float(player_floor) - float(link_floor)) < 0.1) or between_floors
+                            if floor_ok and in_x_range and to_upper:
                                 prefer = True
 
-                        cost += (penalty_prefer if prefer else penalty_base)
+                        # 선호 조건 만족 시, 링크 진입 패널티를 0으로 간주하여 로컬 트리거 성격을 강화
+                        cost += (0.0 if prefer else penalty_base)
                 except Exception:
                     pass
                 
