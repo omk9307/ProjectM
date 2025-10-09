@@ -158,6 +158,14 @@ HUNT_AREA_BRUSH = QBrush(HUNT_AREA_COLOR)
 PRIMARY_AREA_COLOR = QColor(255, 140, 0, 70)
 PRIMARY_AREA_EDGE = QPen(QColor(230, 110, 0, 220), 2, Qt.PenStyle.SolidLine)
 PRIMARY_AREA_BRUSH = QBrush(PRIMARY_AREA_COLOR)
+# 클린업 추격 밴드 오버레이 스타일
+CLEANUP_CHASE_COLOR = QColor(255, 215, 0, 60)
+CLEANUP_CHASE_EDGE = QPen(QColor(255, 215, 0, 220), 2, Qt.PenStyle.DashLine)
+CLEANUP_CHASE_BRUSH = QBrush(CLEANUP_CHASE_COLOR)
+# 군집 중심 윈도우 오버레이 스타일
+CLUSTER_WINDOW_COLOR = QColor(255, 0, 255, 50)
+CLUSTER_WINDOW_EDGE = QPen(QColor(255, 0, 255, 220), 2, Qt.PenStyle.DotLine)
+CLUSTER_WINDOW_BRUSH = QBrush(CLUSTER_WINDOW_COLOR)
 FALLBACK_CHARACTER_EDGE = QPen(QColor(0, 255, 120, 220), 2, Qt.PenStyle.SolidLine)
 FALLBACK_CHARACTER_BRUSH = QBrush(QColor(0, 255, 120, 60))
 NICKNAME_EDGE = QPen(QColor(255, 255, 0, 220), 2, Qt.PenStyle.DotLine)
@@ -837,6 +845,8 @@ class HuntTab(QWidget):
         self.latest_snapshot: Optional[DetectionSnapshot] = None
         self.current_hunt_area: Optional[AreaRect] = None
         self.current_primary_area: Optional[AreaRect] = None
+        self.current_cleanup_chase_area: Optional[AreaRect] = None
+        self.current_cluster_window_area: Optional[AreaRect] = None
         self.latest_monster_count = 0
         self.latest_primary_monster_count = 0
         self.control_release_timeout = self.CONTROL_RELEASE_TIMEOUT_SEC
@@ -855,6 +865,8 @@ class HuntTab(QWidget):
         self.overlay_preferences = {
             'hunt_area': True,
             'primary_area': True,
+            'cleanup_chase_area': True,
+            'cluster_window_area': True,
             'direction_area': True,
             'nickname_range': True,
             'nameplate_area': True,
@@ -3759,6 +3771,14 @@ class HuntTab(QWidget):
         self.show_primary_skill_checkbox.setChecked(True)
         self.show_primary_skill_checkbox.toggled.connect(self._on_overlay_toggle_changed)
 
+        # [NEW] 오버레이 추가 체크박스 (아랫줄)
+        self.show_cleanup_chase_checkbox = QCheckBox("클린업 추격밴드")
+        self.show_cleanup_chase_checkbox.setChecked(True)
+        self.show_cleanup_chase_checkbox.toggled.connect(self._on_overlay_toggle_changed)
+        self.show_cluster_window_checkbox = QCheckBox("군집 중심 범위")
+        self.show_cluster_window_checkbox.setChecked(True)
+        self.show_cluster_window_checkbox.toggled.connect(self._on_overlay_toggle_changed)
+
         self.show_direction_checkbox = QCheckBox("캐릭터방향 범위")
         self.show_direction_checkbox.setChecked(True)
         self.show_direction_checkbox.toggled.connect(self._on_overlay_toggle_changed)
@@ -3784,6 +3804,8 @@ class HuntTab(QWidget):
         for checkbox in (
             self.show_hunt_area_checkbox,
             self.show_primary_skill_checkbox,
+            self.show_cleanup_chase_checkbox,
+            self.show_cluster_window_checkbox,
             self.show_direction_checkbox,
             self.show_nickname_range_checkbox,
             self.show_nameplate_checkbox,
@@ -3808,6 +3830,14 @@ class HuntTab(QWidget):
 
         button_row.addStretch(1)
         control_layout.addLayout(button_row)
+
+        # [NEW] 오버레이 2열 배치(요청: 아랫줄)
+        button_row2 = QHBoxLayout()
+        button_row2.setSpacing(12)
+        button_row2.addWidget(self.show_cleanup_chase_checkbox)
+        button_row2.addWidget(self.show_cluster_window_checkbox)
+        button_row2.addStretch(1)
+        control_layout.addLayout(button_row2)
 
         control_container.setSizePolicy(QSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed))
         outer_layout.addWidget(control_container)
@@ -4757,6 +4787,30 @@ class HuntTab(QWidget):
                 if not rect.isNull():
                     painter.setPen(PRIMARY_AREA_EDGE)
                     painter.setBrush(PRIMARY_AREA_BRUSH)
+                    painter.drawRect(rect)
+            # [NEW] 클린업 추격밴드 오버레이(클린업 중에만)
+            if (
+                getattr(self, 'current_cleanup_chase_area', None)
+                and self.overlay_preferences.get('cleanup_chase_area', True)
+                and hasattr(self, 'show_cleanup_chase_checkbox')
+                and self.show_cleanup_chase_checkbox.isChecked()
+            ):
+                rect = self._area_to_rect(self.current_cleanup_chase_area, image.width(), image.height())
+                if not rect.isNull():
+                    painter.setPen(CLEANUP_CHASE_EDGE)
+                    painter.setBrush(CLEANUP_CHASE_BRUSH)
+                    painter.drawRect(rect)
+            # [NEW] 군집 중심 윈도우 오버레이
+            if (
+                getattr(self, 'current_cluster_window_area', None)
+                and self.overlay_preferences.get('cluster_window_area', True)
+                and hasattr(self, 'show_cluster_window_checkbox')
+                and self.show_cluster_window_checkbox.isChecked()
+            ):
+                rect = self._area_to_rect(self.current_cluster_window_area, image.width(), image.height())
+                if not rect.isNull():
+                    painter.setPen(CLUSTER_WINDOW_EDGE)
+                    painter.setBrush(CLUSTER_WINDOW_BRUSH)
                     painter.drawRect(rect)
             painter.setCompositionMode(COMPOSITION_MODE_SOURCE_OVER)
             if self._is_nickname_overlay_active() and self._latest_nickname_box:
@@ -5763,6 +5817,7 @@ class HuntTab(QWidget):
             return
         show_hunt = self.overlay_preferences.get('hunt_area', True)
         show_primary = self.overlay_preferences.get('primary_area', True)
+        # 신규 오버레이 토글은 같은 함수에서 detection 스레드로 보낼 필요 없음(현지 렌더링)
         hunt_rect = None
         primary_rect = None
         if self.current_hunt_area and self.show_hunt_area_checkbox.isChecked() and show_hunt:
@@ -5775,6 +5830,10 @@ class HuntTab(QWidget):
     def _on_overlay_toggle_changed(self, _checked: bool) -> None:
         self.overlay_preferences['hunt_area'] = self.show_hunt_area_checkbox.isChecked()
         self.overlay_preferences['primary_area'] = self.show_primary_skill_checkbox.isChecked()
+        if hasattr(self, 'show_cleanup_chase_checkbox'):
+            self.overlay_preferences['cleanup_chase_area'] = self.show_cleanup_chase_checkbox.isChecked()
+        if hasattr(self, 'show_cluster_window_checkbox'):
+            self.overlay_preferences['cluster_window_area'] = self.show_cluster_window_checkbox.isChecked()
         direction_state = self.show_direction_checkbox.isChecked()
         self.overlay_preferences['direction_area'] = direction_state
         self._direction_area_user_pref = direction_state
@@ -7890,6 +7949,9 @@ class HuntTab(QWidget):
 
         self.current_hunt_area = hunt_area
         self.current_primary_area = primary_area
+        # 초기화: 프레임별로 갱신
+        self.current_cleanup_chase_area = None
+        self.current_cluster_window_area = None
 
         now = time.time()
         raw_monsters = self.latest_snapshot.monster_boxes or []
@@ -7935,9 +7997,52 @@ class HuntTab(QWidget):
         self._emit_area_overlays()
         self.monster_stats_updated.emit(hunt_count, primary_count)
 
+        # [NEW] 오버레이 계산: 클린업 추격밴드 & 군집 중심 윈도우
+        try:
+            # 클린업 추격밴드: 클린업 상태일 때만 표시
+            if primary_area is not None and getattr(self, '_cleanup_active', False):
+                margin = float(CLEANUP_CHASE_MARGIN_PX)
+                self.current_cleanup_chase_area = AreaRect(
+                    x=primary_area.x - margin,
+                    y=primary_area.y,
+                    width=primary_area.width + (margin * 2.0),
+                    height=primary_area.height,
+                )
+            # 군집 중심 윈도우: 사냥범위 내 몬스터의 X축 분포에서 주 스킬 폭 만큼의 최대 포함 윈도우
+            if hunt_area is not None and primary_area is not None and effective_monsters:
+                width = float(max(1.0, primary_area.width))
+                # 후보: 사냥 Y밴드와 교차하는 몬스터만
+                hunt_monsters = [box for box in effective_monsters if box.intersects(hunt_area)]
+                if hunt_monsters:
+                    xs = sorted(box.center_x for box in hunt_monsters)
+                    n = len(xs)
+                    i = 0
+                    best_i = 0
+                    best_j = 0
+                    j = 0
+                    for i in range(n):
+                        while j < n and (xs[j] - xs[i]) <= width + 1e-6:
+                            j += 1
+                        if (j - i) > (best_j - best_i):
+                            best_i, best_j = i, j
+                    if best_j > best_i:
+                        center = (xs[best_i] + xs[best_j - 1]) / 2.0
+                        x = center - width / 2.0
+                        self.current_cluster_window_area = AreaRect(
+                            x=x,
+                            y=hunt_area.y,
+                            width=width,
+                            height=hunt_area.height,
+                        )
+        except Exception:
+            # 계산 실패 시 조용히 무시
+            pass
+
     def _clear_detection_metrics(self) -> None:
         self.current_hunt_area = None
         self.current_primary_area = None
+        self.current_cleanup_chase_area = None
+        self.current_cluster_window_area = None
         self.latest_monster_count = 0
         self.latest_primary_monster_count = 0
         self._cached_monster_boxes = []
@@ -8844,6 +8949,8 @@ class HuntTab(QWidget):
         if display:
             show_hunt = bool(display.get('show_hunt_area', self.show_hunt_area_checkbox.isChecked()))
             show_primary = bool(display.get('show_primary_area', self.show_primary_skill_checkbox.isChecked()))
+            show_cleanup_chase = bool(display.get('show_cleanup_chase_area', getattr(self, 'show_cleanup_chase_checkbox').isChecked() if hasattr(self, 'show_cleanup_chase_checkbox') else True))
+            show_cluster_window = bool(display.get('show_cluster_window_area', getattr(self, 'show_cluster_window_checkbox').isChecked() if hasattr(self, 'show_cluster_window_checkbox') else True))
             if 'show_direction_area' in display:
                 show_direction = bool(display.get('show_direction_area'))
             elif 'show_nickname_area' in display:
@@ -8895,6 +9002,10 @@ class HuntTab(QWidget):
 
             self.show_hunt_area_checkbox.setChecked(show_hunt)
             self.show_primary_skill_checkbox.setChecked(show_primary)
+            if hasattr(self, 'show_cleanup_chase_checkbox'):
+                self.show_cleanup_chase_checkbox.setChecked(show_cleanup_chase)
+            if hasattr(self, 'show_cluster_window_checkbox'):
+                self.show_cluster_window_checkbox.setChecked(show_cluster_window)
             self.show_direction_checkbox.setChecked(show_direction)
             self.show_nickname_range_checkbox.setChecked(show_nickname_range)
             self.show_nameplate_checkbox.setChecked(show_nameplate)
@@ -9453,6 +9564,8 @@ class HuntTab(QWidget):
             'display': {
                 'show_hunt_area': self.show_hunt_area_checkbox.isChecked(),
                 'show_primary_area': self.show_primary_skill_checkbox.isChecked(),
+                'show_cleanup_chase_area': bool(self.show_cleanup_chase_checkbox.isChecked()) if hasattr(self, 'show_cleanup_chase_checkbox') else True,
+                'show_cluster_window_area': bool(self.show_cluster_window_checkbox.isChecked()) if hasattr(self, 'show_cluster_window_checkbox') else True,
                 'show_direction_area': self.show_direction_checkbox.isChecked(),
                 'show_nickname_range_area': self.show_nickname_range_checkbox.isChecked(),
                 'show_nameplate_area': self.show_nameplate_checkbox.isChecked(),
