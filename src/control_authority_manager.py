@@ -554,6 +554,23 @@ class ControlAuthorityManager(QObject):
                 failed.append("HUNT_PROTECT_ACTIVE")
             if self._state.map_priority_lock:
                 failed.append("MAP_PRIORITY_LOCK")
+            # [추가] 마지막 지면 기준 높이 게이트: 착지(근접) 전에는 사냥 위임 보류
+            try:
+                meta_map = map_snapshot.metadata if isinstance(map_snapshot.metadata, dict) else {}
+                near_flag = meta_map.get("is_near_floor")
+                if isinstance(near_flag, bool):
+                    near_ok = near_flag
+                else:
+                    h = meta_map.get("height_from_last_floor_px")
+                    thr = meta_map.get("near_floor_threshold_px")
+                    near_ok = True
+                    if isinstance(h, (int, float)) and isinstance(thr, (int, float)):
+                        near_ok = (float(h) <= float(thr))
+                if not near_ok:
+                    failed.append("MAP_NOT_NEAR_FLOOR")
+            except Exception:
+                # 메타가 없거나 계산 실패 시 게이트 미적용(기존 로직 유지)
+                pass
 
         if hunt_snapshot:
             if not hunt_snapshot.is_recent():

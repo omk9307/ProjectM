@@ -942,6 +942,82 @@ class MapTab(QWidget):
         player_state = getattr(self, 'player_state', 'unknown') or 'unknown'
         navigation_action = getattr(self, 'navigation_action', '') or ''
         last_move_command = getattr(self, 'last_movement_command', None)
+
+        # --- [추가] 지면 근접 메타 산출 ---
+        # 기준 층: 마지막 접지 층을 소숫점 내림(예: 1.9 -> 1)
+        baseline_floor_int = None
+        try:
+            _floor_val = getattr(self, 'current_player_floor', None)
+            if isinstance(_floor_val, (int, float)):
+                import math as _math
+                baseline_floor_int = int(_math.floor(float(_floor_val)))
+        except Exception:
+            baseline_floor_int = None
+
+        # 플레이어 현재 위치(px)
+        player_pos = getattr(self, 'smoothed_player_pos', None) or getattr(self, 'last_player_pos', None)
+        player_x = float(player_pos.x()) if hasattr(player_pos, 'x') else None
+        player_y = float(player_pos.y()) if hasattr(player_pos, 'y') else None
+
+        # 기준 층의 Y를 현재 X에서 보간하여 구함. 실패 시 마지막 접지 Y로 폴백
+        def _interp_floor_y_at_x(floor_int: int, x_val: float) -> float | None:
+            if floor_int is None or x_val is None:
+                return None
+            try:
+                candidates = []
+                lines = (self.geometry_data or {}).get('terrain_lines', [])
+                for line in lines:
+                    try:
+                        if int(float(line.get('floor', -999))) != int(floor_int):
+                            continue
+                    except Exception:
+                        continue
+                    pts = line.get('points', [])
+                    if len(pts) < 2:
+                        continue
+                    for i in range(len(pts) - 1):
+                        p1, p2 = pts[i], pts[i+1]
+                        min_lx, max_lx = (p1[0], p2[0]) if p1[0] <= p2[0] else (p2[0], p1[0])
+                        if x_val < min_lx or x_val > max_lx:
+                            continue
+                        if (p2[0] - p1[0]) == 0:
+                            line_y = p1[1]
+                        else:
+                            t = (x_val - p1[0]) / (p2[0] - p1[0])
+                            line_y = p1[1] + (p2[1] - p1[1]) * t
+                        candidates.append(float(line_y))
+                if not candidates:
+                    return None
+                if player_y is None:
+                    return candidates[0]
+                return min(candidates, key=lambda yy: abs(yy - player_y))
+            except Exception:
+                return None
+
+        baseline_y = None
+        if baseline_floor_int is not None and player_x is not None:
+            baseline_y = _interp_floor_y_at_x(baseline_floor_int, player_x)
+        if baseline_y is None:
+            try:
+                baseline_y = float(getattr(self, 'last_on_terrain_y', None))
+            except Exception:
+                baseline_y = None
+
+        # 임계값: 최대 점프 Y 오프셋 + 1.5px
+        try:
+            base_thr = float(getattr(self, 'cfg_jump_y_max_threshold', 0.0) or 0.0)
+        except Exception:
+            base_thr = 0.0
+        near_floor_threshold_px = float(base_thr) + 1.5
+
+        # 실제 높이 차이 산출
+        if player_y is not None and baseline_y is not None:
+            height_from_last_floor_px = abs(float(baseline_y) - float(player_y))
+            is_near_floor = bool(height_from_last_floor_px <= near_floor_threshold_px)
+        else:
+            height_from_last_floor_px = None
+            # 위치 불명일 때는 판단 생략(우회), 위치만 있고 기준이 없으면 보수적으로 통과로 간주하지 않음
+            is_near_floor = True if player_y is None else False
         snapshot = PlayerStatusSnapshot(
             timestamp=timestamp,
             floor=getattr(self, 'current_player_floor', None),
@@ -956,6 +1032,11 @@ class MapTab(QWidget):
                 "navigation_locked": bool(getattr(self, 'navigation_state_locked', False)),
                 "guidance_text": getattr(self, 'guidance_text', ''),
                 "pending_nav_reason": getattr(self, 'pending_nav_recalc_reason', None),
+                # [추가] 지면 근접 메타
+                "baseline_floor_int": baseline_floor_int,
+                "near_floor_threshold_px": near_floor_threshold_px,
+                "height_from_last_floor_px": height_from_last_floor_px,
+                "is_near_floor": is_near_floor,
             },
         )
         self._last_authority_snapshot_ts = snapshot.timestamp

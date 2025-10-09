@@ -6033,6 +6033,24 @@ class HuntTab(QWidget):
                 )
                 continue
 
+            if code == "MAP_NOT_NEAR_FLOOR":
+                base_floor = map_meta.get("baseline_floor_int")
+                h = map_meta.get("height_from_last_floor_px")
+                thr = map_meta.get("near_floor_threshold_px")
+                try:
+                    base_floor_text = f"{int(base_floor)}층" if isinstance(base_floor, (int, float)) else "알 수 없음"
+                except Exception:
+                    base_floor_text = "알 수 없음"
+                if isinstance(h, (int, float)) and isinstance(thr, (int, float)):
+                    descriptions.append(
+                        f"MAP_NOT_NEAR_FLOOR: 착지 전이라 권한 위임을 보류합니다. (마지막 지면층 {base_floor_text}, ΔY={float(h):.1f}px, 임계값={float(thr):.1f}px)"
+                    )
+                else:
+                    descriptions.append(
+                        f"MAP_NOT_NEAR_FLOOR: 착지 전이라 권한 위임을 보류합니다. (마지막 지면층 {base_floor_text})"
+                    )
+                continue
+
             if code == "FLOOR_CHANGE_PENDING":
                 lock_reason = request_meta.get("floor_lock_reason")
                 reason_lookup = {
