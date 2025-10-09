@@ -186,6 +186,23 @@ class MonitoringTab(QWidget):
         hunt_ctrl.addSpacing(12)
         hunt_ctrl.addWidget(QLabel("갱신 주기"))
         hunt_ctrl.addWidget(self.hunt_interval_spin)
+
+        # [NEW] 모니터링 전용 오버레이 토글(기본 OFF)
+        self.chk_hunt_bundle = QCheckBox("사냥범위")  # hunt_area + primary_area 세트
+        self.chk_nickname_range = QCheckBox("닉네임범위")
+        self.chk_nameplate_track = QCheckBox("몬스터 이름표 시각화")
+        self.chk_cleanup_band = QCheckBox("클린업" )
+        self.chk_cluster_window = QCheckBox("군집 중심 범위")
+        for _cb in (
+            self.chk_hunt_bundle,
+            self.chk_nickname_range,
+            self.chk_nameplate_track,
+            self.chk_cleanup_band,
+            self.chk_cluster_window,
+        ):
+            _cb.setChecked(False)
+            _cb.toggled.connect(self._on_monitor_overlay_toggled)
+            hunt_ctrl.addWidget(_cb)
         hunt_ctrl.addStretch(1)
         hunt_ctrl.addWidget(self.hunt_preview_checkbox)
         hunt_layout.addLayout(hunt_ctrl)
@@ -309,6 +326,12 @@ class MonitoringTab(QWidget):
             self.map_preview_checkbox.setChecked(map_checked)
             self.hunt_preview_checkbox.setChecked(hunt_checked)
             self._apply_link_checkbox_state(link_checked, propagate=False)
+            # [NEW] 오버레이 체크박스 상태 복원(기본 OFF)
+            self.chk_hunt_bundle.setChecked(_to_bool(settings.value("monitoring/ovl_hunt_bundle"), False))
+            self.chk_nickname_range.setChecked(_to_bool(settings.value("monitoring/ovl_nickname_range"), False))
+            self.chk_nameplate_track.setChecked(_to_bool(settings.value("monitoring/ovl_nameplate_track"), False))
+            self.chk_cleanup_band.setChecked(_to_bool(settings.value("monitoring/ovl_cleanup_band"), False))
+            self.chk_cluster_window.setChecked(_to_bool(settings.value("monitoring/ovl_cluster_window"), False))
         except Exception:
             pass
 
@@ -318,6 +341,12 @@ class MonitoringTab(QWidget):
             self.hunt_preview_checkbox.toggled.connect(self._persist_checkbox_states)
             self.map_link_checkbox.toggled.connect(self._persist_checkbox_states)
             self.hunt_link_checkbox.toggled.connect(self._persist_checkbox_states)
+            # [NEW] 오버레이 상태 저장
+            self.chk_hunt_bundle.toggled.connect(self._persist_checkbox_states)
+            self.chk_nickname_range.toggled.connect(self._persist_checkbox_states)
+            self.chk_nameplate_track.toggled.connect(self._persist_checkbox_states)
+            self.chk_cleanup_band.toggled.connect(self._persist_checkbox_states)
+            self.chk_cluster_window.toggled.connect(self._persist_checkbox_states)
         except Exception:
             pass
 
@@ -381,6 +410,11 @@ class MonitoringTab(QWidget):
         # 초기 동기화(외부 상태를 모니터링 탭으로 가져옴)
         self._sync_monitor_buttons_enabled()
         self._sync_link_checkbox_from_external()
+        # [NEW] 오버레이 선반영: 기본 OFF를 사냥 탭에 즉시 적용
+        try:
+            self._on_monitor_overlay_toggled(False)
+        except Exception:
+            pass
 
     # --- 맵 프리뷰 ---
     def _start_map_preview(self) -> None:
@@ -473,6 +507,12 @@ class MonitoringTab(QWidget):
             # 연동 체크박스(두 개는 항상 동일 상태)
             link_state = bool(self.map_link_checkbox.isChecked()) or bool(self.hunt_link_checkbox.isChecked())
             settings.setValue("monitoring/map_hunt_link", link_state)
+            # [NEW] 오버레이 체크 상태
+            settings.setValue("monitoring/ovl_hunt_bundle", bool(self.chk_hunt_bundle.isChecked()))
+            settings.setValue("monitoring/ovl_nickname_range", bool(self.chk_nickname_range.isChecked()))
+            settings.setValue("monitoring/ovl_nameplate_track", bool(self.chk_nameplate_track.isChecked()))
+            settings.setValue("monitoring/ovl_cleanup_band", bool(self.chk_cleanup_band.isChecked()))
+            settings.setValue("monitoring/ovl_cluster_window", bool(self.chk_cluster_window.isChecked()))
         except Exception:
             pass
 
@@ -737,6 +777,24 @@ class MonitoringTab(QWidget):
         except Exception:
             pass
 
+    # [NEW] 모니터링 오버레이 토글 핸들러 → 사냥 탭에 반영
+    def _on_monitor_overlay_toggled(self, _checked: bool) -> None:
+        if not self._hunt_tab:
+            return
+        try:
+            prefs = {
+                'hunt_area': bool(self.chk_hunt_bundle.isChecked()),
+                'primary_area': bool(self.chk_hunt_bundle.isChecked()),
+                'nickname_range': bool(self.chk_nickname_range.isChecked()),
+                'nameplate_tracking': bool(self.chk_nameplate_track.isChecked()),
+                'cleanup_chase_area': bool(self.chk_cleanup_band.isChecked()),
+                'cluster_window_area': bool(self.chk_cluster_window.isChecked()),
+            }
+            if hasattr(self._hunt_tab, 'set_overlay_preferences'):
+                self._hunt_tab.set_overlay_preferences(prefs)
+        except Exception:
+            pass
+
     def cleanup_on_close(self) -> None:
         self._stop_map_preview()
         # 스플리터 위치 저장
@@ -748,6 +806,11 @@ class MonitoringTab(QWidget):
             # 체크박스 상태 저장
             settings.setValue("monitoring/map_preview_checked", bool(self.map_preview_checkbox.isChecked()))
             settings.setValue("monitoring/hunt_preview_checked", bool(self.hunt_preview_checkbox.isChecked()))
+            settings.setValue("monitoring/ovl_hunt_bundle", bool(self.chk_hunt_bundle.isChecked()))
+            settings.setValue("monitoring/ovl_nickname_range", bool(self.chk_nickname_range.isChecked()))
+            settings.setValue("monitoring/ovl_nameplate_track", bool(self.chk_nameplate_track.isChecked()))
+            settings.setValue("monitoring/ovl_cleanup_band", bool(self.chk_cleanup_band.isChecked()))
+            settings.setValue("monitoring/ovl_cluster_window", bool(self.chk_cluster_window.isChecked()))
         except Exception:
             pass
         # 사냥 프리뷰 해제

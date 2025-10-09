@@ -166,6 +166,8 @@ CLEANUP_CHASE_BRUSH = QBrush(CLEANUP_CHASE_COLOR)
 CLUSTER_WINDOW_COLOR = QColor(255, 0, 255, 50)
 CLUSTER_WINDOW_EDGE = QPen(QColor(255, 0, 255, 220), 2, Qt.PenStyle.DotLine)
 CLUSTER_WINDOW_BRUSH = QBrush(CLUSTER_WINDOW_COLOR)
+# 군집 중심 시각화 선 길이(좌우 각 px)
+JUMP_CENTER_VISUAL_DISTANCE_PX = 120
 FALLBACK_CHARACTER_EDGE = QPen(QColor(0, 255, 120, 220), 2, Qt.PenStyle.SolidLine)
 FALLBACK_CHARACTER_BRUSH = QBrush(QColor(0, 255, 120, 60))
 NICKNAME_EDGE = QPen(QColor(255, 255, 0, 220), 2, Qt.PenStyle.DotLine)
@@ -847,6 +849,9 @@ class HuntTab(QWidget):
         self.current_primary_area: Optional[AreaRect] = None
         self.current_cleanup_chase_area: Optional[AreaRect] = None
         self.current_cluster_window_area: Optional[AreaRect] = None
+        # [NEW] 군집 중심 시각화용 좌표
+        self.current_cluster_center_x: Optional[float] = None
+        self.current_cluster_center_y: Optional[float] = None
         self.latest_monster_count = 0
         self.latest_primary_monster_count = 0
         self.control_release_timeout = self.CONTROL_RELEASE_TIMEOUT_SEC
@@ -4802,16 +4807,32 @@ class HuntTab(QWidget):
                     painter.drawRect(rect)
             # [NEW] 군집 중심 윈도우 오버레이
             if (
-                getattr(self, 'current_cluster_window_area', None)
-                and self.overlay_preferences.get('cluster_window_area', True)
+                self.overlay_preferences.get('cluster_window_area', True)
                 and hasattr(self, 'show_cluster_window_checkbox')
                 and self.show_cluster_window_checkbox.isChecked()
             ):
-                rect = self._area_to_rect(self.current_cluster_window_area, image.width(), image.height())
-                if not rect.isNull():
+                # [NEW] 군집 중심 점 + 좌우 120px 선 시각화
+                cx = getattr(self, 'current_cluster_center_x', None)
+                cy = getattr(self, 'current_cluster_center_y', None)
+                pa = getattr(self, 'current_primary_area', None)
+                if cx is not None and cy is not None and pa is not None:
+                    h = image.height()
+                    w = image.width()
+                    # 수평선은 중심 Y를 기준(주 스킬 밴드 중앙)
+                    y = int(max(0, min(h - 1, round(cy))))
+                    half = int(JUMP_CENTER_VISUAL_DISTANCE_PX)
+                    x1 = int(max(0, min(w - 1, round(cx - half))))
+                    x2 = int(max(0, min(w - 1, round(cx + half))))
+                    painter.setPen(CLUSTER_WINDOW_EDGE)
+                    painter.setBrush(QBrush(Qt.BrushStyle.NoBrush))
+                    painter.drawLine(x1, y, x2, y)
+                    # 중심 점(작은 원)
+                    radius = 4
+                    center_x = int(max(0, min(w - 1, round(cx))))
+                    center_y = y
                     painter.setPen(CLUSTER_WINDOW_EDGE)
                     painter.setBrush(CLUSTER_WINDOW_BRUSH)
-                    painter.drawRect(rect)
+                    painter.drawEllipse(center_x - radius, center_y - radius, radius * 2, radius * 2)
             painter.setCompositionMode(COMPOSITION_MODE_SOURCE_OVER)
             if self._is_nickname_overlay_active() and self._latest_nickname_box:
                 nick_rect = self._dict_to_rect(self._latest_nickname_box, image.width(), image.height())
@@ -6001,6 +6022,21 @@ class HuntTab(QWidget):
                 self.show_monster_confidence_checkbox.blockSignals(True)
                 self.show_monster_confidence_checkbox.setChecked(monster_conf_state)
                 self.show_monster_confidence_checkbox.blockSignals(False)
+        # [NEW] 클린업/군집 중심 범위도 외부에서 제어 가능하도록 반영
+        if 'cleanup_chase_area' in options:
+            cleanup_state = bool(options['cleanup_chase_area'])
+            self.overlay_preferences['cleanup_chase_area'] = cleanup_state
+            if hasattr(self, 'show_cleanup_chase_checkbox') and self.show_cleanup_chase_checkbox.isChecked() != cleanup_state:
+                self.show_cleanup_chase_checkbox.blockSignals(True)
+                self.show_cleanup_chase_checkbox.setChecked(cleanup_state)
+                self.show_cleanup_chase_checkbox.blockSignals(False)
+        if 'cluster_window_area' in options:
+            cluster_state = bool(options['cluster_window_area'])
+            self.overlay_preferences['cluster_window_area'] = cluster_state
+            if hasattr(self, 'show_cluster_window_checkbox') and self.show_cluster_window_checkbox.isChecked() != cluster_state:
+                self.show_cluster_window_checkbox.blockSignals(True)
+                self.show_cluster_window_checkbox.setChecked(cluster_state)
+                self.show_cluster_window_checkbox.blockSignals(False)
         self._emit_area_overlays()
         self._update_detection_thread_overlay_flags()
         self._save_settings()
@@ -7952,6 +7988,8 @@ class HuntTab(QWidget):
         # 초기화: 프레임별로 갱신
         self.current_cleanup_chase_area = None
         self.current_cluster_window_area = None
+        self.current_cluster_center_x = None
+        self.current_cluster_center_y = None
 
         now = time.time()
         raw_monsters = self.latest_snapshot.monster_boxes or []
@@ -8008,32 +8046,16 @@ class HuntTab(QWidget):
                     width=primary_area.width + (margin * 2.0),
                     height=primary_area.height,
                 )
-            # 군집 중심 윈도우: 사냥범위 내 몬스터의 X축 분포에서 주 스킬 폭 만큼의 최대 포함 윈도우
-            if hunt_area is not None and primary_area is not None and effective_monsters:
-                width = float(max(1.0, primary_area.width))
-                # 후보: 사냥 Y밴드와 교차하는 몬스터만
-                hunt_monsters = [box for box in effective_monsters if box.intersects(hunt_area)]
-                if hunt_monsters:
-                    xs = sorted(box.center_x for box in hunt_monsters)
-                    n = len(xs)
-                    i = 0
-                    best_i = 0
-                    best_j = 0
-                    j = 0
-                    for i in range(n):
-                        while j < n and (xs[j] - xs[i]) <= width + 1e-6:
-                            j += 1
-                        if (j - i) > (best_j - best_i):
-                            best_i, best_j = i, j
-                    if best_j > best_i:
-                        center = (xs[best_i] + xs[best_j - 1]) / 2.0
-                        x = center - width / 2.0
-                        self.current_cluster_window_area = AreaRect(
-                            x=x,
-                            y=hunt_area.y,
-                            width=width,
-                            height=hunt_area.height,
-                        )
+            # 군집 중심 점: 주 스킬 범위와 교차하는 몬스터의 중심 X를 산술평균
+            self.current_cluster_center_x = None
+            self.current_cluster_center_y = None
+            if primary_area is not None and effective_monsters:
+                primary_monsters = [m for m in effective_monsters if m.intersects(primary_area)]
+                if len(primary_monsters) >= 2:
+                    center_x = sum(m.center_x for m in primary_monsters) / float(len(primary_monsters))
+                    center_y = primary_area.y + (primary_area.height / 2.0)
+                    self.current_cluster_center_x = float(center_x)
+                    self.current_cluster_center_y = float(center_y)
         except Exception:
             # 계산 실패 시 조용히 무시
             pass
@@ -8043,6 +8065,8 @@ class HuntTab(QWidget):
         self.current_primary_area = None
         self.current_cleanup_chase_area = None
         self.current_cluster_window_area = None
+        self.current_cluster_center_x = None
+        self.current_cluster_center_y = None
         self.latest_monster_count = 0
         self.latest_primary_monster_count = 0
         self._cached_monster_boxes = []

@@ -875,6 +875,9 @@ class MapTab(QWidget):
             self.cfg_airborne_recovery_wait = AIRBORNE_RECOVERY_WAIT_DEFAULT  # 공중 자동복구 대기시간 (초)
             self.cfg_ladder_recovery_resend_delay = LADDER_RECOVERY_RESEND_DELAY_DEFAULT  # 사다리 복구 재전송 대기시간 (초)
             self.ladder_float_recovery_cooldown_until = 0.0  # 탐지 직후 밧줄 매달림 복구 쿨다운
+            # [추가] 즉시 사다리 복구 유예시간(초) 및 근접 시작 시각
+            self.ladder_float_recovery_grace = 0.3
+            self.ladder_float_near_since = 0.0
             self.ladder_down_jump_min_distance = 2.0  # 아래점프를 허용할 최소 사다리 거리(px)
             self.cfg_walk_teleport_probability = WALK_TELEPORT_PROBABILITY_DEFAULT
             self.cfg_walk_teleport_interval = WALK_TELEPORT_INTERVAL_DEFAULT
@@ -9287,6 +9290,8 @@ class MapTab(QWidget):
         setattr(self, '_last_airborne_fail_log_time', 0.0)
         # [추가] 공중 경로 대기 로그 쿨타임 타이머 리셋
         self._last_airborne_path_wait_log_time = 0.0
+        # [추가] 즉시 사다리 복구 유예 타이머 리셋
+        self.ladder_float_near_since = 0.0
 
     def _should_issue_down_jump(self, ladder_dist: Optional[float]) -> bool:
         """사다리와의 거리를 기준으로 아래점프 시도가 안전한지 판단합니다."""
@@ -9446,7 +9451,20 @@ class MapTab(QWidget):
             current_floor=None,
         )
 
+        # [변경] 즉시 복구에 0.3초 유예 적용
         if not (is_near_ladder and dist >= 0.0 and dist <= 1.0):
+            # 근접 조건 해제 시 유예 타이머 리셋
+            self.ladder_float_near_since = 0.0
+            return False
+
+        # 근접한 첫 순간이면 시작 시각만 기록하고 종료
+        if self.ladder_float_near_since <= 0.0:
+            self.ladder_float_near_since = now
+            return False
+
+        # 유예시간이 지나지 않았으면 아직 실행하지 않음
+        grace = float(getattr(self, 'ladder_float_recovery_grace', 0.3) or 0.3)
+        if (now - self.ladder_float_near_since) < grace:
             return False
 
         self.update_general_log("[자동 복구] 사다리 근접 상태 감지. 사다리 멈춤복구를 실행합니다.", "orange")
