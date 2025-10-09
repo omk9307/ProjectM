@@ -12300,8 +12300,9 @@ class MapTab(QWidget):
             print(f"[A* INFO] 목표: '{self.nav_nodes[goal_key]['name']}' ({goal_key}) at ({goal_pos.x():.1f}, {goal_pos.y():.1f})")
             print("-" * 70)
             print("[A* INIT] 초기 Open Set 구성:")
-        
-            for node_key in candidate_keys:
+
+        # [BUGFIX] 디버그 여부와 무관하게 초기 후보 구성 루프를 항상 실행해야 함
+        for node_key in candidate_keys:
                 node_data = self.nav_nodes[node_key]
                 node_pos = node_data['pos']
                 cost_to_node = 0.0
@@ -12366,7 +12367,7 @@ class MapTab(QWidget):
                         cost_to_node = math.hypot(start_pos.x() - node_pos.x(), start_pos.y() - node_pos.y())
                 else:
                     cost_to_node = math.hypot(start_pos.x() - node_pos.x(), start_pos.y() - node_pos.y())
-            
+        
             g_score[node_key] = cost_to_node
             h_score = math.hypot(node_pos.x() - goal_pos.x(), node_pos.y() - goal_pos.y())
             f_score[node_key] = cost_to_node + h_score
