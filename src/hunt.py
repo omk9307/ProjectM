@@ -941,6 +941,10 @@ class HuntTab(QWidget):
         self._cached_monster_boxes_ts = 0.0
         self._active_monster_confidence_overrides: dict[int, float] = {}
 
+        # [NEW] 겹침(2→1) 즉시 클린업 전환 판단용 상태
+        self._prev_primary_count: int = 0
+        self._last_primary_multi_ts: float = 0.0
+
         # 교전/클린업 상태
         # - engage_active: 주 스킬 범위 기준 최소 마릿수(스핀박스) 충족하여 교전 상태로 진입한 후 유지
         # - cleanup_active: 교전 중 마릿수가 기준 미만(>=1)으로 줄었을 때 잔몹 정리 상태
@@ -8017,8 +8021,19 @@ class HuntTab(QWidget):
             1 for box in effective_monsters if primary_area and box.intersects(primary_area)
         )
 
+        # [NEW] 겹침 판단을 위해 이전 프레임 주 스킬 마릿수를 보존
+        try:
+            prev_primary = int(getattr(self, 'latest_primary_monster_count', 0) or 0)
+        except Exception:
+            prev_primary = 0
+        self._prev_primary_count = prev_primary
+
         self.latest_monster_count = hunt_count
         self.latest_primary_monster_count = primary_count
+
+        # [NEW] 최근 다중(≥2) 관측 시각 저장
+        if primary_count >= 2:
+            self._last_primary_multi_ts = now
 
         hunt_threshold_widget = getattr(self, 'hunt_monster_threshold_spinbox', None)
         primary_threshold_widget = getattr(self, 'primary_monster_threshold_spinbox', None)
@@ -8059,6 +8074,42 @@ class HuntTab(QWidget):
         except Exception:
             # 계산 실패 시 조용히 무시
             pass
+
+    def _should_enter_cleanup_due_to_overlap(self, now_ts: float) -> bool:
+        """겹침(이전 프레임 ≥2 → 현재 1) 상황에서 즉시 클린업으로 전환할지 판단.
+
+        - 거리 조건은 사용하지 않음(현재 1마리는 이미 주 스킬 범위 내를 의미)
+        - 접근 윈도우: 최근 2.0초 내 이동 명령이 있었는지 검사
+        - 다중관측 윈도우: 최근 1.0초 내 주 스킬 범위에서 2마리 이상을 관측했는지 검사
+        """
+        try:
+            if int(getattr(self, '_prev_primary_count', 0)) < 2:
+                return False
+            if int(self.latest_primary_monster_count) != 1:
+                return False
+
+            # 접근 윈도우(2초)
+            last_move_ts = float(getattr(self, '_last_movement_command_ts', 0.0) or 0.0)
+            if last_move_ts <= 0.0 or (now_ts - last_move_ts) > 2.0:
+                return False
+
+            # 다중관측 윈도우(1초)
+            last_multi_ts = float(getattr(self, '_last_primary_multi_ts', 0.0) or 0.0)
+            if last_multi_ts <= 0.0 or (now_ts - last_multi_ts) > 1.0:
+                return False
+
+            # 조건 충족 → 즉시 클린업 진입
+            self._engage_active = True
+            self._cleanup_active = True
+            self._cleanup_hold_until_ts = 0.0
+            self._last_monster_seen_ts = now_ts
+            try:
+                self.append_log("겹침 감지 → 클린업 진입 (접근≤2s, 다중관측≤1s)", "info")
+            except Exception:
+                pass
+            return True
+        except Exception:
+            return False
 
     def _clear_detection_metrics(self) -> None:
         self.current_hunt_area = None
@@ -10185,39 +10236,41 @@ class HuntTab(QWidget):
             self._last_monster_seen_ts = time.time()
 
         if self.latest_primary_monster_count < primary_threshold and not allow_cleanup:
-            # 주 스킬 기준이 아직 미충족인 경우: 사냥범위 내 몬스터들로 주 스킬 기준 도달이 가능한지 평가
-            reachable = False
-            try:
-                reachable = self._is_primary_reachable_from_hunt()
-            except Exception:
+            # [겹침 예외] 이전 프레임≥2 → 현재 1, 최근 2s 이동 + 최근 1s 다중관측이면 즉시 클린업 전환
+            if not self._should_enter_cleanup_due_to_overlap(now_ts):
+                # 주 스킬 기준이 아직 미충족인 경우: 사냥범위 내 몬스터들로 주 스킬 기준 도달이 가능한지 평가
                 reachable = False
-
-            if reachable:
-                # 도달 가능하면 기존 접근 로직으로 몬스터 쪽으로 이동 시도
-                if self._handle_monster_approach():
-                    return
-            # 도달 불가하거나 접근 시도가 실패하면 이동 중단 및 권한 반환 시도
-            if self.latest_monster_count == 0:
-                self._ensure_idle_keys("감지 범위 몬스터 없음")
-            else:
-                self._ensure_idle_keys("이동 보류: 주 스킬 범위 미충족 → 맵 탭 권한 반환 대기")
-
-            now_try = time.time()
-            if (now_try - self.last_release_attempt_ts) >= 1.0:
-                self.last_release_attempt_ts = now_try
                 try:
-                    hunt_threshold_widget = getattr(self, 'hunt_monster_threshold_spinbox', None)
-                    hunt_threshold = int(hunt_threshold_widget.value()) if hunt_threshold_widget else 0
+                    reachable = self._is_primary_reachable_from_hunt()
                 except Exception:
-                    hunt_threshold = 0
-                release_meta = {
-                    "latest_monster_count": int(self.latest_monster_count),
-                    "hunt_monster_threshold": int(hunt_threshold),
-                    "latest_primary_monster_count": int(self.latest_primary_monster_count),
-                    "primary_monster_threshold": int(primary_threshold),
-                }
-                self.release_control("PRIMARY_NOT_READY", meta=release_meta)
-            return
+                    reachable = False
+
+                if reachable:
+                    # 도달 가능하면 기존 접근 로직으로 몬스터 쪽으로 이동 시도
+                    if self._handle_monster_approach():
+                        return
+                # 도달 불가하거나 접근 시도가 실패하면 이동 중단 및 권한 반환 시도
+                if self.latest_monster_count == 0:
+                    self._ensure_idle_keys("감지 범위 몬스터 없음")
+                else:
+                    self._ensure_idle_keys("이동 보류: 주 스킬 범위 미충족 → 맵 탭 권한 반환 대기")
+
+                now_try = time.time()
+                if (now_try - self.last_release_attempt_ts) >= 1.0:
+                    self.last_release_attempt_ts = now_try
+                    try:
+                        hunt_threshold_widget = getattr(self, 'hunt_monster_threshold_spinbox', None)
+                        hunt_threshold = int(hunt_threshold_widget.value()) if hunt_threshold_widget else 0
+                    except Exception:
+                        hunt_threshold = 0
+                    release_meta = {
+                        "latest_monster_count": int(self.latest_monster_count),
+                        "hunt_monster_threshold": int(hunt_threshold),
+                        "latest_primary_monster_count": int(self.latest_primary_monster_count),
+                        "primary_monster_threshold": int(primary_threshold),
+                    }
+                    self.release_control("PRIMARY_NOT_READY", meta=release_meta)
+                return
 
         # [클린업 추격] 교전 유지 중(allow_cleanup)이며 주 스킬 범위 내 마릿수가 0일 때,
         # 주 스킬 범위로부터 전/후 각 CLEANUP_CHASE_MARGIN_PX(px) 확장한 밴드 내의 몬스터를 향해 이동 시도
