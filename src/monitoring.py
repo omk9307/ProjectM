@@ -1611,15 +1611,24 @@ class MonitoringTab(QWidget):
             # 모니터링 체크박스 상태 반영 (신호 루프 방지용 blockSignals)
             try:
                 if mp_cfg is not None and hasattr(self, 'chk_mp_standalone'):
+                    mp_flag = bool(getattr(mp_cfg, 'standalone', False))
                     b = self.chk_mp_standalone.blockSignals(True)
-                    self.chk_mp_standalone.setChecked(bool(getattr(mp_cfg, 'standalone', False)))
+                    self.chk_mp_standalone.setChecked(mp_flag)
                     self.chk_mp_standalone.blockSignals(b)
-                    self._mp_standalone_enabled = bool(getattr(mp_cfg, 'standalone', False))
+                    # 내부 상태 갱신
+                    self._mp_standalone_enabled = mp_flag
+                    # 마지막 MP 단독실행 상태도 QSettings에 저장하여 재시작 시 반영 일관화
+                    try:
+                        settings = QSettings("Gemini Inc.", "Maple AI Trainer")
+                        settings.setValue("monitoring/mp_standalone_last", mp_flag)
+                    except Exception:
+                        pass
             except Exception:
                 pass
             if exp_cfg is None:
                 return
             new_flag = bool(getattr(exp_cfg, 'standalone', False))
+            prev_flag = bool(self._exp_standalone_enabled)
             try:
                 if hasattr(self, 'chk_exp_standalone'):
                     b = self.chk_exp_standalone.blockSignals(True)
@@ -1627,14 +1636,14 @@ class MonitoringTab(QWidget):
                     self.chk_exp_standalone.blockSignals(b)
             except Exception:
                 pass
-            self._exp_standalone_enabled = new_flag
             # 마지막 EXP 단독실행 상태를 QSettings에도 저장
             try:
                 settings = QSettings("Gemini Inc.", "Maple AI Trainer")
                 settings.setValue("monitoring/exp_standalone_last", new_flag)
             except Exception:
                 pass
-            if new_flag != self._exp_standalone_enabled:
+            # 상태 변화가 있을 때만 내부 타이머/누적치 갱신
+            if new_flag != prev_flag:
                 self._exp_standalone_enabled = new_flag
                 if new_flag:
                     self._exp_standalone_start_ts = time.time()
