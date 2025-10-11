@@ -36,6 +36,12 @@ try:
     from capture_manager import get_capture_manager
 except Exception:
     get_capture_manager = None  # type: ignore
+try:
+    from window_anchors import is_maple_window_foreground
+except Exception:
+    # 실행 환경에 따라 모듈이 없을 수 있으므로 안전 폴백
+    def is_maple_window_foreground() -> bool:  # type: ignore
+        return True
 
 
 class LogListWidget(QListWidget):
@@ -228,6 +234,17 @@ class MonitoringTab(QWidget):
         self._latest_mp: float | None = None
         self._latest_exp_amount: str | None = None
         self._latest_exp_percent: float | None = None
+        # 실행/세션 및 EXP 기준치 관리
+        self._map_running: bool = False
+        self._hunt_running: bool = False
+        self._run_start_ts: float | None = None
+        self._exp_standalone_enabled: bool = False
+        self._exp_standalone_start_ts: float | None = None
+        self._exp_start_amount: int | None = None
+        self._exp_start_percent: float | None = None
+        self._exp_last_percent: float | None = None
+        self._status_monitor = None
+        self._status_data_manager = None
 
         self._init_ui()
         # AutoControl 실시간 로그와 동일한 Δ 및 구분선 처리를 위해 마지막 키로그 시각 저장
@@ -290,6 +307,11 @@ class MonitoringTab(QWidget):
         self.info_list = InfoListWidget(self)
         info_layout.addWidget(info_ctrl_widget)
         info_layout.addWidget(self.info_list, 1)
+        # 실행시간 라벨(정보 그룹 하단 빈 공간 채움)
+        self.runtime_label = QLabel("")
+        self.runtime_label.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        self.runtime_label.setStyleSheet("color: #BBBBBB; padding: 4px 8px;")
+        info_layout.addWidget(self.runtime_label)
 
         # 우측: 사냥 미리보기
         hunt_box = QGroupBox("사냥 미리보기")
@@ -799,7 +821,29 @@ class MonitoringTab(QWidget):
                 if isinstance(amt, str):
                     self._latest_exp_amount = amt
                 if isinstance(per, (int, float)):
-                    self._latest_exp_percent = float(per)
+                    cur_per = float(per)
+                    # 레벨업 감지: 퍼센트 급락 시 기준치 재설정
+                    try:
+                        if (
+                            isinstance(self._exp_last_percent, float)
+                            and cur_per < self._exp_last_percent - 10.0
+                        ):
+                            self._exp_start_percent = cur_per
+                            try:
+                                self._exp_start_amount = int(self._latest_exp_amount) if isinstance(self._latest_exp_amount, str) and self._latest_exp_amount.isdigit() else None
+                            except Exception:
+                                self._exp_start_amount = None
+                    except Exception:
+                        pass
+                    self._latest_exp_percent = cur_per
+                    self._exp_last_percent = cur_per
+                    # 세션이 활성이고 기준치가 없으면 현재값으로 세팅
+                    if self._is_any_session_active() and self._exp_start_percent is None:
+                        self._exp_start_percent = cur_per
+                        try:
+                            self._exp_start_amount = int(self._latest_exp_amount) if isinstance(self._latest_exp_amount, str) and self._latest_exp_amount.isdigit() else None
+                        except Exception:
+                            self._exp_start_amount = None
         except Exception:
             pass
 
@@ -896,10 +940,7 @@ class MonitoringTab(QWidget):
         # HP/MP/EXP
         hp_line = f"HP: {self._latest_hp:.1f}%" if isinstance(self._latest_hp, float) else "HP: --%"
         mp_line = f"MP: {self._latest_mp:.1f}%" if isinstance(self._latest_mp, float) else "MP: --%"
-        if isinstance(self._latest_exp_amount, str) and isinstance(self._latest_exp_percent, float):
-            exp_line = f"EXP: {self._latest_exp_amount} / {self._latest_exp_percent:.2f}%"
-        else:
-            exp_line = "EXP: -- / --"
+        exp_line, exp_eta_line = self._compose_exp_lines()
 
         lines = [
             f"FPS: {fps_text}",
@@ -910,8 +951,12 @@ class MonitoringTab(QWidget):
             hp_line,
             mp_line,
             exp_line,
+            exp_eta_line,
         ]
         self.info_list.set_lines(lines)
+
+        # 실행시간 라벨 갱신
+        self._update_runtime_label()
 
     def _collect_fps_text(self) -> str:
         owner = (self._current_authority_owner or "map").lower()
@@ -962,6 +1007,87 @@ class MonitoringTab(QWidget):
             except Exception:
                 percent = None
         return f"{max(percent, 0.0):.1f}%" if isinstance(percent, float) else "--%"
+
+    # EXP 표기 구성: "EXP: amount(+Δ) | percent(+Δ%)" 와 다음줄 "레벨업 HH:MM:SS"
+    def _compose_exp_lines(self) -> tuple[str, str]:
+        if not (isinstance(self._latest_exp_amount, str) and isinstance(self._latest_exp_percent, float)):
+            return ("EXP: -- | --%", "레벨업 --:--:--")
+        amount_str = self._latest_exp_amount
+        percent_cur = float(self._latest_exp_percent)
+        # Δ amount
+        delta_amount_text = ""
+        try:
+            cur_amt = int(amount_str) if amount_str.isdigit() else None
+            if isinstance(cur_amt, int) and isinstance(self._exp_start_amount, int):
+                d_amt = max(0, cur_amt - self._exp_start_amount)
+                delta_amount_text = f"(+{d_amt:,})"
+        except Exception:
+            delta_amount_text = ""
+        # Δ percent
+        delta_percent_text = ""
+        if isinstance(self._exp_start_percent, float):
+            d_per = percent_cur - float(self._exp_start_percent)
+            sign = "+" if d_per >= 0 else ""
+            delta_percent_text = f"({sign}{d_per:.2f}%)"
+        # ETA
+        eta_text = self._calc_exp_eta_text(percent_cur)
+        # 포맷
+        try:
+            amount_fmt = f"{int(amount_str):,}"
+        except Exception:
+            amount_fmt = amount_str
+        exp_line = f"EXP: {amount_fmt}{(' ' + delta_amount_text) if delta_amount_text else ''} | {percent_cur:.2f}%{(' ' + delta_percent_text) if delta_percent_text else ''}"
+        eta_line = f"레벨업 {eta_text}"
+        return exp_line, eta_line
+
+    def _calc_exp_eta_text(self, percent_cur: float) -> str:
+        start_ts = self._effective_exp_session_start_ts()
+        if not isinstance(start_ts, float) or not isinstance(self._exp_start_percent, float):
+            return "--:--:--"
+        elapsed = max(0.0, time.time() - start_ts)
+        if elapsed < 1.0:
+            return "--:--:--"
+        gain = max(0.0, percent_cur - float(self._exp_start_percent))
+        if gain <= 0.0:
+            return "--:--:--"
+        rate_per_sec = gain / elapsed
+        remain = max(0.0, 100.0 - percent_cur)
+        if rate_per_sec <= 0.0:
+            return "--:--:--"
+        eta_sec = int(remain / rate_per_sec)
+        return self._format_hhmmss(eta_sec)
+
+    def _effective_exp_session_start_ts(self) -> float | None:
+        if self._map_running or self._hunt_running:
+            return self._run_start_ts
+        if self._exp_standalone_enabled:
+            return self._exp_standalone_start_ts
+        return None
+
+    def _update_runtime_label(self) -> None:
+        active = False
+        start_ts: float | None = None
+        if self._map_running or self._hunt_running:
+            active = True
+            start_ts = self._run_start_ts
+        elif self._exp_standalone_enabled and is_maple_window_foreground():
+            active = True
+            start_ts = self._exp_standalone_start_ts
+        if not active or not isinstance(start_ts, float):
+            self.runtime_label.setText("")
+            return
+        elapsed = max(0, int(time.time() - start_ts))
+        self.runtime_label.setText(f"실행시간: {self._format_hhmmss(elapsed)}")
+
+    @staticmethod
+    def _format_hhmmss(sec: int) -> str:
+        h = sec // 3600
+        m = (sec % 3600) // 60
+        s = sec % 60
+        return f"{h:02d}:{m:02d}:{s:02d}"
+
+    def _is_any_session_active(self) -> bool:
+        return bool(self._map_running or self._hunt_running or self._exp_standalone_enabled)
 
     @pyqtSlot(str, dict)
     def _on_authority_changed(self, owner: str, payload: dict) -> None:
@@ -1117,9 +1243,47 @@ class MonitoringTab(QWidget):
         self._persist_checkbox_states()
 
     def _on_map_detection_status_changed(self, running: bool) -> None:
+        self._map_running = bool(running)
+        if running:
+            if self._run_start_ts is None:
+                self._run_start_ts = time.time()
+            # 세션 시작 시 EXP 기준치 초기화 후 현재값으로 고정
+            self._exp_start_percent = None
+            self._exp_start_amount = None
+            if isinstance(self._latest_exp_percent, float):
+                self._exp_start_percent = float(self._latest_exp_percent)
+                try:
+                    self._exp_start_amount = int(self._latest_exp_amount) if isinstance(self._latest_exp_amount, str) and self._latest_exp_amount.isdigit() else None
+                except Exception:
+                    self._exp_start_amount = None
+        else:
+            if not self._hunt_running:
+                self._run_start_ts = None
+                if not self._exp_standalone_enabled:
+                    self._exp_start_percent = None
+                    self._exp_start_amount = None
         self._sync_monitor_buttons_enabled()
 
     def _on_hunt_detection_status_changed(self, running: bool) -> None:
+        self._hunt_running = bool(running)
+        if running:
+            if self._run_start_ts is None:
+                self._run_start_ts = time.time()
+            # 세션 시작 시 EXP 기준치 초기화 후 현재값으로 고정
+            self._exp_start_percent = None
+            self._exp_start_amount = None
+            if isinstance(self._latest_exp_percent, float):
+                self._exp_start_percent = float(self._latest_exp_percent)
+                try:
+                    self._exp_start_amount = int(self._latest_exp_amount) if isinstance(self._latest_exp_amount, str) and self._latest_exp_amount.isdigit() else None
+                except Exception:
+                    self._exp_start_amount = None
+        else:
+            if not self._map_running:
+                self._run_start_ts = None
+                if not self._exp_standalone_enabled:
+                    self._exp_start_percent = None
+                    self._exp_start_amount = None
         self._sync_monitor_buttons_enabled()
 
     def _sync_monitor_buttons_enabled(self) -> None:
@@ -1157,6 +1321,49 @@ class MonitoringTab(QWidget):
             }
             if hasattr(self._hunt_tab, 'set_overlay_preferences'):
                 self._hunt_tab.set_overlay_preferences(prefs)
+        except Exception:
+            pass
+
+    # 외부에서 상태 모니터/데이터 매니저 연결 (EXP 단독실행 토글 감시 및 스냅샷 구독)
+    def attach_status_monitor(self, monitor, data_manager=None) -> None:
+        try:
+            self._status_monitor = monitor
+            if hasattr(monitor, 'status_captured'):
+                monitor.status_captured.connect(self._on_status_snapshot)
+        except Exception:
+            pass
+        self._status_data_manager = data_manager
+        if data_manager and hasattr(data_manager, 'register_status_config_listener'):
+            try:
+                data_manager.register_status_config_listener(self._handle_status_config_update)
+                cfg = data_manager.load_status_monitor_config() if hasattr(data_manager, 'load_status_monitor_config') else None
+                if cfg is not None:
+                    self._handle_status_config_update(cfg)
+            except Exception:
+                pass
+
+    def _handle_status_config_update(self, config) -> None:
+        try:
+            exp_cfg = getattr(config, 'exp', None)
+            if exp_cfg is None:
+                return
+            new_flag = bool(getattr(exp_cfg, 'standalone', False))
+            if new_flag != self._exp_standalone_enabled:
+                self._exp_standalone_enabled = new_flag
+                if new_flag:
+                    self._exp_standalone_start_ts = time.time()
+                    if isinstance(self._latest_exp_percent, float):
+                        self._exp_start_percent = float(self._latest_exp_percent)
+                    try:
+                        self._exp_start_amount = int(self._latest_exp_amount) if isinstance(self._latest_exp_amount, str) and self._latest_exp_amount.isdigit() else None
+                    except Exception:
+                        self._exp_start_amount = None
+                else:
+                    self._exp_standalone_start_ts = None
+                    if not (self._map_running or self._hunt_running):
+                        self._exp_start_percent = None
+                        self._exp_start_amount = None
+                        self.runtime_label.setText("")
         except Exception:
             pass
 

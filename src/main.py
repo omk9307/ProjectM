@@ -345,6 +345,12 @@ class MainWindow(QMainWindow):
                         map_tab_instance = self.loaded_tabs['맵']
                         if hasattr(map_tab_instance, 'attach_status_monitor'):
                             map_tab_instance.attach_status_monitor(self.status_monitor_thread, data_manager)
+                    # [NEW] 모니터링 탭에도 상태 모니터 연결 (HP/MP/EXP 표시/ETA/실행시간)
+                    if monitoring_tab and hasattr(monitoring_tab, 'attach_status_monitor'):
+                        try:
+                            monitoring_tab.attach_status_monitor(self.status_monitor_thread, data_manager)
+                        except Exception:
+                            pass
                     # [NEW] 학습탭에도 상태 모니터 연결 (MP 단독사용용)
                     if '학습' in self.loaded_tabs:
                         learning_tab_instance = self.loaded_tabs['학습']
