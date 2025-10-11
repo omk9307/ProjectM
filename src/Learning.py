@@ -52,7 +52,7 @@ from PyQt6.QtGui import (
     QPixmap, QImage, QIcon, QPainter, QPen, QColor, QBrush, QCursor, QPolygon,
     QDropEvent, QGuiApplication, QIntValidator, QDoubleValidator, QFont
 )
-from PyQt6.QtCore import Qt, QThread, pyqtSignal, QSize, QRect, QPoint, QPointF, QObject, QMimeData
+from PyQt6.QtCore import Qt, QThread, pyqtSignal, QSize, QRect, QPoint, QPointF, QObject, QMimeData, QTimer
 
 from capture_manager import get_capture_manager
 
@@ -96,6 +96,7 @@ from window_anchors import (
     ensure_relative_roi,
     resolve_roi_to_absolute,
     WindowGeometry,
+    is_maple_window_foreground,
 )
 
 # --- 0. 전역 설정 (v1.3 방해 요소 이름 추가) ---
@@ -4731,6 +4732,15 @@ class LearningTab(QWidget):
         self.initUI()
         self.init_sam()
         self.data_manager.register_status_config_listener(self._handle_status_config_changed)
+        # [NEW] 단독실행 체크박스 색상 토글 타이머
+        try:
+            self._standalone_ui_timer = QTimer(self)
+            self._standalone_ui_timer.setSingleShot(False)
+            self._standalone_ui_timer.setInterval(500)
+            self._standalone_ui_timer.timeout.connect(self._tick_standalone_ui)
+            self._standalone_ui_timer.start()
+        except Exception:
+            pass
 
     def get_data_manager(self):
         """Hunt 등 다른 탭에서 데이터 매니저를 참조할 때 사용."""
@@ -6107,6 +6117,9 @@ class LearningTab(QWidget):
         header_layout.addWidget(title_label)
         self.exp_enabled_checkbox = QCheckBox('사용')
         header_layout.addWidget(self.exp_enabled_checkbox)
+        # [NEW] EXP 전용 단독사용 체크박스
+        self.exp_standalone_checkbox = QCheckBox('단독사용')
+        header_layout.addWidget(self.exp_standalone_checkbox)
         header_layout.addStretch(1)
         vbox.addLayout(header_layout)
         roi_button_layout = QHBoxLayout()
@@ -6125,13 +6138,27 @@ class LearningTab(QWidget):
         self.exp_roi_label.setWordWrap(True)
         vbox.addWidget(self.exp_roi_label)
 
-        info_label = QLabel('탐지 주기: 60초 (고정)')
-        self.exp_interval_label = info_label
-        vbox.addWidget(info_label)
+        # [NEW] EXP 주기(정수) 입력
+        interval_layout = QHBoxLayout()
+        interval_layout.addWidget(QLabel('탐지주기(초):'))
+        self.exp_interval_input = QLineEdit()
+        self.exp_interval_input.setPlaceholderText('예: 60')
+        self.exp_interval_input.setValidator(QIntValidator(1, 3600, self.exp_interval_input))
+        interval_layout.addWidget(self.exp_interval_input)
+        vbox.addLayout(interval_layout)
 
         vbox.addStretch(1)
         box.setLayout(vbox)
         self.exp_enabled_checkbox.toggled.connect(lambda checked: self._on_status_enabled_changed('exp', checked))
+        # [NEW] 핸들러 연결
+        try:
+            self.exp_interval_input.editingFinished.connect(lambda: self._on_status_interval_changed('exp'))
+        except Exception:
+            pass
+        try:
+            self.exp_standalone_checkbox.toggled.connect(self._on_exp_standalone_toggled)
+        except Exception:
+            pass
         return box
 
     def _load_status_command_options(self) -> None:
@@ -6165,6 +6192,12 @@ class LearningTab(QWidget):
 
             self._set_interval_value(self.hp_interval_input, self._status_config.hp.interval_sec)
             self._set_interval_value(self.mp_interval_input, self._status_config.mp.interval_sec)
+            # [NEW] EXP 주기(정수)
+            if hasattr(self, 'exp_interval_input') and self.exp_interval_input is not None:
+                try:
+                    self._set_interval_value(self.exp_interval_input, float(int(round(self._status_config.exp.interval_sec))))
+                except Exception:
+                    self._set_interval_value(self.exp_interval_input, self._status_config.exp.interval_sec)
 
             self._set_checkbox_state(self.hp_enabled_checkbox, self._status_config.hp.enabled)
             self._set_checkbox_state(self.mp_enabled_checkbox, self._status_config.mp.enabled)
@@ -6174,6 +6207,12 @@ class LearningTab(QWidget):
                     self._set_checkbox_state(self.mp_standalone_checkbox, bool(getattr(self._status_config.mp, 'standalone', False)))
                 except Exception:
                     self._set_checkbox_state(self.mp_standalone_checkbox, False)
+            # [NEW] EXP 단독사용 UI 반영
+            if hasattr(self, 'exp_standalone_checkbox') and self.exp_standalone_checkbox is not None:
+                try:
+                    self._set_checkbox_state(self.exp_standalone_checkbox, bool(getattr(self._status_config.exp, 'standalone', False)))
+                except Exception:
+                    self._set_checkbox_state(self.exp_standalone_checkbox, False)
             self._set_checkbox_state(self.exp_enabled_checkbox, self._status_config.exp.enabled)
 
             self._set_status_controls_enabled('hp', self._status_config.hp.enabled)
@@ -6223,17 +6262,15 @@ class LearningTab(QWidget):
                 getattr(self, 'mp_threshold_input', None),
                 getattr(self, 'mp_command_combo', None),
                 getattr(self, 'mp_interval_input', None),
+                getattr(self, 'mp_standalone_checkbox', None),
             ]
         else:
             controls = [
                 getattr(self, 'exp_roi_button', None),
                 getattr(self, 'exp_preview_button', None),
+                getattr(self, 'exp_interval_input', None),
+                getattr(self, 'exp_standalone_checkbox', None),
             ]
-            if getattr(self, 'exp_interval_label', None):
-                if enabled:
-                    self.exp_interval_label.setText('탐지 주기: 60초 (고정)')
-                else:
-                    self.exp_interval_label.setText('탐지 주기: 60초 (비활성)')
 
         for control in controls:
             if control is not None:
@@ -6428,6 +6465,24 @@ class LearningTab(QWidget):
             combo.setCurrentIndex(0)
         combo.blockSignals(False)
 
+    # [NEW] 단독실행 체크박스 색상 토글 타이머 핸들러
+    def _tick_standalone_ui(self) -> None:
+        active_base = (not self._hunt_active) and (not self._map_active) and is_maple_window_foreground()
+        # MP
+        try:
+            mp_on = bool(getattr(self._status_config.mp, 'standalone', False)) and active_base
+            if hasattr(self, 'mp_standalone_checkbox') and self.mp_standalone_checkbox is not None:
+                self.mp_standalone_checkbox.setStyleSheet('color: red;' if mp_on else '')
+        except Exception:
+            pass
+        # EXP
+        try:
+            exp_on = bool(getattr(self._status_config.exp, 'standalone', False)) and active_base
+            if hasattr(self, 'exp_standalone_checkbox') and self.exp_standalone_checkbox is not None:
+                self.exp_standalone_checkbox.setStyleSheet('color: red;' if exp_on else '')
+        except Exception:
+            pass
+
     def _format_status_roi(self, roi: StatusRoi) -> str:
         if not isinstance(roi, StatusRoi) or not roi.is_valid():
             return '범위가 설정되지 않았습니다.'
@@ -6496,19 +6551,34 @@ class LearningTab(QWidget):
     def _on_status_interval_changed(self, resource: str) -> None:
         if self._status_ui_updating:
             return
-        widget = self.hp_interval_input if resource == 'hp' else self.mp_interval_input
+        if resource == 'hp':
+            widget = self.hp_interval_input
+        elif resource == 'mp':
+            widget = self.mp_interval_input
+        else:
+            widget = getattr(self, 'exp_interval_input', None)
         text = widget.text().strip() if widget else ''
         if not text:
             self._apply_status_config_to_ui()
             return
-        try:
-            val = float(text)
-            if val <= 0:
-                raise ValueError
-        except ValueError:
-            self._apply_status_config_to_ui()
-            return
-        updates = {resource: {'interval_sec': val}}
+        if resource == 'exp':
+            try:
+                ival = int(text)
+                if ival <= 0:
+                    raise ValueError
+            except ValueError:
+                self._apply_status_config_to_ui()
+                return
+            updates = {resource: {'interval_sec': int(ival)}}
+        else:
+            try:
+                val = float(text)
+                if val <= 0:
+                    raise ValueError
+            except ValueError:
+                self._apply_status_config_to_ui()
+                return
+            updates = {resource: {'interval_sec': val}}
         self._status_config = self.data_manager.update_status_monitor_config(updates)
         self._apply_status_config_to_ui()
 
@@ -6527,6 +6597,14 @@ class LearningTab(QWidget):
         if self._status_ui_updating:
             return
         updates = {'mp': {'standalone': bool(checked)}}
+        self._status_config = self.data_manager.update_status_monitor_config(updates)
+        self._apply_status_config_to_ui()
+
+    # [NEW] EXP 단독사용 토글 핸들러
+    def _on_exp_standalone_toggled(self, checked: bool) -> None:
+        if self._status_ui_updating:
+            return
+        updates = {'exp': {'standalone': bool(checked)}}
         self._status_config = self.data_manager.update_status_monitor_config(updates)
         self._apply_status_config_to_ui()
 
@@ -6612,6 +6690,11 @@ class LearningTab(QWidget):
         self._status_config = config
         self._load_status_command_options()
         self._apply_status_config_to_ui()
+        # [NEW] 즉시 색상 갱신 시도
+        try:
+            self._tick_standalone_ui()
+        except Exception:
+            pass
 
     # [NEW] 자동 제어 명령 전달 헬퍼
     def _emit_control_command(self, command: str, reason: object = None) -> None:
@@ -6632,6 +6715,10 @@ class LearningTab(QWidget):
     def update_tabs_activity(self, hunt_active: bool, map_active: bool) -> None:
         self._hunt_active = bool(hunt_active)
         self._map_active = bool(map_active)
+        try:
+            self._tick_standalone_ui()
+        except Exception:
+            pass
 
     def _handle_status_snapshot_for_mp_standalone(self, payload: dict) -> None:
         try:
@@ -6643,6 +6730,9 @@ class LearningTab(QWidget):
             if not getattr(mp_cfg, 'enabled', True):
                 return
             if not bool(getattr(mp_cfg, 'standalone', False)):
+                return
+            # [NEW] Mapleland 최상위가 아니면 동작하지 않음
+            if not is_maple_window_foreground():
                 return
             # 사냥/맵이 실행 중이면 단독 동작은 보류
             if self._hunt_active or self._map_active:

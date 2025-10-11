@@ -1021,6 +1021,42 @@ class MapTab(QWidget):
             height_from_last_floor_px = None
             # 위치 불명일 때는 판단 생략(우회), 위치만 있고 기준이 없으면 보수적으로 통과로 간주하지 않음
             is_near_floor = True if player_y is None else False
+        # 진행 방향(좌/우) 메타 계산: intermediate_target_pos → target_waypoint 순으로 판단
+        nav_arrow_side = None
+        try:
+            target_x = None
+            if hasattr(self, 'intermediate_target_pos') and self.intermediate_target_pos is not None:
+                pos = self.intermediate_target_pos
+                if hasattr(pos, 'x') and player_x is not None:
+                    target_x = float(pos.x())
+            if target_x is None:
+                wp_id = getattr(self, 'target_waypoint_id', None)
+                if wp_id is not None and hasattr(self, 'nav_nodes') and isinstance(self.nav_nodes, dict):
+                    node = self.nav_nodes.get(f"wp_{str(wp_id)}", {}) or {}
+                    pos = node.get('pos')
+                    if isinstance(pos, (list, tuple)) and len(pos) >= 1 and player_x is not None:
+                        target_x = float(pos[0])
+            if target_x is not None and player_x is not None:
+                if target_x > player_x:
+                    nav_arrow_side = 'right'
+                elif target_x < player_x:
+                    nav_arrow_side = 'left'
+        except Exception:
+            nav_arrow_side = None
+
+        meta_dict = {
+            "navigation_locked": bool(getattr(self, 'navigation_state_locked', False)),
+            "guidance_text": getattr(self, 'guidance_text', ''),
+            "pending_nav_reason": getattr(self, 'pending_nav_recalc_reason', None),
+            # [추가] 지면 근접 메타
+            "baseline_floor_int": baseline_floor_int,
+            "near_floor_threshold_px": near_floor_threshold_px,
+            "height_from_last_floor_px": height_from_last_floor_px,
+            "is_near_floor": is_near_floor,
+        }
+        if nav_arrow_side in ('left', 'right'):
+            meta_dict['nav_arrow_side'] = nav_arrow_side
+
         snapshot = PlayerStatusSnapshot(
             timestamp=timestamp,
             floor=getattr(self, 'current_player_floor', None),
@@ -1031,16 +1067,7 @@ class MapTab(QWidget):
             is_forbidden_active=bool(getattr(self, 'forbidden_wall_in_progress', False)),
             is_event_active=bool(getattr(self, 'event_in_progress', False)),
             priority_override=bool(getattr(self, '_authority_priority_override', False)),
-            metadata={
-                "navigation_locked": bool(getattr(self, 'navigation_state_locked', False)),
-                "guidance_text": getattr(self, 'guidance_text', ''),
-                "pending_nav_reason": getattr(self, 'pending_nav_recalc_reason', None),
-                # [추가] 지면 근접 메타
-                "baseline_floor_int": baseline_floor_int,
-                "near_floor_threshold_px": near_floor_threshold_px,
-                "height_from_last_floor_px": height_from_last_floor_px,
-                "is_near_floor": is_near_floor,
-            },
+            metadata=meta_dict,
         )
         self._last_authority_snapshot_ts = snapshot.timestamp
         return snapshot

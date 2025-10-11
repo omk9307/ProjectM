@@ -291,6 +291,57 @@ def restore_maple_window(anchor: WindowGeometry, *, allow_resize: bool = True) -
     return True, "창 좌표를 복원했습니다."
 
 
+def is_maple_window_foreground(title_keyword: str = MAPLE_WINDOW_TITLE) -> bool:
+    """Mapleland 창이 현재 포그라운드(최상위 활성)인지 여부를 반환합니다.
+
+    우선순위:
+    1) win32gui.GetForegroundWindow()로 활성 HWND 비교
+    2) pygetwindow.getActiveWindow()의 타이틀 비교(폴백)
+
+    예외 발생 시 False를 반환합니다.
+    """
+    try:
+        candidate_windows = gw.getWindowsWithTitle(title_keyword)
+    except Exception:
+        candidate_windows = []
+
+    target_hwnd = None
+    target_title_lower = None
+    for w in candidate_windows:
+        if not w:
+            continue
+        try:
+            title = (getattr(w, 'title', '') or '').strip()
+        except Exception:
+            title = ''
+        if title_keyword.lower() in title.lower():
+            target_hwnd = getattr(w, '_hWnd', None)
+            target_title_lower = title.lower()
+            break
+
+    # 1) Win32 핸들 비교
+    try:
+        if win32gui is not None and target_hwnd is not None:
+            fg = win32gui.GetForegroundWindow()
+            if int(fg) == int(target_hwnd):
+                return True
+    except Exception:
+        pass
+
+    # 2) pygetwindow 활성창 타이틀 비교
+    try:
+        active = gw.getActiveWindow()
+        if active is not None:
+            title = (getattr(active, 'title', '') or '').strip().lower()
+            if target_title_lower:
+                return target_title_lower in title
+            return title_keyword.lower() in title
+    except Exception:
+        pass
+
+    return False
+
+
 def convert_multiple_rois_to_relative(
     rois: Iterable[Dict[str, int]],
     geometry: WindowGeometry,
@@ -434,6 +485,7 @@ __all__ = [
     "MAPLE_WINDOW_TITLE",
     "get_maple_window_geometry",
     "restore_maple_window",
+    "is_maple_window_foreground",
     "save_window_anchor",
     "list_saved_anchors",
     "get_anchor",

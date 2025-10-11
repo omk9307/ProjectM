@@ -13,7 +13,7 @@ import numpy as np
 from PyQt6.QtCore import QMutex, QMutexLocker, QObject, QThread, pyqtSignal
 
 from capture_manager import get_capture_manager
-from window_anchors import get_maple_window_geometry, resolve_roi_to_absolute
+from window_anchors import get_maple_window_geometry, resolve_roi_to_absolute, is_maple_window_foreground
 
 try:
     import pytesseract  # type: ignore
@@ -388,6 +388,9 @@ class StatusMonitorThread(QThread):
 
         window_geometry = get_maple_window_geometry()
 
+        # Maple 최상위 여부(단독사용 게이트용)
+        topmost = is_maple_window_foreground()
+
         for resource in tasks:
             cfg = getattr(config, resource)
             if not getattr(cfg, 'enabled', True):
@@ -396,14 +399,18 @@ class StatusMonitorThread(QThread):
             # HP/MP는 기본적으로 사냥/맵 탭이 활성일 때만 캡처.
             # 단, MP는 'standalone'이 활성인 경우 예외적으로 단독 캡처 허용.
             if resource in {"hp", "mp"} and not (active_hunt or active_map):
-                if resource == "mp" and bool(getattr(cfg, 'standalone', False)):
-                    pass  # 단독사용: 캡처 계속 진행
+                if resource == "mp" and bool(getattr(cfg, 'standalone', False)) and topmost:
+                    pass  # 단독사용 + 최상위: 캡처 진행
                 else:
                     self._unregister_resource(resource)
                     continue
             if resource == "exp" and not active_hunt:
-                self._unregister_resource(resource)
-                continue
+                # EXP도 단독사용이 켜져 있고 최상위면 허용
+                if bool(getattr(cfg, 'standalone', False)) and topmost:
+                    pass
+                else:
+                    self._unregister_resource(resource)
+                    continue
 
             interval = getattr(config, resource).interval_sec
             last_ts = self._last_capture.get(resource, 0.0)
