@@ -255,6 +255,9 @@ class MonitoringTab(QWidget):
         self._init_ui()
         # AutoControl 실시간 로그와 동일한 Δ 및 구분선 처리를 위해 마지막 키로그 시각 저장
         self._last_key_log_ts: float = 0.0
+        # 모니터링 미니맵: 캐릭터 중심 해제(고정 카메라)
+        self._fixed_camera_center: tuple[float, float] | None = None
+        self._fixed_camera_initialized: bool = False
 
     def _init_ui(self) -> None:
         root = QVBoxLayout(self)
@@ -656,8 +659,12 @@ class MonitoringTab(QWidget):
             state = None
         if not state:
             return
+        # 캐릭터 중심 해제: 초기 1회만 고정 카메라를 세팅하고 이후엔 카메라를 갱신하지 않음
+        cam_arg = None
+        if not self._fixed_camera_initialized:
+            cam_arg = self._fixed_camera_center
         self.map_view.update_view_data(
-            camera_center=state.get('camera_center'),
+            camera_center=cam_arg,
             active_features=state.get('active_features'),
             my_players=state.get('my_players'),
             other_players=state.get('other_players'),
@@ -670,6 +677,8 @@ class MonitoringTab(QWidget):
             nav_action=state.get('nav_action'),
             intermediate_node_type=state.get('intermediate_node_type'),
         )
+        if cam_arg is not None:
+            self._fixed_camera_initialized = True
 
     def _sync_map_static(self) -> None:
         if not self._map_tab:
@@ -700,6 +709,16 @@ class MonitoringTab(QWidget):
             key_features=static.get('key_features'),
             global_positions=static.get('global_positions'),
         )
+        # 고정 카메라 중심: 전체 맵 바운딩의 중앙으로 설정(1회 세팅 용)
+        try:
+            rect = self.full_map_bounding_rect
+            if rect and not rect.isNull():
+                cx = float(rect.center().x()); cy = float(rect.center().y())
+                self._fixed_camera_center = (cx, cy)
+                self._fixed_camera_initialized = False
+        except Exception:
+            self._fixed_camera_center = None
+            self._fixed_camera_initialized = False
 
     # --- 사냥 프리뷰 ---
     def _apply_hunt_preview(self) -> None:
@@ -948,8 +967,8 @@ class MonitoringTab(QWidget):
         mp_line = f"MP: {self._latest_mp:.1f}%" if isinstance(self._latest_mp, float) else "MP: --%"
         # standalone exp 시간 누적(최상위에서만 경과 추가)
         self._tick_exp_standalone_time()
-        exp_line, exp_eta_line = self._compose_exp_lines()
-        char_line = self._compose_char_status_line()
+        exp_amount_line, exp_percent_line, exp_eta_line = self._compose_exp_lines()
+        floor_line, state_line, action_line = self._compose_char_status_lines()
 
         lines = [
             f"FPS: {fps_text}",
@@ -959,16 +978,19 @@ class MonitoringTab(QWidget):
             f"텔레포트 확률: {teleport_percent}",
             hp_line,
             mp_line,
-            exp_line,
+            exp_amount_line,
+            exp_percent_line,
             exp_eta_line,
-            char_line,
+            floor_line,
+            state_line,
+            action_line,
         ]
         self.info_list.set_lines(lines)
 
         # 실행시간 라벨 갱신
         self._update_runtime_label()
 
-    def _compose_char_status_line(self) -> str:
+    def _compose_char_status_lines(self) -> tuple[str, str, str]:
         state = self._last_player_state if isinstance(self._last_player_state, str) and self._last_player_state else "--"
         action = self._last_nav_action if isinstance(self._last_nav_action, str) and self._last_nav_action else "--"
         floor_txt = "--"
@@ -977,7 +999,11 @@ class MonitoringTab(QWidget):
                 floor_txt = f"{int(self._last_floor)}층"
             except Exception:
                 floor_txt = f"{self._last_floor}층"
-        return f"캐릭터 상태: {state} | 필요행동: {action} | 현재층: {floor_txt}"
+        return (
+            f"현재층: {floor_txt}",
+            f"캐릭터 상태: {state}",
+            f"필요행동: {action}",
+        )
 
     def _collect_fps_text(self) -> str:
         owner = (self._current_authority_owner or "map").lower()
@@ -1029,10 +1055,13 @@ class MonitoringTab(QWidget):
                 percent = None
         return f"{max(percent, 0.0):.1f}%" if isinstance(percent, float) else "--%"
 
-    # EXP 표기 구성: "EXP: amount(+Δ) | percent(+Δ%)" 와 다음줄 "레벨업 HH:MM:SS"
-    def _compose_exp_lines(self) -> tuple[str, str]:
+    # EXP 표기 구성: 
+    #  - 1줄: "EXP: amount(+Δ)"
+    #  - 2줄: "EXP(%): n.n% (+x.x%)"
+    #  - 3줄: "레벨업 HH:MM:SS"
+    def _compose_exp_lines(self) -> tuple[str, str, str]:
         if not (isinstance(self._latest_exp_amount, str) and isinstance(self._latest_exp_percent, float)):
-            return ("EXP: -- | --%", "레벨업 --:--:--")
+            return ("EXP: --", "EXP(%): --%", "레벨업 --:--:--")
         amount_str = self._latest_exp_amount
         percent_cur = float(self._latest_exp_percent)
         # Δ amount
@@ -1049,7 +1078,7 @@ class MonitoringTab(QWidget):
         if isinstance(self._exp_start_percent, float):
             d_per = percent_cur - float(self._exp_start_percent)
             sign = "+" if d_per >= 0 else ""
-            delta_percent_text = f"({sign}{d_per:.2f}%)"
+            delta_percent_text = f"({sign}{d_per:.1f}%)"
         # ETA
         eta_text = self._calc_exp_eta_text(percent_cur)
         # 포맷
@@ -1057,9 +1086,10 @@ class MonitoringTab(QWidget):
             amount_fmt = f"{int(amount_str):,}"
         except Exception:
             amount_fmt = amount_str
-        exp_line = f"EXP: {amount_fmt}{(' ' + delta_amount_text) if delta_amount_text else ''} | {percent_cur:.2f}%{(' ' + delta_percent_text) if delta_percent_text else ''}"
+        amount_line = f"EXP: {amount_fmt}{(' ' + delta_amount_text) if delta_amount_text else ''}"
+        percent_line = f"EXP(%): {percent_cur:.1f}%{(' ' + delta_percent_text) if delta_percent_text else ''}"
         eta_line = f"레벨업 {eta_text}"
-        return exp_line, eta_line
+        return amount_line, percent_line, eta_line
 
     def _calc_exp_eta_text(self, percent_cur: float) -> str:
         elapsed = self._get_exp_elapsed_sec()
@@ -1398,6 +1428,12 @@ class MonitoringTab(QWidget):
             if exp_cfg is None:
                 return
             new_flag = bool(getattr(exp_cfg, 'standalone', False))
+            # 마지막 EXP 단독실행 상태를 QSettings에도 저장
+            try:
+                settings = QSettings("Gemini Inc.", "Maple AI Trainer")
+                settings.setValue("monitoring/exp_standalone_last", new_flag)
+            except Exception:
+                pass
             if new_flag != self._exp_standalone_enabled:
                 self._exp_standalone_enabled = new_flag
                 if new_flag:
