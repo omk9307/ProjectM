@@ -10286,9 +10286,42 @@ class HuntTab(QWidget):
             return False
 
         character_box = self._select_reference_character_box(self.latest_snapshot.character_boxes)
-        target = min(candidates, key=lambda box: abs(box.center_x - character_box.center_x))
-        target_side = 'left' if target.center_x < character_box.center_x else 'right'
-        distance = abs(target.center_x - character_box.center_x)
+
+        # 공통 헬퍼로 주 스킬 폭/임계 계산 후 군집 탐지 시도
+        width, primary_threshold = self._compute_primary_window_width_threshold()
+        cluster_center_x: Optional[float] = None
+        cluster_count: int = 0
+
+        if width > 0.0 and primary_threshold >= 1:
+            best_cluster = self._find_best_primary_cluster(
+                candidates,
+                width,
+                primary_threshold,
+                character_box.center_x,
+            )
+            if best_cluster is not None:
+                cluster_center_x, cluster_count = best_cluster
+
+        if cluster_center_x is not None:
+            # 군집 중심 기준으로 접근 방향/거리 산정
+            target_side = 'left' if cluster_center_x < character_box.center_x else 'right'
+            distance = abs(cluster_center_x - character_box.center_x)
+            # 추후 로그에 반영될 수 있도록 마지막 목표 정보 갱신
+            self._last_target_side = target_side
+            self._last_target_distance = distance
+            self._last_target_update_ts = time.time()
+            try:
+                self.append_log(
+                    f"군집 선택: 중심X={int(round(cluster_center_x))}, 마릿수={cluster_count}, 폭={int(round(width))}",
+                    'debug',
+                )
+            except Exception:
+                pass
+        else:
+            # 군집이 없으면 기존 로직: 가장 가까운 1마리로 접근
+            target = min(candidates, key=lambda box: abs(box.center_x - character_box.center_x))
+            target_side = 'left' if target.center_x < character_box.center_x else 'right'
+            distance = abs(target.center_x - character_box.center_x)
 
         teleport_enabled = bool(self.teleport_enabled_checkbox.isChecked())
         teleport_distance = float(self.teleport_distance_spinbox.value())
@@ -10384,30 +10417,23 @@ class HuntTab(QWidget):
         except Exception:
             return False
 
-    def _is_primary_reachable_from_hunt(self) -> bool:
-        """사냥범위 내 몬스터들만 대상으로, 캐릭터가 X축 이동 시 주 스킬 범위 기준을
-        만족할 수 있는지(이론상 배치 가능)를 평가한다.
+    def _compute_primary_window_width_threshold(self) -> tuple[float, int]:
+        """주 스킬 범위 슬라이딩 윈도우의 폭과 임계 마릿수를 계산한다.
 
-        - 대칭 모드: 폭 = primary_radius*2
-        - 전/후 비대칭 모드: 폭 = primary_front + primary_back
-        - 후보는 현재 사냥범위와 Y밴드에 교차하는 몬스터만 사용
-        - 슬라이딩 윈도우로 폭 내에 threshold 이상 포함 가능하면 True
+        - 대칭 모드: 폭 = radius*2
+        - 전/후 비대칭 모드: 폭 = front + back
+        - 임계: primary_monster_threshold_spinbox (>=1)
         """
-        if not (self.latest_snapshot and self.current_hunt_area):
-            return False
-        monsters = self._get_recent_monster_boxes()
-        if not monsters:
-            return False
-        hunt_monsters = [box for box in monsters if box.intersects(self.current_hunt_area)]
-        if not hunt_monsters:
-            return False
-
-        # 주 스킬 기준
-        primary_threshold_widget = getattr(self, 'primary_monster_threshold_spinbox', None)
-        primary_threshold = int(primary_threshold_widget.value()) if primary_threshold_widget else 1
-        primary_threshold = max(1, primary_threshold)
+        # 임계 마릿수 계산
+        try:
+            widget = getattr(self, 'primary_monster_threshold_spinbox', None)
+            threshold = int(widget.value()) if widget else 1
+        except Exception:
+            threshold = 1
+        threshold = max(1, threshold)
 
         # 폭 계산
+        width = 0.0
         mode_on = bool(getattr(self, 'facing_range_checkbox', None) and self.facing_range_checkbox.isChecked())
         if mode_on:
             try:
@@ -10422,19 +10448,100 @@ class HuntTab(QWidget):
                 width = max(1.0, radius * 2.0)
             except Exception:
                 width = 0.0
-        if width <= 0.0:
-            return False
+        return (width, threshold)
 
-        xs = sorted(box.center_x for box in hunt_monsters)
-        i = 0
+    def _find_best_primary_cluster(
+        self,
+        candidates: list,
+        width: float,
+        threshold: int,
+        char_x: float,
+    ) -> Optional[tuple[float, int]]:
+        """슬라이딩 윈도우로 후보 몬스터들 중 주 스킬 폭 내 임계 이상 군집을 탐색하고,
+        캐릭터 X에 가장 가까운 군집 중심을 반환한다.
+
+        반환: (군집 중심 X, 군집 마릿수) 또는 None
+        동점 시 더 많은 마릿수 우선, 그래도 동률이면 현재 바라보는 방향 우선.
+        """
+        boxes = sorted(candidates, key=lambda b: b.center_x)
+        if not boxes or width <= 0.0 or threshold <= 0:
+            return None
+        xs = [b.center_x for b in boxes]
+        # prefix sum으로 빠른 구간 합 계산
+        prefix = [0.0]
+        for x in xs:
+            prefix.append(prefix[-1] + float(x))
+
         n = len(xs)
+        best_center: Optional[float] = None
+        best_count: int = 0
+        best_distance: float = float('inf')
+        last_facing = self.last_facing if self.last_facing in ('left', 'right') else None
+
+        j = 0
         for i in range(n):
-            j = i
             while j < n and (xs[j] - xs[i]) <= width + 1e-6:
                 j += 1
-            if (j - i) >= primary_threshold:
-                return True
-        return False
+            count = j - i
+            if count >= threshold:
+                sum_x = prefix[j] - prefix[i]
+                center = sum_x / float(count)
+                distance = abs(center - char_x)
+
+                better = False
+                if distance + 1e-6 < best_distance:
+                    better = True
+                elif abs(distance - best_distance) <= 1e-6:
+                    # 동거리인 경우 더 많은 마릿수 우선
+                    if count > best_count:
+                        better = True
+                    elif count == best_count and last_facing in ('left', 'right') and best_center is not None:
+                        # 여전히 동률이면 현재 바라보는 방향 우선
+                        new_side = 'left' if center < char_x else 'right'
+                        old_side = 'left' if best_center < char_x else 'right'
+                        if new_side == last_facing and old_side != last_facing:
+                            better = True
+
+                if better:
+                    best_center = center
+                    best_count = count
+                    best_distance = distance
+
+            # i 증가에 맞춰 j 최소 i+1 유지
+            if j < i + 1:
+                j = i + 1
+
+        if best_center is None:
+            return None
+        return (best_center, best_count)
+
+    def _is_primary_reachable_from_hunt(self) -> bool:
+        """사냥범위 내 몬스터들로 주 스킬 기준(폭/임계)을 만족하는 군집이 존재하는지 평가한다.
+
+        공통 헬퍼를 사용하여 폭/임계를 일관되게 적용하고, 군집 존재 여부만 반환한다.
+        """
+        if not (self.latest_snapshot and self.current_hunt_area):
+            return False
+        monsters = self._get_recent_monster_boxes()
+        if not monsters:
+            return False
+        hunt_monsters = [box for box in monsters if box.intersects(self.current_hunt_area)]
+        if not hunt_monsters:
+            return False
+
+        width, primary_threshold = self._compute_primary_window_width_threshold()
+        if width <= 0.0 or primary_threshold <= 0:
+            return False
+
+        # 캐릭터 기준은 동률 처리에만 사용됨
+        try:
+            char_box = self._select_reference_character_box(self.latest_snapshot.character_boxes)
+            char_x = char_box.center_x
+        except Exception:
+            char_x = 0.0
+
+        cluster = self._find_best_primary_cluster(hunt_monsters, width, primary_threshold, char_x)
+        return cluster is not None
 
     def _issue_walk_command(self, side: str, distance: float) -> bool:
         if side not in ('left', 'right'):
