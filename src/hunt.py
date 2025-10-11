@@ -10510,11 +10510,10 @@ class HuntTab(QWidget):
         threshold: int,
         char_x: float,
     ) -> Optional[tuple[float, int]]:
-        """슬라이딩 윈도우로 후보 몬스터들 중 주 스킬 폭 내 임계 이상 군집을 탐색하고,
-        캐릭터 X에 가장 가까운 군집 중심을 반환한다.
+        """슬라이딩 윈도우로 후보 몬스터들 중 주 스킬 폭 내 임계 이상 군집을 탐색한다.
 
+        우선순위: 더 많은 마릿수 → 캐릭터와의 거리 → 현재 바라보는 방향.
         반환: (군집 중심 X, 군집 마릿수) 또는 None
-        동점 시 더 많은 마릿수 우선, 그래도 동률이면 현재 바라보는 방향 우선.
         """
         boxes = sorted(candidates, key=lambda b: b.center_x)
         if not boxes or width <= 0.0 or threshold <= 0:
@@ -10541,14 +10540,14 @@ class HuntTab(QWidget):
                 center = sum_x / float(count)
                 distance = abs(center - char_x)
 
+                # 새 우선순위: 마릿수 → 거리 → 바라보는 방향
                 better = False
-                if distance + 1e-6 < best_distance:
+                if count > best_count:
                     better = True
-                elif abs(distance - best_distance) <= 1e-6:
-                    # 동거리인 경우 더 많은 마릿수 우선
-                    if count > best_count:
+                elif count == best_count:
+                    if distance + 1e-6 < best_distance:
                         better = True
-                    elif count == best_count and last_facing in ('left', 'right') and best_center is not None:
+                    elif abs(distance - best_distance) <= 1e-6 and last_facing in ('left', 'right') and best_center is not None:
                         # 여전히 동률이면 현재 바라보는 방향 우선
                         new_side = 'left' if center < char_x else 'right'
                         old_side = 'left' if best_center < char_x else 'right'
@@ -10567,6 +10566,38 @@ class HuntTab(QWidget):
         if best_center is None:
             return None
         return (best_center, best_count)
+
+    def _get_map_preferred_side(self) -> Optional[str]:
+        """맵 탭 스냅샷으로부터 진행 우선 방향을 추정한다.
+
+        우선순위:
+        - metadata에 'nav_arrow_side' 또는 'nav_preferred_side'가 'left'/'right'로 제공되면 사용
+        - 없으면 last_move_command에서 좌/우 파싱
+        - 실패 시 None
+        """
+        try:
+            snap = self._get_latest_map_snapshot_payload()
+        except Exception:
+            snap = None
+        if not isinstance(snap, dict):
+            return None
+        # 1) 메타 내 명시적 키
+        md = snap.get('metadata') if isinstance(snap.get('metadata'), dict) else {}
+        for key in ('nav_arrow_side', 'nav_preferred_side', 'preferred_side'):
+            val = md.get(key)
+            if val in ('left', 'right'):
+                return val
+        # 2) 마지막 이동 명령으로 추정
+        try:
+            last_cmd = snap.get('last_move_command') or ''
+            if isinstance(last_cmd, str):
+                if '우' in last_cmd:
+                    return 'right'
+                if '좌' in last_cmd:
+                    return 'left'
+        except Exception:
+            pass
+        return None
 
     def _is_primary_reachable_from_hunt(self) -> bool:
         """사냥범위 내 몬스터들로 주 스킬 기준(폭/임계)을 만족하는 군집이 존재하는지 평가한다.
@@ -10960,14 +10991,31 @@ class HuntTab(QWidget):
                 self._last_target_distance = None
                 return None
         char_x = character_box.center_x
-        facing = self.last_facing if self.last_facing in ('left', 'right') else None
-        if facing:
-            if facing == 'left':
-                same_side = [box for box in candidates if box.center_x <= char_x]
-            else:
-                same_side = [box for box in candidates if box.center_x >= char_x]
-            if same_side:
-                candidates = same_side
+        # 좌/우 마릿수 비교 및 맵 진행 방향 우선
+        left_list = [box for box in candidates if box.center_x < char_x]
+        right_list = [box for box in candidates if box.center_x >= char_x]
+        forced_side: Optional[str] = None
+        if len(left_list) != len(right_list):
+            forced_side = 'left' if len(left_list) > len(right_list) else 'right'
+        elif len(left_list) == 1 and len(right_list) == 1:
+            pref = self._get_map_preferred_side()
+            if pref in ('left', 'right'):
+                forced_side = pref
+        # 강제 측면이 정해졌으면 해당 측면으로 후보 축소
+        if forced_side == 'left' and left_list:
+            candidates = left_list
+        elif forced_side == 'right' and right_list:
+            candidates = right_list
+        else:
+            # 강제 선택이 없다면 기존 바라보는 방향 기반 축소 유지
+            facing = self.last_facing if self.last_facing in ('left', 'right') else None
+            if facing:
+                if facing == 'left':
+                    same_side = [box for box in candidates if box.center_x <= char_x]
+                else:
+                    same_side = [box for box in candidates if box.center_x >= char_x]
+                if same_side:
+                    candidates = same_side
 
         selected = min(candidates, key=lambda box: abs(box.center_x - char_x))
         selected_distance = abs(selected.center_x - char_x)
