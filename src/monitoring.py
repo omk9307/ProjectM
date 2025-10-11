@@ -240,11 +240,17 @@ class MonitoringTab(QWidget):
         self._run_start_ts: float | None = None
         self._exp_standalone_enabled: bool = False
         self._exp_standalone_start_ts: float | None = None
+        self._exp_standalone_accum_sec: float = 0.0
+        self._exp_standalone_last_top_ts: float | None = None
         self._exp_start_amount: int | None = None
         self._exp_start_percent: float | None = None
         self._exp_last_percent: float | None = None
         self._status_monitor = None
         self._status_data_manager = None
+        # 캐릭터 상태/행동/층 스냅샷
+        self._last_player_state: str | None = None
+        self._last_nav_action: str | None = None
+        self._last_floor: float | None = None
 
         self._init_ui()
         # AutoControl 실시간 로그와 동일한 Δ 및 구분선 처리를 위해 마지막 키로그 시각 저장
@@ -303,15 +309,15 @@ class MonitoringTab(QWidget):
         info_ctrl_widget = QWidget()
         info_ctrl_layout = QHBoxLayout(info_ctrl_widget)
         info_ctrl_layout.setContentsMargins(0, 0, 0, 0)
+        # 실행시간 라벨(정보 그룹 제목 아래, 좌측 정렬, 검정색)
+        self.runtime_label = QLabel("")
+        self.runtime_label.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+        self.runtime_label.setStyleSheet("color: #000000; padding: 2px 6px;")
+        info_ctrl_layout.addWidget(self.runtime_label)
         info_ctrl_layout.addStretch(1)
         self.info_list = InfoListWidget(self)
         info_layout.addWidget(info_ctrl_widget)
         info_layout.addWidget(self.info_list, 1)
-        # 실행시간 라벨(정보 그룹 하단 빈 공간 채움)
-        self.runtime_label = QLabel("")
-        self.runtime_label.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-        self.runtime_label.setStyleSheet("color: #BBBBBB; padding: 4px 8px;")
-        info_layout.addWidget(self.runtime_label)
 
         # 우측: 사냥 미리보기
         hunt_box = QGroupBox("사냥 미리보기")
@@ -940,7 +946,10 @@ class MonitoringTab(QWidget):
         # HP/MP/EXP
         hp_line = f"HP: {self._latest_hp:.1f}%" if isinstance(self._latest_hp, float) else "HP: --%"
         mp_line = f"MP: {self._latest_mp:.1f}%" if isinstance(self._latest_mp, float) else "MP: --%"
+        # standalone exp 시간 누적(최상위에서만 경과 추가)
+        self._tick_exp_standalone_time()
         exp_line, exp_eta_line = self._compose_exp_lines()
+        char_line = self._compose_char_status_line()
 
         lines = [
             f"FPS: {fps_text}",
@@ -952,11 +961,23 @@ class MonitoringTab(QWidget):
             mp_line,
             exp_line,
             exp_eta_line,
+            char_line,
         ]
         self.info_list.set_lines(lines)
 
         # 실행시간 라벨 갱신
         self._update_runtime_label()
+
+    def _compose_char_status_line(self) -> str:
+        state = self._last_player_state if isinstance(self._last_player_state, str) and self._last_player_state else "--"
+        action = self._last_nav_action if isinstance(self._last_nav_action, str) and self._last_nav_action else "--"
+        floor_txt = "--"
+        if isinstance(self._last_floor, (int, float)):
+            try:
+                floor_txt = f"{int(self._last_floor)}층"
+            except Exception:
+                floor_txt = f"{self._last_floor}층"
+        return f"캐릭터 상태: {state} | 필요행동: {action} | 현재층: {floor_txt}"
 
     def _collect_fps_text(self) -> str:
         owner = (self._current_authority_owner or "map").lower()
@@ -1041,10 +1062,9 @@ class MonitoringTab(QWidget):
         return exp_line, eta_line
 
     def _calc_exp_eta_text(self, percent_cur: float) -> str:
-        start_ts = self._effective_exp_session_start_ts()
-        if not isinstance(start_ts, float) or not isinstance(self._exp_start_percent, float):
+        elapsed = self._get_exp_elapsed_sec()
+        if elapsed is None or not isinstance(self._exp_start_percent, float):
             return "--:--:--"
-        elapsed = max(0.0, time.time() - start_ts)
         if elapsed < 1.0:
             return "--:--:--"
         gain = max(0.0, percent_cur - float(self._exp_start_percent))
@@ -1057,27 +1077,42 @@ class MonitoringTab(QWidget):
         eta_sec = int(remain / rate_per_sec)
         return self._format_hhmmss(eta_sec)
 
-    def _effective_exp_session_start_ts(self) -> float | None:
+    def _get_exp_elapsed_sec(self) -> float | None:
         if self._map_running or self._hunt_running:
-            return self._run_start_ts
+            return max(0.0, time.time() - self._run_start_ts) if isinstance(self._run_start_ts, float) else None
         if self._exp_standalone_enabled:
-            return self._exp_standalone_start_ts
+            return float(self._exp_standalone_accum_sec)
         return None
+
+    def _tick_exp_standalone_time(self) -> None:
+        if not self._exp_standalone_enabled:
+            self._exp_standalone_last_top_ts = None
+            return
+        now = time.time()
+        if is_maple_window_foreground():
+            if self._exp_standalone_last_top_ts is None:
+                self._exp_standalone_last_top_ts = now
+            else:
+                self._exp_standalone_accum_sec += max(0.0, now - self._exp_standalone_last_top_ts)
+                self._exp_standalone_last_top_ts = now
+        else:
+            self._exp_standalone_last_top_ts = None
 
     def _update_runtime_label(self) -> None:
         active = False
-        start_ts: float | None = None
+        elapsed_sec: int | None = None
         if self._map_running or self._hunt_running:
+            active = isinstance(self._run_start_ts, float)
+            if active:
+                elapsed_sec = max(0, int(time.time() - float(self._run_start_ts)))
+        elif self._exp_standalone_enabled:
             active = True
-            start_ts = self._run_start_ts
-        elif self._exp_standalone_enabled and is_maple_window_foreground():
-            active = True
-            start_ts = self._exp_standalone_start_ts
-        if not active or not isinstance(start_ts, float):
+            # 누적된 시간만 사용(최상위 아닐 땐 일시정지)
+            elapsed_sec = max(0, int(self._exp_standalone_accum_sec))
+        if not active or elapsed_sec is None:
             self.runtime_label.setText("")
             return
-        elapsed = max(0, int(time.time() - start_ts))
-        self.runtime_label.setText(f"실행시간: {self._format_hhmmss(elapsed)}")
+        self.runtime_label.setText(f"실행시간: {self._format_hhmmss(elapsed_sec)}")
 
     @staticmethod
     def _format_hhmmss(sec: int) -> str:
@@ -1094,6 +1129,21 @@ class MonitoringTab(QWidget):
         try:
             if owner in ("map", "hunt"):
                 self._current_authority_owner = owner
+            # 맵 스냅샷의 캐릭터 상태/필요행동/현재층 캐싱
+            if isinstance(payload, dict):
+                snap = payload.get('map_snapshot')
+                if isinstance(snap, dict):
+                    st = snap.get('player_state')
+                    na = snap.get('navigation_action')
+                    fl = snap.get('floor')
+                    if isinstance(st, str):
+                        self._last_player_state = st
+                    if isinstance(na, str):
+                        self._last_nav_action = na
+                    try:
+                        self._last_floor = float(fl) if fl is not None else None
+                    except Exception:
+                        self._last_floor = None
         except Exception:
             pass
 
@@ -1352,6 +1402,8 @@ class MonitoringTab(QWidget):
                 self._exp_standalone_enabled = new_flag
                 if new_flag:
                     self._exp_standalone_start_ts = time.time()
+                    self._exp_standalone_accum_sec = 0.0
+                    self._exp_standalone_last_top_ts = None
                     if isinstance(self._latest_exp_percent, float):
                         self._exp_start_percent = float(self._latest_exp_percent)
                     try:
@@ -1360,6 +1412,8 @@ class MonitoringTab(QWidget):
                         self._exp_start_amount = None
                 else:
                     self._exp_standalone_start_ts = None
+                    self._exp_standalone_accum_sec = 0.0
+                    self._exp_standalone_last_top_ts = None
                     if not (self._map_running or self._hunt_running):
                         self._exp_start_percent = None
                         self._exp_start_amount = None
