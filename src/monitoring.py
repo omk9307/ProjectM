@@ -319,72 +319,73 @@ class MonitoringTab(QWidget):
         self.runtime_label.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
         self.runtime_label.setStyleSheet("color: #000000; padding: 2px 6px;")
         info_ctrl_layout.addWidget(self.runtime_label)
+        # [NEW] MP/EXP 단독실행 토글(학습 탭과 연동)
+        info_ctrl_layout.addSpacing(12)
+        self.chk_mp_standalone = QCheckBox("MP")
+        self.chk_exp_standalone = QCheckBox("EXP")
+        for _cb in (self.chk_mp_standalone, self.chk_exp_standalone):
+            _cb.setChecked(False)
+            _cb.setToolTip("단독 실행")
+        self.chk_mp_standalone.toggled.connect(self._on_toggle_mp_standalone)
+        self.chk_exp_standalone.toggled.connect(self._on_toggle_exp_standalone)
+        info_ctrl_layout.addWidget(self.chk_mp_standalone)
+        info_ctrl_layout.addWidget(self.chk_exp_standalone)
         info_ctrl_layout.addStretch(1)
         info_layout.addWidget(info_ctrl_widget)
-        # 정보 컬럼 컨테이너(좌측: 라벨, 우측: 값), 세로 칸 분리
-        self.info_labels: dict[str, QLabel] = {}
+        # 정보 행 컨테이너(한 줄씩 아래로, 좌: 정보명 칸, 우: 수치 칸)
+        self.info_value_labels: dict[str, QLabel] = {}
 
-        def _mk_row(grid: QGridLayout, row: int, label_text: str, key: str) -> None:
+        rows_container = QWidget()
+        rows_container.setStyleSheet(
+            """
+            QWidget { background-color: #2E2E2E; }
+            QLabel { color: #EEEEEE; }
+            """
+        )
+        rows_layout = QVBoxLayout(rows_container)
+        rows_layout.setContentsMargins(4, 4, 4, 4)
+        rows_layout.setSpacing(4)
+
+        def _mk_row(label_text: str, key: str) -> QWidget:
+            row = QFrame()
+            row.setFrameShape(QFrame.Shape.NoFrame)
+            h = QHBoxLayout(row)
+            h.setContentsMargins(4, 2, 4, 2)
+            h.setSpacing(6)
             name = QLabel(label_text)
-            name.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-            name.setStyleSheet("color: #DDDDDD; padding: 2px 4px;")
+            name.setFixedWidth(92)
+            name.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+            name.setStyleSheet("color: #CCCCCC; background: rgba(255,255,255,0.03); padding: 2px 6px; border: 1px solid #444;")
+            vline = QFrame(); vline.setFrameShape(QFrame.Shape.VLine); vline.setFrameShadow(QFrame.Shadow.Sunken)
             value = QLabel("--")
             value.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
-            value.setStyleSheet("color: #FFFFFF; padding: 2px 4px;")
-            grid.addWidget(name, row, 0)
-            grid.addWidget(value, row, 1)
-            self.info_labels[key] = value
+            value.setStyleSheet("color: #FFFFFF; padding: 2px 6px;")
+            h.addWidget(name)
+            h.addWidget(vline)
+            h.addWidget(value, 1)
+            self.info_value_labels[key] = value
+            return row
 
-        def _mk_column(title: str, rows: list[tuple[str, str]]) -> QWidget:
-            box = QGroupBox(title)
-            box.setStyleSheet("QGroupBox{font-weight:bold;}")
-            gl = QGridLayout(box)
-            gl.setContentsMargins(8, 8, 8, 8)
-            gl.setHorizontalSpacing(10)
-            gl.setVerticalSpacing(4)
-            for i, (label_text, key) in enumerate(rows):
-                _mk_row(gl, i, label_text, key)
-            return box
+        def _mk_sep() -> QFrame:
+            s = QFrame(); s.setFrameShape(QFrame.Shape.HLine); s.setFrameShadow(QFrame.Shadow.Sunken)
+            return s
 
-        columns_widget = QWidget()
-        columns_layout = QHBoxLayout(columns_widget)
-        columns_layout.setContentsMargins(0, 0, 0, 0)
-        columns_layout.setSpacing(8)
-        # Column 1: FPS
-        col_fps = _mk_column("FPS", [("FPS", "fps")])
-        columns_layout.addWidget(col_fps, 0)
-        # VLine
-        v1 = QFrame(); v1.setFrameShape(QFrame.Shape.VLine); v1.setFrameShadow(QFrame.Shadow.Sunken)
-        columns_layout.addWidget(v1)
-        # Column 2: 권한/범위
-        col_auth = _mk_column("권한/범위", [
-            ("이동권한", "owner"),
-            ("스킬범위", "skill_cnt"),
-            ("X축 범위", "x_cnt"),
-            ("텔레포트 확률", "teleport"),
-        ])
-        columns_layout.addWidget(col_auth, 1)
-        v2 = QFrame(); v2.setFrameShape(QFrame.Shape.VLine); v2.setFrameShadow(QFrame.Shadow.Sunken)
-        columns_layout.addWidget(v2)
-        # Column 3: HP/EXP
-        col_res = _mk_column("자원/EXP", [
-            ("HP", "hp"),
-            ("MP", "mp"),
-            ("EXP", "exp_amount"),
-            ("EXP(%)", "exp_percent"),
-            ("레벨업", "exp_eta"),
-        ])
-        columns_layout.addWidget(col_res, 1)
-        v3 = QFrame(); v3.setFrameShape(QFrame.Shape.VLine); v3.setFrameShadow(QFrame.Shadow.Sunken)
-        columns_layout.addWidget(v3)
-        # Column 4: 캐릭터
-        col_char = _mk_column("캐릭터", [
-            ("현재층", "floor"),
-            ("캐릭터 상태", "state"),
-            ("필요행동", "action"),
-        ])
-        columns_layout.addWidget(col_char, 1)
-        info_layout.addWidget(columns_widget, 1)
+        # 그룹: FPS
+        rows_layout.addWidget(_mk_row("FPS", "fps"))
+        rows_layout.addWidget(_mk_sep())
+        # 그룹: 권한/범위
+        for t, k in (("이동권한", "owner"), ("스킬범위", "skill_cnt"), ("X축 범위", "x_cnt"), ("텔레포트 확률", "teleport")):
+            rows_layout.addWidget(_mk_row(t, k))
+        rows_layout.addWidget(_mk_sep())
+        # 그룹: 자원/EXP
+        for t, k in (("HP", "hp"), ("MP", "mp"), ("EXP", "exp_amount"), ("EXP(%)", "exp_percent"), ("레벨업", "exp_eta")):
+            rows_layout.addWidget(_mk_row(t, k))
+        rows_layout.addWidget(_mk_sep())
+        # 그룹: 캐릭터
+        for t, k in (("현재층", "floor"), ("캐릭터 상태", "state"), ("필요행동", "action")):
+            rows_layout.addWidget(_mk_row(t, k))
+
+        info_layout.addWidget(rows_container, 1)
 
         # 우측: 사냥 미리보기
         hunt_box = QGroupBox("사냥 미리보기")
@@ -1013,6 +1014,24 @@ class MonitoringTab(QWidget):
     def _tick_info_update(self) -> None:
         # FPS: 권한 소유자 기준 선호, 없으면 폴백
         fps_text = self._collect_fps_text()
+        # 맵탭에서 최신 캐릭터 상태 스냅샷 직접 폴링(권한 신호가 드물어도 갱신)
+        try:
+            if self._map_tab and hasattr(self._map_tab, 'collect_authority_snapshot'):
+                snap = self._map_tab.collect_authority_snapshot()
+                if snap is not None:
+                    st = getattr(snap, 'player_state', None)
+                    na = getattr(snap, 'navigation_action', None)
+                    fl = getattr(snap, 'floor', None)
+                    if isinstance(st, str):
+                        self._last_player_state = st
+                    if isinstance(na, str):
+                        self._last_nav_action = na
+                    try:
+                        self._last_floor = float(fl) if fl is not None else self._last_floor
+                    except Exception:
+                        pass
+        except Exception:
+            pass
         # 이동권한
         owner_text = "맵" if (self._current_authority_owner or "map") == "map" else "사냥"
         # 스킬범위/ X축 범위(사냥탭 캐시 사용)
@@ -1035,25 +1054,54 @@ class MonitoringTab(QWidget):
         floor_line, state_line, action_line = self._compose_char_status_lines()
 
         # FPS
-        self.info_labels.get('fps', QLabel()).setText(fps_text)
+        self.info_value_labels.get('fps', QLabel()).setText(fps_text)
         # 권한/범위
-        self.info_labels.get('owner', QLabel()).setText(owner_text)
-        self.info_labels.get('skill_cnt', QLabel()).setText(str(int(skill_cnt)) if isinstance(skill_cnt, (int, float)) else "--")
-        self.info_labels.get('x_cnt', QLabel()).setText(str(int(x_cnt)) if isinstance(x_cnt, (int, float)) else "--")
-        self.info_labels.get('teleport', QLabel()).setText(teleport_percent)
+        self.info_value_labels.get('owner', QLabel()).setText(owner_text)
+        self.info_value_labels.get('skill_cnt', QLabel()).setText(str(int(skill_cnt)) if isinstance(skill_cnt, (int, float)) else "--")
+        self.info_value_labels.get('x_cnt', QLabel()).setText(str(int(x_cnt)) if isinstance(x_cnt, (int, float)) else "--")
+        self.info_value_labels.get('teleport', QLabel()).setText(teleport_percent)
         # 자원/EXP
-        self.info_labels.get('hp', QLabel()).setText(hp_val)
-        self.info_labels.get('mp', QLabel()).setText(mp_val)
-        self.info_labels.get('exp_amount', QLabel()).setText(exp_amount_line.replace('EXP: ', ''))
-        self.info_labels.get('exp_percent', QLabel()).setText(exp_percent_line.replace('EXP(%): ', ''))
-        self.info_labels.get('exp_eta', QLabel()).setText(exp_eta_line.replace('레벨업 ', ''))
+        self.info_value_labels.get('hp', QLabel()).setText(hp_val)
+        self.info_value_labels.get('mp', QLabel()).setText(mp_val)
+        self.info_value_labels.get('exp_amount', QLabel()).setText(exp_amount_line.replace('EXP: ', ''))
+        self.info_value_labels.get('exp_percent', QLabel()).setText(exp_percent_line.replace('EXP(%): ', ''))
+        self.info_value_labels.get('exp_eta', QLabel()).setText(exp_eta_line.replace('레벨업 ', ''))
         # 캐릭터
-        self.info_labels.get('floor', QLabel()).setText(floor_line.replace('현재층: ', ''))
-        self.info_labels.get('state', QLabel()).setText(state_line.replace('캐릭터 상태: ', ''))
-        self.info_labels.get('action', QLabel()).setText(action_line.replace('필요행동: ', ''))
+        self.info_value_labels.get('floor', QLabel()).setText(floor_line.replace('현재층: ', ''))
+        self.info_value_labels.get('state', QLabel()).setText(state_line.replace('캐릭터 상태: ', ''))
+        self.info_value_labels.get('action', QLabel()).setText(action_line.replace('필요행동: ', ''))
 
         # 실행시간 라벨 갱신
         self._update_runtime_label()
+
+    # --- 모니터링에서 MP/EXP 단독 토글 → 학습 DataManager로 반영 ---
+    def _on_toggle_mp_standalone(self, checked: bool) -> None:
+        dm = getattr(self, '_status_data_manager', None)
+        if dm and hasattr(dm, 'update_status_monitor_config'):
+            try:
+                dm.update_status_monitor_config({'mp': {'standalone': bool(checked)}})
+            except Exception:
+                pass
+        try:
+            settings = QSettings("Gemini Inc.", "Maple AI Trainer")
+            settings.setValue("monitoring/mp_standalone_last", bool(checked))
+        except Exception:
+            pass
+
+    def _on_toggle_exp_standalone(self, checked: bool) -> None:
+        dm = getattr(self, '_status_data_manager', None)
+        if dm and hasattr(dm, 'update_status_monitor_config'):
+            try:
+                dm.update_status_monitor_config({'exp': {'standalone': bool(checked)}})
+            except Exception:
+                pass
+        # 로컬 상태/타이머도 동기화
+        self._handle_status_config_update(type('Cfg', (), {'exp': type('RCfg', (), {'standalone': bool(checked)})()})())
+        try:
+            settings = QSettings("Gemini Inc.", "Maple AI Trainer")
+            settings.setValue("monitoring/exp_standalone_last", bool(checked))
+        except Exception:
+            pass
 
     def _compose_char_status_lines(self) -> tuple[str, str, str]:
         state = self._last_player_state if isinstance(self._last_player_state, str) and self._last_player_state else "--"
@@ -1489,10 +1537,26 @@ class MonitoringTab(QWidget):
 
     def _handle_status_config_update(self, config) -> None:
         try:
+            mp_cfg = getattr(config, 'mp', None)
             exp_cfg = getattr(config, 'exp', None)
+            # 모니터링 체크박스 상태 반영 (신호 루프 방지용 blockSignals)
+            try:
+                if mp_cfg is not None and hasattr(self, 'chk_mp_standalone'):
+                    b = self.chk_mp_standalone.blockSignals(True)
+                    self.chk_mp_standalone.setChecked(bool(getattr(mp_cfg, 'standalone', False)))
+                    self.chk_mp_standalone.blockSignals(b)
+            except Exception:
+                pass
             if exp_cfg is None:
                 return
             new_flag = bool(getattr(exp_cfg, 'standalone', False))
+            try:
+                if hasattr(self, 'chk_exp_standalone'):
+                    b = self.chk_exp_standalone.blockSignals(True)
+                    self.chk_exp_standalone.setChecked(new_flag)
+                    self.chk_exp_standalone.blockSignals(b)
+            except Exception:
+                pass
             # 마지막 EXP 단독실행 상태를 QSettings에도 저장
             try:
                 settings = QSettings("Gemini Inc.", "Maple AI Trainer")
