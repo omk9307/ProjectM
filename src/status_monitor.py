@@ -255,6 +255,8 @@ class StatusMonitorConfig:
         }
         if self.exp.maximum_value is not None:
             exp_data["max_value"] = int(self.exp.maximum_value)
+        # [FIX] EXP 단독사용 플래그도 저장(기존 누락으로 인해 다른 리소스 업데이트 시 EXP 단독사용이 해제되는 문제 발생)
+        exp_data["standalone"] = bool(self.exp.standalone)
 
         return {
             "hp": self.hp.to_dict(),
