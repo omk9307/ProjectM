@@ -1145,7 +1145,7 @@ class HuntTab(QWidget):
         self._char_missing_watchdog.timeout.connect(self._check_character_presence_watchdog)
         self._char_missing_watchdog.start()
 
-        # EXP 정체(1분 주기 연속 동일) 감지 후 재시작 중복 방지용 플래그
+        # EXP 정체(최근 9회 연속 동일) 감지 후 재시작 중복 방지용 플래그
         self._exp_stagnation_restart_pending: bool = False
         # [NEW] 런타임 가시성/프리뷰 상태
         self._ui_runtime_visible: bool = True
@@ -6905,14 +6905,19 @@ class HuntTab(QWidget):
             exp_info = payload.get('exp')
             if isinstance(exp_info, dict):
                 self._record_exp_snapshot(exp_info)
-                # [EXP 정체 감지] 직전 측정 대비 완전 동일하면 문제로 간주
+                # [EXP 정체 감지] 최근 9회 연속 완전 동일하면 문제로 간주
                 try:
                     records = getattr(self, '_status_exp_records', []) or []
-                    if len(records) >= 2:
-                        prev = records[-2]
-                        curr = records[-1]
-                        same_amount = (int(prev.get('amount')) == int(curr.get('amount')))
-                        same_percent = (float(prev.get('percent')) == float(curr.get('percent')))
+                    if len(records) >= 9:
+                        window = records[-9:]
+                        try:
+                            amount_set = {int(r.get('amount')) for r in window}
+                            percent_set = {float(r.get('percent')) for r in window}
+                        except Exception:
+                            amount_set = set()
+                            percent_set = set()
+                        same_amount = (len(amount_set) == 1)
+                        same_percent = (len(percent_set) == 1)
                         if same_amount and same_percent:
                             # HP 확인: 10% 미만이면(또는 읽기 실패) 사망 판단 → 프로세스 종료
                             hp_percent: Optional[float] = None

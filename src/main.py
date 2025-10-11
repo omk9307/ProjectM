@@ -332,6 +332,28 @@ class MainWindow(QMainWindow):
 
                 if self.status_monitor_thread is None:
                     status_config = data_manager.load_status_monitor_config()
+                    # [보강] QSettings에 남은 마지막 단독실행 상태가 True인데 파일값이 False라면 파일값을 True로 승격
+                    try:
+                        from PyQt6.QtCore import QSettings
+                        settings = QSettings("Gemini Inc.", "Maple AI Trainer")
+                        def _to_bool(v, default=False):
+                            if v is None:
+                                return default
+                            if isinstance(v, bool):
+                                return v
+                            s = str(v).strip().lower()
+                            return s in ("1","true","yes","y","on")
+                        mp_last = _to_bool(settings.value("monitoring/mp_standalone_last"), False)
+                        exp_last = _to_bool(settings.value("monitoring/exp_standalone_last"), False)
+                        need_update = {}
+                        if mp_last and not bool(getattr(status_config.mp, 'standalone', False)):
+                            need_update['mp'] = {'standalone': True}
+                        if exp_last and not bool(getattr(status_config.exp, 'standalone', False)):
+                            need_update['exp'] = {'standalone': True}
+                        if need_update:
+                            status_config = data_manager.update_status_monitor_config(need_update)
+                    except Exception:
+                        pass
                     roi_payloads = data_manager.get_status_roi_payloads()
                     self.status_monitor_thread = StatusMonitorThread(
                         status_config,
@@ -360,6 +382,13 @@ class MainWindow(QMainWindow):
                             except Exception:
                                 pass
                     self.status_monitor_thread.start()
+                else:
+                    # 이미 스레드가 있는 경우에도 모니터링 탭 연결을 보장
+                    if monitoring_tab and hasattr(monitoring_tab, 'attach_status_monitor'):
+                        try:
+                            monitoring_tab.attach_status_monitor(self.status_monitor_thread, data_manager)
+                        except Exception:
+                            pass
 
                 # OCR 프로파일 공급자 준비 (학습탭의 이름표 OCR 설정 사용)
                 def _get_active_profile() -> str:

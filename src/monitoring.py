@@ -244,6 +244,7 @@ class MonitoringTab(QWidget):
         self._exp_standalone_start_ts: float | None = None
         self._exp_standalone_accum_sec: float = 0.0
         self._exp_standalone_last_top_ts: float | None = None
+        self._mp_standalone_enabled: bool = False
         self._exp_start_amount: int | None = None
         self._exp_start_percent: float | None = None
         self._exp_last_percent: float | None = None
@@ -331,6 +332,13 @@ class MonitoringTab(QWidget):
         info_ctrl_layout.addWidget(self.chk_mp_standalone)
         info_ctrl_layout.addWidget(self.chk_exp_standalone)
         info_ctrl_layout.addStretch(1)
+        # 실행시간 라벨 폭 고정(체크박스 흔들림 방지)
+        try:
+            fm = self.runtime_label.fontMetrics()
+            w = fm.horizontalAdvance("실행시간: 00:00:00") + 14
+            self.runtime_label.setFixedWidth(max(120, w))
+        except Exception:
+            self.runtime_label.setFixedWidth(140)
         info_layout.addWidget(info_ctrl_widget)
         # 정보 행 컨테이너(한 줄씩 아래로, 좌: 정보명 칸, 우: 수치 칸)
         self.info_value_labels: dict[str, QLabel] = {}
@@ -1014,6 +1022,12 @@ class MonitoringTab(QWidget):
     def _tick_info_update(self) -> None:
         # FPS: 권한 소유자 기준 선호, 없으면 폴백
         fps_text = self._collect_fps_text()
+        # 최상위 여부(단독실행 색상 표시용)
+        topmost = False
+        try:
+            topmost = bool(is_maple_window_foreground())
+        except Exception:
+            topmost = False
         # 맵탭에서 최신 캐릭터 상태 스냅샷 직접 폴링(권한 신호가 드물어도 갱신)
         try:
             if self._map_tab and hasattr(self._map_tab, 'collect_authority_snapshot'):
@@ -1071,6 +1085,15 @@ class MonitoringTab(QWidget):
         self.info_value_labels.get('state', QLabel()).setText(state_line.replace('캐릭터 상태: ', ''))
         self.info_value_labels.get('action', QLabel()).setText(action_line.replace('필요행동: ', ''))
 
+        # 단독실행 체크박스 색상 상태: 실행 조건 충족 시 초록색
+        try:
+            mp_active = bool(self._mp_standalone_enabled) and topmost and not (self._map_running or self._hunt_running)
+            exp_active = bool(self._exp_standalone_enabled) and topmost and not self._hunt_running
+            self.chk_mp_standalone.setStyleSheet('color: #00cc66; font-weight: bold;' if mp_active and self.chk_mp_standalone.isChecked() else '')
+            self.chk_exp_standalone.setStyleSheet('color: #00cc66; font-weight: bold;' if exp_active and self.chk_exp_standalone.isChecked() else '')
+        except Exception:
+            pass
+
         # 실행시간 라벨 갱신
         self._update_runtime_label()
 
@@ -1082,6 +1105,7 @@ class MonitoringTab(QWidget):
                 dm.update_status_monitor_config({'mp': {'standalone': bool(checked)}})
             except Exception:
                 pass
+        self._mp_standalone_enabled = bool(checked)
         try:
             settings = QSettings("Gemini Inc.", "Maple AI Trainer")
             settings.setValue("monitoring/mp_standalone_last", bool(checked))
@@ -1104,8 +1128,10 @@ class MonitoringTab(QWidget):
             pass
 
     def _compose_char_status_lines(self) -> tuple[str, str, str]:
-        state = self._last_player_state if isinstance(self._last_player_state, str) and self._last_player_state else "--"
-        action = self._last_nav_action if isinstance(self._last_nav_action, str) and self._last_nav_action else "--"
+        state_raw = self._last_player_state if isinstance(self._last_player_state, str) and self._last_player_state else "--"
+        action_raw = self._last_nav_action if isinstance(self._last_nav_action, str) and self._last_nav_action else "--"
+        state = self._to_korean_state(state_raw)
+        action = self._to_korean_action(action_raw)
         floor_txt = "--"
         if isinstance(self._last_floor, (int, float)):
             try:
@@ -1117,6 +1143,35 @@ class MonitoringTab(QWidget):
             f"캐릭터 상태: {state}",
             f"필요행동: {action}",
         )
+
+    # 영문 상태/행동 → 한글 매핑
+    def _to_korean_state(self, val: str) -> str:
+        if not isinstance(val, str):
+            return "--"
+        mapping = {
+            'idle': '대기',
+            'on_terrain': '지면',
+            'climbing': '등반',
+            'jumping': '점프',
+            'falling': '낙하',
+        }
+        return mapping.get(val, val.replace('_', ' '))
+
+    def _to_korean_action(self, val: str) -> str:
+        if not isinstance(val, str):
+            return "--"
+        mapping = {
+            'move_to_target': '목표이동',
+            'wait_init': '대기(초기화)',
+            'wait_idle': '대기',
+            'wait_hold': '대기(홀드)',
+            'align_for_climb': '등반정렬',
+            'verify_alignment': '정렬확인',
+            'climb_in_progress': '등반중',
+            'prepare_to_down_jump': '하강점프 준비',
+            'wait_hold_down_jump': '하강점프 대기',
+        }
+        return mapping.get(val, val.replace('_', ' '))
 
     def _collect_fps_text(self) -> str:
         owner = (self._current_authority_owner or "map").lower()
@@ -1253,7 +1308,7 @@ class MonitoringTab(QWidget):
             # 누적된 시간만 사용(최상위 아닐 땐 일시정지)
             elapsed_sec = max(0, int(self._exp_standalone_accum_sec))
         if not active or elapsed_sec is None:
-            self.runtime_label.setText("")
+            self.runtime_label.setText("실행시간: 00:00:00")
             return
         self.runtime_label.setText(f"실행시간: {self._format_hhmmss(elapsed_sec)}")
 
@@ -1532,6 +1587,20 @@ class MonitoringTab(QWidget):
                 cfg = data_manager.load_status_monitor_config() if hasattr(data_manager, 'load_status_monitor_config') else None
                 if cfg is not None:
                     self._handle_status_config_update(cfg)
+                    # [보강] QSettings의 마지막 단독실행 상태가 True인데 파일설정이 False라면 파일설정도 True로 승격
+                    try:
+                        settings = QSettings("Gemini Inc.", "Maple AI Trainer")
+                        mp_last = bool(settings.value("monitoring/mp_standalone_last", False, type=bool))
+                        exp_last = bool(settings.value("monitoring/exp_standalone_last", False, type=bool))
+                        need_update = {}
+                        if mp_last and not bool(getattr(cfg.mp, 'standalone', False)):
+                            need_update['mp'] = {'standalone': True}
+                        if exp_last and not bool(getattr(cfg.exp, 'standalone', False)):
+                            need_update['exp'] = {'standalone': True}
+                        if need_update:
+                            data_manager.update_status_monitor_config(need_update)
+                    except Exception:
+                        pass
             except Exception:
                 pass
 
@@ -1545,6 +1614,7 @@ class MonitoringTab(QWidget):
                     b = self.chk_mp_standalone.blockSignals(True)
                     self.chk_mp_standalone.setChecked(bool(getattr(mp_cfg, 'standalone', False)))
                     self.chk_mp_standalone.blockSignals(b)
+                    self._mp_standalone_enabled = bool(getattr(mp_cfg, 'standalone', False))
             except Exception:
                 pass
             if exp_cfg is None:
@@ -1557,6 +1627,7 @@ class MonitoringTab(QWidget):
                     self.chk_exp_standalone.blockSignals(b)
             except Exception:
                 pass
+            self._exp_standalone_enabled = new_flag
             # 마지막 EXP 단독실행 상태를 QSettings에도 저장
             try:
                 settings = QSettings("Gemini Inc.", "Maple AI Trainer")
