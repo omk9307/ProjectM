@@ -11173,17 +11173,20 @@ class HuntTab(QWidget):
                         except Exception:
                             pass
 
-        # 클린업 허용 여부: 교전 중이고 (1마리 이상) 또는 (클린업 유예 시간 내)
+        # 클린업 허용 여부
         allow_cleanup = (
-            self._engage_active
-            and (
-                self.latest_primary_monster_count >= 1
-                or (
-                    self._cleanup_active
-                    and self._cleanup_hold_until_ts > 0.0
-                    and now_ts <= self._cleanup_hold_until_ts
+            (
+                self._engage_active
+                and (
+                    self.latest_primary_monster_count >= 1
+                    or (
+                        self._cleanup_active
+                        and self._cleanup_hold_until_ts > 0.0
+                        and now_ts <= self._cleanup_hold_until_ts
+                    )
                 )
             )
+            or getattr(self, '_ladder_cleanup_session_active', False)
         )
 
         # 클린업 중에도 최근 몬스터 관측 시간 갱신(권한 자동 반환 방지)
