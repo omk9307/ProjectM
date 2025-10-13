@@ -574,7 +574,8 @@ class ControlAuthorityManager(QObject):
         if not map_snapshot:
             failed.append("MAP_SNAPSHOT_MISSING")
         else:
-            if map_snapshot.player_state not in {"on_terrain", "idle", "jumping"}:
+            # [변경] 낙하 상태도 허용: falling 추가
+            if map_snapshot.player_state not in {"on_terrain", "idle", "jumping", "falling"}:
                 failed.append("MAP_NOT_WALKING")
             if not self._is_map_idle_ready(map_snapshot):
                 failed.append("MAP_STATE_ACTIVE")
@@ -584,20 +585,22 @@ class ControlAuthorityManager(QObject):
                 failed.append("HUNT_PROTECT_ACTIVE")
             if self._state.map_priority_lock:
                 failed.append("MAP_PRIORITY_LOCK")
-            # [추가] 마지막 지면 기준 높이 게이트: 착지(근접) 전에는 사냥 위임 보류
+            # [변경] 지면 근접 게이트: 낙하 중에는 즉시 사냥 권한을 허용하므로 예외 처리
             try:
-                meta_map = map_snapshot.metadata if isinstance(map_snapshot.metadata, dict) else {}
-                near_flag = meta_map.get("is_near_floor")
-                if isinstance(near_flag, bool):
-                    near_ok = near_flag
-                else:
-                    h = meta_map.get("height_from_last_floor_px")
-                    thr = meta_map.get("near_floor_threshold_px")
-                    near_ok = True
-                    if isinstance(h, (int, float)) and isinstance(thr, (int, float)):
-                        near_ok = (float(h) <= float(thr))
-                if not near_ok:
-                    failed.append("MAP_NOT_NEAR_FLOOR")
+                player_is_falling = str(map_snapshot.player_state) == 'falling'
+                if not player_is_falling:
+                    meta_map = map_snapshot.metadata if isinstance(map_snapshot.metadata, dict) else {}
+                    near_flag = meta_map.get("is_near_floor")
+                    if isinstance(near_flag, bool):
+                        near_ok = near_flag
+                    else:
+                        h = meta_map.get("height_from_last_floor_px")
+                        thr = meta_map.get("near_floor_threshold_px")
+                        near_ok = True
+                        if isinstance(h, (int, float)) and isinstance(thr, (int, float)):
+                            near_ok = (float(h) <= float(thr))
+                    if not near_ok:
+                        failed.append("MAP_NOT_NEAR_FLOOR")
             except Exception:
                 # 메타가 없거나 계산 실패 시 게이트 미적용(기존 로직 유지)
                 pass
@@ -683,7 +686,8 @@ class ControlAuthorityManager(QObject):
             return True
         if snapshot.is_forbidden_active or snapshot.is_event_active:
             return False
-        state_ok = snapshot.player_state in {"idle", "on_terrain", "jumping"}
+        # [변경] 낙하 상태도 안정된(사냥 위임 허용) 물리 상태로 간주
+        state_ok = snapshot.player_state in {"idle", "on_terrain", "jumping", "falling"}
         # 행동 값 대신 물리 상태만으로 안정 여부를 판별한다.
         return state_ok
 
