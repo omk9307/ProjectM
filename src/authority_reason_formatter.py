@@ -191,5 +191,50 @@ _HANDLERS = {
     "MAX_HOLD_EXCEEDED": _format_max_hold_exceeded,
     "MAX_TOTAL_HOLD_EXCEEDED": _format_max_total_hold_exceeded,
     "FLOOR_HOLD_EXCEEDED": _format_floor_hold_exceeded,
+    # 사다리 위협 기반 클린업 특례(요청 사유 코드)
+    "LADDER_THREAT_CLEANUP": lambda meta: _format_ladder_threat_cleanup(meta),
 }
 
+
+def _format_ladder_threat_cleanup(meta: Dict[str, Any]) -> str:
+    """사다리 위협 기반 클린업 요청 사유를 한글로 요약.
+
+    괄호 안에 간단한 수치를 포함한다.
+    - P: 주 스킬 범위 내 마릿수, H: 사냥범위 내 마릿수
+    - HP: 현재 체력(%), R: 주 스킬 폭(대칭) 또는 전/후(비대칭)
+    """
+    primary = _extract_number(meta, ("latest_primary_monster_count", "primary_monster_count"))
+    total = _extract_number(meta, ("latest_monster_count", "monster_count"))
+    hp = _extract_number(meta, ("hp_percent", "hp"))
+
+    # 주 스킬 폭 표기: 대칭이면 ±range, 비대칭이면 전/후
+    range_mode = str(meta.get("range_mode") or "").lower()
+    if range_mode == "facing":
+        pf = _extract_number(meta, ("primary_front_px",))
+        pb = _extract_number(meta, ("primary_back_px",))
+        if pf is not None and pb is not None:
+            range_text = f"전 {int(round(pf))} / 후 {int(round(pb))}px"
+        else:
+            pr = _extract_number(meta, ("primary_skill_range",))
+            range_text = f"±{int(round(pr))}px" if pr is not None else None
+    else:
+        pr = _extract_number(meta, ("primary_skill_range",))
+        range_text = f"±{int(round(pr))}px" if pr is not None else None
+
+    parts: list[str] = []
+    # 제목
+    title = "사다리 위협 정리"
+    # 간단 수치 괄호
+    detail_bits: list[str] = []
+    if primary is not None and total is not None:
+        detail_bits.append(f"P {int(round(primary))} / H {int(round(total))}")
+    elif primary is not None:
+        detail_bits.append(f"P {int(round(primary))}")
+    if hp is not None:
+        detail_bits.append(f"HP {int(round(hp))}%")
+    if range_text:
+        detail_bits.append(f"R {range_text}")
+
+    if detail_bits:
+        return f"{title} (" + ", ".join(detail_bits) + ")"
+    return title
