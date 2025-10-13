@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from typing import Optional
+from collections import deque
 import time
 import re
 
@@ -248,6 +249,11 @@ class MonitoringTab(QWidget):
         self._exp_start_amount: int | None = None
         self._exp_start_percent: float | None = None
         self._exp_last_percent: float | None = None
+        # EXP 롤링 윈도우/정체 제외/하이브리드 제어
+        self._exp_samples = deque()  # (timestamp: float, amount:int|None, percent:float)
+        self._exp_window_sec: float = 180.0  # 최근 3분
+        self._exp_stagnation_exclude_sec: float = 15.0  # 15초 이상 무변화 제외
+        self._exp_alpha_boost_until: float = 0.0  # 변화 감지 시 α=1.0 유지 만료시각
         self._status_monitor = None
         self._status_data_manager = None
         # 캐릭터 상태/행동/층 스냅샷
@@ -916,6 +922,11 @@ class MonitoringTab(QWidget):
             if isinstance(exp, dict):
                 amt = exp.get('amount')
                 per = exp.get('percent')
+                ts = exp.get('timestamp') if isinstance(exp.get('timestamp'), (int, float)) else payload.get('timestamp')
+                try:
+                    ts = float(ts) if ts is not None else time.time()
+                except Exception:
+                    ts = time.time()
                 if isinstance(amt, str):
                     self._latest_exp_amount = amt
                 if isinstance(per, (int, float)):
@@ -942,6 +953,12 @@ class MonitoringTab(QWidget):
                             self._exp_start_amount = int(self._latest_exp_amount) if isinstance(self._latest_exp_amount, str) and self._latest_exp_amount.isdigit() else None
                         except Exception:
                             self._exp_start_amount = None
+                    # 롤링 윈도우 샘플 누적 및 프루닝
+                    try:
+                        amt_int = int(self._latest_exp_amount) if isinstance(self._latest_exp_amount, str) and self._latest_exp_amount.isdigit() else None
+                    except Exception:
+                        amt_int = None
+                    self._record_exp_sample(ts, amt_int, cur_per)
         except Exception:
             pass
 
@@ -1247,33 +1264,104 @@ class MonitoringTab(QWidget):
             d_per = percent_cur - float(self._exp_start_percent)
             sign = "+" if d_per >= 0 else ""
             delta_percent_text = f"({sign}{d_per:.1f}%)"
-        # ETA
-        eta_text = self._calc_exp_eta_text(percent_cur)
+        # 롤링 윈도우 통계(3분)
+        window_stats = self._compute_exp_window_stats()
+        per_minute_amount = window_stats.get('per_minute_amount') if isinstance(window_stats, dict) else None
+        per_minute_percent = window_stats.get('per_minute_percent') if isinstance(window_stats, dict) else None
+        # 하이브리드 ETA
+        eta_text = self._calc_exp_eta_text_hybrid(percent_cur, window_stats)
         # 포맷
         try:
             amount_fmt = f"{int(amount_str):,}"
         except Exception:
             amount_fmt = amount_str
         amount_line = f"EXP: {amount_fmt}{(' ' + delta_amount_text) if delta_amount_text else ''}"
+        # 분당 표기(요청 형식): 수치는 정수, 퍼센트는 소수점 1자리
+        if isinstance(per_minute_amount, (int, float)) and per_minute_amount > 0:
+            amount_line += f" | {int(per_minute_amount):,} /m"
+        else:
+            amount_line += " | -- /m"
         percent_line = f"EXP(%): {percent_cur:.1f}%{(' ' + delta_percent_text) if delta_percent_text else ''}"
+        if isinstance(per_minute_percent, (int, float)) and per_minute_percent > 0:
+            percent_line += f" | {per_minute_percent:.1f}% /m"
+        else:
+            percent_line += " | --% /m"
         eta_line = f"레벨업 {eta_text}"
         return amount_line, percent_line, eta_line
 
-    def _calc_exp_eta_text(self, percent_cur: float) -> str:
-        elapsed = self._get_exp_elapsed_sec()
-        if elapsed is None or not isinstance(self._exp_start_percent, float):
+    def _calc_exp_eta_text_hybrid(self, percent_cur: float, window_stats: Optional[dict]) -> str:
+        # 윈도우 기반 증가율(%)
+        window_rate = None
+        try:
+            if isinstance(window_stats, dict):
+                window_rate = float(window_stats.get('rate_per_sec_percent', None))
+        except Exception:
+            window_rate = None
+        # 세션 기반 증가율(%)
+        session_rate = self._calc_session_rate_percent_per_sec(percent_cur)
+
+        now_ts = time.time()
+        alpha = 0.8
+        # 변화 감지 또는 부스트 유지
+        try:
+            if self._exp_alpha_boost_until and now_ts < float(self._exp_alpha_boost_until):
+                alpha = 1.0
+            else:
+                boost = False
+                if isinstance(window_rate, float) and window_rate > 0.0:
+                    if not isinstance(session_rate, float) or session_rate <= 0.0:
+                        boost = True
+                    else:
+                        ratio = window_rate / max(1e-9, session_rate)
+                        if ratio < 0.6 or ratio > 1.4:  # ±40%
+                            boost = True
+                if boost:
+                    alpha = 1.0
+                    self._exp_alpha_boost_until = now_ts + 60.0
+                else:
+                    self._exp_alpha_boost_until = 0.0
+        except Exception:
+            alpha = 0.8
+
+        # 혼합 및 클램프
+        final_rate = None
+        try:
+            if isinstance(window_rate, float) and window_rate > 0.0:
+                if isinstance(session_rate, float) and session_rate > 0.0:
+                    mixed = alpha * window_rate + (1.0 - alpha) * session_rate
+                    # 클램프: 윈도우의 0.5x ~ 2.0x
+                    lo = 0.5 * window_rate
+                    hi = 2.0 * window_rate
+                    final_rate = max(lo, min(hi, mixed))
+                else:
+                    final_rate = window_rate
+            else:
+                # 윈도우가 부족하면 세션 속도 사용
+                if isinstance(session_rate, float) and session_rate > 0.0:
+                    final_rate = session_rate
+                else:
+                    final_rate = None
+        except Exception:
+            final_rate = None
+
+        remain = max(0.0, 100.0 - float(percent_cur))
+        if not isinstance(final_rate, float) or final_rate <= 0.0 or remain <= 0.0:
             return "--:--:--"
-        if elapsed < 1.0:
-            return "--:--:--"
-        gain = max(0.0, percent_cur - float(self._exp_start_percent))
-        if gain <= 0.0:
-            return "--:--:--"
-        rate_per_sec = gain / elapsed
-        remain = max(0.0, 100.0 - percent_cur)
-        if rate_per_sec <= 0.0:
-            return "--:--:--"
-        eta_sec = int(remain / rate_per_sec)
+        eta_sec = int(remain / final_rate)
         return self._format_hhmmss(eta_sec)
+
+    def _calc_session_rate_percent_per_sec(self, percent_cur: float) -> Optional[float]:
+        try:
+            elapsed = self._get_exp_elapsed_sec()
+            if elapsed is None or elapsed < 1.0 or not isinstance(self._exp_start_percent, float):
+                return None
+            gain = max(0.0, float(percent_cur) - float(self._exp_start_percent))
+            if gain <= 0.0:
+                return None
+            rate = gain / float(elapsed)
+            return rate if rate > 0.0 else None
+        except Exception:
+            return None
 
     def _get_exp_elapsed_sec(self) -> float | None:
         if self._map_running or self._hunt_running:
@@ -1281,6 +1369,89 @@ class MonitoringTab(QWidget):
         if self._exp_standalone_enabled:
             return float(self._exp_standalone_accum_sec)
         return None
+
+    # --- EXP 롤링 윈도우 샘플 관리 및 통계 ---
+    def _record_exp_sample(self, ts: float, amount_int: Optional[int], percent_val: float) -> None:
+        try:
+            self._exp_samples.append((float(ts), amount_int if isinstance(amount_int, int) else None, float(percent_val)))
+            # 프루닝: 3분 윈도우 밖 제거
+            cutoff = float(ts) - float(self._exp_window_sec)
+            while self._exp_samples and self._exp_samples[0][0] < cutoff:
+                self._exp_samples.popleft()
+        except Exception:
+            pass
+
+    def _compute_exp_window_stats(self) -> Optional[dict]:
+        try:
+            samples = list(self._exp_samples)
+            if not samples or len(samples) < 2:
+                return None
+            # 시간 순 정렬 보장
+            samples.sort(key=lambda x: x[0])
+
+            POS_EPS = 1e-3
+            effective_duration = 0.0
+            total_amount_gain = 0
+            total_percent_gain = 0.0
+            pending_stagn = 0.0
+            in_stagn = False
+
+            prev_ts, prev_amt, prev_pct = samples[0]
+            for cur_ts, cur_amt, cur_pct in samples[1:]:
+                dt = float(cur_ts) - float(prev_ts)
+                if dt <= 0:
+                    prev_ts, prev_amt, prev_pct = cur_ts, cur_amt, cur_pct
+                    continue
+                dp = float(cur_pct) - float(prev_pct)
+                da = None
+                if isinstance(cur_amt, int) and isinstance(prev_amt, int):
+                    da = int(cur_amt) - int(prev_amt)
+
+                # 증가량 합산(레벨업 등 음수는 무시)
+                if isinstance(da, int) and da > 0:
+                    total_amount_gain += da
+                if dp > POS_EPS:
+                    total_percent_gain += dp
+
+                # 정체(무변화) 구간 추적
+                if abs(dp) <= POS_EPS:
+                    pending_stagn += dt
+                    in_stagn = True
+                else:
+                    # 정체 종료: 임계 미만이면 유효시간에 포함
+                    if in_stagn:
+                        if pending_stagn < float(self._exp_stagnation_exclude_sec):
+                            effective_duration += pending_stagn
+                        pending_stagn = 0.0
+                        in_stagn = False
+                    # 변화 구간은 항상 포함
+                    effective_duration += dt
+
+                prev_ts, prev_amt, prev_pct = cur_ts, cur_amt, cur_pct
+
+            # 끝에 정체 구간이 남아있다면 임계 미만만 포함
+            if in_stagn and pending_stagn > 0.0:
+                if pending_stagn < float(self._exp_stagnation_exclude_sec):
+                    effective_duration += pending_stagn
+
+            effective_duration = max(0.0, float(effective_duration))
+            if effective_duration <= 0.0:
+                return None
+
+            per_sec_amount = float(total_amount_gain) / effective_duration if total_amount_gain > 0 else 0.0
+            per_sec_percent = float(total_percent_gain) / effective_duration if total_percent_gain > 0.0 else 0.0
+            stats = {
+                'total_amount_gain': int(max(0, total_amount_gain)),
+                'total_percent_gain': max(0.0, float(total_percent_gain)),
+                'per_minute_amount': int(per_sec_amount * 60.0) if per_sec_amount > 0.0 else 0,
+                'per_minute_percent': float(per_sec_percent * 60.0) if per_sec_percent > 0.0 else 0.0,
+                'rate_per_sec_percent': per_sec_percent if per_sec_percent > 0.0 else 0.0,
+                'effective_duration': effective_duration,
+                'sample_count': len(samples),
+            }
+            return stats
+        except Exception:
+            return None
 
     def _tick_exp_standalone_time(self) -> None:
         if not self._exp_standalone_enabled:
