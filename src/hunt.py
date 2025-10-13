@@ -1152,6 +1152,10 @@ class HuntTab(QWidget):
         self._monitor_preview_enabled: bool = False
         self._monitor_preview_interval_sec: float = 0.0
 
+        # [사다리 위협] X범위 오버라이드 상태
+        self._ladder_override_active: bool = False
+        self._ladder_override_backup: Optional[dict] = None
+
     def _check_character_presence_watchdog(self) -> None:
         """캐릭터가 10초 이상 미검출 시 ESC 효과로 전체 정지 후 2초 뒤 사냥 재시작.
         - ESC 효과: 사냥/맵 모두 정지 + 모든 키 떼기
@@ -2201,6 +2205,7 @@ class HuntTab(QWidget):
         condition_group = self._create_condition_group()
         direction_switch_group = self._create_direction_switch_group()
         direction_group = self._create_direction_settings_group()
+        ladder_group = self._create_ladder_settings_group()
 
         left_column.addWidget(detection_group)
         left_column.addStretch(1)
@@ -2224,7 +2229,7 @@ class HuntTab(QWidget):
 
         direction_column = QVBoxLayout()
         direction_column.setSpacing(10)
-        for group in (direction_switch_group, direction_group):
+        for group in (direction_switch_group, direction_group, ladder_group):
             group.setSizePolicy(QSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed))
             direction_column.addWidget(group)
 
@@ -2560,6 +2565,37 @@ class HuntTab(QWidget):
         self.direction_delay_max_spinbox.valueChanged.connect(self._handle_setting_changed)
 
         group.setLayout(misc_form)
+        group.setSizePolicy(QSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed))
+        return group
+
+    def _create_ladder_settings_group(self) -> QGroupBox:
+        group = QGroupBox("사다리 설정")
+        group.setSizePolicy(
+            QSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+        )
+        group.setMinimumWidth(0)
+
+        form = QFormLayout()
+
+        # 주변 범위(px): 사다리 접근 시 위험 판정 범위
+        self.ladder_near_px_spinbox = QSpinBox()
+        self.ladder_near_px_spinbox.setRange(20, 2000)
+        self.ladder_near_px_spinbox.setSingleStep(10)
+        self.ladder_near_px_spinbox.setValue(250)
+        self.ladder_near_px_spinbox.setSuffix(" px")
+        form.addRow("주변 범위", self.ladder_near_px_spinbox)
+        self.ladder_near_px_spinbox.valueChanged.connect(self._handle_setting_changed)
+
+        # 체력 조건(%): 이 값 미만일 때 사다리 위협 조건 유효
+        self.ladder_hp_threshold_spinbox = QSpinBox()
+        self.ladder_hp_threshold_spinbox.setRange(1, 100)
+        self.ladder_hp_threshold_spinbox.setSingleStep(1)
+        self.ladder_hp_threshold_spinbox.setValue(90)
+        self.ladder_hp_threshold_spinbox.setSuffix(" %")
+        form.addRow("체력 조건(%)", self.ladder_hp_threshold_spinbox)
+        self.ladder_hp_threshold_spinbox.valueChanged.connect(self._handle_setting_changed)
+
+        group.setLayout(form)
         group.setSizePolicy(QSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed))
         return group
 
@@ -8472,6 +8508,139 @@ class HuntTab(QWidget):
                 p_left = p_right = pr
 
             return f"사냥범위(좌 {e_left}, 우 {e_right}) · 주 스킬(좌 {p_left}, 우 {p_right})"
+
+    # -------------------- 사다리 위협 전용 보조 --------------------
+    def _apply_ladder_threat_range_override(self) -> None:
+        """사다리 위협 사유로 권한 획득 시, 사냥 X범위를 일시적으로 (주변범위+20)으로 설정한다.
+
+        - 비대칭 모드일 경우 전/후 모두 동일 값으로 덮어써 효과를 일관되게 한다.
+        - 설정 파일에는 백업값을 저장하여 일시 변경이 영구 저장되지 않도록 한다.
+        """
+        try:
+            if self._ladder_override_active:
+                return
+            near_px = int(self.ladder_near_px_spinbox.value()) if hasattr(self, 'ladder_near_px_spinbox') else 250
+            override_val = max(1, int(near_px) + 20)
+
+            # 백업 스냅샷
+            mode = 'facing' if (hasattr(self, 'facing_range_checkbox') and self.facing_range_checkbox.isChecked()) else 'symmetric'
+            backup = {
+                'mode': mode,
+                'enemy_range': int(self.enemy_range_spinbox.value()) if hasattr(self, 'enemy_range_spinbox') else 0,
+                'enemy_front': int(self.enemy_front_spinbox.value()) if hasattr(self, 'enemy_front_spinbox') else 0,
+                'enemy_back': int(self.enemy_back_spinbox.value()) if hasattr(self, 'enemy_back_spinbox') else 0,
+                'primary_range': int(self.primary_skill_range_spinbox.value()) if hasattr(self, 'primary_skill_range_spinbox') else 0,
+                'primary_front': int(self.primary_front_spinbox.value()) if hasattr(self, 'primary_front_spinbox') else 0,
+                'primary_back': int(self.primary_back_spinbox.value()) if hasattr(self, 'primary_back_spinbox') else 0,
+            }
+            self._ladder_override_backup = backup
+
+            # 적용: 현재 모드 유지한 채 사냥 X범위만 덮어쓰기
+            if hasattr(self, 'facing_range_checkbox') and self.facing_range_checkbox.isChecked():
+                if hasattr(self, 'enemy_front_spinbox'):
+                    self.enemy_front_spinbox.setValue(override_val)
+                if hasattr(self, 'enemy_back_spinbox'):
+                    self.enemy_back_spinbox.setValue(override_val)
+            else:
+                if hasattr(self, 'enemy_range_spinbox'):
+                    self.enemy_range_spinbox.setValue(override_val)
+
+            self._ladder_override_active = True
+            # 즉시 오버레이 반영
+            try:
+                self._emit_area_overlays()
+            except Exception:
+                pass
+            self.append_log(f"[사다리] 주변범위+20 적용: X범위={override_val}px", 'info')
+        except Exception:
+            pass
+
+    def _revert_ladder_threat_range_override(self) -> None:
+        """사다리 위협 오버라이드를 원래 값으로 복원한다."""
+        try:
+            if not self._ladder_override_active:
+                return
+            snap = self._ladder_override_backup or {}
+            # 복원
+            if 'enemy_range' in snap and hasattr(self, 'enemy_range_spinbox'):
+                self.enemy_range_spinbox.setValue(int(snap.get('enemy_range', self.enemy_range_spinbox.value())))
+            if 'enemy_front' in snap and hasattr(self, 'enemy_front_spinbox'):
+                self.enemy_front_spinbox.setValue(int(snap.get('enemy_front', self.enemy_front_spinbox.value())))
+            if 'enemy_back' in snap and hasattr(self, 'enemy_back_spinbox'):
+                self.enemy_back_spinbox.setValue(int(snap.get('enemy_back', self.enemy_back_spinbox.value())))
+            # 모드는 변경하지 않는다(사용자 의도 유지)
+            self._ladder_override_active = False
+            self._ladder_override_backup = None
+            try:
+                self._emit_area_overlays()
+            except Exception:
+                pass
+            self.append_log("[사다리] X범위 오버라이드 해제", 'info')
+        except Exception:
+            pass
+
+    def _is_monster_near_character(self, radius_px: int) -> bool:
+        """캐릭터 중심과 몬스터 중심 간 유클리드 거리가 radius_px 이하인지 검사.
+        latest_snapshot 캐시를 사용하며, 데이터 없으면 False.
+        """
+        try:
+            if not self.latest_snapshot or not self.latest_snapshot.character_boxes or not self.latest_snapshot.monster_boxes:
+                return False
+            character_box = self._select_reference_character_box(self.latest_snapshot.character_boxes)
+            if not character_box:
+                return False
+            cx = float(character_box.center_x)
+            cy = float(character_box.y + character_box.height / 2.0)
+            r2 = float(max(1, int(radius_px))) ** 2
+            for m in self.latest_snapshot.monster_boxes:
+                mx = float(m.x + m.width / 2.0)
+                my = float(m.y + m.height / 2.0)
+                dx = mx - cx
+                dy = my - cy
+                if (dx * dx + dy * dy) <= r2:
+                    return True
+            return False
+        except Exception:
+            return False
+
+    def _maybe_request_ladder_threat_cleanup(self) -> bool:
+        """사다리 접근 중(맵 상태) + HP<임계 + 근접 위협(≥1) 시 사냥 권한 요청.
+        반환값: 요청을 발행했으면 True, 아니면 False
+        """
+        try:
+            if self.current_authority == 'hunt':
+                return False
+            if not getattr(self, 'map_link_enabled', False):
+                return False
+            if self._request_pending:
+                return False
+            # 맵 상태: 사다리 접근/등반 맥락에서만
+            map_tab = getattr(self, 'map_tab', None)
+            nav = str(getattr(map_tab, 'navigation_action', '') or '') if map_tab else ''
+            on_ladder = str(getattr(map_tab, 'player_state', '') or '')
+            allowed_nav = {'align_for_climb', 'prepare_to_climb', 'climb_in_progress'}
+            if not (nav in allowed_nav or on_ladder in {'climbing_up', 'climbing_down', 'on_ladder_idle'}):
+                return False
+            # HP 조건
+            hp_val = None
+            try:
+                hp_val = float(self._status_display_values.get('hp'))
+            except Exception:
+                hp_val = None
+            if not isinstance(hp_val, (int, float)):
+                return False
+            hp_thr = int(self.ladder_hp_threshold_spinbox.value()) if hasattr(self, 'ladder_hp_threshold_spinbox') else 90
+            if not (hp_val < float(hp_thr)):
+                return False
+            # 근접 위협
+            near_px = int(self.ladder_near_px_spinbox.value()) if hasattr(self, 'ladder_near_px_spinbox') else 250
+            if not self._is_monster_near_character(near_px):
+                return False
+            # 권한 요청
+            self.request_control("LADDER_THREAT_CLEANUP")
+            return True
+        except Exception:
+            return False
         except Exception:
             return ""
 
@@ -9024,6 +9193,22 @@ class HuntTab(QWidget):
                     pass
                 finally:
                     self.floor_hold_spinbox.blockSignals(prev)
+
+        # 사다리 위협 설정 로드
+        ladder_cfg = data.get('ladder_threat', {})
+        if isinstance(ladder_cfg, dict):
+            try:
+                near_px = ladder_cfg.get('near_px')
+                if near_px is not None and hasattr(self, 'ladder_near_px_spinbox'):
+                    self.ladder_near_px_spinbox.setValue(int(near_px))
+            except Exception:
+                pass
+            try:
+                hp_percent = ladder_cfg.get('hp_percent')
+                if hp_percent is not None and hasattr(self, 'ladder_hp_threshold_spinbox'):
+                    self.ladder_hp_threshold_spinbox.setValue(int(hp_percent))
+            except Exception:
+                pass
 
         display = data.get('display', {})
         if display:
@@ -9592,16 +9777,21 @@ class HuntTab(QWidget):
         # [오버라이드 저장 정책]
         # - 오버라이드 중에는 백업(사용자 원래 설정) 값을 저장하여
         #   일시 변경값이 설정 파일에 남지 않도록 한다.
+        snap = None
         if getattr(self, '_zone_override_active', False) and isinstance(getattr(self, '_zone_override_backup', None), dict):
             snap = self._zone_override_backup or {}
+        elif getattr(self, '_ladder_override_active', False) and isinstance(getattr(self, '_ladder_override_backup', None), dict):
+            snap = self._ladder_override_backup or {}
+
+        if isinstance(snap, dict):
             try:
                 mode_value = str(snap.get('mode', 'symmetric')).strip().lower()
             except Exception:
                 mode_value = 'symmetric'
             ranges_data = {
                 'enemy_range': int(snap.get('enemy_range', self.enemy_range_spinbox.value())),
-                'y_band_height': int(snap.get('y_band_height', self.y_band_height_spinbox.value())),
-                'y_band_offset': int(snap.get('y_band_offset', self.y_band_offset_spinbox.value())),
+                'y_band_height': int(snap.get('y_band_height', self.y_band_height_spinbox.value())) if 'y_band_height' in snap else int(self.y_band_height_spinbox.value()),
+                'y_band_offset': int(snap.get('y_band_offset', self.y_band_offset_spinbox.value())) if 'y_band_offset' in snap else int(self.y_band_offset_spinbox.value()),
                 'primary_range': int(snap.get('primary_range', self.primary_skill_range_spinbox.value())),
                 'mode': mode_value,
                 'enemy_front': int(snap.get('enemy_front', self.enemy_front_spinbox.value())) if hasattr(self, 'enemy_front_spinbox') else int(self.enemy_range_spinbox.value()),
@@ -9684,6 +9874,10 @@ class HuntTab(QWidget):
                 'facing_reset_max_sec': self.facing_reset_max_spinbox.value(),
                 'direction_switch_threshold_px': self.direction_threshold_spinbox.value(),
                 'direction_switch_cooldown_sec': self.direction_cooldown_spinbox.value(),
+            },
+            'ladder_threat': {
+                'near_px': int(self.ladder_near_px_spinbox.value()) if hasattr(self, 'ladder_near_px_spinbox') else 250,
+                'hp_percent': int(self.ladder_hp_threshold_spinbox.value()) if hasattr(self, 'ladder_hp_threshold_spinbox') else 90,
             },
             'teleport': {
                 'enabled': self.teleport_settings.enabled,
@@ -9910,6 +10104,11 @@ class HuntTab(QWidget):
             self.last_control_acquired_ts = 0.0
             self.last_release_attempt_ts = 0.0
             self._last_monster_seen_ts = time.time()
+            # 맵으로 반환 시 사다리 오버라이드 해제
+            try:
+                self._revert_ladder_threat_range_override()
+            except Exception:
+                pass
         self._update_authority_ui()
         self._sync_detection_thread_status()
         reason_text = payload.get('reason')
@@ -9933,6 +10132,14 @@ class HuntTab(QWidget):
                 if char_text:
                     message += f" | {char_text}"
                 self.append_log(message, "success")
+            # 사유에 따라 사다리 오버라이드 적용/해제
+            try:
+                if str(reason_text) == 'LADDER_THREAT_CLEANUP':
+                    self._apply_ladder_threat_range_override()
+                else:
+                    self._revert_ladder_threat_range_override()
+            except Exception:
+                pass
         elif owner == "map":
             if not silent:
                 message = "권한 반납"
@@ -9970,6 +10177,13 @@ class HuntTab(QWidget):
             return
         if not self.auto_hunt_enabled:
             return
+
+        # [사다리 위협] 사다리 접근 중 + HP<임계 + 주변 위협 시 우선 권한 요청
+        try:
+            if self._maybe_request_ladder_threat_cleanup():
+                return
+        except Exception:
+            pass
 
         hunt_threshold = self.hunt_monster_threshold_spinbox.value()
         primary_threshold = self.primary_monster_threshold_spinbox.value()

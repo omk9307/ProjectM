@@ -584,7 +584,13 @@ class ControlAuthorityManager(QObject):
                 or hunt_snapshot.monster_count >= hunt_snapshot.hunt_monster_threshold
             )
             if not primary_ready and not hunt_ready:
-                failed.append("HUNT_MONSTER_SHORTAGE")
+                # [특례] 사유가 사다리 위협이면 1마리 이상으로도 허용
+                try:
+                    special_ladder = (str(reason) == 'LADDER_THREAT_CLEANUP')
+                except Exception:
+                    special_ladder = False
+                if not (special_ladder and int(hunt_snapshot.monster_count) >= 1):
+                    failed.append("HUNT_MONSTER_SHORTAGE")
         else:
             failed.append("HUNT_SNAPSHOT_MISSING")
 
