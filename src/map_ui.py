@@ -1296,6 +1296,26 @@ class MapTab(QWidget):
 
         if command_to_resume:
             def _resend_last_command() -> None:
+                # [추가] 권한 재실행은 최근 0.5초간 움직임이 없을 때만 수행
+                try:
+                    import time as _time
+                    now_ts = _time.time()
+                    last_ref = float(getattr(self, 'last_movement_time', 0.0) or getattr(self, 'last_action_time', 0.0) or 0.0)
+                except Exception:
+                    now_ts = 0.0
+                    last_ref = 0.0
+                idle_threshold = 0.5
+                if last_ref > 0.0:
+                    idle_elapsed = now_ts - last_ref
+                    if idle_elapsed < idle_threshold:
+                        try:
+                            from PyQt6.QtCore import QTimer as _QTimer
+                            delay_ms = max(int(round((idle_threshold - idle_elapsed) * 1000)), 50)
+                            _QTimer.singleShot(delay_ms, _resend_last_command)
+                        except Exception:
+                            pass
+                        return
+
                 priority_guard_active = bool(
                     getattr(self, '_authority_priority_override', False)
                     or getattr(self, 'forbidden_wall_in_progress', False)
@@ -9368,6 +9388,20 @@ class MapTab(QWidget):
                     should_send_ladder_recovery = True
 
         command_name = self.last_movement_command
+
+        # [추가] 1층 특례: '아래점프'는 아래층이 없어 무효이므로 대체 행동으로 '사다리타기(우)'를 사용
+        is_bottom_floor = (
+            getattr(self, 'current_player_floor', None) is not None
+            and float(self.current_player_floor) <= 1.0
+        )
+        was_down_jump = (command_name == "아래점프")
+        override_to_climb_right = False
+        if is_bottom_floor and was_down_jump:
+            command_name = "사다리타기(우)"
+            self.last_movement_command = command_name
+            override_to_climb_right = True
+
+        # 기존 사다리 거리 기반 아래점프 금지 로직은 1층 특례 오버라이드 이후에만 적용
         if command_name == "아래점프" and not self._should_issue_down_jump(ladder_dist):
             command_name = None
             self.last_movement_command = None
@@ -9378,12 +9412,24 @@ class MapTab(QWidget):
 
         if should_send_ladder_recovery:
             if command_label:
-                final_log_message = f"{log_message} '사다리 멈춤복구' 후 {command_label} 재시도.{distance_suffix}"
+                if override_to_climb_right:
+                    final_log_message = (
+                        f"{log_message} '사다리 멈춤복구' 후 1층 특례로 {command_label} 재시도.{distance_suffix}"
+                    )
+                else:
+                    final_log_message = (
+                        f"{log_message} '사다리 멈춤복구' 후 {command_label} 재시도.{distance_suffix}"
+                    )
             else:
                 final_log_message = f"{log_message} '사다리 멈춤복구' 후 재시도할 명령이 없습니다.{distance_suffix}"
         else:
             if command_label:
-                final_log_message = f"{log_message} 이전 명령 {command_label} 재시도.{distance_suffix}"
+                if override_to_climb_right:
+                    final_log_message = (
+                        f"{log_message} 현재 1층: '아래점프'는 무효이므로 {command_label}를 재시도합니다.{distance_suffix}"
+                    )
+                else:
+                    final_log_message = f"{log_message} 이전 명령 {command_label} 재시도.{distance_suffix}"
             else:
                 final_log_message = f"{log_message} 재시도할 명령이 없습니다.{distance_suffix}"
 
@@ -9396,9 +9442,14 @@ class MapTab(QWidget):
                 self._emit_control_command("사다리 멈춤복구", None)
         else:
             if command_label:
-                skip_message = (
-                    f"[자동 복구] 사다리 조건 미충족: 이전 명령 {command_label} 재전송만 수행합니다.{distance_suffix}"
-                )
+                if override_to_climb_right:
+                    skip_message = (
+                        f"[자동 복구] 현재 1층: '아래점프'는 무효입니다. {command_label}만 전송합니다.{distance_suffix}"
+                    )
+                else:
+                    skip_message = (
+                        f"[자동 복구] 사다리 조건 미충족: 이전 명령 {command_label} 재전송만 수행합니다.{distance_suffix}"
+                    )
             else:
                 skip_message = (
                     f"[자동 복구] 사다리 조건 미충족: 재전송할 명령이 없습니다.{distance_suffix}"
