@@ -390,6 +390,8 @@ class AutoControlTab(QWidget):
 
         self.globally_pressed_keys = set()
         self.global_listener = None
+        # [NEW] 현재 실행 중인 순차 시퀀스의 출처 태그 ("[맵]"/"[사냥]")
+        self.current_command_source_tag = None
         
         # --- (신규) Quiet 모드: 지정 시간 동안 화이트리스트 외 입력 차단 ---
         self._quiet_until_ts: float = 0.0
@@ -430,6 +432,7 @@ class AutoControlTab(QWidget):
         self.current_command_name = ""
         self.current_command_reason = None
         self.current_command_reason_display = None
+        self.current_command_source_tag = None
         self.current_sequence = []
         self.current_sequence_index = 0
         self.is_sequence_running = False
@@ -1951,10 +1954,10 @@ class AutoControlTab(QWidget):
 
         if action_taken:
             log_action = "(누르기-forced)" if force else "(누르기)"
-            self.log_generated.emit(
-                f"{log_action} {self._translate_key_for_logging(self._key_obj_to_str(key_object))}",
-                "white",
-            )
+            msg = f"{log_action} {self._translate_key_for_logging(self._key_obj_to_str(key_object))}"
+            if self.current_command_source_tag:
+                msg = f"{self.current_command_source_tag} {msg}"
+            self.log_generated.emit(msg, "white")
             return True
 
         if self.console_log_checkbox.isChecked():
@@ -2088,7 +2091,7 @@ class AutoControlTab(QWidget):
         QTimer.singleShot(2000, lambda: self._start_sequence_execution(sequence, f"TEST: {command_text}", is_test=True))
     
     # --- [핵심 수정] time.sleep()을 QTimer 기반의 비동기 방식으로 변경 ---
-    def _start_sequence_execution(self, sequence, command_name, is_test=False, reason=None):
+    def _start_sequence_execution(self, sequence, command_name, is_test=False, reason=None, source_tag=None):
         """
         시퀀스 실행 시작.
         기존: 동일 명령 중복이면 무시 -> 문제: 실패 복구 시 재시도가 막힘.
@@ -2160,11 +2163,15 @@ class AutoControlTab(QWidget):
         self.is_sequence_running = True
         self.is_first_key_event_in_sequence = True
         self.last_command_start_time = time.time()
+        # [NEW] 출처 태그 저장 (모니터링/자동제어 로그에 prefix로 표시)
+        self.current_command_source_tag = source_tag if isinstance(source_tag, str) else None
         
         if self.current_command_reason_display:
             start_msg = f"--- (시작) {self.current_command_name} -원인: {self.current_command_reason_display} ---"
         else:
             start_msg = f"--- (시작) {self.current_command_name} ---"              # <<< (추가) UI에 '(시작)' 로그를 즉시 남기기 위해 생성
+        if self.current_command_source_tag:
+            start_msg = f"{self.current_command_source_tag} {start_msg}"
         start_color = "orange" if self._is_skill_profile(self.current_command_name) else "magenta"
         self.log_generated.emit(start_msg, start_color)                        # <<< (추가) UI 로그 시그널로 즉시 표시
 
@@ -2198,6 +2205,8 @@ class AutoControlTab(QWidget):
                     log_msg = f"--- (완료) {self.current_command_name} -원인: {self.current_command_reason_display} ---"
                 else:
                     log_msg = f"--- (완료) {self.current_command_name} ---"
+                if self.current_command_source_tag:
+                    log_msg = f"{self.current_command_source_tag} {log_msg}"
                 completion_color = "orange" if self._is_skill_profile(self.current_command_name) else "lightgreen"
                 self.log_generated.emit(log_msg, completion_color)
                 # 테스트 모드 후 키 남아있으면 안전 해제
@@ -2214,7 +2223,10 @@ class AutoControlTab(QWidget):
             if action_type in ["press", "release", "release_specific"]:
                 key_obj = self._str_to_key_obj(step.get("key_str"))
                 if not key_obj:
-                    self.log_generated.emit(f"오류: 알 수 없는 키 '{step.get('key_str')}'", "red")
+                    msg = f"오류: 알 수 없는 키 '{step.get('key_str')}'"
+                    if self.current_command_source_tag:
+                        msg = f"{self.current_command_source_tag} {msg}"
+                    self.log_generated.emit(msg, "red")
                 elif action_type == "press":
                     force_requested = bool(step.get("force", False))
                     self._press_key(key_obj, force=force_requested)
@@ -2224,24 +2236,24 @@ class AutoControlTab(QWidget):
                     if released:
                         log_label = "(떼기-forced)" if force_requested else "(떼기)"
                         color = "red" if force_requested else "white"
-                        self.log_generated.emit(
-                            f"{log_label} {self._translate_key_for_logging(step.get('key_str'))}",
-                            color,
-                        )
+                        msg = f"{log_label} {self._translate_key_for_logging(step.get('key_str'))}"
+                        if self.current_command_source_tag:
+                            msg = f"{self.current_command_source_tag} {msg}"
+                        self.log_generated.emit(msg, color)
                     else:
                         if force_requested:
-                            self.log_generated.emit(
-                                f"(떼기-forced) {self._translate_key_for_logging(step.get('key_str'))}",
-                                "red",
-                            )
+                            msg = f"(떼기-forced) {self._translate_key_for_logging(step.get('key_str'))}"
+                            if self.current_command_source_tag:
+                                msg = f"{self.current_command_source_tag} {msg}"
+                            self.log_generated.emit(msg, "red")
                         else:
                             if self.console_log_checkbox.isChecked():
                                 print(f"[AutoControl] RELEASE skipped (not held) -> 강제 릴리즈 시도: {key_obj}")
                             self._release_key(key_obj, force=True)
-                            self.log_generated.emit(
-                                f"(떼기-forced) {self._translate_key_for_logging(step.get('key_str'))}",
-                                "red",
-                            )
+                            msg = f"(떼기-forced) {self._translate_key_for_logging(step.get('key_str'))}"
+                            if self.current_command_source_tag:
+                                msg = f"{self.current_command_source_tag} {msg}"
+                            self.log_generated.emit(msg, "red")
 
             elif action_type == "delay":
                 min_ms = step.get("min_ms", 0)
@@ -2251,14 +2263,20 @@ class AutoControlTab(QWidget):
                     mean = (min_ms + max_ms) / 2
                     std_dev = (max_ms - min_ms) / 6
                     delay_ms = int(max(min(random.gauss(mean, std_dev), max_ms), min_ms))
-                self.log_generated.emit(f"(대기) {delay_ms}ms", "gray")
+                msg = f"(대기) {delay_ms}ms"
+                if self.current_command_source_tag:
+                    msg = f"{self.current_command_source_tag} {msg}"
+                self.log_generated.emit(msg, "gray")
         
             elif action_type == "release_all":
                 self._release_all_keys(force=True)
                 if self.current_command_reason_display:
-                    self.log_generated.emit(f"(모든 키 떼기) -원인: {self.current_command_reason_display}", "white")
+                    msg = f"(모든 키 떼기) -원인: {self.current_command_reason_display}"
                 else:
-                    self.log_generated.emit("(모든 키 떼기)", "white")
+                    msg = "(모든 키 떼기)"
+                if self.current_command_source_tag:
+                    msg = f"{self.current_command_source_tag} {msg}"
+                self.log_generated.emit(msg, "white")
 
             # 다음 스텝로 이동 및 타이머 재시작
             self.current_sequence_index += 1
@@ -2271,14 +2289,17 @@ class AutoControlTab(QWidget):
 
         except Exception as e:
             print(f"[AutoControl] _process_next_step 예외: {e}")
-            self.log_generated.emit(f"오류: _process_next_step 예외 발생 - {e}", "red")
+            msg = f"오류: _process_next_step 예외 발생 - {e}"
+            if self.current_command_source_tag:
+                msg = f"{self.current_command_source_tag} {msg}"
+            self.log_generated.emit(msg, "red")
             self._release_all_keys(force=True)
             self.sequence_watchdog.stop()
             self._notify_sequence_completed(False)
         finally:
             self.is_processing_step = False
 
-    def _start_parallel_sequence(self, sequence, command_name, reason=None):
+    def _start_parallel_sequence(self, sequence, command_name, reason=None, source_tag=None):
         sequence_copy = copy.deepcopy(sequence) if isinstance(sequence, list) else []
 
         if command_name in self.active_parallel_sequences:
@@ -2324,14 +2345,18 @@ class AutoControlTab(QWidget):
             "reason_display": friendly_reason or None,
             "owner": owner,
             "is_processing": False,
+            "source_tag": source_tag if isinstance(source_tag, str) else None,
         }
         self.active_parallel_sequences[command_name] = state
 
         start_color = "orange" if self._is_skill_profile(command_name) else "cyan"
         if friendly_reason:
-            self.log_generated.emit(f"[{command_name}] (시작) -원인: {friendly_reason}", start_color)
+            msg = f"[{command_name}] (시작) -원인: {friendly_reason}"
         else:
-            self.log_generated.emit(f"[{command_name}] (시작)", start_color)
+            msg = f"[{command_name}] (시작)"
+        if source_tag:
+            msg = f"{source_tag} {msg}"
+        self.log_generated.emit(msg, start_color)
 
         watchdog.start(self.SEQUENCE_STUCK_TIMEOUT_MS)
         self._process_parallel_step(command_name)
@@ -2360,16 +2385,19 @@ class AutoControlTab(QWidget):
             if action_type in ["press", "release", "release_specific"]:
                 key_obj = self._str_to_key_obj(step.get("key_str"))
                 if not key_obj:
-                    self.log_generated.emit(f"[{command_name}] 오류: 알 수 없는 키 '{step.get('key_str')}'", "red")
+                    msg = f"[{command_name}] 오류: 알 수 없는 키 '{step.get('key_str')}'"
+                    if state.get("source_tag"):
+                        msg = f"{state['source_tag']} {msg}"
+                    self.log_generated.emit(msg, "red")
                 elif action_type == "press":
                     force_requested = bool(step.get("force", False))
                     pressed = self._press_key_for_owner(owner, key_obj, force=force_requested)
                     if pressed:
                         action_label = "(누르기-forced)" if force_requested else "(누르기)"
-                        self.log_generated.emit(
-                            f"[{command_name}] {action_label} {self._translate_key_for_logging(step.get('key_str'))}",
-                            "white",
-                        )
+                        msg = f"[{command_name}] {action_label} {self._translate_key_for_logging(step.get('key_str'))}"
+                        if state.get("source_tag"):
+                            msg = f"{state['source_tag']} {msg}"
+                        self.log_generated.emit(msg, "white")
                     elif self.console_log_checkbox.isChecked():
                         print(f"[AutoControl] 병렬 PRESS skipped (already held): {step.get('key_str')}")
                 else:
@@ -2378,24 +2406,24 @@ class AutoControlTab(QWidget):
                     if released:
                         action_label = "(떼기-forced)" if force_requested else "(떼기)"
                         color = "red" if force_requested else "white"
-                        self.log_generated.emit(
-                            f"[{command_name}] {action_label} {self._translate_key_for_logging(step.get('key_str'))}",
-                            color,
-                        )
+                        msg = f"[{command_name}] {action_label} {self._translate_key_for_logging(step.get('key_str'))}"
+                        if state.get("source_tag"):
+                            msg = f"{state['source_tag']} {msg}"
+                        self.log_generated.emit(msg, color)
                     else:
                         if force_requested:
-                            self.log_generated.emit(
-                                f"[{command_name}] (떼기-forced) {self._translate_key_for_logging(step.get('key_str'))}",
-                                "red",
-                            )
+                            msg = f"[{command_name}] (떼기-forced) {self._translate_key_for_logging(step.get('key_str'))}"
+                            if state.get("source_tag"):
+                                msg = f"{state['source_tag']} {msg}"
+                            self.log_generated.emit(msg, "red")
                         else:
                             if self.global_key_counts.get(key_obj, 0) == 0:
                                 forced = self._release_key_for_owner(owner, key_obj, force=True)
                                 if forced:
-                                    self.log_generated.emit(
-                                        f"[{command_name}] (떼기-forced) {self._translate_key_for_logging(step.get('key_str'))}",
-                                        "red",
-                                    )
+                                    msg = f"[{command_name}] (떼기-forced) {self._translate_key_for_logging(step.get('key_str'))}"
+                                    if state.get("source_tag"):
+                                        msg = f"{state['source_tag']} {msg}"
+                                    self.log_generated.emit(msg, "red")
                             elif self.console_log_checkbox.isChecked():
                                 print(f"[AutoControl] 병렬 RELEASE skipped (held elsewhere): {step.get('key_str')}")
 
@@ -2408,16 +2436,23 @@ class AutoControlTab(QWidget):
                     mean = (min_ms + max_ms) / 2
                     std_dev = (max_ms - min_ms) / 6
                     delay_ms = int(max(min(random.gauss(mean, std_dev), max_ms), min_ms))
-                self.log_generated.emit(f"[{command_name}] (대기) {delay_ms}ms", "gray")
+                msg = f"[{command_name}] (대기) {delay_ms}ms"
+                if state.get("source_tag"):
+                    msg = f"{state['source_tag']} {msg}"
+                self.log_generated.emit(msg, "gray")
 
             elif action_type == "release_all":
                 self._release_all_for_owner(owner, force=True)
-                self.log_generated.emit(f"[{command_name}] (모든 키 떼기)", "white")
+                msg = f"[{command_name}] (모든 키 떼기)"
+                if state.get("source_tag"):
+                    msg = f"{state['source_tag']} {msg}"
+                self.log_generated.emit(msg, "white")
 
             else:
-                self.log_generated.emit(
-                    f"[{command_name}] 경고: 알 수 없는 동작 '{action_type}'", "orange"
-                )
+                msg = f"[{command_name}] 경고: 알 수 없는 동작 '{action_type}'"
+                if state.get("source_tag"):
+                    msg = f"{state['source_tag']} {msg}"
+                self.log_generated.emit(msg, "orange")
 
             state["index"] += 1
 
@@ -2431,10 +2466,10 @@ class AutoControlTab(QWidget):
 
         except Exception as exc:
             print(f"[AutoControl] 병렬 시퀀스 예외: {command_name} -> {exc}")
-            self.log_generated.emit(
-                f"[{command_name}] 오류: 병렬 시퀀스 처리 중 예외 발생 - {exc}",
-                "red",
-            )
+            msg = f"[{command_name}] 오류: 병렬 시퀀스 처리 중 예외 발생 - {exc}"
+            if state.get("source_tag"):
+                msg = f"{state['source_tag']} {msg}"
+            self.log_generated.emit(msg, "red")
             self._stop_parallel_sequence(command_name, forced=True)
         finally:
             if command_name in self.active_parallel_sequences:
@@ -2459,9 +2494,17 @@ class AutoControlTab(QWidget):
         suffix = f" -원인: {display_reason}" if display_reason else ""
         if success:
             completion_color = "orange" if self._is_skill_profile(command_name) else "lightgreen"
-            self.log_generated.emit(f"[{command_name}] (완료){suffix}", completion_color)
+            msg = f"[{command_name}] (완료){suffix}"
+            src = state.get("source_tag")
+            if src:
+                msg = f"{src} {msg}"
+            self.log_generated.emit(msg, completion_color)
         else:
-            self.log_generated.emit(f"[{command_name}] (중단){suffix}", "orange")
+            msg = f"[{command_name}] (중단){suffix}"
+            src = state.get("source_tag")
+            if src:
+                msg = f"{src} {msg}"
+            self.log_generated.emit(msg, "orange")
 
         self._emit_parallel_sequence_completed(command_name, state, success)
 
@@ -2484,9 +2527,13 @@ class AutoControlTab(QWidget):
         self.sequence_owned_keys.pop(owner, None)
 
         if forced:
-            self.log_generated.emit(f"[{command_name}] 병렬 시퀀스를 강제 종료했습니다.", "orange")
+            msg = f"[{command_name}] 병렬 시퀀스를 강제 종료했습니다."
         else:
-            self.log_generated.emit(f"[{command_name}] 병렬 시퀀스를 중단했습니다.", "orange")
+            msg = f"[{command_name}] 병렬 시퀀스를 중단했습니다."
+        src = state.get("source_tag")
+        if src:
+            msg = f"{src} {msg}"
+        self.log_generated.emit(msg, "orange")
 
         self._emit_parallel_sequence_completed(command_name, state, success=False)
 
@@ -2504,10 +2551,11 @@ class AutoControlTab(QWidget):
     def _on_parallel_sequence_stuck(self, command_name: str) -> None:
         if command_name not in self.active_parallel_sequences:
             return
-        self.log_generated.emit(
-            f"경고: '{command_name}' 병렬 시퀀스가 멈춤. 복구 시도 중...",
-            "orange",
-        )
+        src = self.active_parallel_sequences.get(command_name, {}).get("source_tag")
+        msg = f"경고: '{command_name}' 병렬 시퀀스가 멈춤. 복구 시도 중..."
+        if src:
+            msg = f"{src} {msg}"
+        self.log_generated.emit(msg, "orange")
         self._stop_parallel_sequence(command_name, forced=True)
 
     @pyqtSlot(str, object)
@@ -2525,11 +2573,23 @@ class AutoControlTab(QWidget):
             return
 
         sequence_payload = copy.deepcopy(sequence)
+        # [NEW] 출처 태그 추론
+        src_tag = None
+        try:
+            sender_obj = self.sender()
+            cls_name = type(sender_obj).__name__ if sender_obj is not None else None
+            if cls_name == 'MapTab':
+                src_tag = '[맵]'
+            elif cls_name == 'HuntTab':
+                src_tag = '[사냥]'
+        except Exception:
+            src_tag = None
+
         if self.parallel_profile_flags.get(command_text, False):
-            self._start_parallel_sequence(sequence_payload, command_text, reason=reason)
+            self._start_parallel_sequence(sequence_payload, command_text, reason=reason, source_tag=src_tag)
         else:
             # 새 동작: 만약 동일 명령이 이미 실행 중이라면 강제 재시작하도록 _start_sequence_execution이 처리
-            self._start_sequence_execution(sequence_payload, command_text, is_test=False, reason=reason)
+            self._start_sequence_execution(sequence_payload, command_text, is_test=False, reason=reason, source_tag=src_tag)
 
     def _on_sequence_stuck(self):
         """(신규) 시퀀스가 일정 시간 진행이 없을 때 호출되어 안전 복구를 시도합니다."""
@@ -2541,29 +2601,29 @@ class AutoControlTab(QWidget):
         is_test_mode = self.is_test_mode
 
         print(f"[AutoControl] Sequence watchdog fired for '{command_name}'. Attempting recovery.")
-        self.log_generated.emit(
-            f"경고: '{command_name}' 시퀀스가 멈춤. 복구 시도 중...",
-            "orange",
-        )
+        msg = f"경고: '{command_name}' 시퀀스가 멈춤. 복구 시도 중..."
+        if self.current_command_source_tag:
+            msg = f"{self.current_command_source_tag} {msg}"
+        self.log_generated.emit(msg, "orange")
 
         self._abort_sequence_for_recovery()
 
         if is_test_mode or not command_name:
             if command_name:
-                self.log_generated.emit(
-                    f"'{command_name}' 테스트 모드이므로 자동 재시도를 건너뜁니다.",
-                    "orange",
-                )
+                msg = f"'{command_name}' 테스트 모드이므로 자동 재시도를 건너뜁니다."
+                if self.current_command_source_tag:
+                    msg = f"{self.current_command_source_tag} {msg}"
+                self.log_generated.emit(msg, "orange")
             self._notify_sequence_completed(False)
             return
 
         self.sequence_recovery_attempts[command_name] += 1
         attempt = self.sequence_recovery_attempts[command_name]
         if attempt > self.MAX_SEQUENCE_RECOVERY_ATTEMPTS:
-            self.log_generated.emit(
-                f"경고: '{command_name}' 자동 복구 횟수 초과. 수동 조치가 필요합니다.",
-                "red",
-            )
+            msg = f"경고: '{command_name}' 자동 복구 횟수 초과. 수동 조치가 필요합니다."
+            if self.current_command_source_tag:
+                msg = f"{self.current_command_source_tag} {msg}"
+            self.log_generated.emit(msg, "red")
             self._notify_sequence_completed(False)
             return
 
@@ -2575,19 +2635,19 @@ class AutoControlTab(QWidget):
 
         sequence_template = self.mappings.get(command_name)
         if not isinstance(sequence_template, list) or not sequence_template:
-            self.log_generated.emit(
-                f"경고: '{command_name}'에 대한 시퀀스 원본을 찾을 수 없어 복구를 중단합니다.",
-                "red",
-            )
+            msg = f"경고: '{command_name}'에 대한 시퀀스 원본을 찾을 수 없어 복구를 중단합니다."
+            if self.current_command_source_tag:
+                msg = f"{self.current_command_source_tag} {msg}"
+            self.log_generated.emit(msg, "red")
             self._notify_sequence_completed(False)
             return
 
         sequence_payload = copy.deepcopy(sequence_template)
-        self.log_generated.emit(
-            f"'{command_name}' 자동 재실행을 시작합니다.({attempt}/{self.MAX_SEQUENCE_RECOVERY_ATTEMPTS})",
-            "orange",
-        )
-        self._start_sequence_execution(sequence_payload, command_name, is_test=False, reason=reason)
+        msg = f"'{command_name}' 자동 재실행을 시작합니다.({attempt}/{self.MAX_SEQUENCE_RECOVERY_ATTEMPTS})"
+        if self.current_command_source_tag:
+            msg = f"{self.current_command_source_tag} {msg}"
+        self.log_generated.emit(msg, "orange")
+        self._start_sequence_execution(sequence_payload, command_name, is_test=False, reason=reason, source_tag=self.current_command_source_tag)
 
     def toggle_recording(self):
         if self.is_recording or self.is_waiting_for_start_key:
