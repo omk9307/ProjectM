@@ -952,6 +952,10 @@ class HuntTab(QWidget):
         self._cleanup_active: bool = False
         self._cleanup_hold_until_ts: float = 0.0
 
+        # 사다리복구 조건 평가용 상태(연속 상태 지속 시간 추적)
+        self._ladder_escape_last_state: Optional[str] = None
+        self._ladder_escape_state_since_ts: float = 0.0
+
         self.detection_thread: Optional[DetectionThread] = None
         self.detection_popup: Optional[DetectionPopup] = None
         self.is_popup_active = False
@@ -1564,6 +1568,119 @@ class HuntTab(QWidget):
             if not profile:
                 return False
             return True
+        except Exception:
+            return False
+
+    def api_get_jump_attack_metrics(self) -> dict:
+        """점프공격 가능 여부와 현재/기준 거리를 함께 반환.
+
+        반환 예: {
+          'enabled': True,
+          'possible': False,
+          'distance_px': 72,
+          'threshold_px': 70,
+        }
+        distance_px는 조건 계산이 불가한 경우 None.
+        """
+        result = {
+            'enabled': False,
+            'possible': False,
+            'distance_px': None,
+            'threshold_px': 0,
+        }
+        try:
+            # 주 스킬 선택
+            primary_skill = None
+            for s in getattr(self, 'attack_skills', []) or []:
+                if getattr(s, 'is_primary', False) and getattr(s, 'enabled', True):
+                    primary_skill = s
+                    break
+            if not primary_skill:
+                return result
+            thr = max(1, int(getattr(primary_skill, 'jump_attack_distance_px', 120)))
+            result['threshold_px'] = int(thr)
+            result['enabled'] = bool(getattr(primary_skill, 'jump_attack_enabled', False))
+            if not result['enabled']:
+                # 활성화 안 됐어도 기준은 제공
+                return result
+
+            primary_area = getattr(self, 'current_primary_area', None)
+            if primary_area is None:
+                return result
+            monsters = self._get_recent_monster_boxes()
+            if not monsters:
+                return result
+            primary_monsters = [m for m in monsters if m.intersects(primary_area)]
+            if not (self.latest_snapshot and self.latest_snapshot.character_boxes):
+                return result
+            character_box = self._select_reference_character_box(self.latest_snapshot.character_boxes)
+            char_x = float(character_box.center_x)
+            if primary_monsters:
+                center_x = sum(float(m.center_x) for m in primary_monsters) / float(len(primary_monsters))
+                distance = abs(center_x - char_x)
+                result['distance_px'] = float(distance)
+            else:
+                result['distance_px'] = None
+
+            # 가능 판정은 기존 로직과 동일
+            if len(primary_monsters) < 2:
+                return result
+            if result['distance_px'] is None or float(result['distance_px']) < float(thr):
+                return result
+            side = 'left' if (primary_monsters and (sum(m.center_x for m in primary_monsters) / float(len(primary_monsters)) < char_x)) else 'right'
+            profile = str(getattr(primary_skill, 'jump_profile_right', '') if side == 'right' else getattr(primary_skill, 'jump_profile_left', '') or '').strip()
+            if not profile:
+                return result
+            # 확률 요소는 제외(가능 조건만)
+            result['possible'] = True
+            return result
+        except Exception:
+            return result
+
+    def api_is_ladder_escape_condition_now(self) -> bool:
+        """사다리복구 조건 충족 여부를 평가하여 반환.
+
+        기준:
+        - '사다리복구' 기능이 켜져 있어야 함
+        - 포함 상태(점프/사다리/낙하) 중 하나가 현재 player_state에 해당
+        - 포함 상태로 연속 유지 시간이 임계값(초) 이상
+        """
+        try:
+            # 기능 ON 확인
+            enabled = bool(getattr(self, 'ladder_escape_enabled_checkbox', None).isChecked()) if hasattr(self, 'ladder_escape_enabled_checkbox') else False
+            if not enabled:
+                return False
+            # 포함 상태 설정
+            inc_jump = bool(self.ladder_escape_include_jump_checkbox.isChecked()) if hasattr(self, 'ladder_escape_include_jump_checkbox') else True
+            inc_ladder = bool(self.ladder_escape_include_ladder_checkbox.isChecked()) if hasattr(self, 'ladder_escape_include_ladder_checkbox') else True
+            inc_fall = bool(self.ladder_escape_include_fall_checkbox.isChecked()) if hasattr(self, 'ladder_escape_include_fall_checkbox') else True
+
+            included_states = set()
+            if inc_jump:
+                included_states.add('jumping')
+            if inc_ladder:
+                included_states.update({'climbing_up', 'climbing_down', 'on_ladder_idle'})
+            if inc_fall:
+                included_states.add('falling')
+
+            # 현재 상태
+            map_tab = getattr(self, 'map_tab', None)
+            cur_state = str(getattr(map_tab, 'player_state', '') or '') if map_tab else ''
+            now = time.time()
+            if cur_state in included_states:
+                if self._ladder_escape_last_state != cur_state:
+                    self._ladder_escape_last_state = cur_state
+                    self._ladder_escape_state_since_ts = now
+            else:
+                # 포함되지 않은 상태면 타이머 리셋
+                self._ladder_escape_last_state = None
+                self._ladder_escape_state_since_ts = 0.0
+                return False
+
+            # 연속 유지 시간
+            elapsed = max(0.0, now - float(self._ladder_escape_state_since_ts or now))
+            thr = float(self.ladder_escape_threshold_spinbox.value()) if hasattr(self, 'ladder_escape_threshold_spinbox') else 2.0
+            return elapsed >= max(0.5, thr)
         except Exception:
             return False
 
@@ -6391,14 +6508,14 @@ class HuntTab(QWidget):
         for code in failed_codes:
             if code == "MAP_SNAPSHOT_MISSING":
                 descriptions.append(
-                    "MAP_SNAPSHOT_MISSING: 맵 탭이 최신 상태 스냅샷을 전달하지 않아 캐릭터 상태를 파악할 수 없습니다. (맵 탐지 실행 여부 확인 필요)"
+                    "맵 탭이 최신 상태 스냅샷을 전달하지 않아 캐릭터 상태를 파악할 수 없습니다. (맵 탐지 실행 여부 확인 필요)"
                 )
                 continue
 
             if code == "MAP_NOT_WALKING":
                 state = map_snapshot.get("player_state") or "알 수 없음"
                 descriptions.append(
-                    f"MAP_NOT_WALKING: 캐릭터가 지상(on_terrain), 대기(idle), 점프(jumping) 상태 중 하나가 아닙니다. 현재 상태={state}."
+                    f"캐릭터가 지상(on_terrain), 대기(idle), 점프(jumping) 상태 중 하나가 아닙니다. 현재 상태={state}."
                 )
                 continue
 
@@ -6415,18 +6532,18 @@ class HuntTab(QWidget):
                     extras.append("경로 잠금 상태")
                 extra_text = f" ({', '.join(extras)})" if extras else ""
                 descriptions.append(
-                    f"MAP_STATE_ACTIVE: 맵 탭 캐릭터가 아직 안정 상태가 아닙니다. 현재 상태={state}{extra_text}."
+                    f"맵 탭 캐릭터가 아직 안정 상태가 아닙니다. 현재 상태={state}{extra_text}."
                 )
                 continue
 
             if code == "MAP_PROTECT_ACTIVE":
                 if map_protect_seconds is not None:
                     descriptions.append(
-                        f"MAP_PROTECT_ACTIVE: 맵 탭 권한 보호 시간 {map_protect_seconds:.1f}초가 아직 끝나지 않아 대기합니다."
+                        f"맵 탭 권한 보호 시간 {map_protect_seconds:.1f}초가 아직 끝나지 않아 대기합니다."
                     )
                 else:
                     descriptions.append(
-                        "MAP_PROTECT_ACTIVE: 맵 탭이 권한을 되찾은 직후 보호 시간이 아직 끝나지 않아 대기합니다."
+                        "맵 탭이 권한을 되찾은 직후 보호 시간이 아직 끝나지 않아 대기합니다."
                     )
                 continue
 
@@ -6440,7 +6557,7 @@ class HuntTab(QWidget):
                     extras.append(f"요청 사유={request_meta.get('priority_reason')}")
                 extra_text = f" ({', '.join(extras)})" if extras else ""
                 descriptions.append(
-                    f"MAP_PRIORITY_LOCK: 맵 탭이 우선 처리 작업을 진행하고 있어 권한을 유지해야 합니다{extra_text}."
+                    f"맵 탭이 우선 처리 작업을 진행하고 있어 권한을 유지해야 합니다{extra_text}."
                 )
                 continue
 
@@ -6454,11 +6571,11 @@ class HuntTab(QWidget):
                     base_floor_text = "알 수 없음"
                 if isinstance(h, (int, float)) and isinstance(thr, (int, float)):
                     descriptions.append(
-                        f"MAP_NOT_NEAR_FLOOR: 착지 전이라 권한 위임을 보류합니다. (마지막 지면층 {base_floor_text}, ΔY={float(h):.1f}px, 임계값={float(thr):.1f}px)"
+                        f"착지 전이라 권한 위임을 보류합니다. (마지막 지면층 {base_floor_text}, ΔY={float(h):.1f}px, 임계값={float(thr):.1f}px)"
                     )
                 else:
                     descriptions.append(
-                        f"MAP_NOT_NEAR_FLOOR: 착지 전이라 권한 위임을 보류합니다. (마지막 지면층 {base_floor_text})"
+                        f"착지 전이라 권한 위임을 보류합니다. (마지막 지면층 {base_floor_text})"
                     )
                 continue
 
@@ -6482,18 +6599,18 @@ class HuntTab(QWidget):
                     floor_text = f", 기준 층={lock_floor}"
                 reason_text = f" (사유: {lock_reason})" if lock_reason else ""
                 descriptions.append(
-                    "FLOOR_CHANGE_PENDING: 강제 반납 이후 캐릭터가 다른 층으로 이동하기 전까지 맵 탭 권한을 유지합니다." + reason_text + floor_text + elapsed_text
+                    "강제 반납 이후 캐릭터가 다른 층으로 이동하기 전까지 맵 탭 권한을 유지합니다." + reason_text + floor_text + elapsed_text
                 )
                 continue
 
             if code == "HUNT_PROTECT_ACTIVE":
                 if hunt_protect_seconds is not None:
                     descriptions.append(
-                        f"HUNT_PROTECT_ACTIVE: 사냥 탭 권한 보호 시간 {hunt_protect_seconds:.1f}초가 지나지 않아 권한을 유지합니다."
+                        f"사냥 탭 권한 보호 시간 {hunt_protect_seconds:.1f}초가 지나지 않아 권한을 유지합니다."
                     )
                 else:
                     descriptions.append(
-                        "HUNT_PROTECT_ACTIVE: 사냥 탭이 권한을 획득한 직후 보호 시간 내에 있어 맵 탭 요청을 대기합니다."
+                        "사냥 탭이 권한을 획득한 직후 보호 시간 내에 있어 맵 탭 요청을 대기합니다."
                     )
                 continue
 
@@ -6502,11 +6619,11 @@ class HuntTab(QWidget):
                 if isinstance(timestamp, (int, float)):
                     elapsed = now - timestamp
                     descriptions.append(
-                        f"HUNT_SNAPSHOT_OUTDATED: 사냥 스냅샷이 {elapsed:.1f}초 동안 갱신되지 않아 안전을 위해 대기합니다."
+                        f"사냥 스냅샷이 {elapsed:.1f}초 동안 갱신되지 않아 안전을 위해 대기합니다."
                     )
                 else:
                     descriptions.append(
-                        "HUNT_SNAPSHOT_OUTDATED: 사냥 스냅샷이 최신이 아니어서 대기합니다."
+                        "사냥 스냅샷이 최신이 아니어서 대기합니다."
                     )
                 continue
 
@@ -6525,19 +6642,19 @@ class HuntTab(QWidget):
                 if not shortage_bits:
                     shortage_bits.append("사냥 조건 미충족")
                 descriptions.append(
-                    "HUNT_MONSTER_SHORTAGE: 사냥 조건을 충족하지 못했습니다. " + ", ".join(shortage_bits) + "."
+                    "사냥 조건을 충족하지 못했습니다. " + ", ".join(shortage_bits) + "."
                 )
                 continue
 
             if code == "HUNT_SNAPSHOT_MISSING":
                 descriptions.append(
-                    "HUNT_SNAPSHOT_MISSING: 사냥 탭이 최신 몬스터 정보를 전달하지 않아 요청을 보류합니다. (사냥 탐지 실행 여부 확인)"
+                    "사냥 탭이 최신 몬스터 정보를 전달하지 않아 요청을 보류합니다. (사냥 탐지 실행 여부 확인)"
                 )
                 continue
 
             if code == "MAP_ALREADY_OWNER":
                 descriptions.append(
-                    "MAP_ALREADY_OWNER: 이미 맵 탭이 조작 권한을 보유 중입니다."
+                    "이미 맵 탭이 조작 권한을 보유 중입니다."
                 )
                 continue
 
@@ -6547,9 +6664,113 @@ class HuntTab(QWidget):
                 )
                 continue
 
-            descriptions.append(f"{code}: 추가 정보 없이 대기 중입니다.")
+            descriptions.append("추가 정보 없이 대기 중입니다.")
 
         return descriptions
+
+    def _summarize_authority_pending(
+        self,
+        failed_codes: Iterable[str],
+        detail_payload: dict,
+    ) -> str:
+        """PENDING 사유를 한 줄 요약용 한국어 태그로 변환한다.
+
+        - 일부 항목은 괄호로 간단한 현재값(상태/초/수치)을 함께 표시한다.
+        - 반환 문자열은 ", "로 연결된 요약 항목들이다.
+        """
+        items: list[str] = []
+        map_snapshot = detail_payload.get("map_snapshot") or {}
+        hunt_snapshot = detail_payload.get("hunt_snapshot") or {}
+        request_meta = detail_payload.get("meta") or {}
+        map_state = map_snapshot.get("player_state") or None
+        map_meta = map_snapshot.get("metadata") if isinstance(map_snapshot.get("metadata"), dict) else {}
+        map_protect_seconds = request_meta.get("map_protect_sec")
+        hunt_protect_seconds = request_meta.get("hunt_protect_sec")
+
+        now = time.time()
+        for code in failed_codes:
+            tag = None
+            if code == "MAP_SNAPSHOT_MISSING":
+                tag = "맵 스냅샷 없음"
+            elif code == "MAP_NOT_WALKING":
+                tag = "캐릭터 상태 비정상"
+                if isinstance(map_state, str):
+                    tag += f" (현재: {map_state})"
+            elif code == "MAP_STATE_ACTIVE":
+                tag = "맵 탭 동작 중"
+                if isinstance(map_state, str):
+                    tag += f" (현재: {map_state})"
+            elif code == "MAP_PROTECT_ACTIVE":
+                tag = "맵 보호 시간"
+                try:
+                    sec = float(map_protect_seconds)
+                    if sec > 0:
+                        tag += f" (~{sec:.1f}s)"
+                except Exception:
+                    pass
+            elif code == "MAP_PRIORITY_LOCK":
+                tag = "맵 우선 처리"
+            elif code == "MAP_NOT_NEAR_FLOOR":
+                tag = "착지 전"
+                h = map_meta.get("height_from_last_floor_px")
+                thr = map_meta.get("near_floor_threshold_px")
+                if isinstance(h, (int, float)) and isinstance(thr, (int, float)):
+                    try:
+                        tag += f" (ΔY={float(h):.0f}/임계 {float(thr):.0f}px)"
+                    except Exception:
+                        pass
+            elif code == "FLOOR_CHANGE_PENDING":
+                tag = "층 이동 대기"
+                lock_set_at = request_meta.get("floor_lock_set_at")
+                if isinstance(lock_set_at, (int, float)):
+                    try:
+                        elapsed = now - float(lock_set_at)
+                        if elapsed >= 0:
+                            tag += f" (~{elapsed:.1f}s)"
+                    except Exception:
+                        pass
+            elif code == "HUNT_PROTECT_ACTIVE":
+                tag = "사냥 보호 시간"
+                try:
+                    sec = float(hunt_protect_seconds)
+                    if sec > 0:
+                        tag += f" (~{sec:.1f}s)"
+                except Exception:
+                    pass
+            elif code == "HUNT_SNAPSHOT_OUTDATED":
+                tag = "사냥 스냅샷 오래됨"
+                ts = hunt_snapshot.get("timestamp")
+                if isinstance(ts, (int, float)):
+                    try:
+                        elapsed = now - float(ts)
+                        if elapsed >= 0:
+                            tag += f" (~{elapsed:.1f}s)"
+                    except Exception:
+                        pass
+            elif code == "HUNT_MONSTER_SHORTAGE":
+                tag = "몬스터 부족"
+                total = hunt_snapshot.get("monster_count")
+                total_thr = hunt_snapshot.get("hunt_monster_threshold")
+                prim = hunt_snapshot.get("primary_monster_count")
+                prim_thr = hunt_snapshot.get("primary_monster_threshold")
+                bits: list[str] = []
+                if isinstance(total, (int, float)) and isinstance(total_thr, (int, float)) and total < total_thr:
+                    bits.append(f"{int(total) if float(total).is_integer() else total}<{int(total_thr) if float(total_thr).is_integer() else total_thr}")
+                if isinstance(prim, (int, float)) and isinstance(prim_thr, (int, float)) and prim < prim_thr:
+                    bits.append(f"주 {int(prim) if float(prim).is_integer() else prim}<{int(prim_thr) if float(prim_thr).is_integer() else prim_thr}")
+                if bits:
+                    tag += " (" + ", ".join(bits) + ")"
+            elif code == "HUNT_SNAPSHOT_MISSING":
+                tag = "사냥 스냅샷 없음"
+            elif code == "MAP_ALREADY_OWNER":
+                tag = "맵 탭 보유 중"
+            elif code == "HOLD_LIMIT_NOT_REACHED":
+                tag = "보유 시간 미달"
+
+            if tag:
+                items.append(tag)
+
+        return ", ".join(items)
 
     def _on_downscale_toggled(self, checked: bool) -> None:
         if self._suppress_downscale_prompt:
@@ -6734,9 +6955,9 @@ class HuntTab(QWidget):
         if status == AuthorityDecisionStatus.PENDING.value:
             failed = details.get("failed") or []
             if failed:
-                failed_codes = ", ".join(str(item) for item in failed)
+                summary_text = self._summarize_authority_pending(failed, details)
                 self.append_log(
-                    f"사냥 권한 요청 대기: {failed_codes}",
+                    f"사냥 권한 요청 대기: {summary_text}",
                     "warn",
                 )
                 for line in self._describe_authority_pending_reasons(failed, details):

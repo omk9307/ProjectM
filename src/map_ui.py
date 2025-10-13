@@ -5386,6 +5386,7 @@ class MapTab(QWidget):
             "waypoint_arrival_x_threshold_min": self.cfg_waypoint_arrival_x_threshold_min,
             "waypoint_arrival_x_threshold_max": self.cfg_waypoint_arrival_x_threshold_max,
             "ladder_arrival_x_threshold": self.cfg_ladder_arrival_x_threshold,
+            "ladder_arrival_short_threshold": self.cfg_ladder_arrival_short_threshold,
             "jump_link_arrival_x_threshold": self.cfg_jump_link_arrival_x_threshold,
             "ladder_avoidance_width": self.cfg_ladder_avoidance_width,
             # [신규] 아래점프 최소 사다리 거리(px) - 비 cfg 속성이므로 직접 주입/회수

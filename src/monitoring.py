@@ -262,6 +262,13 @@ class MonitoringTab(QWidget):
         self._last_floor: float | None = None
         # 특수 로직 상태 라벨 캐시
         self.special_value_labels: dict[str, QLabel] = {}
+        self.special_name_labels: dict[str, QLabel] = {}
+        self._special_name_style_default = (
+            "color: #CCCCCC; background: rgba(255,255,255,0.03); padding: 2px 6px; border: 1px solid #444;"
+        )
+        self._special_name_style_active = (
+            "color: #FFFFFF; background: #1e7f2f; padding: 2px 6px; border: 1px solid #2e9d45;"
+        )
 
         self._init_ui()
         # AutoControl 실시간 로그와 동일한 Δ 및 구분선 처리를 위해 마지막 키로그 시각 저장
@@ -486,7 +493,23 @@ class MonitoringTab(QWidget):
 
         # [NEW] 특수 로직 상태 패널(체크/수치)
         special_group = QGroupBox("특수 로직 상태")
+        try:
+            special_group.setMinimumWidth(220)
+        except Exception:
+            pass
         special_layout = QVBoxLayout(special_group)
+        # 배경/테두리: 로그 영역과 유사하게
+        special_container = QWidget()
+        special_container.setStyleSheet(
+            """
+            QWidget { background-color: #2E2E2E; }
+            QLabel { color: #EEEEEE; }
+            QGroupBox { border: 1px solid #555; }
+            """
+        )
+        special_rows = QVBoxLayout(special_container)
+        special_rows.setContentsMargins(4, 4, 4, 4)
+        special_rows.setSpacing(4)
 
         def _mk_special_row(label_text: str, key: str) -> QWidget:
             row = QFrame()
@@ -495,9 +518,9 @@ class MonitoringTab(QWidget):
             h.setContentsMargins(4, 2, 4, 2)
             h.setSpacing(6)
             name = QLabel(label_text)
-            name.setFixedWidth(110)
+            name.setFixedWidth(120)
             name.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
-            name.setStyleSheet("color: #CCCCCC; background: rgba(255,255,255,0.03); padding: 2px 6px; border: 1px solid #444;")
+            name.setStyleSheet(self._special_name_style_default)
             vline = QFrame(); vline.setFrameShape(QFrame.Shape.VLine); vline.setFrameShadow(QFrame.Shadow.Sunken)
             value = QLabel("?")
             value.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
@@ -506,17 +529,28 @@ class MonitoringTab(QWidget):
             h.addWidget(vline)
             h.addWidget(value, 1)
             self.special_value_labels[key] = value
+            self.special_name_labels[key] = name
             return row
 
+        # 1) 핵심 상태 5종(+ 사다리복구 추가 요청으로 6종)
         for t, k in (
             ("클린업", "cleanup"),
             ("점프공격", "jump_attack"),
             ("조작권한 위임", "handover"),
             ("사다리 위험", "ladder_threat"),
             ("사다리 정리", "ladder_cleanup"),
+            ("사다리복구", "ladder_escape"),
         ):
-            special_layout.addWidget(_mk_special_row(t, k))
-        special_layout.addStretch(1)
+            special_rows.addWidget(_mk_special_row(t, k))
+
+        # 2) 보호 시간 2종
+        for t, k in (
+            ("맵 보호", "map_protect"),
+            ("사냥보호시간", "hunt_protect"),
+        ):
+            special_rows.addWidget(_mk_special_row(t, k))
+
+        special_layout.addWidget(special_container)
 
         # 로그 더블클릭 → 다른 로그를 가까운 시간대로 스크롤 동기화
         try:
@@ -541,15 +575,16 @@ class MonitoringTab(QWidget):
         # 좌우 가로 리사이즈: 하단 로그 전용 스플리터
         self._bottom_hsplitter = QSplitter(Qt.Orientation.Horizontal)
         self._bottom_hsplitter.setChildrenCollapsible(False)
+        # 사용자 요청: 특수 로직 상태 패널을 가장 좌측에 배치
+        self._bottom_hsplitter.addWidget(special_group)
         self._bottom_hsplitter.addWidget(map_group)
         self._bottom_hsplitter.addWidget(hunt_group)
         self._bottom_hsplitter.addWidget(key_group)
-        self._bottom_hsplitter.addWidget(special_group)
         # 기본 동일 비율
-        self._bottom_hsplitter.setStretchFactor(0, 1)
+        self._bottom_hsplitter.setStretchFactor(0, 0)
         self._bottom_hsplitter.setStretchFactor(1, 1)
         self._bottom_hsplitter.setStretchFactor(2, 1)
-        self._bottom_hsplitter.setStretchFactor(3, 0)
+        self._bottom_hsplitter.setStretchFactor(3, 1)
 
         bottom_container = QWidget()
         _bottom_layout = QVBoxLayout(bottom_container)
@@ -613,13 +648,14 @@ class MonitoringTab(QWidget):
                 elif len(sizes) == 3:
                     a, b, c = sizes
                     # 이전 3분할 설정을 유지하며 특수 패널 기본폭 추가
-                    self._bottom_hsplitter.setSizes([a, b, c, 240])
+                    # 이전 저장 순서(맵/사냥/키) 앞에 특수 패널 폭(240) 추가
+                    self._bottom_hsplitter.setSizes([240, a, b, c])
                 else:
-                    self._bottom_hsplitter.setSizes([260, 260, 260, 240])
+                    self._bottom_hsplitter.setSizes([240, 260, 260, 260])
             else:
-                self._bottom_hsplitter.setSizes([260, 260, 260, 240])
+                self._bottom_hsplitter.setSizes([240, 260, 260, 260])
         except Exception:
-            self._bottom_hsplitter.setSizes([260, 260, 260, 240])
+            self._bottom_hsplitter.setSizes([240, 260, 260, 260])
 
         # 체크박스 상태 복원(마지막 표시 상태 + 연동)
         try:
@@ -1166,14 +1202,24 @@ class MonitoringTab(QWidget):
 
     # --- 특수 로직 상태 갱신 ---
     def _fmt_check(self, value: object) -> str:
+        # 기본 폴백 기호(요청사항: 체크 대신 배경색 사용, 값은 보조로만 유지)
         try:
             if value is True:
-                return "✓"
+                return ""
             if value is False:
                 return "—"
             return "?"
         except Exception:
             return "?"
+
+    def _set_special_active(self, key: str, active: bool) -> None:
+        name = self.special_name_labels.get(key)
+        if not name:
+            return
+        try:
+            name.setStyleSheet(self._special_name_style_active if active else self._special_name_style_default)
+        except Exception:
+            pass
 
     def _update_special_status(self) -> None:
         # 클린업(동작중)
@@ -1183,20 +1229,37 @@ class MonitoringTab(QWidget):
                 cleanup_val = bool(self._hunt_tab.api_is_cleanup_active())
         except Exception:
             cleanup_val = None
+        self._set_special_active('cleanup', bool(cleanup_val))
         lbl = self.special_value_labels.get('cleanup')
         if lbl:
-            lbl.setText(self._fmt_check(cleanup_val))
+            lbl.setText('' if cleanup_val else '—' if cleanup_val is False else '?')
 
-        # 점프공격(가능 조건)
-        jump_val = None
+        # 점프공격(가능 조건) + 미작동 시 거리/기준 표시
+        jump_possible = None
+        jump_distance_text = None
         try:
-            if self._hunt_tab and hasattr(self._hunt_tab, 'api_is_jump_attack_possible_now'):
-                jump_val = bool(self._hunt_tab.api_is_jump_attack_possible_now())
+            metrics = None
+            if self._hunt_tab and hasattr(self._hunt_tab, 'api_get_jump_attack_metrics'):
+                metrics = self._hunt_tab.api_get_jump_attack_metrics()
+            if isinstance(metrics, dict):
+                jump_possible = bool(metrics.get('possible'))
+                cur = metrics.get('distance_px')
+                thr = metrics.get('threshold_px')
+                if not jump_possible:
+                    if isinstance(cur, (int, float)) and isinstance(thr, (int, float)):
+                        jump_distance_text = f"{int(round(cur))}px (기준 > {int(round(thr))}px)"
+                    elif isinstance(thr, (int, float)):
+                        jump_distance_text = f"-- (기준 > {int(round(thr))}px)"
         except Exception:
-            jump_val = None
+            jump_possible = None
+            jump_distance_text = None
+        self._set_special_active('jump_attack', bool(jump_possible))
         lbl = self.special_value_labels.get('jump_attack')
         if lbl:
-            lbl.setText(self._fmt_check(jump_val))
+            if jump_possible is True:
+                lbl.setText('')
+            else:
+                lbl.setText(jump_distance_text or '—')
 
         # 사다리 위험(조건 충족)
         ladder_threat = None
@@ -1205,9 +1268,10 @@ class MonitoringTab(QWidget):
                 ladder_threat = bool(self._hunt_tab.api_is_ladder_threat_now())
         except Exception:
             ladder_threat = None
+        self._set_special_active('ladder_threat', bool(ladder_threat))
         lbl = self.special_value_labels.get('ladder_threat')
         if lbl:
-            lbl.setText(self._fmt_check(ladder_threat))
+            lbl.setText('' if ladder_threat else '—' if ladder_threat is False else '?')
 
         # 사다리 정리(오버라이드 활성)
         ladder_cleanup = None
@@ -1216,9 +1280,22 @@ class MonitoringTab(QWidget):
                 ladder_cleanup = bool(self._hunt_tab.api_is_ladder_cleanup_active())
         except Exception:
             ladder_cleanup = None
+        self._set_special_active('ladder_cleanup', bool(ladder_cleanup))
         lbl = self.special_value_labels.get('ladder_cleanup')
         if lbl:
-            lbl.setText(self._fmt_check(ladder_cleanup))
+            lbl.setText('' if ladder_cleanup else '—' if ladder_cleanup is False else '?')
+
+        # 사다리복구(지속 임계 충족)
+        ladder_escape = None
+        try:
+            if self._hunt_tab and hasattr(self._hunt_tab, 'api_is_ladder_escape_condition_now'):
+                ladder_escape = bool(self._hunt_tab.api_is_ladder_escape_condition_now())
+        except Exception:
+            ladder_escape = None
+        self._set_special_active('ladder_escape', bool(ladder_escape))
+        lbl = self.special_value_labels.get('ladder_escape')
+        if lbl:
+            lbl.setText('' if ladder_escape else '—' if ladder_escape is False else '?')
 
         # 조작권한 위임(현재 소유자 반대측으로 즉시 양도 가능?)
         handover = None
@@ -1227,7 +1304,6 @@ class MonitoringTab(QWidget):
                 mgr = ControlAuthorityManager.instance()
                 owner = (self._current_authority_owner or 'map').lower()
                 if owner == 'map':
-                    # 사냥으로 위임 가능 여부
                     hsnap = None
                     if self._hunt_tab and hasattr(self._hunt_tab, 'api_get_hunt_condition_snapshot'):
                         hsnap = self._hunt_tab.api_get_hunt_condition_snapshot()
@@ -1236,13 +1312,49 @@ class MonitoringTab(QWidget):
                 elif owner == 'hunt':
                     decision = mgr.peek_decision_for('map')
                     handover = (decision.status.value == 'accepted')
-                else:
-                    handover = None
         except Exception:
             handover = None
+        self._set_special_active('handover', bool(handover))
         lbl = self.special_value_labels.get('handover')
         if lbl:
-            lbl.setText(self._fmt_check(handover))
+            lbl.setText('' if handover else '—' if handover is False else '?')
+
+        # 보호 시간 표시(활성 시 이름 초록, 우측에 남은 시간)
+        try:
+            rem_map = None
+            rem_hunt = None
+            if ControlAuthorityManager is not None:
+                mgr = ControlAuthorityManager.instance()
+                st = mgr.current_state()
+                now = time.time()
+                try:
+                    rem_map = max(0.0, float(getattr(st, 'map_protect_until', 0.0)) - now)
+                except Exception:
+                    rem_map = None
+                try:
+                    rem_hunt = max(0.0, float(getattr(st, 'hunt_protect_until', 0.0)) - now)
+                except Exception:
+                    rem_hunt = None
+            # 맵 보호
+            map_active = isinstance(rem_map, float) and rem_map > 0.0
+            self._set_special_active('map_protect', bool(map_active))
+            lab = self.special_value_labels.get('map_protect')
+            if lab:
+                if isinstance(rem_map, float):
+                    lab.setText(f"{rem_map:.1f}s")
+                else:
+                    lab.setText('?')
+            # 사냥 보호
+            hunt_active = isinstance(rem_hunt, float) and rem_hunt > 0.0
+            self._set_special_active('hunt_protect', bool(hunt_active))
+            lab = self.special_value_labels.get('hunt_protect')
+            if lab:
+                if isinstance(rem_hunt, float):
+                    lab.setText(f"{rem_hunt:.1f}s")
+                else:
+                    lab.setText('?')
+        except Exception:
+            pass
 
     # --- 모니터링에서 MP/EXP 단독 토글 → 학습 DataManager로 반영 ---
     def _on_toggle_mp_standalone(self, checked: bool) -> None:
