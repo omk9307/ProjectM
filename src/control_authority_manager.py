@@ -322,6 +322,36 @@ class ControlAuthorityManager(QObject):
             self._emit_request_result(requester, decision, meta)
             return decision
 
+    # ------------------------------------------------------------------
+    # 모니터링/진단용: 부작용 없는 권한 평가(peek)
+    # ------------------------------------------------------------------
+    def peek_decision_for(
+        self,
+        requester: AuthorityOwner,
+        *,
+        reason: str = "monitoring_peek",
+        hunt_snapshot: Optional[HuntConditionSnapshot] = None,
+    ) -> AuthorityDecision:
+        """현재 조건에서 요청자가 권한을 가질 수 있는지 부작용 없이 평가한다.
+
+        - 상태 전이/보류 저장/시그널 방출 없이 내부 평가 로직만 수행한다.
+        - requester가 "hunt"이면 최신 맵 스냅샷과 전달된 사냥 스냅샷을 함께 고려한다.
+        - requester가 "map"이면 사냥 스냅샷 없이 평가한다.
+        """
+        with self._mutex:
+            meta: Dict[str, Any] = {}
+            now = time.time()
+            if requester == self._state.owner:
+                return AuthorityDecision(
+                    status=AuthorityDecisionStatus.NOOP,
+                    reason="already_owner",
+                    payload=self._state.as_payload(),
+                )
+            if requester == "hunt":
+                return self._evaluate_hunt_request(now, reason, meta, hunt_snapshot)
+            else:
+                return self._evaluate_map_request(now, reason, meta)
+
     def notify_priority_event(self, kind: str, *, metadata: Optional[Dict[str, Any]] = None) -> None:
         with self._mutex:
             metadata = dict(metadata or {})

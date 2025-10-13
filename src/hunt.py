@@ -1485,6 +1485,129 @@ class HuntTab(QWidget):
         }
         return result
 
+    # ---------------------- 외부 조회용 얇은 API ----------------------
+    def api_get_hunt_condition_snapshot(self) -> Optional[HuntConditionSnapshot]:
+        """현재 사냥 조건 스냅샷을 반환(모니터링/권한 평가용).
+
+        - 내부 `_build_hunt_condition_snapshot()`과 동일 내용을 래핑한다.
+        - 예외 발생 시 None 반환.
+        """
+        try:
+            return self._build_hunt_condition_snapshot()
+        except Exception:
+            return None
+
+    def api_is_cleanup_active(self) -> bool:
+        """현재 시점 클린업 동작 중 여부를 반환.
+
+        기준: allow_cleanup 조건과 동일(교전 중이고, 주 스킬 범위 내 ≥1 또는 클린업 유예 시간 내).
+        """
+        try:
+            now_ts = time.time()
+            return bool(
+                getattr(self, '_engage_active', False)
+                and (
+                    int(getattr(self, 'latest_primary_monster_count', 0)) >= 1
+                    or (
+                        getattr(self, '_cleanup_active', False)
+                        and float(getattr(self, '_cleanup_hold_until_ts', 0.0)) > 0.0
+                        and now_ts <= float(getattr(self, '_cleanup_hold_until_ts', 0.0))
+                    )
+                )
+            )
+        except Exception:
+            return False
+
+    def api_is_jump_attack_possible_now(self) -> bool:
+        """주 공격 스킬 기준으로 ‘점프공격’ 실행 조건 충족 여부를 평가(실행/랜덤 제외).
+
+        - 점프공격 On
+        - 주 스킬 범위 교차 몬스터 ≥ 2
+        - 캐릭터와 군집 중심 X거리 ≥ 설정 px
+        - 해당 방향 점프 프로필 존재
+        """
+        try:
+            # 주 스킬 선택
+            primary_skill = None
+            for s in getattr(self, 'attack_skills', []) or []:
+                if getattr(s, 'is_primary', False) and getattr(s, 'enabled', True):
+                    primary_skill = s
+                    break
+            if not primary_skill or not getattr(primary_skill, 'jump_attack_enabled', False):
+                return False
+
+            primary_area = getattr(self, 'current_primary_area', None)
+            if primary_area is None:
+                return False
+
+            monsters = self._get_recent_monster_boxes()
+            if not monsters:
+                return False
+            primary_monsters = [m for m in monsters if m.intersects(primary_area)]
+            if len(primary_monsters) < 2:
+                return False
+
+            # 캐릭터 기준점
+            if not (self.latest_snapshot and self.latest_snapshot.character_boxes):
+                return False
+            character_box = self._select_reference_character_box(self.latest_snapshot.character_boxes)
+            char_x = float(character_box.center_x)
+            center_x = sum(float(m.center_x) for m in primary_monsters) / float(len(primary_monsters))
+            side = 'left' if center_x < char_x else 'right'
+            distance = abs(center_x - char_x)
+
+            threshold = max(1, int(getattr(primary_skill, 'jump_attack_distance_px', 120)))
+            if distance < threshold:
+                return False
+
+            profile = str(getattr(primary_skill, 'jump_profile_right', '') if side == 'right' else getattr(primary_skill, 'jump_profile_left', '') or '').strip()
+            if not profile:
+                return False
+            return True
+        except Exception:
+            return False
+
+    def api_is_ladder_threat_now(self) -> bool:
+        """현재 ‘사다리 위협’ 조건이 충족되는지 평가(요청/전이 없이).
+
+        - 맵 상태: 사다리 접근/등반 맥락(align/prepare/climb or on_ladder_*)
+        - HP < 임계
+        - 근접 위협: 캐릭터 주변 밴드 내 몬스터 존재
+        """
+        try:
+            # 맵 상태 확인
+            map_tab = getattr(self, 'map_tab', None)
+            nav = str(getattr(map_tab, 'navigation_action', '') or '') if map_tab else ''
+            on_ladder = str(getattr(map_tab, 'player_state', '') or '') if map_tab else ''
+            allowed_nav = {'align_for_climb', 'prepare_to_climb', 'climb_in_progress'}
+            if not (nav in allowed_nav or on_ladder in {'climbing_up', 'climbing_down', 'on_ladder_idle'}):
+                return False
+
+            # HP 값
+            hp_val = None
+            try:
+                hp_val = float(self._status_display_values.get('hp'))
+            except Exception:
+                hp_val = None
+            if not isinstance(hp_val, (int, float)):
+                return False
+            hp_thr = int(self.ladder_hp_threshold_spinbox.value()) if hasattr(self, 'ladder_hp_threshold_spinbox') else 90
+            if not (hp_val < float(hp_thr)):
+                return False
+
+            # 근접 위협
+            near_px = int(self.ladder_near_px_spinbox.value()) if hasattr(self, 'ladder_near_px_spinbox') else 250
+            return bool(self._is_monster_near_character(near_px))
+        except Exception:
+            return False
+
+    def api_is_ladder_cleanup_active(self) -> bool:
+        """사다리 위협 기반 X범위 오버라이드(사다리 정리) 활성 여부."""
+        try:
+            return bool(getattr(self, '_ladder_override_active', False))
+        except Exception:
+            return False
+
     def api_start_detection(self) -> bool:
         """사냥 탐지를 시작(이미 실행 중이면 그대로 유지)."""
         try:
