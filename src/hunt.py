@@ -2577,6 +2577,12 @@ class HuntTab(QWidget):
 
         form = QFormLayout()
 
+        # 기능 ON/OFF
+        self.ladder_threat_enable_checkbox = QCheckBox("사다리 위협 시 자동 클린업 전환")
+        self.ladder_threat_enable_checkbox.setChecked(True)
+        form.addRow(self.ladder_threat_enable_checkbox)
+        self.ladder_threat_enable_checkbox.toggled.connect(self._handle_setting_changed)
+
         # 주변 범위(px): 사다리 접근 시 위험 판정 범위
         self.ladder_near_px_spinbox = QSpinBox()
         self.ladder_near_px_spinbox.setRange(20, 2000)
@@ -2595,9 +2601,125 @@ class HuntTab(QWidget):
         form.addRow("체력 조건(%)", self.ladder_hp_threshold_spinbox)
         self.ladder_hp_threshold_spinbox.valueChanged.connect(self._handle_setting_changed)
 
+        # [신규] 사다리/점프/낙하 지속 시 탈출 설정
+        # 마스터 스위치
+        self.ladder_escape_enabled_checkbox = QCheckBox("사다리복구")
+        self.ladder_escape_enabled_checkbox.setChecked(False)
+        form.addRow(self.ladder_escape_enabled_checkbox)
+        self.ladder_escape_enabled_checkbox.toggled.connect(self._handle_setting_changed)
+        self.ladder_escape_enabled_checkbox.toggled.connect(self._update_ladder_escape_controls)
+
+        # 탈출 명령프로필
+        self.ladder_escape_profile_combo = QComboBox()
+        self.ladder_escape_profile_combo.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToContents)
+        self.ladder_escape_profile_combo.addItem("프로필 선택", "")
+        form.addRow("탈출 명령프로필", self.ladder_escape_profile_combo)
+        self.ladder_escape_profile_combo.currentIndexChanged.connect(self._handle_setting_changed)
+
+        # 지속 임계값/쿨다운(초)
+        self.ladder_escape_threshold_spinbox = QDoubleSpinBox()
+        self.ladder_escape_threshold_spinbox.setRange(0.5, 10.0)
+        self.ladder_escape_threshold_spinbox.setSingleStep(0.1)
+        self.ladder_escape_threshold_spinbox.setDecimals(2)
+        self.ladder_escape_threshold_spinbox.setValue(2.0)
+        self.ladder_escape_threshold_spinbox.setSuffix(" s")
+        form.addRow("지속 임계값(초)", self.ladder_escape_threshold_spinbox)
+        self.ladder_escape_threshold_spinbox.valueChanged.connect(self._handle_setting_changed)
+
+        self.ladder_escape_cooldown_spinbox = QDoubleSpinBox()
+        self.ladder_escape_cooldown_spinbox.setRange(0.5, 30.0)
+        self.ladder_escape_cooldown_spinbox.setSingleStep(0.5)
+        self.ladder_escape_cooldown_spinbox.setDecimals(2)
+        self.ladder_escape_cooldown_spinbox.setValue(3.0)
+        self.ladder_escape_cooldown_spinbox.setSuffix(" s")
+        form.addRow("쿨다운(초)", self.ladder_escape_cooldown_spinbox)
+        self.ladder_escape_cooldown_spinbox.valueChanged.connect(self._handle_setting_changed)
+
+        # 감지 상태(점프/사다리/낙하)
+        self._ladder_escape_states_widget = QWidget()
+        _states_layout = QHBoxLayout(self._ladder_escape_states_widget)
+        _states_layout.setContentsMargins(0, 0, 0, 0)
+        _states_layout.setSpacing(8)
+        self.ladder_escape_include_jump_checkbox = QCheckBox("점프 포함")
+        self.ladder_escape_include_jump_checkbox.setChecked(True)
+        self.ladder_escape_include_ladder_checkbox = QCheckBox("사다리 포함")
+        self.ladder_escape_include_ladder_checkbox.setChecked(True)
+        self.ladder_escape_include_fall_checkbox = QCheckBox("낙하 포함")
+        self.ladder_escape_include_fall_checkbox.setChecked(True)
+        for cb in (
+            self.ladder_escape_include_jump_checkbox,
+            self.ladder_escape_include_ladder_checkbox,
+            self.ladder_escape_include_fall_checkbox,
+        ):
+            cb.toggled.connect(self._handle_setting_changed)
+            _states_layout.addWidget(cb)
+        form.addRow("감지 상태", self._ladder_escape_states_widget)
+
+        # 초기 enable 상태
+        self._update_ladder_escape_controls(self.ladder_escape_enabled_checkbox.isChecked())
+
         group.setLayout(form)
         group.setSizePolicy(QSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed))
         return group
+
+    def _update_ladder_escape_controls(self, checked: bool) -> None:
+        """사다리복구 토글에 따라 하위 컨트롤 활성화 제어."""
+        widgets = [
+            getattr(self, 'ladder_escape_profile_combo', None),
+            getattr(self, 'ladder_escape_threshold_spinbox', None),
+            getattr(self, 'ladder_escape_cooldown_spinbox', None),
+            getattr(self, '_ladder_escape_states_widget', None),
+        ]
+        for w in widgets:
+            try:
+                if w is not None:
+                    w.setEnabled(bool(checked))
+            except Exception:
+                pass
+
+    def _refresh_ladder_escape_profile_options(self, keep_selection: bool = True) -> None:
+        """'탈출 명령프로필' 콤보를 '기타' 카테고리 목록으로 갱신.
+        기본값으로 '사다리 멈춤복구'를 우선 선택.
+        """
+        combo = getattr(self, 'ladder_escape_profile_combo', None)
+        if combo is None:
+            return
+        try:
+            previous_data = combo.currentData() if keep_selection else None
+        except Exception:
+            previous_data = None
+        names = []
+        try:
+            names = self._get_misc_command_profiles()
+        except Exception:
+            names = []
+        default_name = "사다리 멈춤복구"
+        # 중복 제거 + 정렬
+        seen = set()
+        ordered = []
+        for n in names:
+            if isinstance(n, str) and n not in seen:
+                seen.add(n)
+                ordered.append(n)
+        if default_name not in seen:
+            ordered.insert(0, default_name)
+
+        # 재구성
+        current_block = combo.blockSignals(True)
+        try:
+            combo.clear()
+            combo.addItem("프로필 선택", "")
+            for n in ordered:
+                combo.addItem(n, n)
+            # 이전 선택 복원 또는 기본값 선택
+            target = previous_data or default_name
+            idx = combo.findData(target)
+            if idx >= 0:
+                combo.setCurrentIndex(idx)
+            else:
+                combo.setCurrentIndex(0)
+        finally:
+            combo.blockSignals(current_block)
 
     def _create_auto_shutdown_group(self) -> QGroupBox:
         group = QGroupBox("자동 대응")
@@ -8508,6 +8630,8 @@ class HuntTab(QWidget):
                 p_left = p_right = pr
 
             return f"사냥범위(좌 {e_left}, 우 {e_right}) · 주 스킬(좌 {p_left}, 우 {p_right})"
+        except Exception:
+            return ""
 
     # -------------------- 사다리 위협 전용 보조 --------------------
     def _apply_ladder_threat_range_override(self) -> None:
@@ -8580,8 +8704,10 @@ class HuntTab(QWidget):
             pass
 
     def _is_monster_near_character(self, radius_px: int) -> bool:
-        """캐릭터 중심과 몬스터 중심 간 유클리드 거리가 radius_px 이하인지 검사.
-        latest_snapshot 캐시를 사용하며, 데이터 없으면 False.
+        """사냥탭의 X 반경(radius_px)과 Y 밴드 높이(y_band_height_spinbox)를 사용해 근접 위협을 판정.
+
+        - X축: 캐릭터 중심 기준 abs(mx - cx) <= radius_px
+        - Y축: 사냥 Y 밴드(top ~ top+height) 내부인지 확인
         """
         try:
             if not self.latest_snapshot or not self.latest_snapshot.character_boxes or not self.latest_snapshot.monster_boxes:
@@ -8590,14 +8716,17 @@ class HuntTab(QWidget):
             if not character_box:
                 return False
             cx = float(character_box.center_x)
-            cy = float(character_box.y + character_box.height / 2.0)
-            r2 = float(max(1, int(radius_px))) ** 2
+            # 사냥 밴드 Y 범위 계산(사냥 범위 계산과 동일 방식)
+            height = max(1.0, float(self.y_band_height_spinbox.value())) if hasattr(self, 'y_band_height_spinbox') else 40.0
+            offset = float(self.y_band_offset_spinbox.value()) if hasattr(self, 'y_band_offset_spinbox') else 0.0
+            base_y = float(character_box.bottom)
+            top = base_y - height + offset
+            bottom = top + height
+            rx = float(max(1, int(radius_px)))
             for m in self.latest_snapshot.monster_boxes:
                 mx = float(m.x + m.width / 2.0)
                 my = float(m.y + m.height / 2.0)
-                dx = mx - cx
-                dy = my - cy
-                if (dx * dx + dy * dy) <= r2:
+                if abs(mx - cx) <= rx and top <= my <= bottom:
                     return True
             return False
         except Exception:
@@ -8608,6 +8737,9 @@ class HuntTab(QWidget):
         반환값: 요청을 발행했으면 True, 아니면 False
         """
         try:
+            # 기능 비활성화 시 동작 안 함
+            if hasattr(self, 'ladder_threat_enable_checkbox') and not self.ladder_threat_enable_checkbox.isChecked():
+                return False
             if self.current_authority == 'hunt':
                 return False
             if not getattr(self, 'map_link_enabled', False):
@@ -9029,6 +9161,11 @@ class HuntTab(QWidget):
         self._load_nickname_configuration()
         self._load_direction_configuration()
         self._load_nameplate_configuration()
+        # [신규] 탈출 명령프로필 콤보 갱신
+        try:
+            self._refresh_ladder_escape_profile_options(keep_selection=True)
+        except Exception:
+            pass
         if hasattr(self.data_manager, 'register_status_config_listener'):
             try:
                 self.data_manager.register_status_config_listener(self._handle_status_config_update)
@@ -9207,6 +9344,67 @@ class HuntTab(QWidget):
                 hp_percent = ladder_cfg.get('hp_percent')
                 if hp_percent is not None and hasattr(self, 'ladder_hp_threshold_spinbox'):
                     self.ladder_hp_threshold_spinbox.setValue(int(hp_percent))
+            except Exception:
+                pass
+            try:
+                enabled = ladder_cfg.get('enabled')
+                if enabled is not None and hasattr(self, 'ladder_threat_enable_checkbox'):
+                    self.ladder_threat_enable_checkbox.setChecked(bool(enabled))
+            except Exception:
+                pass
+
+        # [신규] 사다리/점프/낙하 지속 시 탈출 설정 로드
+        ladder_escape_cfg = data.get('ladder_escape', {})
+        if isinstance(ladder_escape_cfg, dict):
+            try:
+                enabled = bool(ladder_escape_cfg.get('enabled', False))
+                if hasattr(self, 'ladder_escape_enabled_checkbox'):
+                    self.ladder_escape_enabled_checkbox.setChecked(enabled)
+            except Exception:
+                pass
+            # 콤보 목록 갱신 후 선택
+            try:
+                self._refresh_ladder_escape_profile_options(keep_selection=False)
+                cmd = str(ladder_escape_cfg.get('command_profile') or '').strip()
+                if cmd:
+                    idx = self.ladder_escape_profile_combo.findData(cmd)
+                    if idx >= 0:
+                        self.ladder_escape_profile_combo.setCurrentIndex(idx)
+                    else:
+                        # 목록에 없으면 임시 추가
+                        self.ladder_escape_profile_combo.addItem(cmd, cmd)
+                        self.ladder_escape_profile_combo.setCurrentIndex(self.ladder_escape_profile_combo.findData(cmd))
+                else:
+                    # 기본값: 사다리 멈춤복구
+                    idx = self.ladder_escape_profile_combo.findData("사다리 멈춤복구")
+                    if idx >= 0:
+                        self.ladder_escape_profile_combo.setCurrentIndex(idx)
+            except Exception:
+                pass
+            try:
+                thr = float(ladder_escape_cfg.get('threshold_sec', 2.0) or 2.0)
+                if hasattr(self, 'ladder_escape_threshold_spinbox'):
+                    self.ladder_escape_threshold_spinbox.setValue(max(0.5, min(10.0, thr)))
+            except Exception:
+                pass
+            try:
+                cd = float(ladder_escape_cfg.get('cooldown_sec', 3.0) or 3.0)
+                if hasattr(self, 'ladder_escape_cooldown_spinbox'):
+                    self.ladder_escape_cooldown_spinbox.setValue(max(0.5, min(30.0, cd)))
+            except Exception:
+                pass
+            try:
+                states = ladder_escape_cfg.get('states') or {}
+                if hasattr(self, 'ladder_escape_include_jump_checkbox'):
+                    self.ladder_escape_include_jump_checkbox.setChecked(bool(states.get('include_jump', True)))
+                if hasattr(self, 'ladder_escape_include_ladder_checkbox'):
+                    self.ladder_escape_include_ladder_checkbox.setChecked(bool(states.get('include_ladder', True)))
+                if hasattr(self, 'ladder_escape_include_fall_checkbox'):
+                    self.ladder_escape_include_fall_checkbox.setChecked(bool(states.get('include_fall', True)))
+            except Exception:
+                pass
+            try:
+                self._update_ladder_escape_controls(self.ladder_escape_enabled_checkbox.isChecked())
             except Exception:
                 pass
 
@@ -9876,8 +10074,20 @@ class HuntTab(QWidget):
                 'direction_switch_cooldown_sec': self.direction_cooldown_spinbox.value(),
             },
             'ladder_threat': {
+                'enabled': bool(self.ladder_threat_enable_checkbox.isChecked()) if hasattr(self, 'ladder_threat_enable_checkbox') else True,
                 'near_px': int(self.ladder_near_px_spinbox.value()) if hasattr(self, 'ladder_near_px_spinbox') else 250,
                 'hp_percent': int(self.ladder_hp_threshold_spinbox.value()) if hasattr(self, 'ladder_hp_threshold_spinbox') else 90,
+            },
+            'ladder_escape': {
+                'enabled': bool(getattr(self, 'ladder_escape_enabled_checkbox', None).isChecked()) if hasattr(self, 'ladder_escape_enabled_checkbox') else False,
+                'command_profile': (self.ladder_escape_profile_combo.currentData() or '') if hasattr(self, 'ladder_escape_profile_combo') else '',
+                'threshold_sec': float(self.ladder_escape_threshold_spinbox.value()) if hasattr(self, 'ladder_escape_threshold_spinbox') else 2.0,
+                'cooldown_sec': float(self.ladder_escape_cooldown_spinbox.value()) if hasattr(self, 'ladder_escape_cooldown_spinbox') else 3.0,
+                'states': {
+                    'include_jump': bool(self.ladder_escape_include_jump_checkbox.isChecked()) if hasattr(self, 'ladder_escape_include_jump_checkbox') else True,
+                    'include_ladder': bool(self.ladder_escape_include_ladder_checkbox.isChecked()) if hasattr(self, 'ladder_escape_include_ladder_checkbox') else True,
+                    'include_fall': bool(self.ladder_escape_include_fall_checkbox.isChecked()) if hasattr(self, 'ladder_escape_include_fall_checkbox') else True,
+                },
             },
             'teleport': {
                 'enabled': self.teleport_settings.enabled,
