@@ -890,6 +890,59 @@ def send_telegram_message(message: str) -> None:
     threading.Thread(target=_worker, daemon=True).start()
 
 
+def send_telegram_text_and_screenshot(message: str) -> None:
+    """텍스트와 Mapleland 창 스크린샷을 동시에 전송.
+    - 자격 없거나 의존성 누락 시 조용히 무시
+    - 텍스트/사진 각각 별도의 스레드에서 전송
+    """
+    token, chat_id = _load_telegram_credentials()
+    if not token or not chat_id:
+        return
+
+    def _send_text() -> None:
+        try:
+            import requests  # type: ignore
+        except Exception:
+            return
+        try:
+            url = f"https://api.telegram.org/bot{token}/sendMessage"
+            payload = {"chat_id": chat_id, "text": message, "disable_web_page_preview": True}
+            requests.post(url, data=payload, timeout=5)
+        except Exception:
+            pass
+
+    def _send_photo() -> None:
+        try:
+            import requests  # type: ignore
+            import mss  # type: ignore
+            import cv2  # type: ignore
+            import numpy as np  # type: ignore
+        except Exception:
+            return
+        try:
+            geo = get_maple_window_geometry()
+            if geo is None or int(geo.width) <= 0 or int(geo.height) <= 0:
+                return
+            region = {"left": int(geo.left), "top": int(geo.top), "width": int(geo.width), "height": int(geo.height)}
+            with mss.mss() as sct:
+                shot = sct.grab(region)
+            frame_rgb = np.frombuffer(shot.rgb, dtype=np.uint8).reshape(shot.height, shot.width, 3)
+            frame_bgr = cv2.cvtColor(frame_rgb, cv2.COLOR_RGB2BGR)
+            ok, buf = cv2.imencode('.png', frame_bgr)
+            if not ok:
+                return
+            png_bytes = bytes(buf)
+            url = f"https://api.telegram.org/bot{token}/sendPhoto"
+            data = {"chat_id": chat_id}
+            files = {"photo": ("maple.png", png_bytes, "image/png")}
+            requests.post(url, data=data, files=files, timeout=8)
+        except Exception:
+            pass
+
+    threading.Thread(target=_send_text, daemon=True).start()
+    threading.Thread(target=_send_photo, daemon=True).start()
+
+
 class OCRWatchThread(QThread):
     """다중 ROI에 대해 주기적으로 한글 OCR을 수행하는 워커."""
 
@@ -1141,7 +1194,7 @@ class OCRWatchThread(QThread):
                         msg += f" (키워드: {matched_keyword})"
                     if joined:
                         msg += f"\n텍스트: {joined[:300]}"
-                    send_telegram_message(msg)
+                    send_telegram_text_and_screenshot(msg)
                     self._last_send_ts = now
                     if send_count != 0:
                         self._sent_count += 1

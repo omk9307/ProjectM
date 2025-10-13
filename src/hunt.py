@@ -3112,6 +3112,35 @@ class HuntTab(QWidget):
         wait_row.addWidget(self.shutdown_other_player_wait_summary, 1)
         actions_layout.addLayout(wait_row)
 
+        # [추가] 대기모드 전용 체력회복 설정
+        wait_hp_row = QHBoxLayout()
+        wait_hp_row.setContentsMargins(0, 0, 0, 0)
+        wait_hp_row.setSpacing(6)
+
+        wait_hp_label = QLabel("대기모드 체력회복:")
+        self.wait_hp_enable_checkbox = QCheckBox("사용")
+        self.wait_hp_threshold_spinbox = QSpinBox()
+        self.wait_hp_threshold_spinbox.setRange(1, 99)
+        self.wait_hp_threshold_spinbox.setValue(50)
+        self.wait_hp_threshold_spinbox.setSuffix(" %")
+
+        self.wait_hp_command_combo = QComboBox()
+        try:
+            self.wait_hp_command_combo.clear()
+            self.wait_hp_command_combo.addItem("프로필 선택", "")
+            for name in self._get_misc_command_profiles():
+                self.wait_hp_command_combo.addItem(name, name)
+        except Exception:
+            pass
+
+        wait_hp_row.addWidget(wait_hp_label)
+        wait_hp_row.addWidget(self.wait_hp_enable_checkbox)
+        wait_hp_row.addWidget(QLabel("HP 임계값"))
+        wait_hp_row.addWidget(self.wait_hp_threshold_spinbox)
+        wait_hp_row.addWidget(QLabel("명령 프로필"))
+        wait_hp_row.addWidget(self.wait_hp_command_combo, 1)
+        actions_layout.addLayout(wait_hp_row)
+
         # 마을 귀환 액션 (미구현)
         self.shutdown_other_player_radio_town = QRadioButton()
         self.shutdown_other_player_action_group.addButton(self.shutdown_other_player_radio_town, 2)
@@ -4042,10 +4071,17 @@ class HuntTab(QWidget):
         waypoint_id_str = str(waypoint_id)
 
         try:
+            # 대기모드 체력회복 설정 전달
+            wait_hp_cfg = {
+                'enabled': bool(getattr(self, 'wait_hp_enable_checkbox', None) and self.wait_hp_enable_checkbox.isChecked()),
+                'threshold': int(self.wait_hp_threshold_spinbox.value()) if hasattr(self, 'wait_hp_threshold_spinbox') else 50,
+                'command_profile': (self.wait_hp_command_combo.currentData() or '') if hasattr(self, 'wait_hp_command_combo') else '',
+            }
             success = map_tab.start_other_player_wait_operation(
                 waypoint_id=waypoint_id_str,
                 waypoint_name=waypoint_name,
                 source='hunt.other_player',
+                wait_hp_config=wait_hp_cfg,
             )
         except Exception as exc:
             self.append_log(f"대기 모드 시작 실패: {exc}", "warn")
@@ -10101,6 +10137,43 @@ class HuntTab(QWidget):
             self._update_shutdown_labels()
             self._stop_shutdown_timer_if_idle()
 
+            # [추가] 대기모드 체력회복 설정 로드
+            try:
+                using = bool(auto_shutdown_cfg.get('wait_hp_enabled', False))
+                thr_raw = auto_shutdown_cfg.get('wait_hp_threshold', 50)
+                try:
+                    thr_val = int(thr_raw)
+                except Exception:
+                    thr_val = 50
+                thr_val = max(1, min(99, thr_val))
+                cmd = str(auto_shutdown_cfg.get('wait_hp_command_profile', '') or '')
+
+                if hasattr(self, 'wait_hp_enable_checkbox'):
+                    blocker = QSignalBlocker(self.wait_hp_enable_checkbox)
+                    self.wait_hp_enable_checkbox.setChecked(using)
+                    del blocker
+                if hasattr(self, 'wait_hp_threshold_spinbox'):
+                    blocker = QSignalBlocker(self.wait_hp_threshold_spinbox)
+                    self.wait_hp_threshold_spinbox.setValue(thr_val)
+                    del blocker
+                if hasattr(self, 'wait_hp_command_combo'):
+                    try:
+                        self.wait_hp_command_combo.clear()
+                        self.wait_hp_command_combo.addItem("프로필 선택", "")
+                        names = self._get_misc_command_profiles()
+                        for name in names:
+                            self.wait_hp_command_combo.addItem(name, name)
+                        if cmd:
+                            idx = self.wait_hp_command_combo.findData(cmd)
+                            if idx >= 0:
+                                blocker = QSignalBlocker(self.wait_hp_command_combo)
+                                self.wait_hp_command_combo.setCurrentIndex(idx)
+                                del blocker
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+
         regions_data = data.get('manual_capture_regions', [])
         manual_regions: list[dict] = []
         window_geometry = get_maple_window_geometry()
@@ -10626,6 +10699,16 @@ class HuntTab(QWidget):
                 data['reservation_epoch'] = int(dt_value.toSecsSinceEpoch())
             except Exception:
                 data['reservation_epoch'] = None
+
+        # [추가] 대기모드 체력회복 설정 저장
+        try:
+            data['wait_hp_enabled'] = bool(self.wait_hp_enable_checkbox.isChecked()) if hasattr(self, 'wait_hp_enable_checkbox') else False
+            data['wait_hp_threshold'] = int(self.wait_hp_threshold_spinbox.value()) if hasattr(self, 'wait_hp_threshold_spinbox') else 50
+            data['wait_hp_command_profile'] = (self.wait_hp_command_combo.currentData() or '') if hasattr(self, 'wait_hp_command_combo') else ''
+        except Exception:
+            data['wait_hp_enabled'] = False
+            data['wait_hp_threshold'] = 50
+            data['wait_hp_command_profile'] = ''
 
         return data
 

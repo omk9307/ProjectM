@@ -586,6 +586,11 @@ class MapTab(QWidget):
             self._other_player_test_scheduled_start_time = 0.0
             self._other_player_alert_custom_remaining = 0
             self.other_player_wait_context: dict[str, Any] = {}
+            # [추가] 대기모드 전용 체력회복 설정 상태
+            self.wait_hp_enabled: bool = False
+            self.wait_hp_threshold: int = 0
+            self.wait_hp_command_profile: str = ''
+            self._wait_hp_last_ts: float = 0.0
             self._other_player_test_end_time = 0.0
             self._other_player_test_active_duration = 0
             self._other_player_test_delay_timer = QTimer(self)
@@ -6545,6 +6550,7 @@ class MapTab(QWidget):
         waypoint_name: str,
         *,
         source: str = '',
+        wait_hp_config: Optional[dict] = None,
     ) -> bool:
         if not self.is_detection_running:
             self.update_general_log("[대기 모드] 탐지 실행 중에만 사용할 수 있습니다.", "red")
@@ -6569,6 +6575,28 @@ class MapTab(QWidget):
                 "red",
             )
             return False
+
+        # [추가] 대기모드 체력회복 설정 적용
+        try:
+            if isinstance(wait_hp_config, dict):
+                self.wait_hp_enabled = bool(wait_hp_config.get('enabled', False))
+                try:
+                    thr = int(wait_hp_config.get('threshold', 0))
+                except Exception:
+                    thr = 0
+                self.wait_hp_threshold = max(1, min(99, thr)) if self.wait_hp_enabled else 0
+                cmd = wait_hp_config.get('command_profile')
+                self.wait_hp_command_profile = str(cmd).strip() if isinstance(cmd, str) else ''
+            else:
+                self.wait_hp_enabled = False
+                self.wait_hp_threshold = 0
+                self.wait_hp_command_profile = ''
+            self._wait_hp_last_ts = 0.0
+        except Exception:
+            self.wait_hp_enabled = False
+            self.wait_hp_threshold = 0
+            self.wait_hp_command_profile = ''
+            self._wait_hp_last_ts = 0.0
 
         stop_sent = self._emit_control_command("모든 키 떼기", "other_player_wait:start")
         if not stop_sent:
@@ -7513,7 +7541,7 @@ class MapTab(QWidget):
                     f"프로필: {profile_name}\n"
                     f"시각: {timestamp_text}"
                 )
-                self._send_telegram_alert(message)
+                self._send_telegram_text_and_screenshot(message)
                 self._other_player_alert_last_time = now
                 if mode == "custom" and self._other_player_alert_custom_remaining > 0:
                     self._other_player_alert_custom_remaining -= 1
@@ -7694,6 +7722,95 @@ class MapTab(QWidget):
                 )
 
         threading.Thread(target=_worker, daemon=True).start()
+
+    def _send_telegram_text_and_screenshot(self, message: str) -> None:
+        if not message or not self.telegram_alert_enabled:
+            return
+
+        self._refresh_telegram_credentials()
+        token = (self.telegram_bot_token or "").strip()
+        chat_id = (self.telegram_chat_id or "").strip()
+        if not token or not chat_id:
+            self.update_general_log(
+                "텔레그램 전송 실패: workspace/config/telegram.json 또는 환경변수에서 자격 정보를 찾을 수 없습니다.",
+                "orange",
+            )
+            return
+
+        def _send_text() -> None:
+            try:
+                import requests  # type: ignore
+            except ImportError:
+                QTimer.singleShot(
+                    0,
+                    lambda: self.update_general_log(
+                        "텔레그램 전송 실패: requests 모듈이 필요합니다. pip install requests", "red"
+                    ),
+                )
+                return
+            try:
+                url = f"https://api.telegram.org/bot{token}/sendMessage"
+                payload = {
+                    "chat_id": chat_id,
+                    "text": message,
+                    "disable_web_page_preview": True,
+                }
+                response = requests.post(url, data=payload, timeout=5)
+                if response.status_code >= 400:
+                    QTimer.singleShot(
+                        0,
+                        lambda: self.update_general_log(
+                            f"텔레그램 전송 실패({response.status_code}): {response.text}", "red"
+                        ),
+                    )
+            except Exception as exc:  # noqa: BLE001
+                QTimer.singleShot(
+                    0,
+                    lambda: self.update_general_log(f"텔레그램 전송 중 오류: {exc}", "red"),
+                )
+
+        def _send_photo() -> None:
+            try:
+                # 지연 임포트로 환경 의존성 완화
+                import requests  # type: ignore
+                import mss  # type: ignore
+                import cv2  # type: ignore
+                import numpy as np  # type: ignore
+            except Exception:
+                return  # 사진 전송은 조용히 무시(텍스트는 별도 스레드에서 시도됨)
+
+            # Mapleland 창 영역 캡처
+            try:
+                geometry = get_maple_window_geometry()
+                if geometry is None or int(geometry.width) <= 0 or int(geometry.height) <= 0:
+                    return
+                region = {
+                    "left": int(geometry.left),
+                    "top": int(geometry.top),
+                    "width": int(geometry.width),
+                    "height": int(geometry.height),
+                }
+                with mss.mss() as sct:
+                    shot = sct.grab(region)
+                frame_rgb = np.frombuffer(shot.rgb, dtype=np.uint8).reshape(shot.height, shot.width, 3)
+                frame_bgr = cv2.cvtColor(frame_rgb, cv2.COLOR_RGB2BGR)
+                ok, buf = cv2.imencode('.png', frame_bgr)
+                if not ok:
+                    return
+                png_bytes = bytes(buf)
+            except Exception:
+                return
+
+            try:
+                url = f"https://api.telegram.org/bot{token}/sendPhoto"
+                data = {"chat_id": chat_id}
+                files = {"photo": ("maple.png", png_bytes, "image/png")}
+                requests.post(url, data=data, files=files, timeout=8)
+            except Exception:
+                pass  # 사진 전송 실패는 조용히 무시
+
+        threading.Thread(target=_send_text, daemon=True).start()
+        threading.Thread(target=_send_photo, daemon=True).start()
 
     def _on_auto_control_toggled(self, checked: bool) -> None:  # noqa: ARG002
         if not self.active_profile_name:
@@ -11311,6 +11428,48 @@ class MapTab(QWidget):
                 self._status_log_lines[idx] = display
                 self._status_last_ui_update[resource] = timestamp
                 updated = True
+            # [선행] 대기모드 전용 HP 회복(최우선)
+            if resource == 'hp':
+                try:
+                    if self._is_other_player_wait_active() and bool(getattr(self, 'wait_hp_enabled', False)):
+                        # 권한 정책: 맵 링크 사용 시 맵이 권한을 보유해야 함
+                        if getattr(self, 'map_link_enabled', False):
+                            if str(getattr(self, 'current_authority_owner', 'map')) != 'map':
+                                pass
+                            else:
+                                _do_wait_hp = True
+                        else:
+                            _do_wait_hp = True
+                        if '_do_wait_hp' in locals() and _do_wait_hp:
+                            cmd = (getattr(self, 'wait_hp_command_profile', '') or '').strip()
+                            thr = int(getattr(self, 'wait_hp_threshold', 0) or 0)
+                            if cmd and thr > 0 and float(value) <= float(thr):
+                                # 자동제어 체크 확인
+                                if hasattr(self, 'auto_control_checkbox') and not self.auto_control_checkbox.isChecked():
+                                    pass
+                                else:
+                                    # 간격 제한: 학습탭 HP interval_sec 사용
+                                    try:
+                                        interval = float(getattr(self._status_config.hp, 'interval_sec', 1.0) or 1.0)
+                                    except Exception:
+                                        interval = 1.0
+                                    last_ts = float(getattr(self, '_wait_hp_last_ts', 0.0) or 0.0)
+                                    if (timestamp - last_ts) >= max(0.1, interval * 0.9):
+                                        if float(value) < 20.0:
+                                            self._ensure_mapleland_foreground()
+                                        self._issue_status_command('hp', cmd)
+                                        # 다음 HP 상태 명령 방지용 타임스탬프 동기화
+                                        self._status_last_command_ts['hp'] = timestamp
+                                        self._wait_hp_last_ts = timestamp
+                                        try:
+                                            self.update_general_log(f"[대기모드 HP] 명령 실행: '{cmd}' (현재 {int(round(float(value)))}%)", "orange")
+                                        except Exception:
+                                            pass
+                                    # 이후 일반 상태 명령은 간격 검사로 차단됨
+                    del _do_wait_hp
+                except Exception:
+                    pass
+
             self._maybe_trigger_status_command(resource, float(value), timestamp)
             # HP 회복여부 판단 및 긴급모드 제어
             if resource == 'hp':
@@ -11375,7 +11534,14 @@ class MapTab(QWidget):
                         except Exception:
                             pass
 
-                        if self._hp_emergency_active:
+                        # 대기모드 HP 우선으로 명령을 발행한 틱에서는 아래 로직은 정보 처리만 수행(중복 트리거 방지)
+                        wait_hp_recent = False
+                        try:
+                            wait_hp_recent = (timestamp - float(getattr(self, '_wait_hp_last_ts', 0.0) or 0.0)) < 0.1
+                        except Exception:
+                            wait_hp_recent = False
+
+                        if self._hp_emergency_active and not wait_hp_recent:
                             max_dur = float(getattr(hp_cfg, 'emergency_max_duration_sec', 10.0) or 10.0)
                             if max_dur >= 1.0 and (time.time() - self._hp_emergency_started_at) >= max_dur and not self._hp_emergency_telegram_sent:
                                 if bool(getattr(hp_cfg, 'emergency_timeout_telegram', False)):
@@ -11389,6 +11555,9 @@ class MapTab(QWidget):
                                 self.update_general_log("[HP] 긴급 회복 보호 해제 [시간 초과]", "gray")
                         # [NEW] HP 저체력 텔레그램/초긴급 명령 처리
                         try:
+                            if wait_hp_recent:
+                                # 우선 트리거 틱에는 초긴급/텔레그램 재트리거를 생략
+                                raise Exception('skip_urgent_in_wait_hp_tick')
                             low_hp_enabled = bool(getattr(hp_cfg, 'low_hp_telegram_alert', False))
                             try:
                                 threshold = float(getattr(hp_cfg, 'urgent_threshold', None) or 3.0)
