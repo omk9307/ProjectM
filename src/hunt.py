@@ -1163,6 +1163,10 @@ class HuntTab(QWidget):
         self._ladder_cleanup_session_active: bool = False
         # 초기 탐지 안정화를 위한 짧은 보호 윈도우(초)
         self._ladder_cleanup_hold_until_ts: float = 0.0
+        # [신규] 사다리 준비 정리(purge) 세션 상태
+        self._ladder_purge_session_active: bool = False
+        # 초기 탐지 안정화를 위한 짧은 보호 윈도우(초)
+        self._ladder_purge_hold_until_ts: float = 0.0
 
     def _check_character_presence_watchdog(self) -> None:
         """캐릭터가 10초 이상 미검출 시 ESC 효과로 전체 정지 후 2초 뒤 사냥 재시작.
@@ -1691,18 +1695,15 @@ class HuntTab(QWidget):
     def api_is_ladder_threat_now(self) -> bool:
         """현재 ‘사다리 위협’ 조건이 충족되는지 평가(요청/전이 없이).
 
-        - 맵 상태: 사다리 접근/등반 맥락(align/prepare/climb or on_ladder_*)
-        - HP < 임계
-        - 맵 기준 사다리 근접(≤ 설정 px)
+        - 맵 상태: 오르기 준비 중(prepare_to_climb)만
+        - HP ≤ 임계
         - 주 스킬 범위 내 몬스터 ≥ 1
         """
         try:
-            # 맵 상태 확인
+            # 맵 상태 확인: prepare_to_climb만 허용
             map_tab = getattr(self, 'map_tab', None)
             nav = str(getattr(map_tab, 'navigation_action', '') or '') if map_tab else ''
-            on_ladder = str(getattr(map_tab, 'player_state', '') or '') if map_tab else ''
-            allowed_nav = {'align_for_climb', 'prepare_to_climb', 'climb_in_progress'}
-            if not (nav in allowed_nav or on_ladder in {'climbing_up', 'climbing_down', 'on_ladder_idle'}):
+            if nav != 'prepare_to_climb':
                 return False
 
             # HP 값
@@ -1714,31 +1715,7 @@ class HuntTab(QWidget):
             if not isinstance(hp_val, (int, float)):
                 return False
             hp_thr = int(self.ladder_hp_threshold_spinbox.value()) if hasattr(self, 'ladder_hp_threshold_spinbox') else 90
-            if not (hp_val < float(hp_thr)):
-                return False
-
-            # 맵 기준 사다리 근접(px)
-            try:
-                tol_px = int(self.ladder_near_px_spinbox.value()) if hasattr(self, 'ladder_near_px_spinbox') else 15
-            except Exception:
-                tol_px = 15
-            try:
-                pos = getattr(map_tab, 'smoothed_player_pos', None) or getattr(map_tab, 'last_player_pos', None)
-                transition_objects = (getattr(map_tab, 'geometry_data', {}) or {}).get('transition_objects', [])
-                current_floor = getattr(map_tab, 'current_player_floor', None)
-                is_near_ladder = False
-                if pos is not None and hasattr(map_tab, '_check_near_ladder') and transition_objects:
-                    result = map_tab._check_near_ladder(
-                        pos,
-                        transition_objects,
-                        float(tol_px),
-                        return_dist=True,
-                        current_floor=current_floor,
-                    )
-                    is_near_ladder = bool(result[0]) if isinstance(result, tuple) and len(result) >= 1 else False
-                if not is_near_ladder:
-                    return False
-            except Exception:
+            if not (hp_val <= float(hp_thr)):
                 return False
 
             # 주 스킬 범위 내 마릿수 ≥ 1
@@ -1749,7 +1726,11 @@ class HuntTab(QWidget):
     def api_is_ladder_cleanup_active(self) -> bool:
         """사다리 위협 기반 X범위 오버라이드(사다리 정리) 활성 여부."""
         try:
-            return bool(getattr(self, '_ladder_override_active', False))
+            return bool(
+                getattr(self, '_ladder_override_active', False)
+                or getattr(self, '_ladder_cleanup_session_active', False)
+                or getattr(self, '_ladder_purge_session_active', False)
+            )
         except Exception:
             return False
 
@@ -9241,6 +9222,45 @@ class HuntTab(QWidget):
         except Exception:
             return ""
 
+    def _maybe_request_ladder_prepare_purge(self) -> bool:
+        """맵이 사다리 오르기 준비 중이고(prepare_to_climb), HP≤임계, 주 스킬 범위 내 ≥1일 때 purge 권한 요청.
+        반환값: 요청을 발행했으면 True, 아니면 False
+        """
+        try:
+            # 기능 토글 사용(기존 토글 재활용)
+            if hasattr(self, 'ladder_threat_enable_checkbox') and not self.ladder_threat_enable_checkbox.isChecked():
+                return False
+            if self.current_authority == 'hunt':
+                return False
+            if not getattr(self, 'map_link_enabled', False):
+                return False
+            if self._request_pending:
+                return False
+            # 맵 상태: 오르기 "준비" 상태로 한정
+            map_tab = getattr(self, 'map_tab', None)
+            nav = str(getattr(map_tab, 'navigation_action', '') or '') if map_tab else ''
+            if nav != 'prepare_to_climb':
+                return False
+            # HP 조건: 설정값 이하(≤)
+            hp_val = None
+            try:
+                hp_val = float(self._status_display_values.get('hp'))
+            except Exception:
+                hp_val = None
+            if not isinstance(hp_val, (int, float)):
+                return False
+            hp_thr = int(self.ladder_hp_threshold_spinbox.value()) if hasattr(self, 'ladder_hp_threshold_spinbox') else 90
+            if not (hp_val <= float(hp_thr)):
+                return False
+            # 주 스킬 범위 내 마릿수 ≥ 1
+            if int(self.latest_primary_monster_count) < 1:
+                return False
+            # 권한 요청(새 사유 코드)
+            self.request_control("LADDER_PREPARE_PURGE")
+            return True
+        except Exception:
+            return False
+
     def _get_latest_map_snapshot_payload(self) -> Optional[dict]:
         """권한 매니저의 최신 맵 스냅샷을 payload(dict) 형태로 가져온다.
         사용가능 시 as_payload()를 반환, 없으면 None.
@@ -10843,7 +10863,7 @@ class HuntTab(QWidget):
                 if char_text:
                     message += f" | {char_text}"
                 self.append_log(message, "success")
-            # 사유에 따라 사다리 오버라이드 적용/해제
+            # 사유에 따라 사다리 관련 세션 적용/해제
             try:
                 if str(reason_text) == 'LADDER_THREAT_CLEANUP':
                     # 사다리 정리 세션 시작 + 초기 보호 윈도우(0.3초)
@@ -10853,9 +10873,19 @@ class HuntTab(QWidget):
                     except Exception:
                         pass
                     self._apply_ladder_threat_range_override()
+                elif str(reason_text) == 'LADDER_PREPARE_PURGE':
+                    # [신규] 사다리 준비 정리(purge) 세션 시작 + 초기 보호 윈도우(0.3초)
+                    try:
+                        self._ladder_purge_session_active = True
+                        self._ladder_purge_hold_until_ts = time.time() + 0.3
+                    except Exception:
+                        pass
+                    # purge는 X범위 오버라이드 미사용
                 else:
                     self._ladder_cleanup_session_active = False
                     self._ladder_cleanup_hold_until_ts = 0.0
+                    self._ladder_purge_session_active = False
+                    self._ladder_purge_hold_until_ts = 0.0
                     self._revert_ladder_threat_range_override()
             except Exception:
                 pass
@@ -10876,6 +10906,11 @@ class HuntTab(QWidget):
             if not silent:
                 self.append_log(f"권한 소유자 변경: {owner}", "info")
         if owner != "hunt":
+            # 세션 종료 정리
+            self._ladder_cleanup_session_active = False
+            self._ladder_cleanup_hold_until_ts = 0.0
+            self._ladder_purge_session_active = False
+            self._ladder_purge_hold_until_ts = 0.0
             self._schedule_condition_poll()
 
     def _update_authority_ui(self) -> None:
@@ -10897,9 +10932,9 @@ class HuntTab(QWidget):
         if not self.auto_hunt_enabled:
             return
 
-        # [사다리 위협] 사다리 접근 중 + HP<임계 + 주변 위협 시 우선 권한 요청
+        # [사다리 준비 purge] prepare_to_climb + HP≤임계 + 주스킬≥1이면 우선 권한 요청
         try:
-            if self._maybe_request_ladder_threat_cleanup():
+            if self._maybe_request_ladder_prepare_purge():
                 return
         except Exception:
             pass
@@ -11082,6 +11117,22 @@ class HuntTab(QWidget):
                         return
             except Exception:
                 pass
+        # [사다리 준비 purge 세션] 주 스킬 범위 0마리면 즉시 맵으로 반납(초기 보호 시간 경과 후)
+        if getattr(self, '_ladder_purge_session_active', False):
+            try:
+                if time.time() >= float(getattr(self, '_ladder_purge_hold_until_ts', 0.0) or 0.0):
+                    if int(self.latest_primary_monster_count) <= 0:
+                        hp_val = None
+                        try:
+                            hp_val = float(self._status_display_values.get('hp'))
+                        except Exception:
+                            hp_val = None
+                        total = int(self.latest_monster_count)
+                        reason_text = f"사다리 정리 완료 (P 0 / H {total}" + (f", HP {int(hp_val)}%" if isinstance(hp_val, (int, float)) else "") + ")"
+                        self.release_control(reason_text)
+                        return
+            except Exception:
+                pass
         if self.latest_monster_count == 0:
             self._ensure_idle_keys("감지 범위 몬스터 없음")
             return
@@ -11193,7 +11244,11 @@ class HuntTab(QWidget):
         if allow_cleanup:
             self._last_monster_seen_ts = time.time()
 
-        if self.latest_primary_monster_count < primary_threshold and not allow_cleanup:
+        if (
+            self.latest_primary_monster_count < primary_threshold
+            and not allow_cleanup
+            and not getattr(self, '_ladder_purge_session_active', False)
+        ):
             # [겹침 예외] 이전 프레임≥2 → 현재 1, 최근 2s 이동 + 최근 1s 다중관측이면 즉시 클린업 전환
             if not self._should_enter_cleanup_due_to_overlap(now_ts):
                 # 주 스킬 기준이 아직 미충족인 경우: 사냥범위 내 몬스터들로 주 스킬 기준 도달이 가능한지 평가
@@ -11734,6 +11789,9 @@ class HuntTab(QWidget):
         try:
             if getattr(self, '_cleanup_active', False) and getattr(skill, 'is_primary', False):
                 min_required = 1
+            # [신규] purge 세션에서도 주 스킬 최소 마릿수는 1로 완화
+            if getattr(self, '_ladder_purge_session_active', False) and getattr(skill, 'is_primary', False):
+                min_required = 1
         except Exception:
             pass
         if monster_count < min_required:
@@ -11908,6 +11966,12 @@ class HuntTab(QWidget):
             return None
 
         primary_skill = next((s for s in enabled_skills if s.is_primary), None)
+        # [신규] purge 세션 중에는 주 스킬만 사용
+        try:
+            if getattr(self, '_ladder_purge_session_active', False):
+                return primary_skill if (primary_skill and primary_skill.enabled) else None
+        except Exception:
+            pass
         primary_count = self.latest_primary_monster_count
         fallback_skill: Optional[AttackSkill] = None
         if primary_skill and self._skill_meets_monster_conditions(primary_skill, primary_count):

@@ -620,7 +620,8 @@ class ControlAuthorityManager(QObject):
             if not primary_ready and not hunt_ready:
                 # [특례] 사유가 사다리 위협이면 1마리 이상으로도 허용
                 try:
-                    special_ladder = (str(reason) == 'LADDER_THREAT_CLEANUP')
+                    r = str(reason)
+                    special_ladder = (r == 'LADDER_THREAT_CLEANUP' or r == 'LADDER_PREPARE_PURGE')
                 except Exception:
                     special_ladder = False
                 if not (special_ladder and int(hunt_snapshot.monster_count) >= 1):

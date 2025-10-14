@@ -193,6 +193,8 @@ _HANDLERS = {
     "FLOOR_HOLD_EXCEEDED": _format_floor_hold_exceeded,
     # 사다리 위협 기반 클린업 특례(요청 사유 코드)
     "LADDER_THREAT_CLEANUP": lambda meta: _format_ladder_threat_cleanup(meta),
+    # [신규] 사다리 오르기 준비 중 정리(purge)
+    "LADDER_PREPARE_PURGE": lambda meta: _format_ladder_threat_cleanup(meta),
 }
 
 
