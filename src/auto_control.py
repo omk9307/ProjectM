@@ -26,6 +26,7 @@ SERIAL_PORT = 'COM6'
 BAUD_RATE = 115200
 CMD_PRESS = 0x01
 CMD_RELEASE = 0x02
+CMD_CLEAR_ALL = 0x03
 BASE_DIR = Path(__file__).resolve().parents[1]
 
 #  모든 키의 표준 HID 코드를 담는 통합 맵
@@ -1859,6 +1860,21 @@ class AutoControlTab(QWidget):
             except serial.SerialException as e:
                 print(f"[AutoControl] 데이터 전송 실패: {e}")
                 self.connect_to_pi()
+        elif command == CMD_CLEAR_ALL:
+            # 키코드 없이 CLEAR_ALL 명령(0x03, 0x00) 전송
+            try:
+                self.ser.write(bytes([CMD_CLEAR_ALL, 0x00]))
+                # 전역 상태/시각 초기화 및 UI 리셋
+                self.last_sent_timestamps.clear()
+                try:
+                    self.keyboard_state_reset.emit()
+                except Exception:
+                    pass
+                if getattr(self, 'console_log_checkbox', None) and self.console_log_checkbox.isChecked():
+                    print("[AutoControl] CLEAR_ALL sent")
+            except serial.SerialException as e:
+                print(f"[AutoControl] CLEAR_ALL 전송 실패: {e}")
+                self.connect_to_pi()
 
     def _get_key_set_for_owner(self, owner: str) -> set:
         key_set = self.sequence_owned_keys.get(owner)
@@ -1977,6 +1993,13 @@ class AutoControlTab(QWidget):
         """
         self._release_all_for_owner(self.SEQUENTIAL_OWNER, force=force)
 
+    def _send_clear_all(self) -> None:
+        """라즈베리파이에 프로토콜 CLEAR_ALL(0x03)을 전송하여 상태를 강제 초기화."""
+        if not self.ser or not self.ser.is_open:
+            return
+        # _send_command가 CLEAR_ALL 분기 처리함
+        self._send_command(CMD_CLEAR_ALL, None)
+
     # ===================
     # 공개 API (텔레그램 연동용)
     # ===================
@@ -2006,6 +2029,11 @@ class AutoControlTab(QWidget):
             self.global_key_counts.clear()
             try:
                 self.keyboard_state_reset.emit()
+            except Exception:
+                pass
+            # 라즈베리 측 상태도 확실히 초기화
+            try:
+                self._send_clear_all()
             except Exception:
                 pass
         except Exception:
@@ -2270,6 +2298,12 @@ class AutoControlTab(QWidget):
         
             elif action_type == "release_all":
                 self._release_all_keys(force=True)
+                # '모든 키 떼기' 명령일 때 라즈베리에 CLEAR_ALL 송신으로 하드 초기화
+                try:
+                    if (self.current_command_name or "").strip() == "모든 키 떼기":
+                        self._send_clear_all()
+                except Exception:
+                    pass
                 if self.current_command_reason_display:
                     msg = f"(모든 키 떼기) -원인: {self.current_command_reason_display}"
                 else:
@@ -2443,6 +2477,12 @@ class AutoControlTab(QWidget):
 
             elif action_type == "release_all":
                 self._release_all_for_owner(owner, force=True)
+                # 병렬에서도 동일하게 '모든 키 떼기'에 한해 CLEAR_ALL 전송
+                try:
+                    if (command_name or "").strip() == "모든 키 떼기":
+                        self._send_clear_all()
+                except Exception:
+                    pass
                 msg = f"[{command_name}] (모든 키 떼기)"
                 if state.get("source_tag"):
                     msg = f"{state['source_tag']} {msg}"
@@ -3019,6 +3059,10 @@ class AutoControlTab(QWidget):
 
         if self.ser and self.ser.is_open:
             self._release_all_keys()
+            try:
+                self._send_clear_all()
+            except Exception:
+                pass
             time.sleep(0.1)
             self.ser.close()
             print("시리얼 포트 연결을 해제했습니다.")

@@ -632,8 +632,8 @@ class MainWindow(QMainWindow):
             except Exception as exc:
                 print(f"경고: 맵 탭 강제 중단 중 오류: {exc}")
 
-        if stopped_any:
-            self._schedule_release_all_keys()
+        # 탐지 정지 여부와 무관하게 항상 전체 해제를 전송하여 잔여 입력 방지
+        self._schedule_release_all_keys()
 
     def _schedule_release_all_keys(self) -> None:
         auto_control_tab = self.loaded_tabs.get('자동 제어')
