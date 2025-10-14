@@ -28,6 +28,7 @@ import pygetwindow as gw
 import time
 import uuid
 import hashlib
+import random
 import requests
 import copy
 from pathlib import Path
@@ -2838,6 +2839,84 @@ class DataManager:
             except (json.JSONDecodeError, FileNotFoundError):
                 self._write_status_config(status_default)
 
+    # --- [NEW] 펫 먹이 설정 관리 ---
+    def _default_pet_feed_config(self) -> dict:
+        return {
+            'enabled': False,
+            'when_exp_standalone': True,
+            'when_map_or_hunt': True,
+            'min_minutes': 30,
+            'max_minutes': 30,
+            'command_profile': None,
+        }
+
+    def get_pet_feed_config(self) -> dict:
+        settings = self.load_settings()
+        default_cfg = self._default_pet_feed_config()
+        raw = settings.get('pet_feed') if isinstance(settings, dict) else None
+        cfg = dict(raw) if isinstance(raw, dict) else {}
+        changed = False
+
+        # 병합 및 정규화
+        for k, v in default_cfg.items():
+            if k not in cfg:
+                cfg[k] = v
+                changed = True
+        # 타입 보정
+        cfg['enabled'] = bool(cfg.get('enabled'))
+        cfg['when_exp_standalone'] = bool(cfg.get('when_exp_standalone'))
+        cfg['when_map_or_hunt'] = bool(cfg.get('when_map_or_hunt'))
+        try:
+            min_m = int(cfg.get('min_minutes', 30) or 30)
+        except (TypeError, ValueError):
+            min_m = 30
+        try:
+            max_m = int(cfg.get('max_minutes', 30) or 30)
+        except (TypeError, ValueError):
+            max_m = 30
+        if min_m < 1:
+            min_m = 1
+        if max_m < 1:
+            max_m = 1
+        if min_m > 720:
+            min_m = 720
+        if max_m > 720:
+            max_m = 720
+        if min_m > max_m:
+            min_m, max_m = max_m, min_m
+        if cfg.get('min_minutes') != min_m:
+            cfg['min_minutes'] = min_m
+            changed = True
+        if cfg.get('max_minutes') != max_m:
+            cfg['max_minutes'] = max_m
+            changed = True
+
+        cmd = cfg.get('command_profile')
+        if not isinstance(cmd, str) or not cmd.strip():
+            if cmd is not None:
+                cfg['command_profile'] = None
+                changed = True
+        else:
+            cfg['command_profile'] = cmd.strip()
+
+        if changed:
+            try:
+                self.save_settings({'pet_feed': cfg})
+            except Exception:
+                pass
+        return cfg
+
+    def update_pet_feed_config(self, updates: dict) -> dict:
+        if not isinstance(updates, dict):
+            return self.get_pet_feed_config()
+        cfg = self.get_pet_feed_config()
+        merged = dict(cfg)
+        for k, v in updates.items():
+            merged[k] = v
+        # 재정규화
+        self.save_settings({'pet_feed': merged})
+        return self.get_pet_feed_config()
+
     def _default_nickname_config(self):
         return {
             "target_text": "버프몬",
@@ -4741,6 +4820,17 @@ class LearningTab(QWidget):
             self._standalone_ui_timer.start()
         except Exception:
             pass
+        # [NEW] 펫 먹이 스케줄러 상태
+        self._pet_feed_cfg = self.data_manager.get_pet_feed_config()
+        self._pet_feed_next_due_ts: float = 0.0
+        try:
+            self._pet_feed_timer = QTimer(self)
+            self._pet_feed_timer.setSingleShot(False)
+            self._pet_feed_timer.setInterval(1000)
+            self._pet_feed_timer.timeout.connect(self._tick_pet_feed)
+            self._pet_feed_timer.start()
+        except Exception:
+            pass
 
     def get_data_manager(self):
         """Hunt 등 다른 탭에서 데이터 매니저를 참조할 때 사용."""
@@ -5432,6 +5522,10 @@ class LearningTab(QWidget):
         status_group = self._create_status_monitor_group()
         right_layout.addWidget(status_group)
 
+        # [NEW] 펫 먹이 설정 (HP/MP/EXP 바로 아래)
+        pet_feed_group = self._create_pet_feed_group()
+        right_layout.addWidget(pet_feed_group)
+
         self.log_viewer = QTextEdit()
         self.log_viewer.setReadOnly(True)
         log_metrics = self.log_viewer.fontMetrics()
@@ -5904,6 +5998,310 @@ class LearningTab(QWidget):
         layout.addLayout(cards_layout)
         group.setLayout(layout)
         return group
+
+    # --- [NEW] 펫 먹이 설정 UI/로직 ---
+    def _create_pet_feed_group(self) -> QGroupBox:
+        group = QGroupBox("펫 먹이 설정")
+        layout = QVBoxLayout(group)
+
+        # 헤더: 제목 + 사용
+        header = QHBoxLayout()
+        header.addWidget(QLabel("펫 먹이"))
+        self.pet_feed_enabled_checkbox = QCheckBox("사용")
+        header.addWidget(self.pet_feed_enabled_checkbox)
+        header.addStretch(1)
+        layout.addLayout(header)
+
+        # 조건: EXP 단독 OR 맵/사냥 실행 중
+        cond_row = QHBoxLayout()
+        cond_row.addWidget(QLabel("조건:"))
+        self.pet_feed_cond_exp_chk = QCheckBox("EXP 단독 시")
+        self.pet_feed_cond_map_chk = QCheckBox("맵/사냥 실행 중")
+        cond_row.addWidget(self.pet_feed_cond_exp_chk)
+        cond_row.addWidget(self.pet_feed_cond_map_chk)
+        cond_row.addStretch(1)
+        layout.addLayout(cond_row)
+
+        # 주기 범위(분): 최소~최대 (랜덤)
+        interval_row = QHBoxLayout()
+        interval_row.addWidget(QLabel("주기(분):"))
+        self.pet_feed_min_spin = QSpinBox()
+        self.pet_feed_min_spin.setRange(1, 720)
+        self.pet_feed_min_spin.setValue(30)
+        interval_row.addWidget(self.pet_feed_min_spin)
+        interval_row.addWidget(QLabel("~"))
+        self.pet_feed_max_spin = QSpinBox()
+        self.pet_feed_max_spin.setRange(1, 720)
+        self.pet_feed_max_spin.setValue(30)
+        interval_row.addWidget(self.pet_feed_max_spin)
+        interval_row.addStretch(1)
+        layout.addLayout(interval_row)
+
+        # 명령 프로필(자동제어 기타)
+        cmd_row = QHBoxLayout()
+        cmd_row.addWidget(QLabel("명령 프로필:"))
+        self.pet_feed_cmd_combo = QComboBox()
+        cmd_row.addWidget(self.pet_feed_cmd_combo)
+        cmd_row.addStretch(1)
+        layout.addLayout(cmd_row)
+
+        # 남은 시간 표시
+        self.pet_feed_next_label = QLabel("다음 실행: -")
+        self.pet_feed_next_label.setStyleSheet('color: #666666;')
+        layout.addWidget(self.pet_feed_next_label)
+
+        # 연결
+        try:
+            self.pet_feed_enabled_checkbox.toggled.connect(self._on_pet_feed_enabled_toggled)
+            self.pet_feed_cond_exp_chk.toggled.connect(self._on_pet_feed_conditions_toggled)
+            self.pet_feed_cond_map_chk.toggled.connect(self._on_pet_feed_conditions_toggled)
+            self.pet_feed_min_spin.valueChanged.connect(self._on_pet_feed_min_changed)
+            self.pet_feed_max_spin.valueChanged.connect(self._on_pet_feed_max_changed)
+            self.pet_feed_cmd_combo.currentIndexChanged.connect(self._on_pet_feed_command_changed)
+        except Exception:
+            pass
+
+        # 드롭다운 채우기 + UI 반영
+        self._load_pet_feed_command_options()
+        self._apply_pet_feed_config_to_ui()
+
+        return group
+
+    def _load_pet_feed_command_options(self) -> None:
+        try:
+            profiles = self.data_manager.list_command_profiles(('기타',))
+        except Exception:
+            profiles = {'기타': []}
+        self.pet_feed_cmd_combo.blockSignals(True)
+        self.pet_feed_cmd_combo.clear()
+        for name in profiles.get('기타', []):
+            self.pet_feed_cmd_combo.addItem(name, name)
+        self.pet_feed_cmd_combo.blockSignals(False)
+
+    def _apply_pet_feed_config_to_ui(self) -> None:
+        cfg = getattr(self, '_pet_feed_cfg', None) or self.data_manager.get_pet_feed_config()
+        self._pet_feed_cfg = cfg
+
+        def _find_and_set(combo: QComboBox, value: str | None):
+            if value is None:
+                combo.setCurrentIndex(-1 if combo.count() > 0 else 0)
+                return
+            idx = combo.findData(value)
+            if idx == -1:
+                combo.addItem(value, value)
+                idx = combo.findData(value)
+            combo.setCurrentIndex(max(0, idx))
+
+        try:
+            self.pet_feed_enabled_checkbox.blockSignals(True)
+            self.pet_feed_cond_exp_chk.blockSignals(True)
+            self.pet_feed_cond_map_chk.blockSignals(True)
+            self.pet_feed_min_spin.blockSignals(True)
+            self.pet_feed_max_spin.blockSignals(True)
+            self.pet_feed_cmd_combo.blockSignals(True)
+
+            self.pet_feed_enabled_checkbox.setChecked(bool(cfg.get('enabled', False)))
+            self.pet_feed_cond_exp_chk.setChecked(bool(cfg.get('when_exp_standalone', True)))
+            self.pet_feed_cond_map_chk.setChecked(bool(cfg.get('when_map_or_hunt', True)))
+            self.pet_feed_min_spin.setValue(int(cfg.get('min_minutes', 30) or 30))
+            self.pet_feed_max_spin.setValue(int(cfg.get('max_minutes', 30) or 30))
+            _find_and_set(self.pet_feed_cmd_combo, cfg.get('command_profile'))
+        except Exception:
+            pass
+        finally:
+            try:
+                self.pet_feed_enabled_checkbox.blockSignals(False)
+                self.pet_feed_cond_exp_chk.blockSignals(False)
+                self.pet_feed_cond_map_chk.blockSignals(False)
+                self.pet_feed_min_spin.blockSignals(False)
+                self.pet_feed_max_spin.blockSignals(False)
+                self.pet_feed_cmd_combo.blockSignals(False)
+            except Exception:
+                pass
+
+        # 활성화 상태에 따라 컨트롤 활성화
+        enabled = bool(cfg.get('enabled', False))
+        for w in (
+            self.pet_feed_cond_exp_chk,
+            self.pet_feed_cond_map_chk,
+            self.pet_feed_min_spin,
+            self.pet_feed_max_spin,
+            self.pet_feed_cmd_combo,
+        ):
+            try:
+                w.setEnabled(enabled)
+            except Exception:
+                pass
+
+        # 시작 시점(앱 기동/사용 on)에는 즉시 실행하지 않도록 다음 스케줄을 세팅
+        if enabled and float(getattr(self, '_pet_feed_next_due_ts', 0.0) or 0.0) <= 0.0:
+            self._schedule_next_pet_feed()
+        elif not enabled:
+            self._pet_feed_next_due_ts = 0.0
+            try:
+                self.pet_feed_next_label.setText("다음 실행: -")
+            except Exception:
+                pass
+
+    def _random_pet_interval_sec(self) -> float:
+        cfg = getattr(self, '_pet_feed_cfg', None) or self.data_manager.get_pet_feed_config()
+        try:
+            min_m = int(cfg.get('min_minutes', 30) or 30)
+            max_m = int(cfg.get('max_minutes', 30) or 30)
+        except Exception:
+            min_m = max_m = 30
+        if min_m < 1:
+            min_m = 1
+        if max_m < 1:
+            max_m = 1
+        if min_m > 720:
+            min_m = 720
+        if max_m > 720:
+            max_m = 720
+        if min_m > max_m:
+            min_m, max_m = max_m, min_m
+        minutes = random.uniform(float(min_m), float(max_m))
+        return max(60.0, minutes * 60.0)
+
+    def _format_due_text(self, due_ts: float) -> str:
+        try:
+            now = time.time()
+            remain = max(0, int(round(due_ts - now)))
+            m, s = divmod(remain, 60)
+            h, m = divmod(m, 60)
+            if h > 0:
+                return f"다음 실행: {h}시간 {m}분 {s}초 후"
+            if m > 0:
+                return f"다음 실행: {m}분 {s}초 후"
+            return f"다음 실행: {s}초 후"
+        except Exception:
+            return "다음 실행: -"
+
+    def _schedule_next_pet_feed(self) -> None:
+        try:
+            self._pet_feed_next_due_ts = time.time() + float(self._random_pet_interval_sec())
+            if hasattr(self, 'pet_feed_next_label') and self.pet_feed_next_label is not None:
+                self.pet_feed_next_label.setText(self._format_due_text(self._pet_feed_next_due_ts))
+        except Exception:
+            self._pet_feed_next_due_ts = time.time() + 1800.0
+
+    def _pet_feed_conditions_ok(self) -> bool:
+        cfg = getattr(self, '_pet_feed_cfg', None) or self.data_manager.get_pet_feed_config()
+        cond_exp = bool(cfg.get('when_exp_standalone', True))
+        cond_run = bool(cfg.get('when_map_or_hunt', True))
+
+        ok_exp = False
+        try:
+            ok_exp = cond_exp and bool(getattr(self._status_config.exp, 'standalone', False))
+        except Exception:
+            ok_exp = False
+        ok_run = cond_run and (bool(getattr(self, '_hunt_active', False)) or bool(getattr(self, '_map_active', False)))
+        return (ok_exp or ok_run)
+
+    def _tick_pet_feed(self) -> None:
+        try:
+            cfg = getattr(self, '_pet_feed_cfg', None) or self.data_manager.get_pet_feed_config()
+            self._pet_feed_cfg = cfg
+            if not bool(cfg.get('enabled', False)):
+                return
+            # Maple 창 포그라운드 게이트
+            if not is_maple_window_foreground():
+                # 라벨만 갱신
+                if float(getattr(self, '_pet_feed_next_due_ts', 0.0) or 0.0) > 0:
+                    try:
+                        self.pet_feed_next_label.setText(self._format_due_text(self._pet_feed_next_due_ts))
+                    except Exception:
+                        pass
+                return
+            # 조건 게이트(OR)
+            if not self._pet_feed_conditions_ok():
+                if float(getattr(self, '_pet_feed_next_due_ts', 0.0) or 0.0) > 0:
+                    try:
+                        self.pet_feed_next_label.setText(self._format_due_text(self._pet_feed_next_due_ts))
+                    except Exception:
+                        pass
+                return
+            # 스케줄 없으면 시작부터 대기 (즉시 실행 금지)
+            if float(getattr(self, '_pet_feed_next_due_ts', 0.0) or 0.0) <= 0.0:
+                self._schedule_next_pet_feed()
+                return
+            # 라벨 주기적 갱신
+            try:
+                self.pet_feed_next_label.setText(self._format_due_text(self._pet_feed_next_due_ts))
+            except Exception:
+                pass
+            # 만기 처리
+            now = time.time()
+            if now < float(self._pet_feed_next_due_ts):
+                return
+            # 명령 유효성 검사
+            command = cfg.get('command_profile')
+            if not isinstance(command, str) or not command.strip():
+                # 명령이 없으면 다음 스케줄만 세팅
+                self._schedule_next_pet_feed()
+                return
+            # 실행
+            reason = f"pet_feed:{int(cfg.get('min_minutes', 30) or 30)}~{int(cfg.get('max_minutes', 30) or 30)}m"
+            self._emit_control_command(command.strip(), reason)
+            # 다음 스케줄
+            self._schedule_next_pet_feed()
+        except Exception:
+            pass
+
+    # 이벤트 핸들러들
+    def _on_pet_feed_enabled_toggled(self, checked: bool) -> None:
+        self._pet_feed_cfg = self.data_manager.update_pet_feed_config({'enabled': bool(checked)})
+        # 시작 즉시 실행 방지: on 시 새 스케줄 세팅, off 시 해제
+        if bool(checked):
+            self._schedule_next_pet_feed()
+        else:
+            self._pet_feed_next_due_ts = 0.0
+            try:
+                self.pet_feed_next_label.setText("다음 실행: -")
+            except Exception:
+                pass
+        self._apply_pet_feed_config_to_ui()
+
+    def _on_pet_feed_conditions_toggled(self, _=None) -> None:
+        self._pet_feed_cfg = self.data_manager.update_pet_feed_config({
+            'when_exp_standalone': bool(self.pet_feed_cond_exp_chk.isChecked()),
+            'when_map_or_hunt': bool(self.pet_feed_cond_map_chk.isChecked()),
+        })
+        # 조건만 바뀔 때는 스케줄 유지
+        self._apply_pet_feed_config_to_ui()
+
+    def _on_pet_feed_min_changed(self, value: int) -> None:
+        min_v = int(value)
+        max_v = int(self.pet_feed_max_spin.value())
+        if min_v > max_v:
+            max_v = min_v
+            self.pet_feed_max_spin.blockSignals(True)
+            self.pet_feed_max_spin.setValue(max_v)
+            self.pet_feed_max_spin.blockSignals(False)
+        self._pet_feed_cfg = self.data_manager.update_pet_feed_config({'min_minutes': min_v, 'max_minutes': max_v})
+        # 주기 변경 시 새 스케줄
+        if bool(self._pet_feed_cfg.get('enabled', False)):
+            self._schedule_next_pet_feed()
+        self._apply_pet_feed_config_to_ui()
+
+    def _on_pet_feed_max_changed(self, value: int) -> None:
+        max_v = int(value)
+        min_v = int(self.pet_feed_min_spin.value())
+        if min_v > max_v:
+            min_v = max_v
+            self.pet_feed_min_spin.blockSignals(True)
+            self.pet_feed_min_spin.setValue(min_v)
+            self.pet_feed_min_spin.blockSignals(False)
+        self._pet_feed_cfg = self.data_manager.update_pet_feed_config({'min_minutes': min_v, 'max_minutes': max_v})
+        if bool(self._pet_feed_cfg.get('enabled', False)):
+            self._schedule_next_pet_feed()
+        self._apply_pet_feed_config_to_ui()
+
+    def _on_pet_feed_command_changed(self, _=None) -> None:
+        data = self.pet_feed_cmd_combo.currentData()
+        cmd = data if isinstance(data, str) and data.strip() else None
+        self._pet_feed_cfg = self.data_manager.update_pet_feed_config({'command_profile': cmd})
+        self._apply_pet_feed_config_to_ui()
 
     def _build_status_card(self, resource: str) -> QGroupBox:
         title = 'HP' if resource == 'hp' else 'MP'

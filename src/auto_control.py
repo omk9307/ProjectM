@@ -712,6 +712,27 @@ class AutoControlTab(QWidget):
         self.detection_button.clicked.connect(self.request_detection_toggle.emit)
         right_layout.addWidget(self.detection_button)
 
+        # 구분선
+        try:
+            sep = QFrame()
+            sep.setFrameShape(QFrame.Shape.HLine)
+            sep.setFrameShadow(QFrame.Shadow.Sunken)
+            right_layout.addWidget(sep)
+        except Exception:
+            pass
+
+        # [신규] 긴급 정지 버튼 (모든 키 떼기)
+        self.emergency_stop_btn = QPushButton(QIcon.fromTheme("process-stop"), " 긴급 정지 (모든 키 떼기)")
+        try:
+            self.emergency_stop_btn.setStyleSheet(
+                "QPushButton { background-color: #c62828; color: white; font-weight: 700; padding: 8px; }"
+                "QPushButton:hover { background-color: #b71c1c; }"
+            )
+        except Exception:
+            pass
+        self.emergency_stop_btn.clicked.connect(self._on_emergency_stop_clicked)
+        right_layout.addWidget(self.emergency_stop_btn)
+
         clear_log_btn.clicked.connect(self.key_log_list.clear)
 
         return right_widget
@@ -774,6 +795,32 @@ class AutoControlTab(QWidget):
         self.keyboard_visual_widget.reset()
         for key_str in active_keys:
             self.keyboard_visual_widget.update_key_state(key_str, True)
+
+    def _on_emergency_stop_clicked(self):
+        """UI 하단 '긴급 정지' 버튼: 즉시 모든 키 해제 트리거."""
+        try:
+            if getattr(self, 'console_log_checkbox', None) and self.console_log_checkbox.isChecked():
+                print("[AutoControl] UI 긴급정지 버튼 클릭 → 모든 키 떼기")
+        except Exception:
+            pass
+
+        # 1) 매핑 기반 실행을 우선 시도
+        if isinstance(self.mappings, dict) and '모든 키 떼기' in self.mappings:
+            try:
+                self.receive_control_command('모든 키 떼기', reason='ui:emergency_stop')
+                if getattr(self, 'status_label', None):
+                    self.status_label.setText("긴급 정지: 모든 키 떼기 실행")
+                return
+            except Exception:
+                pass
+
+        # 2) 폴백: 직접 전역 해제 + 라즈베리에 CLEAR_ALL 전송
+        try:
+            self.api_release_all_keys_global()
+            if getattr(self, 'status_label', None):
+                self.status_label.setText("긴급 정지: 전역 해제(폴백)")
+        except Exception:
+            pass
 
     @pyqtSlot(str, bool)
     def _handle_keyboard_state_change(self, key_str: str, pressed: bool):
@@ -2999,6 +3046,7 @@ class AutoControlTab(QWidget):
             "authority:forced_release": "권한 강제 해제",
             "authority:forced_acquire": "권한 강제 획득",
             "esc:global_stop": "Esc 긴급 정지",
+            "ui:emergency_stop": "UI 긴급 정지",
         }
 
         translated = predefined.get(reason_text)
