@@ -2661,6 +2661,9 @@ class AnnotationEditorDialog(QDialog):
         initial_polygons=None,
         initial_class_name=None,
         initial_mode=EditModeDialog.MANUAL,
+        *,
+        seq_index: int | None = None,
+        seq_total: int | None = None,
     ):
         super().__init__(learning_tab)
         self.pixmap = pixmap
@@ -2669,6 +2672,9 @@ class AnnotationEditorDialog(QDialog):
         self._result_polygons = []
         self._result_class_name = None
         self._current_mode = None
+        # 다중 편집 순번 표시용
+        self._seq_index = int(seq_index) if isinstance(seq_index, int) and seq_index > 0 else None
+        self._seq_total = int(seq_total) if isinstance(seq_total, int) and seq_total > 0 else None
 
         polygons_copy = self._clone_polygons(initial_polygons)
 
@@ -2757,7 +2763,7 @@ class AnnotationEditorDialog(QDialog):
             self._current_mode = EditModeDialog.AI_ASSIST
             self.manual_editor.update_mode_buttons(False, sam_ready)
             self.ai_editor.update_mode_buttons(True)
-            self.setWindowTitle(self.ai_editor.windowTitle())
+            self._set_title_from_child(self.ai_editor)
             # 이전 뷰 상태 적용
             if prev_state is not None:
                 self._apply_view_state(self.ai_editor, prev_state)
@@ -2781,7 +2787,7 @@ class AnnotationEditorDialog(QDialog):
             self.stack.setCurrentWidget(self.manual_editor)
             self._current_mode = EditModeDialog.MANUAL
             self.manual_editor.update_mode_buttons(True, sam_ready)
-            self.setWindowTitle(self.manual_editor.windowTitle())
+            self._set_title_from_child(self.manual_editor)
             # 이전 뷰 상태 적용
             if prev_state is not None:
                 self._apply_view_state(self.manual_editor, prev_state)
@@ -2852,6 +2858,21 @@ class AnnotationEditorDialog(QDialog):
 
     def current_mode(self):
         return self._current_mode
+
+    def _compose_seq_title(self, base: str) -> str:
+        try:
+            if self._seq_total and self._seq_total > 1 and self._seq_index:
+                return f"{base} ({self._seq_index}/{self._seq_total})"
+        except Exception:
+            pass
+        return base
+
+    def _set_title_from_child(self, child_widget: QWidget) -> None:
+        try:
+            base = child_widget.windowTitle()
+        except Exception:
+            base = "편집기"
+        self.setWindowTitle(self._compose_seq_title(base))
 
 class MultiCaptureDialog(QDialog):
     def __init__(self, pixmaps, parent=None):
@@ -8711,14 +8732,15 @@ class LearningTab(QWidget):
                 multi_dialog = MultiCaptureDialog(captured_pixmaps, self)
                 if multi_dialog.exec():
                     selected_pixmaps = multi_dialog.get_selected_pixmaps()
-                    for pixmap in selected_pixmaps:
-                        self.open_editor_mode_dialog(pixmap, initial_class_name=initial_class_name)
+                    total = len(selected_pixmaps)
+                    for idx, pixmap in enumerate(selected_pixmaps, start=1):
+                        self.open_editor_mode_dialog(pixmap, initial_class_name=initial_class_name, seq_index=idx, seq_total=total)
         except Exception as e:
             QMessageBox.critical(self, "캡처 오류", str(e))
         finally:
             self.update_status_message("준비")
 
-    def open_editor_mode_dialog(self, pixmap, image_path=None, initial_polygons=None, initial_class_name=None):
+    def open_editor_mode_dialog(self, pixmap, image_path=None, initial_polygons=None, initial_class_name=None, *, seq_index: int | None = None, seq_total: int | None = None):
         dialog = EditModeDialog(pixmap, self.sam_predictor is not None, self)
         mode_result = dialog.exec()
         if mode_result == EditModeDialog.CANCEL:
@@ -8740,6 +8762,8 @@ class LearningTab(QWidget):
             initial_polygons=initial_polygons,
             initial_class_name=effective_initial_class,
             initial_mode=mode_result,
+            seq_index=seq_index,
+            seq_total=seq_total,
         )
 
         editor_result = editor_dialog.exec()
@@ -8890,7 +8914,8 @@ class LearningTab(QWidget):
         else: # 카테고리가 선택된 경우는 없음(버튼 비활성화)
             return
 
-        for image_path in image_paths_to_edit:
+        total = len(image_paths_to_edit)
+        for i, image_path in enumerate(image_paths_to_edit, start=1):
             img_bgr = cv2.imread(image_path)
             if img_bgr is None:
                 self.log_viewer.append(f"오류: '{os.path.basename(image_path)}' 파일을 열 수 없습니다.")
@@ -8913,7 +8938,14 @@ class LearningTab(QWidget):
             h, w, ch = img_rgb.shape
             bytes_per_line = ch * w
             q_image = QImage(img_rgb.data, w, h, bytes_per_line, QImage.Format.Format_RGB888)
-            self.open_editor_mode_dialog(QPixmap.fromImage(q_image), image_path=image_path, initial_polygons=initial_polygons, initial_class_name=initial_class_name)
+            self.open_editor_mode_dialog(
+                QPixmap.fromImage(q_image),
+                image_path=image_path,
+                initial_polygons=initial_polygons,
+                initial_class_name=initial_class_name,
+                seq_index=i if total > 1 else None,
+                seq_total=total if total > 1 else None,
+            )
 
     def start_training(self):
         if len(self.data_manager.get_class_list()) == 0:
