@@ -4282,6 +4282,23 @@ class ActionLearningDialog(QDialog):
         self.delete_last_button.setEnabled(False)
         self.update_data_counts()
 
+    def closeEvent(self, event):  # noqa: N802
+        """
+        다이얼로그가 닫힐 때 학습 스레드가 남아있지 않도록 안전 정리.
+        """
+        try:
+            # 진행 중인 학습 스레드를 정지/대기
+            if hasattr(self, 'training_thread') and self.training_thread:
+                try:
+                    if self.training_thread.isRunning():
+                        self.training_thread.stop()
+                        # 과도한 대기를 피하기 위해 제한 시간 대기
+                        self.training_thread.wait(2000)
+                except Exception:
+                    pass
+        finally:
+            super().closeEvent(event)
+
     def start_learning(self):
         """1초 대기 후 움직임 감지 상태로 전환하거나, 수집을 취소합니다."""
         # '취소' 기능

@@ -13010,7 +13010,12 @@ class MapTab(QWidget):
         if self.detection_thread and self.detection_thread.isRunning():
             self.detection_thread.stop()
             self.detection_thread.wait()
-            
+        # 창 닫힘 경로에서도 캡처 스레드를 안전히 정지/대기
+        if self.capture_thread and self.capture_thread.isRunning():
+            self.capture_thread.stop()
+            self.capture_thread.wait()
+            self.capture_thread = None
+        
         #  단축키 관리자 및 이벤트 필터 정리
         if self.hotkey_manager:
             self.hotkey_manager.unregister_hotkey()
