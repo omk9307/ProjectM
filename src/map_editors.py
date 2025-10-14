@@ -3165,8 +3165,8 @@ class FullMinimapEditorDialog(QDialog):
                 if not coords_checked:
                     itype = item_at_pos.data(0)
                     if itype == "vertex":
-                        # 꼭짓점 중심 좌표 계산 (ellipse 좌상단 보정: +1.5, +1.5)
-                        center = item_at_pos.pos() + QPointF(1.5, 1.5)
+                        # 꼭짓점 중심 좌표 계산을 씬 좌표계 바운딩 중심으로 산정(펜/트랜스폼에도 견고)
+                        center = item_at_pos.sceneBoundingRect().center()
                         self._toggle_coord_at_point(center)
                         return
                     if itype == "transition_object":
@@ -3953,7 +3953,8 @@ class FullMinimapEditorDialog(QDialog):
         items = self.view.items(self.view.mapFromScene(scene_pos))
         for item in items:
             if isinstance(item, QGraphicsEllipseItem) and item.data(0) == "vertex":
-                return item.pos() + QPointF(3, 3)
+                # 꼭짓점(3x3 ellipse)의 씬 바운딩 중심을 그대로 사용해 스냅 오프셋 제거
+                return item.sceneBoundingRect().center()
         return None
     
     def _update_snap_indicator(self, snap_point):
