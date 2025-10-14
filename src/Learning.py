@@ -4739,22 +4739,39 @@ class TrainingThread(QThread):
     progress = pyqtSignal(str)
     results_path_ready = pyqtSignal(str)
     finished = pyqtSignal(bool, str)
-    def __init__(self, yaml_path, epochs, base_model_name, training_runs_path):
+
+    def __init__(self, yaml_path, epochs, base_model_name, training_runs_path, selected_class_indices=None):
         super().__init__()
         self.yaml_path = yaml_path
         self.epochs = epochs
         self.base_model_name = base_model_name
-        self.training_runs_path = training_runs_path # (v1.2) 훈련 결과 저장 경로 추가
+        self.training_runs_path = training_runs_path  # (v1.2) 훈련 결과 저장 경로 추가
+        # v1.5: 선택된 클래스만 학습하도록 인덱스 전달(없으면 전체 학습)
+        self.selected_class_indices = selected_class_indices if selected_class_indices else None
 
     def run(self):
         try:
-            self.progress.emit(f"모델 훈련을 시작합니다... (기본 모델: {self.base_model_name}, Epochs: {self.epochs})")
+            cls_info = (
+                f"선택 클래스: {len(self.selected_class_indices)}개" if self.selected_class_indices else "전체 클래스"
+            )
+            self.progress.emit(
+                f"모델 훈련을 시작합니다... (기본 모델: {self.base_model_name}, Epochs: {self.epochs}, {cls_info})"
+            )
             model = YOLO(f"{self.base_model_name}-seg.pt")
             # (v1.2) project 경로를 workspace/training_runs로 지정
-            results = model.train(data=self.yaml_path, epochs=self.epochs, imgsz=640, device=0, project=self.training_runs_path)
+            results = model.train(
+                data=self.yaml_path,
+                epochs=self.epochs,
+                imgsz=640,
+                device=0,
+                project=self.training_runs_path,
+                # v1.5: 선택된 클래스만 학습
+                classes=self.selected_class_indices,
+            )
             self.results_path_ready.emit(str(results.save_dir))
             self.finished.emit(True, "훈련 성공! '최신 훈련 저장'으로 모델을 저장하세요.")
-        except Exception as e: self.finished.emit(False, f"훈련 오류: {e}")
+        except Exception as e:
+            self.finished.emit(False, f"훈련 오류: {e}")
 
 class ExportThread(QThread):
     progress = pyqtSignal(str)
@@ -8620,11 +8637,44 @@ class LearningTab(QWidget):
         self.log_viewer.append(f"데이터셋 설정 파일 생성 완료: '{yaml_path}'")
         epochs = self.epoch_spinbox.value()
         base_model = self.base_model_selector.currentText()
+
+        # v1.5: 체크된 클래스만 학습할지 여부 판단 및 로깅
+        all_classes = self.data_manager.get_class_list()
+        try:
+            selected_indices = self.get_checked_class_indices() or []
+        except Exception:
+            selected_indices = []
+
+        use_selected_only = False
+        if selected_indices and len(selected_indices) < len(all_classes):
+            selected_names = [all_classes[i] for i in selected_indices]
+            preview = ", ".join(selected_names[:5]) + (" …" if len(selected_names) > 5 else "")
+            reply = QMessageBox.question(
+                self,
+                "선택 클래스 학습",
+                f"체크된 클래스 {len(selected_indices)}개만 학습할까요?\n예시: {preview}",
+            )
+            use_selected_only = reply == QMessageBox.StandardButton.Yes
+            if use_selected_only:
+                self.log_viewer.append(
+                    f"선택된 {len(selected_indices)}개 클래스만 학습합니다: {', '.join(selected_names)}"
+                )
+            else:
+                self.log_viewer.append("전체 클래스로 학습합니다.")
+        else:
+            self.log_viewer.append("체크된 클래스가 없거나 전체가 선택되어 있어 전체 클래스로 학습합니다.")
+
         self.train_btn.setEnabled(False)
         
         # (v1.2) TrainingThread에 training_runs 경로 전달
         training_runs_path = os.path.join(self.data_manager.workspace_root, 'training_runs')
-        self.training_thread = TrainingThread(yaml_path, epochs, base_model, training_runs_path)
+        self.training_thread = TrainingThread(
+            yaml_path,
+            epochs,
+            base_model,
+            training_runs_path,
+            selected_class_indices=selected_indices if use_selected_only else None,
+        )
         
         self.training_thread.progress.connect(self.log_viewer.append)
         self.training_thread.results_path_ready.connect(self.log_training_path)
