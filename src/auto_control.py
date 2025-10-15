@@ -740,6 +740,22 @@ class AutoControlTab(QWidget):
         self.image_click_checkbox.setChecked(False)
         top_img_row.addSpacing(12)
         top_img_row.addWidget(self.image_click_checkbox)
+        # 클릭 지연 범위
+        top_img_row.addSpacing(8)
+        top_img_row.addWidget(QLabel("클릭 지연:"))
+        self.image_click_delay_min_spin = QSpinBox()
+        self.image_click_delay_min_spin.setRange(0, 500)
+        self.image_click_delay_min_spin.setValue(10)
+        self.image_click_delay_min_spin.setSuffix(" ms")
+        self.image_click_delay_min_spin.setFixedWidth(90)
+        self.image_click_delay_max_spin = QSpinBox()
+        self.image_click_delay_max_spin.setRange(0, 500)
+        self.image_click_delay_max_spin.setValue(30)
+        self.image_click_delay_max_spin.setSuffix(" ms")
+        self.image_click_delay_max_spin.setFixedWidth(90)
+        top_img_row.addWidget(self.image_click_delay_min_spin)
+        top_img_row.addWidget(QLabel("~"))
+        top_img_row.addWidget(self.image_click_delay_max_spin)
         img_layout.addLayout(top_img_row)
 
         # 템플릿 리스트 + 버튼들
@@ -780,6 +796,8 @@ class AutoControlTab(QWidget):
         self.image_region_btn.clicked.connect(self._on_pick_image_region)
         self.image_threshold_spin.valueChanged.connect(self._on_image_threshold_changed)
         self.image_click_checkbox.toggled.connect(self._on_image_click_toggled)
+        self.image_click_delay_min_spin.valueChanged.connect(self._on_image_click_delay_changed)
+        self.image_click_delay_max_spin.valueChanged.connect(self._on_image_click_delay_changed)
         self.image_add_btn.clicked.connect(self._on_add_image_templates)
         self.image_del_btn.clicked.connect(self._on_delete_selected_templates)
         self.image_test_btn.clicked.connect(self._on_test_image_matching)
@@ -2062,6 +2080,21 @@ class AutoControlTab(QWidget):
                 self.image_click_checkbox.blockSignals(False)
             except Exception:
                 pass
+            # 클릭 지연 범위
+            try:
+                cmin = int(action_data.get('click_delay_min_ms', 10))
+                cmax = int(action_data.get('click_delay_max_ms', 30))
+            except Exception:
+                cmin, cmax = 10, 30
+            try:
+                self.image_click_delay_min_spin.blockSignals(True)
+                self.image_click_delay_max_spin.blockSignals(True)
+                self.image_click_delay_min_spin.setValue(max(0, min(500, cmin)))
+                self.image_click_delay_max_spin.setValue(max(0, min(500, max(cmin, cmax))))
+                self.image_click_delay_min_spin.blockSignals(False)
+                self.image_click_delay_max_spin.blockSignals(False)
+            except Exception:
+                pass
             region = action_data.get('region') or {}
             if isinstance(region, dict) and all(k in region for k in ('top','left','width','height')):
                 self.image_region_label.setStyleSheet("")
@@ -2114,12 +2147,22 @@ class AutoControlTab(QWidget):
             new_action_data["dur_ms"] = int(self.mouse_dur_spin.value())
             new_action_data["mode"] = 'image' if self.mouse_mode_image.isChecked() else 'coord'
             # 부가 설정 보존
-            for k in ("threshold", "region", "image_id", "image_files", "click_after"):
+            for k in ("threshold", "region", "image_id", "image_files", "click_after", "click_delay_min_ms", "click_delay_max_ms"):
                 if k in existing and k not in new_action_data:
                     new_action_data[k] = existing[k]
             # 현재 클릭 토글 UI값 반영
             try:
                 new_action_data["click_after"] = bool(self.image_click_checkbox.isChecked())
+            except Exception:
+                pass
+            # 클릭 지연 범위 반영
+            try:
+                cmin = int(self.image_click_delay_min_spin.value())
+                cmax = int(self.image_click_delay_max_spin.value())
+                if cmax < cmin:
+                    cmax = cmin
+                new_action_data["click_delay_min_ms"] = max(0, min(500, cmin))
+                new_action_data["click_delay_max_ms"] = max(0, min(500, cmax))
             except Exception:
                 pass
         self.mappings[command_text][row] = new_action_data
@@ -3131,7 +3174,13 @@ class AutoControlTab(QWidget):
                         # (신규) 클릭 포함이 체크된 경우에만 이동 후 클릭
                         if bool(step.get('click_after', False)):
                             try:
-                                extra_ms = random.randint(10, 30)
+                                cmin = int(step.get('click_delay_min_ms', 10))
+                                cmax = int(step.get('click_delay_max_ms', 30))
+                                if cmax < cmin:
+                                    cmax = cmin
+                                cmin = max(0, min(500, cmin))
+                                cmax = max(0, min(500, cmax))
+                                extra_ms = random.randint(cmin, cmax)
                                 QTimer.singleShot(dur + extra_ms, lambda: self._send_mouse_click_cmd('left'))
                             except Exception:
                                 pass
