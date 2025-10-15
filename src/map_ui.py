@@ -6562,6 +6562,14 @@ class MapTab(QWidget):
             return False
 
         self.other_player_wait_context = context
+
+        # 대기 목표 활성화 시 이전 중간목표 잔존값 초기화
+        try:
+            self.intermediate_target_pos = None
+            self.intermediate_target_entry_pos = None
+            self.intermediate_target_exit_pos = None
+        except Exception:
+            pass
         return True
 
     def start_other_player_wait_operation(
@@ -6753,6 +6761,13 @@ class MapTab(QWidget):
             # 그래프 재구성이 실패하더라도 이후 로직이 자체적으로 실패를 처리한다.
             pass
 
+        # 대기 목표 활성화 직후 중간목표 초기화
+        try:
+            self.intermediate_target_pos = None
+            self.intermediate_target_entry_pos = None
+            self.intermediate_target_exit_pos = None
+        except Exception:
+            pass
         self.journey_plan = [waypoint_id]
         self.current_journey_index = 0
         self.current_segment_path = []
@@ -6802,6 +6817,14 @@ class MapTab(QWidget):
 
         goal_id_str = str(goal_id)
         waypoint_name = context.get('goal_name', goal_id_str)
+
+        # 재이동 준비 시 중간목표 잔존값 초기화
+        try:
+            self.intermediate_target_pos = None
+            self.intermediate_target_entry_pos = None
+            self.intermediate_target_exit_pos = None
+        except Exception:
+            pass
 
         contact_terrain = self._get_contact_terrain(final_player_pos)
         if contact_terrain is None:
@@ -7006,12 +7029,10 @@ class MapTab(QWidget):
         if not isinstance(pos, QPointF):
             return
 
-        # 목표 X 계산: intermediate_target_pos > 현재 세그먼트 노드 > 웨이포인트
+        # 목표 X 계산 우선순위: 현재 세그먼트 노드 > 웨이포인트 > intermediate_target_pos
         target_x: Optional[float] = None
         try:
-            if isinstance(self.intermediate_target_pos, QPointF):
-                target_x = float(self.intermediate_target_pos.x())
-            elif self.current_segment_path and self.current_segment_index < len(self.current_segment_path):
+            if self.current_segment_path and self.current_segment_index < len(self.current_segment_path):
                 node_key = self.current_segment_path[self.current_segment_index]
                 node = self.nav_nodes.get(node_key, {}) or {}
                 node_pos = node.get('pos')
@@ -7022,6 +7043,8 @@ class MapTab(QWidget):
                 wp_pos = wp_node.get('pos')
                 if isinstance(wp_pos, QPointF):
                     target_x = float(wp_pos.x())
+            elif isinstance(self.intermediate_target_pos, QPointF):
+                target_x = float(self.intermediate_target_pos.x())
         except Exception:
             target_x = None
 
@@ -7069,12 +7092,10 @@ class MapTab(QWidget):
         if not isinstance(pos, QPointF):
             return
 
-        # 방향 계산 (킥오프와 동일한 규칙)
+        # 방향 계산 (킥오프와 동일한 우선순위)
         target_x: Optional[float] = None
         try:
-            if isinstance(self.intermediate_target_pos, QPointF):
-                target_x = float(self.intermediate_target_pos.x())
-            elif self.current_segment_path and self.current_segment_index < len(self.current_segment_path):
+            if self.current_segment_path and self.current_segment_index < len(self.current_segment_path):
                 node_key = self.current_segment_path[self.current_segment_index]
                 node = self.nav_nodes.get(node_key, {}) or {}
                 node_pos = node.get('pos')
@@ -7085,6 +7106,8 @@ class MapTab(QWidget):
                 wp_pos = wp_node.get('pos')
                 if isinstance(wp_pos, QPointF):
                     target_x = float(wp_pos.x())
+            elif isinstance(self.intermediate_target_pos, QPointF):
+                target_x = float(self.intermediate_target_pos.x())
         except Exception:
             target_x = None
 
@@ -7175,6 +7198,14 @@ class MapTab(QWidget):
         context['phase'] = 'wait_travel'
         context['wait_route'] = None
         context['hold_started_at'] = None
+
+        # 재이동 전환 시 중간목표 잔존값 초기화
+        try:
+            self.intermediate_target_pos = None
+            self.intermediate_target_entry_pos = None
+            self.intermediate_target_exit_pos = None
+        except Exception:
+            pass
 
         self._emit_control_command("모든 키 떼기", "other_player_wait:reposition")
         self.journey_plan = [goal_id_str]
