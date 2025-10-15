@@ -1168,6 +1168,11 @@ class HuntTab(QWidget):
         # 초기 탐지 안정화를 위한 짧은 보호 윈도우(초)
         self._ladder_purge_hold_until_ts: float = 0.0
 
+        # [NEW] 대기모드 위치 복구 임계값(px)
+        # - 대기 웨이포인트에서 이 값(px) 이상 벗어나면 복귀 이동을 시작
+        # - UI: '대기 모드 설정' 팝업에서 조절 (0~100, 기본 10)
+        self.wait_recover_threshold_px: int = 10
+
     def _check_character_presence_watchdog(self) -> None:
         """캐릭터가 10초 이상 미검출 시 ESC 효과로 전체 정지 후 2초 뒤 사냥 재시작.
         - ESC 효과: 사냥/맵 모두 정지 + 모든 키 떼기
@@ -3502,6 +3507,16 @@ class HuntTab(QWidget):
 
         layout.addRow("대기모드 체력회복", wait_hp_row_widget)
 
+        # [NEW] 대기모드 위치 복구(px): 웨이포인트 X에서 이만큼 벗어나면 복귀 시작
+        wait_recover_spin = QSpinBox(dialog)
+        wait_recover_spin.setRange(0, 100)
+        try:
+            wait_recover_spin.setValue(int(getattr(self, 'wait_recover_threshold_px', 10) or 10))
+        except Exception:
+            wait_recover_spin.setValue(10)
+        wait_recover_spin.setSuffix(" px")
+        layout.addRow("대기모드 위치 복구(px)", wait_recover_spin)
+
         button_box = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel, dialog)
         button_box.accepted.connect(dialog.accept)
         button_box.rejected.connect(dialog.reject)
@@ -3548,6 +3563,25 @@ class HuntTab(QWidget):
             setattr(self, 'wait_hp_enabled', False)
             setattr(self, 'wait_hp_threshold', 50)
             setattr(self, 'wait_hp_command_profile', '')
+
+            # [NEW] 대기모드 위치 복구(px) 로드
+        try:
+            raw_px = auto_shutdown_cfg.get('wait_recover_threshold_px', 10)
+            try:
+                px_val = int(raw_px)
+            except Exception:
+                px_val = 10
+            # 안전범위 0~100으로 클램프
+            px_val = max(0, min(100, px_val))
+            setattr(self, 'wait_recover_threshold_px', px_val)
+        except Exception:
+            setattr(self, 'wait_recover_threshold_px', 10)
+
+        # [NEW] 대기모드 위치 복구(px) 저장
+        try:
+            setattr(self, 'wait_recover_threshold_px', int(wait_recover_spin.value()))
+        except Exception:
+            setattr(self, 'wait_recover_threshold_px', 10)
 
         self._update_other_player_action_summary()
         self._save_settings()
@@ -4087,6 +4121,8 @@ class HuntTab(QWidget):
                 'enabled': bool(getattr(self, 'wait_hp_enabled', False)),
                 'threshold': int(getattr(self, 'wait_hp_threshold', 50) or 50),
                 'command_profile': str(getattr(self, 'wait_hp_command_profile', '') or ''),
+                # [NEW] 대기모드 위치 복구 임계값(px)
+                'recover_threshold_px': int(getattr(self, 'wait_recover_threshold_px', 10) or 10),
             }
             success = map_tab.start_other_player_wait_operation(
                 waypoint_id=waypoint_id_str,
@@ -10741,6 +10777,12 @@ class HuntTab(QWidget):
             data['wait_hp_enabled'] = False
             data['wait_hp_threshold'] = 50
             data['wait_hp_command_profile'] = ''
+
+        # [NEW] 대기모드 위치 복구(px) 저장
+        try:
+            data['wait_recover_threshold_px'] = int(getattr(self, 'wait_recover_threshold_px', 10) or 10)
+        except Exception:
+            data['wait_recover_threshold_px'] = 10
 
         return data
 

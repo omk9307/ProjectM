@@ -15,15 +15,17 @@ import ctypes
 
 from PyQt6.QtWidgets import (
     QApplication, QWidget, QVBoxLayout, QHBoxLayout, QLabel, QListWidget, QPushButton,
-    QGroupBox, QFormLayout, QComboBox, QSpinBox, QMessageBox, QFrame, QCheckBox,
+    QGroupBox, QFormLayout, QComboBox, QSpinBox, QDoubleSpinBox, QMessageBox, QFrame, QCheckBox,
     QListWidgetItem, QInputDialog, QAbstractItemView, QTabWidget, QFileDialog,
-    QGridLayout, QSizePolicy
+    QGridLayout, QSizePolicy, QButtonGroup
 )
-from PyQt6.QtCore import pyqtSlot, Qt, QTimer, pyqtSignal, QMimeData, QSize, QSettings, QThread
+from PyQt6.QtCore import pyqtSlot, Qt, QTimer, pyqtSignal, QMimeData, QSize, QSettings, QThread, QEvent
 from PyQt6.QtGui import QIcon, QColor
 from pynput.keyboard import Key, Listener
 from datetime import datetime
 import pygetwindow as gw
+import uuid
+import shutil
 
 # --- 설정 및 상수 ---
 SERIAL_PORT = 'COM6'
@@ -217,6 +219,43 @@ def _resolve_key_mappings_path():
 
 
 KEY_MAPPINGS_FILE = _resolve_key_mappings_path()
+
+
+def _resolve_mouse_image_base_dir() -> Path:
+    """이미지 기반 마우스 이동 템플릿의 기본 저장 디렉터리를 해상합니다.
+    우선순위:
+      1) 환경변수 MAPLE_MOUSE_IMAGE_DIR
+      2) G:\\Coding\\Project_Maple\\workspace\\config\\mouse_move_image (사용자 지정 경로)
+      3) <repo>/workspace/config/mouse_move_image (로컬 워크스페이스)
+    """
+    # 1) 환경변수
+    try:
+        env_p = os.environ.get('MAPLE_MOUSE_IMAGE_DIR')
+        if env_p:
+            p = Path(env_p)
+            p.mkdir(parents=True, exist_ok=True)
+            return p.resolve()
+    except Exception:
+        pass
+
+    # 2) 사용자 지정 Windows 경로
+    candidates = [
+        Path(r"G:\\Coding\\Project_Maple\\workspace\\config\\mouse_move_image"),
+        BASE_DIR / 'workspace' / 'config' / 'mouse_move_image',
+    ]
+    for c in candidates:
+        try:
+            c.mkdir(parents=True, exist_ok=True)
+            return c.resolve()
+        except Exception:
+            continue
+    # 끝까지 실패하면 BASE_DIR 하위로 폴백
+    fb = BASE_DIR / 'workspace' / 'config' / 'mouse_move_image'
+    try:
+        fb.mkdir(parents=True, exist_ok=True)
+    except Exception:
+        pass
+    return fb.resolve()
 
 class CopyableListWidget(QListWidget):
     def __init__(self, parent=None):
@@ -632,16 +671,97 @@ class AutoControlTab(QWidget):
         delay_layout.addWidget(self.min_delay_spin)
         delay_layout.addWidget(QLabel("~"))
         delay_layout.addWidget(self.max_delay_spin)
-        # Mouse absolute move editor
+        # Mouse absolute move editor (UI 개편)
         self.mouse_move_widget = QWidget()
-        mm_layout = QHBoxLayout(self.mouse_move_widget)
-        mm_layout.setContentsMargins(0,0,0,0)
+        mm_vlayout = QVBoxLayout(self.mouse_move_widget)
+        mm_vlayout.setContentsMargins(0,0,0,0)
+
+        # 모드 체크박스(서로 배타)
+        self.mouse_mode_coord = QCheckBox("좌표")
+        self.mouse_mode_image = QCheckBox("이미지")
+        self.mouse_mode_group = QButtonGroup(self.mouse_move_widget)
+        self.mouse_mode_group.setExclusive(True)
+        self.mouse_mode_group.addButton(self.mouse_mode_coord)
+        self.mouse_mode_group.addButton(self.mouse_mode_image)
+        self.mouse_mode_coord.setChecked(True)
+
+        # 좌표 행: 좌표 체크박스 우측에 x/y/dur 배치
+        coord_row = QHBoxLayout()
+        coord_row.setContentsMargins(0,0,0,0)
         self.mouse_x_spin = QSpinBox(); self.mouse_x_spin.setRange(-32768, 32767)
         self.mouse_y_spin = QSpinBox(); self.mouse_y_spin.setRange(-32768, 32767)
         self.mouse_dur_spin = QSpinBox(); self.mouse_dur_spin.setRange(40, 5000); self.mouse_dur_spin.setSuffix(" ms"); self.mouse_dur_spin.setValue(240)
-        mm_layout.addWidget(QLabel("x:")); mm_layout.addWidget(self.mouse_x_spin)
-        mm_layout.addWidget(QLabel("y:")); mm_layout.addWidget(self.mouse_y_spin)
-        mm_layout.addWidget(QLabel("dur:")); mm_layout.addWidget(self.mouse_dur_spin)
+        for w, width in ((self.mouse_x_spin, 90), (self.mouse_y_spin, 90), (self.mouse_dur_spin, 110)):
+            try:
+                w.setFixedWidth(width)
+                w.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+            except Exception:
+                pass
+        coord_row.addWidget(self.mouse_mode_coord)
+        coord_row.addSpacing(8)
+        coord_row.addWidget(QLabel("x:")); coord_row.addWidget(self.mouse_x_spin)
+        coord_row.addWidget(QLabel("y:")); coord_row.addWidget(self.mouse_y_spin)
+        coord_row.addWidget(QLabel("dur:")); coord_row.addWidget(self.mouse_dur_spin)
+        coord_row.addStretch(1)
+        mm_vlayout.addLayout(coord_row)
+
+        # 이미지 행: 이미지 체크박스는 좌표 행 아래
+        image_row = QHBoxLayout()
+        image_row.setContentsMargins(0,0,0,0)
+        image_row.addWidget(self.mouse_mode_image)
+        image_row.addStretch(1)
+        mm_vlayout.addLayout(image_row)
+
+        # 이미지 설정 위젯(이미지 모드일 때만 표시)
+        self.image_settings_widget = QFrame()
+        self.image_settings_widget.setFrameShape(QFrame.Shape.NoFrame)
+        img_layout = QVBoxLayout(self.image_settings_widget)
+        img_layout.setContentsMargins(0,0,0,0)
+        img_layout.setSpacing(6)
+
+        # 상단: 영역 지정 + 임계값
+        top_img_row = QHBoxLayout()
+        self.image_region_btn = QPushButton("영역 지정")
+        self.image_region_btn.setFixedWidth(90)
+        self.image_region_label = QLabel("(영역 미설정)")
+        self.image_region_label.setStyleSheet("color: #aaa;")
+        top_img_row.addWidget(self.image_region_btn)
+        top_img_row.addWidget(self.image_region_label, 1)
+        top_img_row.addSpacing(12)
+        top_img_row.addWidget(QLabel("임계값:"))
+        self.image_threshold_spin = QDoubleSpinBox()
+        self.image_threshold_spin.setRange(0.0, 1.0)
+        self.image_threshold_spin.setSingleStep(0.01)
+        self.image_threshold_spin.setDecimals(2)
+        self.image_threshold_spin.setValue(0.85)
+        self.image_threshold_spin.setFixedWidth(80)
+        top_img_row.addWidget(self.image_threshold_spin)
+        self.image_click_checkbox = QCheckBox("매칭 후 클릭")
+        self.image_click_checkbox.setChecked(False)
+        top_img_row.addSpacing(12)
+        top_img_row.addWidget(self.image_click_checkbox)
+        img_layout.addLayout(top_img_row)
+
+        # 템플릿 리스트 + 버튼들
+        self.image_template_list = QListWidget()
+        self.image_template_list.setViewMode(QListWidget.ViewMode.IconMode)
+        self.image_template_list.setIconSize(QSize(128, 72))
+        self.image_template_list.setResizeMode(QListWidget.ResizeMode.Adjust)
+        self.image_template_list.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
+        self.image_template_list.setMinimumHeight(120)
+        img_layout.addWidget(self.image_template_list)
+
+        tpl_btn_row = QHBoxLayout()
+        self.image_add_btn = QPushButton("파일 추가")
+        self.image_del_btn = QPushButton("선택 삭제")
+        self.image_test_btn = QPushButton("매칭 테스트")
+        tpl_btn_row.addWidget(self.image_add_btn)
+        tpl_btn_row.addWidget(self.image_del_btn)
+        tpl_btn_row.addStretch(1)
+        tpl_btn_row.addWidget(self.image_test_btn)
+        img_layout.addLayout(tpl_btn_row)
+
+        mm_vlayout.addWidget(self.image_settings_widget)
         editor_layout.addRow("타입:", self.action_type_combo)
         editor_layout.addRow("키:", self.key_combo)
         editor_layout.addRow("지연 시간:", self.delay_widget)
@@ -654,9 +774,71 @@ class AutoControlTab(QWidget):
         self.mouse_x_spin.valueChanged.connect(self._update_action_from_editor)
         self.mouse_y_spin.valueChanged.connect(self._update_action_from_editor)
         self.mouse_dur_spin.valueChanged.connect(self._update_action_from_editor)
+        self.mouse_mode_coord.toggled.connect(self._on_mouse_mode_toggled)
+        self.mouse_mode_image.toggled.connect(self._on_mouse_mode_toggled)
+        # 이미지 설정 시그널
+        self.image_region_btn.clicked.connect(self._on_pick_image_region)
+        self.image_threshold_spin.valueChanged.connect(self._on_image_threshold_changed)
+        self.image_click_checkbox.toggled.connect(self._on_image_click_toggled)
+        self.image_add_btn.clicked.connect(self._on_add_image_templates)
+        self.image_del_btn.clicked.connect(self._on_delete_selected_templates)
+        self.image_test_btn.clicked.connect(self._on_test_image_matching)
         self.force_checkbox.toggled.connect(self._update_action_from_editor)
         editor_group.setEnabled(False)
+        # 편집기에서 Z 키로 좌표 채우기 이벤트 필터 설치
+        editor_group.installEventFilter(self)
         return editor_group
+
+    def _on_mouse_mode_toggled(self, _checked: bool) -> None:
+        # 좌표/이미지 모드 상호배타 처리 및 입력 활성화 갱신
+        # 시퀀스 데이터도 즉시 반영
+        self._update_mouse_move_mode_enabled()
+        self._update_action_from_editor()
+        # 이미지 모드 켜짐 시 템플릿 UI 초기화
+        try:
+            if self.mouse_mode_image.isChecked():
+                _, _, action = self._get_selected_action_ref()
+                if isinstance(action, dict):
+                    self._ensure_step_image_dir(action)
+                    self._refresh_image_template_list(action)
+        except Exception:
+            pass
+
+    def _update_mouse_move_mode_enabled(self) -> None:
+        is_coord = bool(getattr(self, 'mouse_mode_coord', None) and self.mouse_mode_coord.isChecked())
+        for w in (getattr(self, 'mouse_x_spin', None), getattr(self, 'mouse_y_spin', None), getattr(self, 'mouse_dur_spin', None)):
+            if w is not None:
+                try:
+                    w.setEnabled(is_coord)
+                except Exception:
+                    pass
+        # 이미지 설정 표시 토글
+        if getattr(self, 'image_settings_widget', None) is not None and getattr(self, 'mouse_mode_image', None) is not None:
+            try:
+                self.image_settings_widget.setVisible(self.mouse_mode_image.isChecked())
+            except Exception:
+                pass
+
+    def eventFilter(self, obj, event):
+        try:
+            if obj is self.editor_group and event.type() == QEvent.Type.KeyPress:
+                # Z 키로 현재 커서 좌표 채우기 (mouse_move_abs 편집 중에만)
+                if self.action_type_combo.currentText() == 'mouse_move_abs':
+                    key = event.key()
+                    mods = event.modifiers()
+                    if key in (Qt.Key.Key_Z, ) and mods == Qt.KeyboardModifier.NoModifier:
+                        # 좌표 모드일 때만 적용
+                        if self.mouse_mode_coord.isChecked():
+                            x, y = self._get_cursor_pos()
+                            self.mouse_x_spin.setValue(int(x))
+                            self.mouse_y_spin.setValue(int(y))
+                            self._update_action_from_editor()
+                            if getattr(self, 'status_label', None):
+                                self.status_label.setText(f"마우스 좌표 적용: ({x},{y})")
+                            return True
+        except Exception:
+            pass
+        return super().eventFilter(obj, event)
 
     def _create_recording_settings_panel(self):
         group = QGroupBox("녹화 설정")
@@ -677,6 +859,247 @@ class AutoControlTab(QWidget):
         layout.addRow("녹화 종료 키:", self.stop_key_combo)
         layout.addRow("자동 종료 시간:", self.auto_stop_spin)
         return group
+
+    # ---------------------------
+    # 이미지 기반 이동: 편집/파일/매칭 헬퍼
+    # ---------------------------
+    def _get_selected_action_ref(self):
+        command_item = self._current_command_item()
+        if not command_item:
+            return None, None, None
+        selected_rows = self._selected_action_rows()
+        if len(selected_rows) != 1:
+            return None, None, None
+        row = selected_rows[0]
+        command_text = command_item.text()
+        sequence = self.mappings.get(command_text, [])
+        if not (0 <= row < len(sequence)):
+            return None, None, None
+        return command_text, row, sequence[row]
+
+    def _ensure_step_image_dir(self, action_data: dict) -> Path | None:
+        try:
+            base = _resolve_mouse_image_base_dir()
+            image_id = action_data.get('image_id')
+            if not image_id:
+                image_id = uuid.uuid4().hex[:12]
+                action_data['image_id'] = image_id
+            step_dir = base / f"img-{image_id}"
+            step_dir.mkdir(parents=True, exist_ok=True)
+            return step_dir
+        except Exception as e:
+            QMessageBox.critical(self, "오류", f"이미지 저장 폴더 준비 실패: {e}")
+            return None
+
+    def _refresh_image_template_list(self, action_data: dict | None = None) -> None:
+        if action_data is None:
+            _, _, action_data = self._get_selected_action_ref()
+            if not isinstance(action_data, dict):
+                return
+        self.image_template_list.clear()
+        step_dir = self._ensure_step_image_dir(action_data)
+        if step_dir is None:
+            return
+        # 파일 목록 로드/동기화
+        valid_ext = {'.png', '.jpg', '.jpeg', '.bmp', '.webp'}
+        files = []
+        try:
+            for p in sorted(step_dir.iterdir()):
+                if p.is_file() and p.suffix.lower() in valid_ext:
+                    files.append(p.name)
+        except Exception:
+            files = []
+        action_data['image_files'] = files
+        if not files:
+            placeholder = QListWidgetItem(QIcon(), "등록된 템플릿이 없습니다")
+            placeholder.setFlags(Qt.ItemFlag.NoItemFlags)
+            self.image_template_list.addItem(placeholder)
+            return
+        for name in files:
+            full = step_dir / name
+            item = QListWidgetItem(QIcon(str(full)), name)
+            item.setData(Qt.ItemDataRole.UserRole, name)
+            self.image_template_list.addItem(item)
+
+    def _on_pick_image_region(self):
+        # 현재 스텝 참조
+        cmd, row, action = self._get_selected_action_ref()
+        if not action or self.action_type_combo.currentText() != 'mouse_move_abs':
+            return
+        # Snipper 선택(듀얼모니터 우선)
+        region = None
+        try:
+            from map_widgets import MultiScreenSnipper
+            snipper = MultiScreenSnipper(self)
+            if snipper.exec():
+                roi = snipper.get_global_roi()
+                region = {
+                    'top': int(roi.top()), 'left': int(roi.left()),
+                    'width': int(roi.width()), 'height': int(roi.height()),
+                }
+        except Exception:
+            try:
+                from detection_runtime import ScreenSnipper
+                sn = ScreenSnipper(self)
+                if sn.exec():
+                    r = sn.get_roi()
+                    region = {
+                        'top': int(r.top()), 'left': int(r.left()),
+                        'width': int(r.width()), 'height': int(r.height()),
+                    }
+            except Exception as e:
+                QMessageBox.critical(self, "영역 지정 실패", f"화면 스니퍼를 사용할 수 없습니다: {e}")
+                region = None
+        if region and region['width'] > 0 and region['height'] > 0:
+            action['region'] = region
+            self.image_region_label.setStyleSheet("")
+            self.image_region_label.setText(f"({region['left']},{region['top']}) {region['width']}x{region['height']}")
+        else:
+            self.image_region_label.setStyleSheet("color: #aaa;")
+            self.image_region_label.setText("(영역 미설정)")
+
+    def _on_image_threshold_changed(self, value: float):
+        _, _, action = self._get_selected_action_ref()
+        if isinstance(action, dict) and self.action_type_combo.currentText() == 'mouse_move_abs':
+            try:
+                action['threshold'] = float(value)
+            except Exception:
+                action['threshold'] = 0.85
+
+    def _on_image_click_toggled(self, checked: bool):
+        _, _, action = self._get_selected_action_ref()
+        if isinstance(action, dict) and self.action_type_combo.currentText() == 'mouse_move_abs':
+            action['click_after'] = bool(checked)
+
+    def _on_add_image_templates(self):
+        cmd, row, action = self._get_selected_action_ref()
+        if not action:
+            return
+        step_dir = self._ensure_step_image_dir(action)
+        if step_dir is None:
+            return
+        file_paths, _ = QFileDialog.getOpenFileNames(
+            self, '이미지 템플릿 불러오기', str(step_dir), '이미지 파일 (*.png *.jpg *.jpeg *.bmp *.webp)'
+        )
+        if not file_paths:
+            return
+        added = 0
+        errors = []
+        for src in file_paths:
+            try:
+                dst = step_dir / os.path.basename(src)
+                shutil.copy2(src, dst)
+                added += 1
+            except Exception as e:
+                errors.append(f"{os.path.basename(src)}: {e}")
+        self._refresh_image_template_list(action)
+        msg = f"템플릿 {added}개 추가"
+        if errors:
+            msg += f"\n실패 {len(errors)}개: " + ", ".join(errors[:3]) + ("..." if len(errors) > 3 else "")
+        self.status_label.setText(msg)
+
+    def _on_delete_selected_templates(self):
+        cmd, row, action = self._get_selected_action_ref()
+        if not action:
+            return
+        step_dir = self._ensure_step_image_dir(action)
+        if step_dir is None:
+            return
+        selected = [it for it in self.image_template_list.selectedItems() if it.flags() != Qt.ItemFlag.NoItemFlags]
+        if not selected:
+            QMessageBox.information(self, '삭제', '삭제할 템플릿을 선택하세요.')
+            return
+        for it in selected:
+            name = it.data(Qt.ItemDataRole.UserRole) or it.text()
+            try:
+                (step_dir / name).unlink(missing_ok=True)
+            except Exception:
+                pass
+        self._refresh_image_template_list(action)
+
+    def _grab_region_bgr(self, region: dict):
+        """절대 좌표 영역을 캡처하여 BGR numpy array로 반환."""
+        try:
+            import mss
+            import numpy as np
+            with mss.mss() as sct:
+                monitor = {
+                    'left': int(region['left']), 'top': int(region['top']),
+                    'width': int(region['width']), 'height': int(region['height'])
+                }
+                shot = sct.grab(monitor)
+            img = np.array(shot)  # BGRA
+            return img[:, :, :3].copy()  # BGR
+        except Exception as e:
+            QMessageBox.critical(self, '캡처 오류', f'화면 캡처 실패: {e}')
+            return None
+
+    def _list_step_template_paths(self, action: dict) -> list[Path]:
+        step_dir = self._ensure_step_image_dir(action)
+        if step_dir is None:
+            return []
+        files = action.get('image_files') or []
+        paths = []
+        for name in files:
+            p = step_dir / name
+            if p.is_file():
+                paths.append(p)
+        return paths
+
+    def _perform_image_match(self, action: dict):
+        """이미지 매칭 수행. 성공 시 (True, (x,y), best_score, tpl_name), 실패 시 (False, None, best_score, None)."""
+        try:
+            import cv2
+            import numpy as np
+        except Exception as e:
+            QMessageBox.critical(self, '의존성 오류', f'OpenCV가 필요합니다: {e}')
+            return False, None, -1.0, None
+        region = action.get('region')
+        if not (isinstance(region, dict) and all(k in region for k in ('top','left','width','height'))):
+            return False, None, -1.0, None
+        bgr = self._grab_region_bgr(region)
+        if bgr is None:
+            return False, None, -1.0, None
+        gray = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
+        tpl_paths = self._list_step_template_paths(action)
+        if not tpl_paths:
+            return False, None, -1.0, None
+        best_score = -1.0
+        best_loc = None
+        best_sz = None
+        best_name = None
+        for p in tpl_paths:
+            img = cv2.imread(str(p), cv2.IMREAD_GRAYSCALE)
+            if img is None:
+                continue
+            h, w = img.shape[:2]
+            if h <= 0 or w <= 0 or h > gray.shape[0] or w > gray.shape[1]:
+                continue
+            res = cv2.matchTemplate(gray, img, cv2.TM_CCOEFF_NORMED)
+            min_val, max_val, min_loc, max_loc = cv2.minMaxLoc(res)
+            if max_val > best_score:
+                best_score = max_val
+                best_loc = max_loc
+                best_sz = (w, h)
+                best_name = p.name
+        threshold = float(action.get('threshold', 0.85))
+        if best_score >= threshold and best_loc is not None and best_sz is not None:
+            left, top = int(region['left']), int(region['top'])
+            w, h = best_sz
+            cx = left + int(best_loc[0] + w / 2)
+            cy = top + int(best_loc[1] + h / 2)
+            return True, (cx, cy), best_score, best_name
+        return False, None, best_score, None
+
+    def _on_test_image_matching(self):
+        _, _, action = self._get_selected_action_ref()
+        if not action:
+            return
+        ok, pos, score, name = self._perform_image_match(action)
+        if ok:
+            QMessageBox.information(self, '매칭 성공', f"{name} → 좌표 ({pos[0]}, {pos[1]}) | 점수 {score:.2f}")
+        else:
+            QMessageBox.information(self, '매칭 실패', f"영역/템플릿을 확인하세요. 최고 점수: {score:.2f}")
 
     def _create_keyboard_visual_panel(self):
         group = QGroupBox()
@@ -1589,6 +2012,9 @@ class AutoControlTab(QWidget):
             if label_for_force:
                 label_for_force.setVisible(is_key_based)
 
+        # 마우스 모드에 따른 입력 활성화 갱신
+        self._update_mouse_move_mode_enabled()
+
     def _update_editor_panel(self, action_data):
         self.action_type_combo.blockSignals(True); self.key_combo.blockSignals(True); self.min_delay_spin.blockSignals(True); self.max_delay_spin.blockSignals(True)
         action_type = action_data.get("type", "press")
@@ -1611,6 +2037,39 @@ class AutoControlTab(QWidget):
             self.mouse_x_spin.setValue(int(action_data.get("x", 0)))
             self.mouse_y_spin.setValue(int(action_data.get("y", 0)))
             self.mouse_dur_spin.setValue(int(action_data.get("dur_ms", 240)))
+            mode = str(action_data.get("mode", "coord"))
+            self.mouse_mode_coord.blockSignals(True); self.mouse_mode_image.blockSignals(True)
+            if mode == 'image':
+                self.mouse_mode_image.setChecked(True)
+                self.mouse_mode_coord.setChecked(False)
+            else:
+                self.mouse_mode_coord.setChecked(True)
+                self.mouse_mode_image.setChecked(False)
+            self.mouse_mode_coord.blockSignals(False); self.mouse_mode_image.blockSignals(False)
+            self._update_mouse_move_mode_enabled()
+            # 이미지 설정 UI 반영
+            try:
+                threshold = float(action_data.get('threshold', 0.85))
+            except Exception:
+                threshold = 0.85
+            self.image_threshold_spin.blockSignals(True)
+            self.image_threshold_spin.setValue(threshold)
+            self.image_threshold_spin.blockSignals(False)
+            click_after = bool(action_data.get('click_after', False))
+            try:
+                self.image_click_checkbox.blockSignals(True)
+                self.image_click_checkbox.setChecked(click_after)
+                self.image_click_checkbox.blockSignals(False)
+            except Exception:
+                pass
+            region = action_data.get('region') or {}
+            if isinstance(region, dict) and all(k in region for k in ('top','left','width','height')):
+                self.image_region_label.setStyleSheet("")
+                self.image_region_label.setText(f"({region.get('left')},{region.get('top')}) {region.get('width')}x{region.get('height')}")
+            else:
+                self.image_region_label.setStyleSheet("color: #aaa;")
+                self.image_region_label.setText("(영역 미설정)")
+            self._refresh_image_template_list(action_data)
             if hasattr(self, 'force_checkbox'):
                 self.force_checkbox.blockSignals(True)
                 self.force_checkbox.setChecked(False)
@@ -1636,6 +2095,12 @@ class AutoControlTab(QWidget):
             return
         command_text = command_item.text()
         action_type = self.action_type_combo.currentText()
+        # 기존 데이터 머지(특히 mouse/image 부가설정 보존)
+        existing = {}
+        try:
+            existing = dict(self.mappings.get(command_text, [])[row])
+        except Exception:
+            existing = {}
         new_action_data = {"type": action_type}
         if action_type in ['press', 'release', 'release_specific']:
             new_action_data["key_str"] = self.key_combo.currentText()
@@ -1647,6 +2112,16 @@ class AutoControlTab(QWidget):
             new_action_data["x"] = int(self.mouse_x_spin.value())
             new_action_data["y"] = int(self.mouse_y_spin.value())
             new_action_data["dur_ms"] = int(self.mouse_dur_spin.value())
+            new_action_data["mode"] = 'image' if self.mouse_mode_image.isChecked() else 'coord'
+            # 부가 설정 보존
+            for k in ("threshold", "region", "image_id", "image_files", "click_after"):
+                if k in existing and k not in new_action_data:
+                    new_action_data[k] = existing[k]
+            # 현재 클릭 토글 UI값 반영
+            try:
+                new_action_data["click_after"] = bool(self.image_click_checkbox.isChecked())
+            except Exception:
+                pass
         self.mappings[command_text][row] = new_action_data
         self._update_action_item_text(action_item, new_action_data)
 
@@ -1660,6 +2135,15 @@ class AutoControlTab(QWidget):
         elif type == "release_all": step_text = "모든 키 떼기"
         elif type == "release_specific": step_text = f"{force_prefix}특정 키 떼기: {action_data.get('key_str', 'N/A')}"
         elif type == "mouse_move_abs": step_text = f"마우스 이동(절대): x={action_data.get('x', 0)}, y={action_data.get('y', 0)}, dur={action_data.get('dur_ms', 0)}ms"
+        
+        # 모드 표시(좌표/이미지)
+        if type == "mouse_move_abs":
+            mode = str(action_data.get('mode', 'coord'))
+            tag = "[좌표]" if mode == 'coord' else "[이미지]"
+            if mode == 'image' and bool(action_data.get('click_after', False)):
+                step_text = f"{step_text} {tag} [클릭]"
+            else:
+                step_text = f"{step_text} {tag}"
         elif type == "mouse_left_click": step_text = "마우스 좌클릭"
         elif type == "mouse_right_click": step_text = "마우스 우클릭"
         elif type == "mouse_double_click": step_text = "마우스 더블클릭"
@@ -1692,6 +2176,33 @@ class AutoControlTab(QWidget):
         command_text = current_item.text()
         reply = QMessageBox.question(self, "명령 프로필 삭제", f"'{command_text}' 명령 프로필을 삭제하시겠습니까?", QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel)
         if reply == QMessageBox.StandardButton.Yes:
+            # (신규) 이미지 스텝 폴더 정리(참조 카운트 기반)
+            try:
+                # 전체 참조 카운트 수집
+                id_counts: dict[str, int] = {}
+                for seq_name, seq in self.mappings.items():
+                    for st in (seq or []):
+                        if isinstance(st, dict) and st.get('type') == 'mouse_move_abs' and str(st.get('mode','coord')) == 'image':
+                            iid = st.get('image_id')
+                            if iid:
+                                id_counts[iid] = id_counts.get(iid, 0) + 1
+                # 삭제 대상 명령 시퀀스 내 id 카운트
+                del_counts: dict[str, int] = {}
+                for st in (self.mappings.get(command_text, []) or []):
+                    if isinstance(st, dict) and st.get('type') == 'mouse_move_abs' and str(st.get('mode','coord')) == 'image':
+                        iid = st.get('image_id')
+                        if iid:
+                            del_counts[iid] = del_counts.get(iid, 0) + 1
+                # 디렉터리 삭제: 다른 명령에서 더 이상 참조하지 않을 경우만
+                base = _resolve_mouse_image_base_dir()
+                for iid, delc in del_counts.items():
+                    total = id_counts.get(iid, 0)
+                    if total <= delc:
+                        p = base / f"img-{iid}"
+                        if p.exists():
+                            shutil.rmtree(p, ignore_errors=True)
+            except Exception:
+                pass
             if command_text in self.active_parallel_sequences:
                 self._stop_parallel_sequence(command_text, forced=True)
             self.mappings.pop(command_text, None)
@@ -1771,9 +2282,42 @@ class AutoControlTab(QWidget):
             return
         command_text = command_item.text()
         sequence = self.mappings.get(command_text, [])
+        # 삭제 전 이미지 스텝 디렉터리 정리(참조 카운트 기반)
+        def _count_image_ids() -> dict[str, int]:
+            counts: dict[str, int] = {}
+            try:
+                for seq in self.mappings.values():
+                    for st in (seq or []):
+                        if isinstance(st, dict) and st.get('type') == 'mouse_move_abs' and str(st.get('mode','coord')) == 'image':
+                            iid = st.get('image_id')
+                            if iid:
+                                counts[iid] = counts.get(iid, 0) + 1
+            except Exception:
+                pass
+            return counts
+        id_counts_before = _count_image_ids()
+        delete_counts: dict[str, int] = {}
+        for row in selected_rows:
+            if 0 <= row < len(sequence):
+                st = sequence[row]
+                if isinstance(st, dict) and st.get('type') == 'mouse_move_abs' and str(st.get('mode','coord')) == 'image':
+                    iid = st.get('image_id')
+                    if iid:
+                        delete_counts[iid] = delete_counts.get(iid, 0) + 1
         for row in reversed(selected_rows):
             if 0 <= row < len(sequence):
                 del sequence[row]
+        # 실제 디렉터리 삭제(다른 스텝에서 더 이상 참조하지 않는 경우만)
+        try:
+            base = _resolve_mouse_image_base_dir()
+            for iid, delc in delete_counts.items():
+                total = id_counts_before.get(iid, 0)
+                if total <= delc and iid:
+                    p = base / f"img-{iid}"
+                    if p.exists():
+                        shutil.rmtree(p, ignore_errors=True)
+        except Exception:
+            pass
         self._populate_action_sequence_list(command_text)
         if sequence:
             next_row = min(selected_rows[0], len(sequence) - 1)
@@ -2063,7 +2607,7 @@ class AutoControlTab(QWidget):
             return True
         try:
             if self._epp_guard_refcount == 0:
-                script_path = (BASE_DIR / 'scripts' / 'epp_toggle.py').resolve()
+                script_path = self._resolve_epp_toggle_script()
                 proc = subprocess.run([sys.executable, str(script_path), 'off'], capture_output=True, text=True)
                 if proc.returncode != 0:
                     self.log_generated.emit(f"[EPP] OFF 실패: {proc.stdout or proc.stderr}", "red")
@@ -2082,7 +2626,7 @@ class AutoControlTab(QWidget):
             if self._epp_guard_refcount > 0:
                 self._epp_guard_refcount -= 1
                 if self._epp_guard_refcount == 0:
-                    script_path = (BASE_DIR / 'scripts' / 'epp_toggle.py').resolve()
+                    script_path = self._resolve_epp_toggle_script()
                     proc = subprocess.run([sys.executable, str(script_path), 'restore'], capture_output=True, text=True)
                     if proc.returncode == 0:
                         self.log_generated.emit("[EPP] 복구(해제)", "cyan")
@@ -2090,6 +2634,34 @@ class AutoControlTab(QWidget):
                         self.log_generated.emit(f"[EPP] 복구 실패: {proc.stdout or proc.stderr}", "red")
         except Exception as e:
             self.log_generated.emit(f"[EPP] 복구 예외: {e}", "red")
+
+    def _resolve_epp_toggle_script(self) -> str:
+        """Resolve the path to epp_toggle.py with overrides.
+        Priority:
+          1) env MAPLE_EPP_TOGGLE
+          2) G:\\Coding\\Project_Maple\\src\\epp_toggle.py (user-requested)
+          3) repo scripts/epp_toggle.py
+          4) repo src/epp_toggle.py
+        Returns best-effort path (may not exist).
+        """
+        try:
+            env_p = os.environ.get('MAPLE_EPP_TOGGLE')
+            if env_p and os.path.exists(env_p):
+                return env_p
+        except Exception:
+            pass
+        candidates = [
+            r"G:\\Coding\\Project_Maple\\src\\epp_toggle.py",
+            str((BASE_DIR / 'scripts' / 'epp_toggle.py').resolve()),
+            str((BASE_DIR / 'src' / 'epp_toggle.py').resolve()),
+        ]
+        for c in candidates:
+            try:
+                if os.path.exists(c):
+                    return c
+            except Exception:
+                pass
+        return candidates[0]
 
     def _sequence_contains_mouse(self, sequence: list) -> bool:
         try:
@@ -2538,20 +3110,57 @@ class AutoControlTab(QWidget):
                 self.log_generated.emit(msg, "gray")
             
             elif action_type == "mouse_move_abs":
-                # 절대좌표 목표 → 현재 좌표 → Δ 계산 후 전송. 자동 대기 없음.
-                try:
-                    tx = int(step.get('x', 0)); ty = int(step.get('y', 0))
-                    dur = int(step.get('dur_ms', 240))
-                except Exception:
-                    tx, ty, dur = 0, 0, 240
-                cx, cy = self._get_cursor_pos()
-                dx = int(tx) - int(cx)
-                dy = int(ty) - int(cy)
-                sent = self._send_mouse_smooth_move(dx, dy, dur)
-                label = f"(마우스 이동: abs→Δ=({dx},{dy}), dur={dur}ms)"
-                if self.current_command_source_tag:
-                    label = f"{self.current_command_source_tag} {label}"
-                self.log_generated.emit(label, "white" if sent else "red")
+                # 이미지/좌표 모드 분기
+                mode = str(step.get('mode', 'coord'))
+                if mode == 'image':
+                    ok, pos, score, name = self._perform_image_match(step)
+                    if ok and pos:
+                        try:
+                            dur = int(step.get('dur_ms', 240))
+                        except Exception:
+                            dur = 240
+                        tx, ty = int(pos[0]), int(pos[1])
+                        cx, cy = self._get_cursor_pos()
+                        dx = int(tx) - int(cx)
+                        dy = int(ty) - int(cy)
+                        sent = self._send_mouse_smooth_move(dx, dy, dur)
+                        label = f"(마우스 이동[이미지]: {name} score={score:.2f} → Δ=({dx},{dy}), dur={dur}ms)"
+                        if self.current_command_source_tag:
+                            label = f"{self.current_command_source_tag} {label}"
+                        self.log_generated.emit(label, "white" if sent else "red")
+                        # (신규) 클릭 포함이 체크된 경우에만 이동 후 클릭
+                        if bool(step.get('click_after', False)):
+                            try:
+                                extra_ms = random.randint(10, 30)
+                                QTimer.singleShot(dur + extra_ms, lambda: self._send_mouse_click_cmd('left'))
+                            except Exception:
+                                pass
+                    else:
+                        # 매칭 실패 → 시퀀스 중지 및 로그 출력
+                        self.sequence_watchdog.stop()
+                        msg = "이미지 매칭 실패: 시퀀스를 중지합니다."
+                        if self.current_command_source_tag:
+                            msg = f"{self.current_command_source_tag} {msg}"
+                        self.log_generated.emit(msg, "red")
+                        self._notify_sequence_completed(False)
+                        return
+                else:
+                    # 절대좌표 목표 → 현재 좌표 → Δ 계산 후 전송. 자동 대기 없음.
+                    try:
+                        tx = int(step.get('x', 0)); ty = int(step.get('y', 0))
+                        dur = int(step.get('dur_ms', 240))
+                    except Exception:
+                        tx, ty, dur = 0, 0, 240
+                    cx, cy = self._get_cursor_pos()
+                    dx = int(tx) - int(cy)
+                    dy = int(ty) - int(cy)
+                    # [버그 수정] dx 계산 시 cx 사용
+                    dx = int(tx) - int(cx)
+                    sent = self._send_mouse_smooth_move(dx, dy, dur)
+                    label = f"(마우스 이동: abs→Δ=({dx},{dy}), dur={dur}ms)"
+                    if self.current_command_source_tag:
+                        label = f"{self.current_command_source_tag} {label}"
+                    self.log_generated.emit(label, "white" if sent else "red")
 
             elif action_type == "mouse_left_click":
                 sent = self._send_mouse_click_cmd('left')
