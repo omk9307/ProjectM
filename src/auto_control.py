@@ -26,6 +26,13 @@ from datetime import datetime
 import pygetwindow as gw
 import uuid
 import shutil
+from window_anchors import (
+    get_maple_window_geometry,
+    make_relative_roi,
+    resolve_roi_to_absolute,
+    ensure_relative_roi,
+    last_used_anchor_name,
+)
 
 # --- 설정 및 상수 ---
 SERIAL_PORT = 'COM6'
@@ -220,6 +227,11 @@ def _resolve_key_mappings_path():
 
 KEY_MAPPINGS_FILE = _resolve_key_mappings_path()
 
+__all__ = [
+    "AutoControlTab",
+    "KeyboardVisualizer",
+]
+
 
 def _resolve_mouse_image_base_dir() -> Path:
     """이미지 기반 마우스 이동 템플릿의 기본 저장 디렉터리를 해상합니다.
@@ -262,18 +274,44 @@ class CopyableListWidget(QListWidget):
         super().__init__(parent)
         # 여러 항목을 선택할 수 있도록 설정
         self.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
+        # 항목 원본 텍스트(UserRole+1)에 접근해 복사 시 전체 텍스트를 사용
+        # 리스트 폭 변경에 따른 엘라이드 재적용을 위해 resize 이벤트 훅 추가
 
     def keyPressEvent(self, event):
         # Ctrl+C가 눌렸는지 확인
         if event.key() == Qt.Key.Key_C and event.modifiers() == Qt.KeyboardModifier.ControlModifier:
             selected_items = self.selectedItems()
             if selected_items:
-                # 선택된 모든 항목의 텍스트를 줄바꿈으로 연결
-                copied_text = "\n".join(item.text() for item in selected_items)
+                # 선택된 모든 항목의 '원본 텍스트'(UserRole+1)를 줄바꿈으로 연결
+                lines = []
+                for item in selected_items:
+                    full = item.data(Qt.ItemDataRole.UserRole + 1)
+                    if not isinstance(full, str) or not full:
+                        full = item.text()
+                    lines.append(full)
+                copied_text = "\n".join(lines)
                 QApplication.clipboard().setText(copied_text)
         else:
             # 다른 키 입력은 기본 동작을 따름
             super().keyPressEvent(event)
+
+    def _reapply_elide(self):
+        try:
+            from PyQt6.QtGui import QFontMetrics
+            fm = QFontMetrics(self.font())
+            width = max(50, int(self.viewport().width()) - 16)
+            for i in range(self.count()):
+                item = self.item(i)
+                full = item.data(Qt.ItemDataRole.UserRole + 1)
+                if isinstance(full, str) and full:
+                    elided = fm.elidedText(full, Qt.TextElideMode.ElideMiddle, width)
+                    item.setText(elided)
+        except Exception:
+            pass
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._reapply_elide()
 
 
 class CommandProfileListWidget(QListWidget):
@@ -472,6 +510,8 @@ class AutoControlTab(QWidget):
             QPushButton { padding: 4px; }
             QPushButton:checked { background-color: #c62828; color: white; border: 1px solid #999; }
         """)
+        # 편집 시그널 가드(프로그램적 UI 업데이트 동안 핸들러 차단)
+        self._editor_syncing: bool = False
 
     def _parallel_owner(self, command_name: str) -> str:
         return f"parallel::{command_name}"
@@ -690,7 +730,7 @@ class AutoControlTab(QWidget):
         coord_row.setContentsMargins(0,0,0,0)
         self.mouse_x_spin = QSpinBox(); self.mouse_x_spin.setRange(-32768, 32767)
         self.mouse_y_spin = QSpinBox(); self.mouse_y_spin.setRange(-32768, 32767)
-        self.mouse_dur_spin = QSpinBox(); self.mouse_dur_spin.setRange(40, 5000); self.mouse_dur_spin.setSuffix(" ms"); self.mouse_dur_spin.setValue(240)
+        self.mouse_dur_spin = QSpinBox(); self.mouse_dur_spin.setRange(0, 5000); self.mouse_dur_spin.setSuffix(" ms"); self.mouse_dur_spin.setValue(240)
         for w, width in ((self.mouse_x_spin, 90), (self.mouse_y_spin, 90), (self.mouse_dur_spin, 110)):
             try:
                 w.setFixedWidth(width)
@@ -808,6 +848,8 @@ class AutoControlTab(QWidget):
         return editor_group
 
     def _on_mouse_mode_toggled(self, _checked: bool) -> None:
+        if getattr(self, '_editor_syncing', False):
+            return
         # 좌표/이미지 모드 상호배타 처리 및 입력 활성화 갱신
         # 시퀀스 데이터도 즉시 반영
         self._update_mouse_move_mode_enabled()
@@ -824,12 +866,19 @@ class AutoControlTab(QWidget):
 
     def _update_mouse_move_mode_enabled(self) -> None:
         is_coord = bool(getattr(self, 'mouse_mode_coord', None) and self.mouse_mode_coord.isChecked())
-        for w in (getattr(self, 'mouse_x_spin', None), getattr(self, 'mouse_y_spin', None), getattr(self, 'mouse_dur_spin', None)):
+        # 좌표 모드: x, y 활성화 / 이미지 모드: x, y 비활성화
+        for w in (getattr(self, 'mouse_x_spin', None), getattr(self, 'mouse_y_spin', None)):
             if w is not None:
                 try:
                     w.setEnabled(is_coord)
                 except Exception:
                     pass
+        # dur_ms는 두 모드 모두에서 사용되므로 항상 활성
+        if getattr(self, 'mouse_dur_spin', None) is not None:
+            try:
+                self.mouse_dur_spin.setEnabled(True)
+            except Exception:
+                pass
         # 이미지 설정 표시 토글
         if getattr(self, 'image_settings_widget', None) is not None and getattr(self, 'mouse_mode_image', None) is not None:
             try:
@@ -944,39 +993,55 @@ class AutoControlTab(QWidget):
         cmd, row, action = self._get_selected_action_ref()
         if not action or self.action_type_combo.currentText() != 'mouse_move_abs':
             return
-        # Snipper 선택(듀얼모니터 우선)
-        region = None
+        # 사냥탭과 동일: 전체 가상 화면 스니퍼
+        from detection_runtime import ScreenSnipper
+        chosen_abs = None
         try:
-            from map_widgets import MultiScreenSnipper
-            snipper = MultiScreenSnipper(self)
-            if snipper.exec():
-                roi = snipper.get_global_roi()
-                region = {
-                    'top': int(roi.top()), 'left': int(roi.left()),
-                    'width': int(roi.width()), 'height': int(roi.height()),
+            sn = ScreenSnipper(self)
+            if sn.exec():
+                r = sn.get_roi()
+                chosen_abs = {
+                    'top': int(r.top()), 'left': int(r.left()),
+                    'width': int(r.width()), 'height': int(r.height()),
                 }
-        except Exception:
-            try:
-                from detection_runtime import ScreenSnipper
-                sn = ScreenSnipper(self)
-                if sn.exec():
-                    r = sn.get_roi()
-                    region = {
-                        'top': int(r.top()), 'left': int(r.left()),
-                        'width': int(r.width()), 'height': int(r.height()),
-                    }
-            except Exception as e:
-                QMessageBox.critical(self, "영역 지정 실패", f"화면 스니퍼를 사용할 수 없습니다: {e}")
-                region = None
-        if region and region['width'] > 0 and region['height'] > 0:
-            action['region'] = region
-            self.image_region_label.setStyleSheet("")
-            self.image_region_label.setText(f"({region['left']},{region['top']}) {region['width']}x{region['height']}")
-        else:
+        except Exception as e:
+            QMessageBox.critical(self, "영역 지정 실패", f"화면 스니퍼를 사용할 수 없습니다: {e}")
+            chosen_abs = None
+
+        if not (chosen_abs and chosen_abs['width'] > 0 and chosen_abs['height'] > 0):
             self.image_region_label.setStyleSheet("color: #aaa;")
             self.image_region_label.setText("(영역 미설정)")
+            return
+
+        # 창 기준 상대 ROI로 저장(사냥탭과 동일 로직)
+        window_geometry = None
+        try:
+            window_geometry = get_maple_window_geometry()
+        except Exception:
+            window_geometry = None
+        if window_geometry:
+            relative_payload = make_relative_roi(chosen_abs, window_geometry, anchor_name=last_used_anchor_name())
+        else:
+            relative_payload = dict(chosen_abs)
+            if getattr(self, 'status_label', None):
+                self.status_label.setText('경고: Mapleland 창 좌표를 찾지 못해 절대 좌표로 저장했습니다. 창 좌표를 먼저 저장하면 이동해도 안전합니다.')
+            try:
+                self.log_generated.emit('경고: Mapleland 창 좌표를 찾지 못해 절대 좌표로 저장했습니다. 창 좌표를 먼저 저장하면 이동해도 안전합니다.', 'warn')
+            except Exception:
+                pass
+
+        action['region'] = relative_payload
+        # 표시용: 절대 좌표로 복원해 라벨에 출력
+        try:
+            disp = resolve_roi_to_absolute(relative_payload, window=window_geometry) or chosen_abs
+        except Exception:
+            disp = chosen_abs
+        self.image_region_label.setStyleSheet("")
+        self.image_region_label.setText(f"({disp['left']},{disp['top']}) {disp['width']}x{disp['height']}")
 
     def _on_image_threshold_changed(self, value: float):
+        if getattr(self, '_editor_syncing', False):
+            return
         _, _, action = self._get_selected_action_ref()
         if isinstance(action, dict) and self.action_type_combo.currentText() == 'mouse_move_abs':
             try:
@@ -985,9 +1050,34 @@ class AutoControlTab(QWidget):
                 action['threshold'] = 0.85
 
     def _on_image_click_toggled(self, checked: bool):
+        if getattr(self, '_editor_syncing', False):
+            return
         _, _, action = self._get_selected_action_ref()
         if isinstance(action, dict) and self.action_type_combo.currentText() == 'mouse_move_abs':
             action['click_after'] = bool(checked)
+
+    def _on_image_click_delay_changed(self, _value: int):
+        """클릭 지연 범위 스핀박스 변경 시 스텝 데이터에 저장."""
+        if getattr(self, '_editor_syncing', False):
+            return
+        _, _, action = self._get_selected_action_ref()
+        if not (isinstance(action, dict) and self.action_type_combo.currentText() == 'mouse_move_abs'):
+            return
+        try:
+            cmin = int(self.image_click_delay_min_spin.value())
+            cmax = int(self.image_click_delay_max_spin.value())
+            if cmax < cmin:
+                # UI상에서도 정합성 유지
+                self.image_click_delay_max_spin.blockSignals(True)
+                self.image_click_delay_max_spin.setValue(cmin)
+                self.image_click_delay_max_spin.blockSignals(False)
+                cmax = cmin
+            cmin = max(0, min(500, cmin))
+            cmax = max(0, min(500, cmax))
+            action['click_delay_min_ms'] = cmin
+            action['click_delay_max_ms'] = cmax
+        except Exception:
+            pass
 
     def _on_add_image_templates(self):
         cmd, row, action = self._get_selected_action_ref()
@@ -1072,10 +1162,34 @@ class AutoControlTab(QWidget):
         except Exception as e:
             QMessageBox.critical(self, '의존성 오류', f'OpenCV가 필요합니다: {e}')
             return False, None, -1.0, None
-        region = action.get('region')
-        if not (isinstance(region, dict) and all(k in region for k in ('top','left','width','height'))):
+        region_payload = action.get('region')
+        if not isinstance(region_payload, dict):
             return False, None, -1.0, None
-        bgr = self._grab_region_bgr(region)
+        # 사냥탭과 동일: 실행 시 절대좌표 복원 후 캡처
+        try:
+            geom = get_maple_window_geometry()
+        except Exception:
+            geom = None
+        abs_region = resolve_roi_to_absolute(region_payload, window=geom)
+        if abs_region is None:
+            # 구버전 절대좌표 지원
+            if all(k in region_payload for k in ('top','left','width','height')):
+                try:
+                    abs_region = {
+                        'left': int(region_payload['left']),
+                        'top': int(region_payload['top']),
+                        'width': int(region_payload['width']),
+                        'height': int(region_payload['height']),
+                    }
+                except Exception:
+                    abs_region = None
+        if abs_region is None:
+            try:
+                self.log_generated.emit('탐지 영역을 복원할 수 없습니다. 창 위치를 확인하고 다시 지정해주세요.', 'warn')
+            except Exception:
+                pass
+            return False, None, -1.0, None
+        bgr = self._grab_region_bgr(abs_region)
         if bgr is None:
             return False, None, -1.0, None
         gray = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
@@ -1102,12 +1216,77 @@ class AutoControlTab(QWidget):
                 best_name = p.name
         threshold = float(action.get('threshold', 0.85))
         if best_score >= threshold and best_loc is not None and best_sz is not None:
-            left, top = int(region['left']), int(region['top'])
+            left, top = int(abs_region['left']), int(abs_region['top'])
             w, h = best_sz
             cx = left + int(best_loc[0] + w / 2)
             cy = top + int(best_loc[1] + h / 2)
             return True, (cx, cy), best_score, best_name
         return False, None, best_score, None
+
+    def _retry_image_match_and_move(self, step: dict):
+        """이미지 매칭 재시도(한 번) 후 성공 시 이동/클릭, 실패 시 시퀀스 중지.
+        재시도는 _process_next_step 외부에서 호출된다.
+        """
+        try:
+            if not self.is_sequence_running:
+                return
+            # 현재 인덱스가 유효한지, 같은 스텝인지 간단 검증(uid가 있으면 비교)
+            if not (0 <= self.current_sequence_index < len(self.current_sequence)):
+                return
+            current_step = self.current_sequence[self.current_sequence_index]
+            if isinstance(step, dict) and isinstance(current_step, dict):
+                uid1 = step.get('uid'); uid2 = current_step.get('uid')
+                if uid1 and uid2 and uid1 != uid2:
+                    return
+            ok, pos, score, name = self._perform_image_match(step)
+            if ok and pos:
+                try:
+                    dur = int(step.get('dur_ms', 240))
+                except Exception:
+                    dur = 240
+                tx, ty = int(pos[0]), int(pos[1])
+                cx, cy = self._get_cursor_pos()
+                dx = int(tx) - int(cx)
+                dy = int(ty) - int(cy)
+                sent = self._send_mouse_smooth_move(dx, dy, dur)
+                label = f"(마우스 이동[이미지-재시도성공]: {name} score={score:.2f} → Δ=({dx},{dy}), dur={dur}ms)"
+                if self.current_command_source_tag:
+                    label = f"{self.current_command_source_tag} {label}"
+                self.log_generated.emit(label, "white" if sent else "red")
+                if bool(step.get('click_after', False)):
+                    try:
+                        cmin = int(step.get('click_delay_min_ms', 10))
+                        cmax = int(step.get('click_delay_max_ms', 30))
+                        if cmax < cmin:
+                            cmax = cmin
+                        cmin = max(0, min(500, cmin))
+                        cmax = max(0, min(500, cmax))
+                        extra_ms = random.randint(cmin, cmax)
+                        QTimer.singleShot(dur + extra_ms, lambda: self._send_mouse_click_cmd('left'))
+                    except Exception:
+                        pass
+                # 다음 스텝으로 진행
+                self.current_sequence_index += 1
+                try:
+                    self.sequence_timer.stop()
+                except Exception:
+                    pass
+                self.sequence_watchdog.start(self.SEQUENCE_STUCK_TIMEOUT_MS)
+                # 이미지 이동 스텝 자체의 추가 대기는 없으므로 1ms 기본 지연
+                self.sequence_timer.start(1)
+            else:
+                # 2회 실패 → 중지
+                self.sequence_watchdog.stop()
+                msg = "이미지 매칭 실패(2/2): 시퀀스를 중지합니다."
+                if self.current_command_source_tag:
+                    msg = f"{self.current_command_source_tag} {msg}"
+                self.log_generated.emit(msg, "red")
+                self._notify_sequence_completed(False)
+        except Exception as e:
+            try:
+                self.log_generated.emit(f"이미지 매칭 재시도 중 예외: {e}", "red")
+            except Exception:
+                pass
 
     def _on_test_image_matching(self):
         _, _, action = self._get_selected_action_ref()
@@ -2034,6 +2213,7 @@ class AutoControlTab(QWidget):
         self._update_mouse_move_mode_enabled()
 
     def _update_editor_panel(self, action_data):
+        self._editor_syncing = True
         self.action_type_combo.blockSignals(True); self.key_combo.blockSignals(True); self.min_delay_spin.blockSignals(True); self.max_delay_spin.blockSignals(True)
         action_type = action_data.get("type", "press")
         self.action_type_combo.setCurrentText(action_type)
@@ -2095,10 +2275,29 @@ class AutoControlTab(QWidget):
                 self.image_click_delay_max_spin.blockSignals(False)
             except Exception:
                 pass
-            region = action_data.get('region') or {}
-            if isinstance(region, dict) and all(k in region for k in ('top','left','width','height')):
+            # 라벨 표시는 절대좌표로 복원해 출력(사냥탭과 동일 철학)
+            region_payload = action_data.get('region')
+            abs_disp = None
+            if isinstance(region_payload, dict):
+                try:
+                    geom = get_maple_window_geometry()
+                except Exception:
+                    geom = None
+                try:
+                    abs_disp = resolve_roi_to_absolute(region_payload, window=geom)
+                except Exception:
+                    abs_disp = None
+                if abs_disp is None and all(k in region_payload for k in ('top','left','width','height')):
+                    # 구버전 절대좌표
+                    abs_disp = {
+                        'left': int(region_payload.get('left', 0)),
+                        'top': int(region_payload.get('top', 0)),
+                        'width': int(region_payload.get('width', 0)),
+                        'height': int(region_payload.get('height', 0)),
+                    }
+            if abs_disp and abs_disp.get('width', 0) > 0 and abs_disp.get('height', 0) > 0:
                 self.image_region_label.setStyleSheet("")
-                self.image_region_label.setText(f"({region.get('left')},{region.get('top')}) {region.get('width')}x{region.get('height')}")
+                self.image_region_label.setText(f"({abs_disp['left']},{abs_disp['top']}) {abs_disp['width']}x{abs_disp['height']}")
             else:
                 self.image_region_label.setStyleSheet("color: #aaa;")
                 self.image_region_label.setText("(영역 미설정)")
@@ -2114,8 +2313,11 @@ class AutoControlTab(QWidget):
                 self.force_checkbox.setChecked(False)
                 self.force_checkbox.blockSignals(False)
         self.action_type_combo.blockSignals(False); self.key_combo.blockSignals(False); self.min_delay_spin.blockSignals(False); self.max_delay_spin.blockSignals(False)
+        self._editor_syncing = False
 
     def _update_action_from_editor(self, _=None):
+        if getattr(self, '_editor_syncing', False):
+            return
         command_item = self._current_command_item()
         if not command_item:
             return
@@ -2147,7 +2349,7 @@ class AutoControlTab(QWidget):
             new_action_data["dur_ms"] = int(self.mouse_dur_spin.value())
             new_action_data["mode"] = 'image' if self.mouse_mode_image.isChecked() else 'coord'
             # 부가 설정 보존
-            for k in ("threshold", "region", "image_id", "image_files", "click_after", "click_delay_min_ms", "click_delay_max_ms"):
+            for k in ("threshold", "region", "image_id", "image_files", "click_after", "click_delay_min_ms", "click_delay_max_ms", "uid"):
                 if k in existing and k not in new_action_data:
                     new_action_data[k] = existing[k]
             # 현재 클릭 토글 UI값 반영
@@ -2196,6 +2398,12 @@ class AutoControlTab(QWidget):
         self.action_sequence_list.clear()
         sequence = self.mappings.get(command_text, [])
         for step in sequence:
+            # 스텝 UID 확보(편집 컨텍스트 안정화)
+            if isinstance(step, dict) and 'uid' not in step:
+                try:
+                    step['uid'] = uuid.uuid4().hex
+                except Exception:
+                    pass
             item = QListWidgetItem()
             self._update_action_item_text(item, step)
             self.action_sequence_list.addItem(item)
@@ -2309,7 +2517,7 @@ class AutoControlTab(QWidget):
             QMessageBox.warning(self, "오류", "먼저 좌측에서 명령을 선택하세요.")
             return
         command_text = command_item.text()
-        new_action = {"type": "press", "key_str": "Key.space"}
+        new_action = {"type": "press", "key_str": "Key.space", "uid": uuid.uuid4().hex}
         self.mappings[command_text].append(new_action)
         self._populate_action_sequence_list(command_text)
         new_index = self.action_sequence_list.count() - 1
@@ -2595,7 +2803,7 @@ class AutoControlTab(QWidget):
             return max(-32768, min(32767, int(v)))
         dx = clamp16(dx_counts)
         dy = clamp16(dy_counts)
-        dur = max(10, min(5000, int(dur_ms)))
+        dur = max(0, min(5000, int(dur_ms)))
         try:
             payload = bytes([MOUSE_SMOOTH_MOVE]) + struct.pack('<hhh', dx, dy, dur)
             self.ser.write(payload)
@@ -3185,13 +3393,14 @@ class AutoControlTab(QWidget):
                             except Exception:
                                 pass
                     else:
-                        # 매칭 실패 → 시퀀스 중지 및 로그 출력
-                        self.sequence_watchdog.stop()
-                        msg = "이미지 매칭 실패: 시퀀스를 중지합니다."
+                        # 1차 실패: 50ms 후 한 번 더 재시도
+                        retry_msg = "이미지 매칭 실패(1/2): 50ms 후 재시도"
                         if self.current_command_source_tag:
-                            msg = f"{self.current_command_source_tag} {msg}"
-                        self.log_generated.emit(msg, "red")
-                        self._notify_sequence_completed(False)
+                            retry_msg = f"{self.current_command_source_tag} {retry_msg}"
+                        self.log_generated.emit(retry_msg, "orange")
+                        # 현재 스텝 재시도 예약. 진행 중 플래그를 해제하여 재진입 허용
+                        self.is_processing_step = False
+                        QTimer.singleShot(50, lambda s=copy.deepcopy(step): self._retry_image_match_and_move(s))
                         return
                 else:
                     # 절대좌표 목표 → 현재 좌표 → Δ 계산 후 전송. 자동 대기 없음.
@@ -3932,9 +4141,18 @@ class AutoControlTab(QWidget):
         
         timestamp = datetime.now().strftime("%H:%M:%S:%f")[:-3]
         # [수정] 로그 메시지에 시간차 정보 추가
-        log_text = f"[{timestamp}] {message}{delta_text}"
-        
-        item = QListWidgetItem(log_text)
+        full_text = f"[{timestamp}] {message}{delta_text}"
+        try:
+            from PyQt6.QtGui import QFontMetrics
+            fm = QFontMetrics(self.key_log_list.font())
+            width = max(50, int(self.key_log_list.viewport().width()) - 16)
+            elided = fm.elidedText(full_text, Qt.TextElideMode.ElideMiddle, width)
+        except Exception:
+            elided = full_text
+
+        item = QListWidgetItem(elided)
+        item.setData(Qt.ItemDataRole.UserRole + 1, full_text)
+        item.setToolTip(full_text)
         item.setForeground(QColor(color_str))
         self.key_log_list.addItem(item)
         
@@ -3948,9 +4166,18 @@ class AutoControlTab(QWidget):
     def _add_key_log_entry(self, action, key_name):
         # HH:MM:SS:ms 형식으로 타임스탬프 생성
         timestamp = datetime.now().strftime("%H:%M:%S:%f")[:-3]
-        log_text = f"[{timestamp}] ({action}) {key_name}"
-        
-        item = QListWidgetItem(log_text)
+        full_text = f"[{timestamp}] ({action}) {key_name}"
+        try:
+            from PyQt6.QtGui import QFontMetrics
+            fm = QFontMetrics(self.key_log_list.font())
+            width = max(50, int(self.key_log_list.viewport().width()) - 16)
+            elided = fm.elidedText(full_text, Qt.TextElideMode.ElideMiddle, width)
+        except Exception:
+            elided = full_text
+
+        item = QListWidgetItem(elided)
+        item.setData(Qt.ItemDataRole.UserRole + 1, full_text)
+        item.setToolTip(full_text)
         # 비가시 시 UI 누적 생략
         if not getattr(self, '_ui_runtime_visible', True):
             return
@@ -3967,9 +4194,18 @@ class AutoControlTab(QWidget):
     def _add_execution_log_entry(self, log_message):
         """시퀀스 실행 로그를 타임스탬프와 함께 GUI에 추가합니다."""
         timestamp = datetime.now().strftime("%H:%M:%S:%f")[:-3]
-        full_log = f"[{timestamp}] {log_message}"
+        full_text = f"[{timestamp}] {log_message}"
+        try:
+            from PyQt6.QtGui import QFontMetrics
+            fm = QFontMetrics(self.key_log_list.font())
+            width = max(50, int(self.key_log_list.viewport().width()) - 16)
+            elided = fm.elidedText(full_text, Qt.TextElideMode.ElideMiddle, width)
+        except Exception:
+            elided = full_text
 
-        item = QListWidgetItem(full_log)
+        item = QListWidgetItem(elided)
+        item.setData(Qt.ItemDataRole.UserRole + 1, full_text)
+        item.setToolTip(full_text)
         # 실행 로그는 다른 색상으로 구분 (예: 파란색)
         item.setForeground(Qt.GlobalColor.cyan)
         # 비가시 시 UI 누적 생략

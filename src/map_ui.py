@@ -6975,6 +6975,14 @@ class MapTab(QWidget):
         self._emit_control_command("모든 키 떼기", "other_player_wait:hold")
         # 대기 상태에선 보강 타이머를 중지
         self._stop_wait_nav_reinforce_timer()
+        # [NEW] 사냥 탭에 도착 이벤트 통지(금지 몬스터 플로우 등 분기 식별용)
+        try:
+            hunt_tab = getattr(self, '_hunt_tab', None)
+            if hunt_tab and hasattr(hunt_tab, 'on_other_player_wait_arrived'):
+                source = str(context.get('source') or '')
+                hunt_tab.on_other_player_wait_arrived(source=source, waypoint_name=waypoint_name)
+        except Exception:
+            pass
 
     def _maintain_other_player_wait_travel(
         self,
@@ -11577,20 +11585,45 @@ class MapTab(QWidget):
                         threshold = getattr(hp_cfg, 'recovery_threshold', None)
                         if isinstance(threshold, int):
                             current = float(value)
+                            # 임계값을 퍼센트로 환산(100 초과 → 절대 HP 입력)
+                            thr_percent: float | None
+                            if threshold > 100:
+                                maximum = getattr(hp_cfg, 'maximum_value', None)
+                                try:
+                                    max_val = float(maximum) if maximum is not None else 0.0
+                                except (TypeError, ValueError):
+                                    max_val = 0.0
+                                if max_val <= 0.0:
+                                    thr_percent = None
+                                    # A안: 최대체력 미설정 시 1회 경고 후 검사 스킵
+                                    if not hasattr(self, '_hp_abs_thr_warned') or not getattr(self, '_hp_abs_thr_warned'):
+                                        try:
+                                            self.update_general_log('[HP] 최대체력이 설정되지 않아 절대 HP 임계값 회복검사를 건너뜁니다.', 'orange')
+                                        except Exception:
+                                            pass
+                                        try:
+                                            setattr(self, '_hp_abs_thr_warned', True)
+                                        except Exception:
+                                            pass
+                                else:
+                                    thr_percent = float(threshold) * 100.0 / max_val
+                            else:
+                                thr_percent = float(threshold)
+
                             if self._hp_recovery_pending:
                                 self._hp_recovery_pending = False
-                                if current >= float(threshold):
+                                if thr_percent is not None and current >= float(thr_percent):
                                     self._hp_recovery_fail_streak = 0
                                     if self._hp_emergency_active:
                                         self._hp_emergency_active = False
                                         self._hp_emergency_started_at = 0.0
                                         self._hp_emergency_telegram_sent = False
                                         self.update_general_log(f"[HP] 긴급 회복 보호 해제 [{int(round(current))}%]", "gray")
-                                else:
+                                elif thr_percent is not None:
                                     self._hp_recovery_fail_streak = int(self._hp_recovery_fail_streak) + 1
                                     if self._hp_emergency_active:
                                         self.update_general_log(
-                                            f"HP회복검사 통과 실패 : 기준치 [{int(threshold)}%] > 현재수치 [{int(round(current))}%]",
+                                            f"HP회복검사 통과 실패 : 기준치 [{int(round(thr_percent))}%] > 현재수치 [{int(round(current))}%]",
                                             "orange",
                                         )
                                         # 긴급 모드에서는 즉시 HP 회복 명령 재발행
@@ -11598,7 +11631,8 @@ class MapTab(QWidget):
                                         if isinstance(cmd, str) and cmd.strip():
                                             self._issue_status_command('hp', cmd.strip())
                                     if (
-                                        getattr(hp_cfg, 'emergency_enabled', False)
+                                        thr_percent is not None
+                                        and getattr(hp_cfg, 'emergency_enabled', False)
                                         and not self._hp_emergency_active
                                         and self._hp_recovery_fail_streak >= int(getattr(hp_cfg, 'emergency_trigger_failures', 3) or 3)
                                     ):
@@ -11714,7 +11748,34 @@ class MapTab(QWidget):
         command_name = (getattr(cfg, 'command_profile', None) or '').strip()
         if not command_name:
             return
-        if percentage > threshold:
+        # [변경] 100 초과 입력은 절대 HP로 간주 → 퍼센트로 환산
+        thr_percent: float
+        if isinstance(threshold, int) and threshold > 100 and resource == 'hp':
+            maximum = getattr(cfg, 'maximum_value', None)
+            try:
+                max_val = float(maximum) if maximum is not None else 0.0
+            except (TypeError, ValueError):
+                max_val = 0.0
+            if max_val <= 0.0:
+                # A안: 최대체력 미설정 시 무시 + 1회 경고
+                if not hasattr(self, '_hp_abs_thr_warned') or not getattr(self, '_hp_abs_thr_warned'):
+                    try:
+                        self.update_general_log('[HP] 최대체력이 설정되지 않아 절대 HP 임계값을 적용할 수 없습니다. (회복 트리거 건너뜀)', 'orange')
+                    except Exception:
+                        pass
+                    try:
+                        setattr(self, '_hp_abs_thr_warned', True)
+                    except Exception:
+                        pass
+                return
+            thr_percent = float(threshold) * 100.0 / max_val
+        else:
+            try:
+                thr_percent = float(threshold)
+            except (TypeError, ValueError):
+                return
+
+        if percentage > thr_percent:
             return
         interval = max(0.1, getattr(cfg, 'interval_sec', 1.0))
         if (timestamp - self._status_last_command_ts.get(resource, 0.0)) < interval:

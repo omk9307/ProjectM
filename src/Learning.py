@@ -852,6 +852,16 @@ class MonsterSettingsDialog(QDialog):
         self.conf_spinbox.setEnabled(self.override_enabled)
         self.conf_spinbox.setToolTip("사냥 탭에서 해당 몬스터를 탐지할 최소 신뢰도입니다.")
         override_row.addWidget(self.conf_spinbox)
+        # [NEW] 공격 금지 체크박스 (개별 신뢰도 스핀박스 우측)
+        self.attack_forbidden_checkbox = QCheckBox("공격 금지")
+        try:
+            if self.data_manager and hasattr(self.data_manager, 'is_monster_attack_forbidden'):
+                self.attack_forbidden_checkbox.setChecked(
+                    bool(self.data_manager.is_monster_attack_forbidden(self.class_name))
+                )
+        except Exception:
+            self.attack_forbidden_checkbox.setChecked(False)
+        override_row.addWidget(self.attack_forbidden_checkbox)
         override_row.addStretch(1)
 
         settings_layout.addLayout(override_row)
@@ -3053,6 +3063,11 @@ class DataManager:
             if isinstance(model, str) and model.strip():
                 self._last_used_model = model.strip()
         self._prune_monster_confidence_overrides()
+        # [NEW] 공격 금지 설정 정리(존재하지 않는 클래스 제거)
+        try:
+            self._prune_monster_attack_forbidden()
+        except Exception:
+            pass
 
     def ensure_dirs_and_files(self):
         os.makedirs(self.images_path, exist_ok=True)
@@ -4079,6 +4094,15 @@ class DataManager:
             overrides[new_name] = overrides.pop(old_name)
             self.save_settings({'monster_confidence_overrides': overrides})
 
+        # [NEW] 공격 금지 설정 키 이관
+        try:
+            forbidden_map = self.get_monster_attack_forbidden_map()
+            if old_name in forbidden_map:
+                forbidden_map[new_name] = bool(forbidden_map.pop(old_name))
+                self.save_settings({'monster_attack_forbidden': forbidden_map})
+        except Exception:
+            pass
+
         nameplate_config = self.get_monster_nameplate_config()
         per_class = nameplate_config.get('per_class', {})
         if old_name in per_class:
@@ -4167,6 +4191,11 @@ class DataManager:
                     if os.path.exists(path): os.remove(path)
 
         self.delete_monster_confidence_override(class_name)
+        # [NEW] 공격 금지 설정 제거
+        try:
+            self.delete_monster_attack_forbidden(class_name)
+        except Exception:
+            pass
 
         nameplate_config = self.get_monster_nameplate_config()
         per_class = nameplate_config.get('per_class', {})
@@ -4277,6 +4306,59 @@ class DataManager:
             else:
                 self._last_used_model = None
             self._notify_model_listeners(self._last_used_model)
+
+    # --- [NEW] 몬스터 공격 금지 설정 ---
+    def get_monster_attack_forbidden_map(self) -> dict[str, bool]:
+        settings = self.load_settings()
+        raw = settings.get('monster_attack_forbidden', {}) if isinstance(settings, dict) else {}
+        result: dict[str, bool] = {}
+        if isinstance(raw, dict):
+            for key, value in raw.items():
+                if isinstance(key, str):
+                    result[key] = bool(value)
+        return result
+
+    def is_monster_attack_forbidden(self, class_name: str) -> bool:
+        try:
+            return bool(self.get_monster_attack_forbidden_map().get(class_name, False))
+        except Exception:
+            return False
+
+    def set_monster_attack_forbidden(self, class_name: str, enabled: bool) -> None:
+        class_name = (class_name or '').strip()
+        if not class_name:
+            return
+        settings = self.load_settings()
+        current = dict(settings.get('monster_attack_forbidden', {})) if isinstance(settings, dict) else {}
+        if enabled:
+            current[class_name] = True
+        else:
+            current.pop(class_name, None)
+        self.save_settings({'monster_attack_forbidden': current})
+
+    def delete_monster_attack_forbidden(self, class_name: str) -> None:
+        class_name = (class_name or '').strip()
+        if not class_name:
+            return
+        settings = self.load_settings()
+        current = dict(settings.get('monster_attack_forbidden', {})) if isinstance(settings, dict) else {}
+        if class_name in current:
+            current.pop(class_name, None)
+            self.save_settings({'monster_attack_forbidden': current})
+
+    def _prune_monster_attack_forbidden(self) -> None:
+        settings = self.load_settings()
+        current = dict(settings.get('monster_attack_forbidden', {})) if isinstance(settings, dict) else {}
+        if not current:
+            return
+        valid = set(self.get_class_list())
+        removed = False
+        for key in list(current.keys()):
+            if key not in valid:
+                current.pop(key, None)
+                removed = True
+        if removed:
+            self.save_settings({'monster_attack_forbidden': current})
 
     def get_detection_runtime_settings(self) -> dict:
         settings = self.load_settings()
@@ -4458,7 +4540,8 @@ class DataManager:
                     except (TypeError, ValueError):
                         pass
                     else:
-                        if 1 <= t_val <= 99:
+                        # [변경] 1 이상이면 저장(100 초과는 절대 HP로 해석)
+                        if 1 <= t_val:
                             target.recovery_threshold = t_val
             if allow_threshold and 'command_profile' in payload:
                 command = payload.get('command_profile')
@@ -6691,7 +6774,8 @@ class LearningTab(QWidget):
         threshold_layout.addWidget(QLabel('회복 % 설정:'))
         input_field = QLineEdit()
         input_field.setPlaceholderText('예: 70')
-        input_field.setValidator(QIntValidator(1, 99, input_field))
+        # [변경] 100 초과 입력(절대 HP)도 허용
+        input_field.setValidator(QIntValidator(1, 999999, input_field))
         threshold_layout.addWidget(input_field)
         vbox.addLayout(threshold_layout)
 
@@ -7242,7 +7326,8 @@ class LearningTab(QWidget):
         if text:
             try:
                 val = int(text)
-                if 1 <= val <= 99:
+                # [변경] 1 이상이면 저장 (100 초과는 절대 HP로 해석)
+                if 1 <= val:
                     value = val
             except ValueError:
                 pass
@@ -8299,6 +8384,21 @@ class LearningTab(QWidget):
                         self.log_viewer.append(
                             f"'{class_name}' 이름표 임계값을 {new_threshold:.2f}로 설정했습니다."
                         )
+
+            # [NEW] 공격 금지 설정 저장
+            try:
+                if hasattr(dialog, 'attack_forbidden_checkbox') and hasattr(self, 'data_manager') and self.data_manager:
+                    forbidden_state = bool(dialog.attack_forbidden_checkbox.isChecked())
+                    self.data_manager.set_monster_attack_forbidden(class_name, forbidden_state)
+                    if hasattr(self, 'log_viewer'):
+                        msg = (
+                            f"'{class_name}' 공격 금지 설정을 활성화했습니다."
+                            if forbidden_state
+                            else f"'{class_name}' 공격 금지 설정을 비활성화했습니다."
+                        )
+                        self.log_viewer.append(msg)
+            except Exception:
+                pass
 
             self._apply_monster_confidence_indicator(item, class_name)
         finally:

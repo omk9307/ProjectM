@@ -1046,6 +1046,12 @@ class HuntTab(QWidget):
         # [NEW] 초긴급 명령 1회 트리거 상태
         self._low_hp_urgent_active: bool = False
 
+        # [NEW] 금지 몬스터 플로우 상태/설정
+        self.forbidden_monster_enabled: bool = False
+        self.forbidden_monster_command_profile: str = ''
+        self._forbidden_active: bool = False
+        self._forbidden_cooldown_until: float = 0.0
+
         self.teleport_settings = TeleportSettings()
         self.teleport_command_left = "텔레포트(좌)"
         self.teleport_command_right = "텔레포트(우)"
@@ -2427,6 +2433,12 @@ class HuntTab(QWidget):
     def on_sequence_completed(self, command_name: str, reason: object, success: bool) -> None:
         if isinstance(reason, str) and reason.startswith('status:'):
             self._handle_status_sequence_completed(command_name, reason, success)
+        # [NEW] 금지몬스터 명령 완료 시 1초 뒤 대기모드 종료 + 쿨다운
+        try:
+            if isinstance(reason, str) and reason == 'forbidden_monster':
+                self._schedule_forbidden_finish()
+        except Exception:
+            pass
         command = str(command_name) if command_name else ''
         entry = self._pop_completion_delay(command)
         if not entry:
@@ -3517,6 +3529,34 @@ class HuntTab(QWidget):
         wait_recover_spin.setSuffix(" px")
         layout.addRow("대기모드 위치 복구(px)", wait_recover_spin)
 
+        # [NEW] 금지몬스터 감지 설정 (자동제어 '기타' 프로필 실행)
+        forbid_row = QWidget(dialog)
+        forbid_layout = QHBoxLayout(forbid_row)
+        forbid_layout.setContentsMargins(0, 0, 0, 0)
+        forbid_layout.setSpacing(8)
+        forbid_enable_chk = QCheckBox("사용", dialog)
+        try:
+            forbid_enable_chk.setChecked(bool(getattr(self, 'forbidden_monster_enabled', False)))
+        except Exception:
+            forbid_enable_chk.setChecked(False)
+        forbid_layout.addWidget(forbid_enable_chk)
+        forbid_layout.addWidget(QLabel("명령 프로필", dialog))
+        forbid_cmd_combo = QComboBox(dialog)
+        forbid_cmd_combo.addItem("프로필 선택", "")
+        try:
+            misc_profiles = self._get_misc_command_profiles()
+            for name in misc_profiles:
+                forbid_cmd_combo.addItem(name, name)
+            current_forbid_cmd = str(getattr(self, 'forbidden_monster_command_profile', '') or '')
+            if current_forbid_cmd:
+                idx = forbid_cmd_combo.findData(current_forbid_cmd)
+                if idx >= 0:
+                    forbid_cmd_combo.setCurrentIndex(idx)
+        except Exception:
+            pass
+        forbid_layout.addWidget(forbid_cmd_combo, 1)
+        layout.addRow("금지몬스터 감지", forbid_row)
+
         button_box = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel, dialog)
         button_box.accepted.connect(dialog.accept)
         button_box.rejected.connect(dialog.reject)
@@ -3582,6 +3622,13 @@ class HuntTab(QWidget):
             setattr(self, 'wait_recover_threshold_px', int(wait_recover_spin.value()))
         except Exception:
             setattr(self, 'wait_recover_threshold_px', 10)
+        # [NEW] 금지몬스터 감지 설정 저장
+        try:
+            self.forbidden_monster_enabled = bool(forbid_enable_chk.isChecked())
+            self.forbidden_monster_command_profile = str(forbid_cmd_combo.currentData() or '')
+        except Exception:
+            self.forbidden_monster_enabled = False
+            self.forbidden_monster_command_profile = ''
 
         self._update_other_player_action_summary()
         self._save_settings()
@@ -4101,7 +4148,7 @@ class HuntTab(QWidget):
 
         self._update_shutdown_labels()
 
-    def _start_other_player_wait_mode(self, started_at: float) -> bool:
+    def _start_other_player_wait_mode(self, started_at: float, *, flow: str = 'other_player') -> bool:
         selected = self._select_random_wait_waypoint()
         if not selected:
             self.append_log("대기 모드를 실행하려면 웨이포인트를 먼저 설정해주세요.", "warn")
@@ -4127,7 +4174,7 @@ class HuntTab(QWidget):
             success = map_tab.start_other_player_wait_operation(
                 waypoint_id=waypoint_id_str,
                 waypoint_name=waypoint_name,
-                source='hunt.other_player',
+                source=f'hunt.{flow}',
                 wait_hp_config=wait_hp_cfg,
             )
         except Exception as exc:
@@ -7367,10 +7414,34 @@ class HuntTab(QWidget):
                         threshold = getattr(hp_cfg, 'recovery_threshold', None)
                         if isinstance(threshold, int):
                             current = float(hp_value)
+                            # 임계값을 퍼센트로 환산(100 초과 → 절대 HP 입력)
+                            thr_percent: float | None
+                            if threshold > 100:
+                                maximum = getattr(hp_cfg, 'maximum_value', None)
+                                try:
+                                    max_val = float(maximum) if maximum is not None else 0.0
+                                except (TypeError, ValueError):
+                                    max_val = 0.0
+                                if max_val <= 0.0:
+                                    thr_percent = None
+                                    if not hasattr(self, '_hp_abs_thr_warned') or not getattr(self, '_hp_abs_thr_warned'):
+                                        try:
+                                            self.append_log('[HP] 최대체력이 설정되지 않아 절대 HP 임계값 회복검사를 건너뜁니다.', 'warn')
+                                        except Exception:
+                                            pass
+                                        try:
+                                            setattr(self, '_hp_abs_thr_warned', True)
+                                        except Exception:
+                                            pass
+                                else:
+                                    thr_percent = float(threshold) * 100.0 / max_val
+                            else:
+                                thr_percent = float(threshold)
+
                             # 회복여부 판단은 HP 명령 직후 다음 주기 한 번만
                             if self._hp_recovery_pending:
                                 self._hp_recovery_pending = False
-                                if current >= float(threshold):
+                                if thr_percent is not None and current >= float(thr_percent):
                                     # 성공
                                     self._hp_recovery_fail_streak = 0
                                     if self._hp_emergency_active:
@@ -7378,12 +7449,12 @@ class HuntTab(QWidget):
                                         self._hp_emergency_started_at = 0.0
                                         self._hp_emergency_telegram_sent = False
                                         self.append_log(f"[HP] 긴급 회복 보호 해제 [{int(round(current))}%]", 'info')
-                                else:
+                                elif thr_percent is not None:
                                     # 실패
                                     self._hp_recovery_fail_streak = int(self._hp_recovery_fail_streak) + 1
                                     if self._hp_emergency_active:
                                         self.append_log(
-                                            f"HP회복검사 통과 실패 : 기준치 [{int(threshold)}%] > 현재수치 [{int(round(current))}%]",
+                                            f"HP회복검사 통과 실패 : 기준치 [{int(round(thr_percent))}%] > 현재수치 [{int(round(current))}%]",
                                             'warn',
                                         )
                                         # 긴급 모드에서는 즉시 HP 회복 명령 재발행
@@ -7391,7 +7462,8 @@ class HuntTab(QWidget):
                                         if isinstance(cmd, str) and cmd.strip():
                                             self._issue_status_command('hp', cmd.strip(), current)
                                     if (
-                                        getattr(hp_cfg, 'emergency_enabled', False)
+                                        thr_percent is not None
+                                        and getattr(hp_cfg, 'emergency_enabled', False)
                                         and not self._hp_emergency_active
                                         and self._hp_recovery_fail_streak >= int(getattr(hp_cfg, 'emergency_trigger_failures', 3) or 3)
                                     ):
@@ -7596,7 +7668,34 @@ class HuntTab(QWidget):
         command_name = command_name.strip()
         if not command_name:
             return
-        if percentage > threshold:
+        # [변경] HP 임계값이 100 초과면 절대 HP로 간주 → 퍼센트 환산
+        thr_percent: float
+        if resource == 'hp' and isinstance(threshold, int) and threshold > 100:
+            maximum = getattr(cfg, 'maximum_value', None)
+            try:
+                max_val = float(maximum) if maximum is not None else 0.0
+            except (TypeError, ValueError):
+                max_val = 0.0
+            if max_val <= 0.0:
+                # A안: 최대체력 미설정 시 무시 + 1회 경고
+                if not hasattr(self, '_hp_abs_thr_warned') or not getattr(self, '_hp_abs_thr_warned'):
+                    try:
+                        self.append_log('[HP] 최대체력이 설정되지 않아 절대 HP 임계값을 적용할 수 없습니다. (회복 트리거 건너뜀)', 'warn')
+                    except Exception:
+                        pass
+                    try:
+                        setattr(self, '_hp_abs_thr_warned', True)
+                    except Exception:
+                        pass
+                return
+            thr_percent = float(threshold) * 100.0 / max_val
+        else:
+            try:
+                thr_percent = float(threshold)
+            except (TypeError, ValueError):
+                return
+
+        if percentage > thr_percent:
             return
         last_ts = self._status_last_command_ts.get(resource, 0.0)
         interval = max(0.1, getattr(cfg, 'interval_sec', 1.0))
@@ -8140,6 +8239,11 @@ class HuntTab(QWidget):
         perf_data = payload.get('perf') or {}
 
         self._expire_nameplate_dead_zones(received_ts)
+        # [NEW] 금지몬스터 감지 → 대기모드 트리거(쿨다운 및 플래그 검사 포함)
+        try:
+            self._maybe_trigger_forbidden_flow(monsters_data, received_ts)
+        except Exception:
+            pass
         if track_events:
             self._handle_nameplate_track_events(track_events, received_ts)
 
@@ -8772,6 +8876,108 @@ class HuntTab(QWidget):
         if now > self._nameplate_hold_until:
             self._nameplate_hold_until = 0.0
         return []
+
+    # ----- [NEW] 금지몬스터 감지 플로우 -----
+    def _maybe_trigger_forbidden_flow(self, monsters: List[dict], now: float) -> None:
+        """YOLO 몬스터 목록에서 '공격 금지'로 지정된 클래스가 보이면 대기모드 트리거.
+
+        - 조건: 기능 활성, 프로필 지정, 웨이포인트 유효, 쿨다운 만료, 현재 비활성
+        - 트리거 시: 사냥탭 탐지를 중단하고 맵탭 대기모드 진입(flow='forbidden')
+        """
+        if not bool(getattr(self, 'forbidden_monster_enabled', False)):
+            return
+        if self._forbidden_active:
+            return
+        try:
+            if now < float(getattr(self, '_forbidden_cooldown_until', 0.0) or 0.0):
+                return
+        except Exception:
+            pass
+        cmd = (getattr(self, 'forbidden_monster_command_profile', '') or '').strip()
+        if not cmd:
+            return
+        if not self._has_wait_waypoint_configured():
+            return
+        # 금지 클래스 집합 로드
+        forbidden_set: set[str] = set()
+        if self.data_manager and hasattr(self.data_manager, 'get_monster_attack_forbidden_map'):
+            try:
+                fmap = self.data_manager.get_monster_attack_forbidden_map() or {}
+                forbidden_set = {name for name, enabled in fmap.items() if enabled}
+            except Exception:
+                forbidden_set = set()
+        if not forbidden_set:
+            return
+        # YOLO 박스(class_name)만 확인
+        found = False
+        for item in (monsters or []):
+            if not isinstance(item, dict):
+                continue
+            src = str(item.get('source') or 'yolo')
+            if src != 'yolo':
+                continue
+            cname = str(item.get('class_name') or '')
+            if cname and cname in forbidden_set:
+                found = True
+                break
+        if not found:
+            return
+        # 트리거
+        self._trigger_forbidden_wait_flow(now)
+
+    def _trigger_forbidden_wait_flow(self, now: float) -> None:
+        if self._forbidden_active:
+            return
+        self._forbidden_active = True
+        ok = False
+        try:
+            ok = bool(self._start_other_player_wait_mode(now, flow='forbidden'))
+        except Exception as exc:
+            self.append_log(f"금지몬스터 대기모드 시작 실패: {exc}", 'warn')
+            ok = False
+        if not ok:
+            self._forbidden_active = False
+            return
+        try:
+            self.append_log("금지몬스터 감지 → 대기 모드 진입", 'info')
+        except Exception:
+            pass
+
+    def on_other_player_wait_arrived(self, source: str = '', waypoint_name: str = '') -> None:
+        """맵탭이 대기 웨이포인트 도착을 알릴 때 호출.
+        - 금지 플로우일 경우 자동제어 명령 1회 실행(reason='forbidden_monster')
+        """
+        try:
+            if str(source or '').lower() != 'hunt.forbidden':
+                return
+            if not self._forbidden_active:
+                return
+            cmd = (getattr(self, 'forbidden_monster_command_profile', '') or '').strip()
+            if not cmd:
+                # 명령 미지정: 즉시 종료 및 쿨다운 시작
+                self._schedule_forbidden_finish()
+                return
+            self._emit_control_command(cmd, reason='forbidden_monster')
+            self.append_log(f"금지몬스터 도착 → 명령 실행: '{cmd}'", 'info')
+        except Exception:
+            # 에러 시에도 종료 예약
+            self._schedule_forbidden_finish()
+
+    def _schedule_forbidden_finish(self) -> None:
+        """금지 플로우 종료(1초 후 대기모드 종료 + 10분 쿨다운)."""
+        try:
+            QTimer.singleShot(1000, lambda: self._finish_other_player_wait_mode(reason='forbidden_done'))
+        except Exception:
+            try:
+                self._finish_other_player_wait_mode(reason='forbidden_done')
+            except Exception:
+                pass
+        self._forbidden_active = False
+        try:
+            import time as _t
+            self._forbidden_cooldown_until = float(_t.time()) + 600.0
+        except Exception:
+            self._forbidden_cooldown_until = 0.0
 
     def _expire_nameplate_dead_zones(self, now: float) -> None:
         if not self._nameplate_dead_zones:
@@ -10503,7 +10709,24 @@ class HuntTab(QWidget):
             self.set_auto_hunt_enabled(bool(self.auto_request_checkbox.isChecked()))
         except Exception:
             pass
+        # [NEW] 금지몬스터 감지 설정 로드
+        try:
+            self._load_forbidden_monster_settings(data)
+        except Exception:
+            pass
         self._save_settings()
+
+    def _load_forbidden_monster_settings(self, data: dict) -> None:
+        """금지몬스터 감지 저장값 로드."""
+        try:
+            cfg = data.get('forbidden_monster', {}) if isinstance(data, dict) else {}
+            enabled = bool(cfg.get('enabled', False))
+            cmd = str(cfg.get('command_profile', '') or '')
+            self.forbidden_monster_enabled = enabled
+            self.forbidden_monster_command_profile = cmd
+        except Exception:
+            self.forbidden_monster_enabled = False
+            self.forbidden_monster_command_profile = ''
 
     def _save_settings(self) -> None:
         if getattr(self, '_suppress_settings_save', False):
@@ -10717,6 +10940,12 @@ class HuntTab(QWidget):
             'last_popup_position': list(self.last_popup_position) if self.last_popup_position else None,
             'last_popup_size': list(self.last_popup_size) if self.last_popup_size else None,
             'auto_shutdown': self._build_auto_shutdown_settings(),
+            # [NEW] 금지몬스터 감지 설정 저장
+            'forbidden_monster': {
+                'enabled': bool(getattr(self, 'forbidden_monster_enabled', False)),
+                'command_profile': str(getattr(self, 'forbidden_monster_command_profile', '') or ''),
+                'cooldown_sec': 600,
+            },
         }
 
         try:
