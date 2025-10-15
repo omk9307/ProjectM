@@ -840,6 +840,7 @@ class HuntTab(QWidget):
     def __init__(self) -> None:
         super().__init__()
         self.data_manager = None
+        self._auto_control_tab = None
         self.current_authority: str = "map"
         self.attack_skills: List[AttackSkill] = []
         self.buff_skills: List[BuffSkill] = []
@@ -7299,6 +7300,26 @@ class HuntTab(QWidget):
         if not normalized:
             return
 
+        # [긴급 경로] 모든 키 떼기는 즉시 라즈베리 측까지 반영되도록 전용 API를 우선 사용
+        try:
+            if normalized == '모든 키 떼기' and getattr(self, '_auto_control_tab', None):
+                act = getattr(self._auto_control_tab, 'api_emergency_stop_all', None)
+                if callable(act):
+                    reason_text = str(reason) if isinstance(reason, str) else 'hunt:release_all'
+                    act(reason=reason_text)
+                    # 중복 전송 방지를 위해 일반 경로(control_command_issued.emit)는 생략
+                    try:
+                        if reason_text:
+                            self._append_control_log(f"모든 키 떼기 -원인: {reason_text}")
+                        else:
+                            self._append_control_log("모든 키 떼기")
+                    except Exception:
+                        pass
+                    return
+        except Exception:
+            # 실패 시 기존 경로로 폴백
+            pass
+
         # [NEW] 금지 플로우 활성 중에는 '모든 키 떼기'와 금지 플로우 전용 명령만 허용
         try:
             if getattr(self, '_forbidden_active', False):
@@ -7393,6 +7414,10 @@ class HuntTab(QWidget):
             and self._is_log_enabled('control_log_checkbox')
         ):
             self._append_colored_text(self.control_log_view, line, color or "white")
+
+    def attach_auto_control_tab(self, auto_control_tab) -> None:
+        """자동 제어 탭 참조를 보관해 긴급 정지 경로에 사용한다."""
+        self._auto_control_tab = auto_control_tab
         self._append_keyboard_log(message, timestamp=timestamp, color=color)
 
     def _set_command_cooldown(self, delay_sec: float) -> None:

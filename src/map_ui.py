@@ -2061,6 +2061,17 @@ class MapTab(QWidget):
         if not command:
             return _wrap_result(False, "empty_command", {"message": "empty_command"})
 
+        # [긴급 경로] 모든 키 떼기는 즉시 라즈베리 측까지 반영되도록 전용 API를 우선 사용
+        try:
+            if str(command).strip() == '모든 키 떼기' and getattr(self, '_auto_control_tab', None):
+                act = getattr(self._auto_control_tab, 'api_emergency_stop_all', None)
+                if callable(act):
+                    act(reason=str(reason) if isinstance(reason, str) else 'map:release_all')
+                    return _wrap_result(True, 'emergency', {'path': 'api_emergency_stop_all'})
+        except Exception:
+            # 실패 시 기존 경로로 폴백
+            pass
+
         is_status_command = isinstance(reason, str) and reason.startswith('status:')
         is_urgent_command = isinstance(reason, str) and reason.startswith('urgent:')
         status_resource = ''

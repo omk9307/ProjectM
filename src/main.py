@@ -450,6 +450,13 @@ class MainWindow(QMainWindow):
                     self._on_hunt_detection_status_changed(current)
                 except Exception:
                     pass
+
+            # [NEW] 사냥탭에도 자동제어 탭 참조 제공(긴급 정지 경로 사용)
+            try:
+                if hasattr(hunt_tab, 'attach_auto_control_tab'):
+                    hunt_tab.attach_auto_control_tab(auto_control_tab)
+            except Exception:
+                pass
         else:
             print("경고: '사냥' 또는 '자동 제어' 탭을 찾을 수 없어 연결하지 못했습니다.")
 
