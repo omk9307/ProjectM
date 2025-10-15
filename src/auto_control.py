@@ -3045,8 +3045,88 @@ class AutoControlTab(QWidget):
         """라즈베리파이에 프로토콜 CLEAR_ALL(0x03)을 전송하여 상태를 강제 초기화."""
         if not self.ser or not self.ser.is_open:
             return
+        # 긴급 상황에서는 양방향 버퍼를 비워 이전 큐잉 데이터를 폐기하고 CLEAR_ALL을 우선 전송한다.
+        try:
+            # outbuf에 남아있을 수 있는 이전 명령을 폐기해 즉시 초기화가 반영되도록 함
+            self.ser.reset_output_buffer()
+        except Exception:
+            pass
+        try:
+            self.ser.reset_input_buffer()
+        except Exception:
+            pass
         # _send_command가 CLEAR_ALL 분기 처리함
         self._send_command(CMD_CLEAR_ALL, None)
+        # 가능한 즉시 전송되도록 flush 시도
+        try:
+            self.ser.flush()
+        except Exception:
+            pass
+
+    def api_emergency_stop_all(self, reason: str = 'esc:global_stop') -> None:
+        """모든 진행 중 동작을 즉시 중단하고 CLEAR_ALL을 강제 전송한다.
+
+        - 병렬/순차 시퀀스를 모두 중단
+        - 모든 오너의 키 강제 해제 및 상태 리셋
+        - 시리얼 버퍼 정리 후 CLEAR_ALL 전송(즉시 반영)
+        """
+        # 1) 병렬 시퀀스 강제 종료
+        try:
+            self._stop_all_parallel_sequences(forced=True)
+        except Exception:
+            pass
+
+        # 2) 메인 시퀀스 중단 및 강제 해제
+        try:
+            if getattr(self, 'is_sequence_running', False):
+                try:
+                    self.sequence_timer.stop()
+                except Exception:
+                    pass
+                try:
+                    self.sequence_watchdog.stop()
+                except Exception:
+                    pass
+                try:
+                    self._release_all_keys(force=True)
+                except Exception:
+                    pass
+                self.is_sequence_running = False
+                self.is_processing_step = False
+                self.current_sequence = []
+                self.current_sequence_index = 0
+                self.is_first_key_event_in_sequence = True
+        except Exception:
+            pass
+
+        # 3) 남은 오너 키도 전역 강제 해제 + UI 리셋
+        try:
+            for owner, key_set in list(self.sequence_owned_keys.items()):
+                for key_obj in list(key_set):
+                    try:
+                        self._release_key_for_owner(owner, key_obj, force=True)
+                    except Exception:
+                        pass
+            self.global_key_counts.clear()
+            try:
+                self.keyboard_state_reset.emit()
+            except Exception:
+                pass
+        except Exception:
+            pass
+
+        # 4) 라즈베리파이에 CLEAR_ALL 강제 전송(버퍼 정리 후)
+        try:
+            self._send_clear_all()
+        except Exception:
+            pass
+
+        # 5) 로그 표시
+        try:
+            msg = f"(모든 키 떼기) -원인: {reason}" if reason else "(모든 키 떼기)"
+            self.log_generated.emit(msg, "white")
+        except Exception:
+            pass
 
     # ===================
     # 공개 API (텔레그램 연동용)

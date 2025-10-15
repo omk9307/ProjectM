@@ -632,6 +632,13 @@ class MainWindow(QMainWindow):
             except Exception as exc:
                 print(f"경고: 맵 탭 강제 중단 중 오류: {exc}")
 
+        # ESC 효과: 사냥 권한을 명시적으로 반납하여 루프를 즉시 유휴 상태로 안정화
+        try:
+            if hunt_tab and getattr(hunt_tab, 'current_authority', None) == 'hunt' and hasattr(hunt_tab, 'release_control'):
+                hunt_tab.release_control(reason='esc_effect')
+        except Exception as exc:
+            print(f"경고: 사냥 권한 반납 중 오류: {exc}")
+
         # 탐지 정지 여부와 무관하게 항상 전체 해제를 전송하여 잔여 입력 방지
         self._schedule_release_all_keys()
 
@@ -643,9 +650,16 @@ class MainWindow(QMainWindow):
 
         def _send_release():
             try:
-                auto_control_tab.receive_control_command("모든 키 떼기", reason="esc:global_stop")
+                if hasattr(auto_control_tab, 'api_emergency_stop_all'):
+                    auto_control_tab.api_emergency_stop_all(reason="esc:global_stop")
+                elif hasattr(auto_control_tab, 'api_release_all_keys_global'):
+                    # 폴백: 전역 강제 해제 + CLEAR_ALL
+                    auto_control_tab.api_release_all_keys_global()
+                else:
+                    # 최후 폴백: 기존 경로 유지
+                    auto_control_tab.receive_control_command("모든 키 떼기", reason="esc:global_stop")
             except Exception as exc:
-                print(f"경고: '모든 키 떼기' 명령 전송 실패: {exc}")
+                print(f"경고: '모든 키 떼기' 전송 실패: {exc}")
 
         # ESC 즉시 정지 요구에 따라 지연 없이 즉시 전송
         _send_release()

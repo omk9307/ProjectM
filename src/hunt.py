@@ -3633,6 +3633,50 @@ class HuntTab(QWidget):
         self._update_other_player_action_summary()
         self._save_settings()
 
+    # ----- [NEW] 금지몬스터 경고음 재생 -----
+    def _play_forbidden_alert(self) -> None:
+        """금지몬스터 감지 시 색다른 경고음(짧은 멜로디)을 비동기 재생.
+
+        - Windows: winsound.Beep 시퀀스
+        - 기타: QGuiApplication.beep() 3회
+        """
+        import threading
+
+        def _worker():
+            try:
+                import os
+                if os.name == 'nt':
+                    try:
+                        import winsound, time as _t
+                        pattern = [
+                            (880, 120),  # A5
+                            (660, 100),  # E5
+                            (1460, 160), # F#6-ish
+                            (0, 60),
+                            (1460, 160),
+                        ]
+                        for freq, dur in pattern:
+                            if freq > 0:
+                                winsound.Beep(int(freq), int(dur))
+                            else:
+                                _t.sleep(dur / 1000.0)
+                        return
+                    except Exception:
+                        pass
+                # Fallback: Qt 기본 비프 3회
+                try:
+                    from PyQt6.QtGui import QGuiApplication
+                    import time as _t
+                    for _ in range(3):
+                        QGuiApplication.beep()
+                        _t.sleep(0.12)
+                except Exception:
+                    pass
+            except Exception:
+                pass
+
+        threading.Thread(target=_worker, daemon=True).start()
+
     def _configure_other_player_town_mode(self) -> None:
         QMessageBox.information(self, "마을 귀환", "마을 귀환 기능은 아직 구현되지 않았습니다.")
         self.shutdown_other_player_radio_town.setChecked(True)
@@ -7255,6 +7299,15 @@ class HuntTab(QWidget):
         if not normalized:
             return
 
+        # [NEW] 금지 플로우 활성 중에는 '모든 키 떼기'와 금지 플로우 전용 명령만 허용
+        try:
+            if getattr(self, '_forbidden_active', False):
+                reason_str = str(reason) if isinstance(reason, str) else ''
+                if normalized != '모든 키 떼기' and reason_str != 'forbidden_monster':
+                    return
+        except Exception:
+            pass
+
         reason_str = str(reason) if isinstance(reason, str) else ""
         is_status_command = reason_str.startswith('status:')
         is_urgent_command = reason_str.startswith('urgent:')
@@ -8458,6 +8511,31 @@ class HuntTab(QWidget):
                     characters = [DetectionBox(**vars(box)) for box in self._last_character_boxes]
                     if not characters_data and self._last_character_details:
                         characters_data = [dict(item) for item in self._last_character_details]
+                    dir_center_x: Optional[float] = None
+                    if getattr(self, "_direction_active", False) and self._latest_direction_match:
+                        last_seen = float(getattr(self, "_direction_last_seen_ts", 0.0))
+                        if now - last_seen <= self.DIRECTION_TIMEOUT_SEC:
+                            try:
+                                mx = float(self._latest_direction_match.get("x", 0.0))
+                                mw = float(self._latest_direction_match.get("width", 0.0))
+                                dir_center_x = mx + mw / 2.0
+                            except Exception:
+                                dir_center_x = None
+                    if dir_center_x is not None and characters:
+                        fw = 0.0
+                        try:
+                            perf_data = payload.get("perf") or {}
+                            fw = float(perf_data.get("frame_width", 0.0))
+                        except Exception:
+                            fw = 0.0
+                        for idx, box in enumerate(characters):
+                            width = float(box.width)
+                            new_x = dir_center_x - width / 2.0
+                            if fw > 1.0 and width > 0.0:
+                                new_x = max(0.0, min(new_x, fw - width))
+                            box.x = float(new_x)
+                            if idx < len(characters_data) and isinstance(characters_data[idx], dict):
+                                characters_data[idx]['x'] = float(new_x)
                     fallback_used = True
                 else:
                     self._reset_character_cache()
@@ -8922,6 +9000,15 @@ class HuntTab(QWidget):
                 break
         if not found:
             return
+        # 즉시 모든 키 떼기(쿨다운 중은 발행하지 않음) + 경고음
+        try:
+            self._issue_all_keys_release("forbidden_monster:detect")
+        except Exception:
+            pass
+        try:
+            self._play_forbidden_alert()
+        except Exception:
+            pass
         # 트리거
         self._trigger_forbidden_wait_flow(now)
 
@@ -8940,6 +9027,12 @@ class HuntTab(QWidget):
             return
         try:
             self.append_log("금지몬스터 감지 → 대기 모드 진입", 'info')
+            # 맵 탭 일반 로그에도 표시(가능 시)
+            if getattr(self, 'map_tab', None) and hasattr(self.map_tab, 'update_general_log'):
+                try:
+                    self.map_tab.update_general_log("[금지] 몬스터 감지 → 대기 모드 진입", "red")
+                except Exception:
+                    pass
         except Exception:
             pass
 

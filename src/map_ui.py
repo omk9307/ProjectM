@@ -5113,12 +5113,21 @@ class MapTab(QWidget):
         self._forced_detection_stop_reason = reason or 'manual'
 
     def toggle_anchor_detection(self, checked):
-            #  외부 호출(sender() is None) 또는 버튼 직접 클릭 시 상태를 동기화
+            #  외부 호출(sender() is None) 시에는 전달된 checked를 '목표 상태'로 정확히 반영한다.
+            #  (기존 버그: 외부 호출에서도 무조건 toggle()을 호출하여 정지 요청이 재시작으로 뒤집힘)
             if self.sender() is None:
-                # 외부에서 호출된 경우, 버튼의 상태를 프로그램적으로 토글
-                self.detect_anchor_btn.toggle()
-                # 토글된 후의 실제 상태를 checked 변수에 반영
-                checked = self.detect_anchor_btn.isChecked()
+                target = bool(checked)
+                try:
+                    current = bool(self.detect_anchor_btn.isChecked())
+                except Exception:
+                    current = False
+                if target != current:
+                    blocker = QSignalBlocker(self.detect_anchor_btn)
+                    try:
+                        self.detect_anchor_btn.setChecked(target)
+                    finally:
+                        del blocker
+                checked = target
             
             if checked:
                 # --- "maple" 창 탐색 및 활성화 ---
