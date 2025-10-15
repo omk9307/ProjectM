@@ -7764,6 +7764,11 @@ class HuntTab(QWidget):
             return
         if not getattr(cfg, 'enabled', True):
             return
+        # [정책 변경] 대기모드에서는 일반 HP 회복을 절대 실행하지 않음
+        # - 대기모드 전용 HP 회복만 허용(맵 탭에서 처리)
+        # - 긴급/초긴급 로직은 아래 별도 경로에서 계속 판단
+        if resource == 'hp' and bool(getattr(self, 'shutdown_other_player_wait_active', False)):
+            return
         threshold = getattr(cfg, 'recovery_threshold', None)
         if threshold is None:
             return
@@ -9080,7 +9085,7 @@ class HuntTab(QWidget):
             self._play_forbidden_alert()
         except Exception:
             pass
-        # [NEW] 텔레그램 알림(옵션) + 10분 쿨다운 즉시 시작
+        # [NEW] 텔레그램 알림(옵션) + 1분 쿨다운 즉시 시작
         try:
             if bool(getattr(self, 'forbidden_monster_telegram_alert', False)):
                 try:
@@ -9088,9 +9093,9 @@ class HuntTab(QWidget):
                     self._notify_telegram(msg)
                 except Exception:
                     pass
-            # 감지 시점 기준 10분 쿨다운 시작(중복 트리거 방지)
+            # 감지 시점 기준 1분 쿨다운 시작(중복 트리거 방지)
             try:
-                self._forbidden_cooldown_until = float(now) + 600.0
+                self._forbidden_cooldown_until = float(now) + 60.0
             except Exception:
                 self._forbidden_cooldown_until = 0.0
         except Exception:
@@ -9143,7 +9148,7 @@ class HuntTab(QWidget):
             self._schedule_forbidden_finish()
 
     def _schedule_forbidden_finish(self) -> None:
-        """금지 플로우 종료(1초 후 대기모드 종료 + 10분 쿨다운)."""
+        """금지 플로우 종료(1초 후 대기모드 종료 + 1분 쿨다운)."""
         try:
             QTimer.singleShot(1000, lambda: self._finish_other_player_wait_mode(reason='forbidden_done'))
         except Exception:
@@ -9157,7 +9162,7 @@ class HuntTab(QWidget):
             # [변경] 이미 감지 시점에 쿨다운이 설정되었다면 덮어쓰지 않음
             now_ts = float(_t.time())
             if float(getattr(self, '_forbidden_cooldown_until', 0.0) or 0.0) <= now_ts:
-                self._forbidden_cooldown_until = now_ts + 600.0
+                self._forbidden_cooldown_until = now_ts + 60.0
         except Exception:
             self._forbidden_cooldown_until = 0.0
 
@@ -11129,7 +11134,7 @@ class HuntTab(QWidget):
             'forbidden_monster': {
                 'enabled': bool(getattr(self, 'forbidden_monster_enabled', False)),
                 'command_profile': str(getattr(self, 'forbidden_monster_command_profile', '') or ''),
-                'cooldown_sec': 600,
+                'cooldown_sec': 60,
                 'telegram_alert': bool(getattr(self, 'forbidden_monster_telegram_alert', False)),
             },
         }

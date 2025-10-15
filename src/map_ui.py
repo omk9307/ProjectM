@@ -11758,6 +11758,11 @@ class MapTab(QWidget):
             return
         if not getattr(cfg, 'enabled', True):
             return
+        # [정책 변경] 대기모드에서는 일반 HP 회복을 절대 실행하지 않음
+        # - 대기모드 전용 HP 회복만 허용
+        # - 긴급/초긴급 로직은 별도 경로로 유지됨
+        if resource == 'hp' and self._is_other_player_wait_active():
+            return
         # [정책] HP 상태 명령은 권한을 가진 쪽에서만 발동(맵 링크 사용 시)
         if resource == 'hp' and getattr(self, 'map_link_enabled', False):
             if str(getattr(self, 'current_authority_owner', 'map')) != 'map':
