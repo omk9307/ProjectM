@@ -4253,6 +4253,12 @@ class HuntTab(QWidget):
             self.force_stop_detection(reason='other_player_wait_start')
         finally:
             self._syncing_with_map = previous_sync
+        # [추가] 대기 모드에서는 맵이 권한을 갖도록 즉시 반납
+        try:
+            if self.current_authority == 'hunt':
+                self.release_control(reason='OTHER_PLAYER_WAIT_START')
+        except Exception:
+            pass
         self.shutdown_other_player_wait_active = True
         self.shutdown_other_player_wait_started_at = started_at
         self.shutdown_other_player_elapsed.setText("대기 모드 진행 중")
@@ -11521,6 +11527,16 @@ class HuntTab(QWidget):
             self.request_control(request_reason)
 
     def _run_hunt_loop(self) -> None:
+        # 대기 모드(active)에서는 어떤 공격/버프도 수행하지 않고 즉시 유휴 상태를 유지한다.
+        try:
+            if bool(getattr(self, 'shutdown_other_player_wait_active', False)):
+                self._engage_active = False
+                self._cleanup_active = False
+                self._cleanup_hold_until_ts = 0.0
+                self._ensure_idle_keys("대기 모드 진행 중")
+                return
+        except Exception:
+            pass
         if not self.auto_hunt_enabled:
             # 교전/클린업 상태 초기화
             self._engage_active = False
