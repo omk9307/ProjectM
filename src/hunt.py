@@ -1052,6 +1052,8 @@ class HuntTab(QWidget):
         self.forbidden_monster_command_profile: str = ''
         self._forbidden_active: bool = False
         self._forbidden_cooldown_until: float = 0.0
+        # [NEW] 금지몬스터 감지 시 텔레그램 알림 여부(전역)
+        self.forbidden_monster_telegram_alert: bool = False
 
         self.teleport_settings = TeleportSettings()
         self.teleport_command_left = "텔레포트(좌)"
@@ -3556,6 +3558,13 @@ class HuntTab(QWidget):
         except Exception:
             pass
         forbid_layout.addWidget(forbid_cmd_combo, 1)
+        # [NEW] 금지몬스터 텔레그램 알림 전역 옵션
+        forbid_tg_chk = QCheckBox("텔레그램 알림", dialog)
+        try:
+            forbid_tg_chk.setChecked(bool(getattr(self, 'forbidden_monster_telegram_alert', False)))
+        except Exception:
+            forbid_tg_chk.setChecked(False)
+        forbid_layout.addWidget(forbid_tg_chk)
         layout.addRow("금지몬스터 감지", forbid_row)
 
         button_box = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel, dialog)
@@ -3627,9 +3636,11 @@ class HuntTab(QWidget):
         try:
             self.forbidden_monster_enabled = bool(forbid_enable_chk.isChecked())
             self.forbidden_monster_command_profile = str(forbid_cmd_combo.currentData() or '')
+            self.forbidden_monster_telegram_alert = bool(forbid_tg_chk.isChecked())
         except Exception:
             self.forbidden_monster_enabled = False
             self.forbidden_monster_command_profile = ''
+            self.forbidden_monster_telegram_alert = False
 
         self._update_other_player_action_summary()
         self._save_settings()
@@ -4285,12 +4296,19 @@ class HuntTab(QWidget):
             return
 
         try:
+            # [NEW] 자동 재시작 플래그: 수동 시작과 구분하여 쿨다운 초기화 방지
+            setattr(self, '_auto_restart_after_wait', True)
             self.detect_btn.setChecked(True)
             self._toggle_detection(True)
         except Exception as exc:
             self.append_log(f"대기 모드 후 탐지 재시작 실패: {exc}", "warn")
         else:
             self.append_log("대기 모드 종료 후 사냥 탐지를 재시작합니다.", "info")
+        finally:
+            try:
+                delattr(self, '_auto_restart_after_wait')
+            except Exception:
+                pass
 
     def _create_detection_group(self) -> QGroupBox:
         group = QGroupBox("탐지 실행")
@@ -4921,6 +4939,13 @@ class HuntTab(QWidget):
 
     def _toggle_detection(self, checked: bool) -> None:
         if checked:
+            # [NEW] 수동 시작 시 금지몬스터 쿨다운 초기화
+            try:
+                if not bool(getattr(self, '_auto_restart_after_wait', False)):
+                    self._forbidden_cooldown_until = 0.0
+                    self._forbidden_active = False
+            except Exception:
+                pass
             if not self.data_manager:
                 QMessageBox.warning(self, "오류", "학습 탭과의 연동이 필요합니다.")
                 self.detect_btn.setChecked(False)
@@ -9011,8 +9036,9 @@ class HuntTab(QWidget):
                 forbidden_set = set()
         if not forbidden_set:
             return
-        # YOLO 박스(class_name)만 확인
+        # YOLO 박스(class_name)만 확인 + 개별 신뢰도(또는 전역) 임계치 이상일 때만 유효
         found = False
+        found_name: str = ''
         for item in (monsters or []):
             if not isinstance(item, dict):
                 continue
@@ -9020,8 +9046,28 @@ class HuntTab(QWidget):
             if src != 'yolo':
                 continue
             cname = str(item.get('class_name') or '')
-            if cname and cname in forbidden_set:
+            if not (cname and cname in forbidden_set):
+                continue
+            # 신뢰도 임계치 계산(개별 신뢰도 우선, 없으면 전역 몬스터 신뢰도)
+            try:
+                score = float(item.get('score', 0.0))
+            except (TypeError, ValueError):
+                continue
+            try:
+                class_id = int(item.get('class_id', -1))
+            except (TypeError, ValueError):
+                class_id = -1
+            try:
+                overrides = getattr(self, '_active_monster_confidence_overrides', {}) or {}
+                if class_id in overrides:
+                    threshold = float(overrides.get(class_id, 0.0))
+                else:
+                    threshold = float(self.conf_monster_spinbox.value()) if hasattr(self, 'conf_monster_spinbox') else 0.85
+            except Exception:
+                threshold = 0.85
+            if score >= max(0.05, min(0.95, threshold)):
                 found = True
+                found_name = cname
                 break
         if not found:
             return
@@ -9032,6 +9078,21 @@ class HuntTab(QWidget):
             pass
         try:
             self._play_forbidden_alert()
+        except Exception:
+            pass
+        # [NEW] 텔레그램 알림(옵션) + 10분 쿨다운 즉시 시작
+        try:
+            if bool(getattr(self, 'forbidden_monster_telegram_alert', False)):
+                try:
+                    msg = f"금지몬스터 감지: '{found_name}' → 대기 모드 진입"
+                    self._notify_telegram(msg)
+                except Exception:
+                    pass
+            # 감지 시점 기준 10분 쿨다운 시작(중복 트리거 방지)
+            try:
+                self._forbidden_cooldown_until = float(now) + 600.0
+            except Exception:
+                self._forbidden_cooldown_until = 0.0
         except Exception:
             pass
         # 트리거
@@ -9093,7 +9154,10 @@ class HuntTab(QWidget):
         self._forbidden_active = False
         try:
             import time as _t
-            self._forbidden_cooldown_until = float(_t.time()) + 600.0
+            # [변경] 이미 감지 시점에 쿨다운이 설정되었다면 덮어쓰지 않음
+            now_ts = float(_t.time())
+            if float(getattr(self, '_forbidden_cooldown_until', 0.0) or 0.0) <= now_ts:
+                self._forbidden_cooldown_until = now_ts + 600.0
         except Exception:
             self._forbidden_cooldown_until = 0.0
 
@@ -10840,11 +10904,14 @@ class HuntTab(QWidget):
             cfg = data.get('forbidden_monster', {}) if isinstance(data, dict) else {}
             enabled = bool(cfg.get('enabled', False))
             cmd = str(cfg.get('command_profile', '') or '')
+            tg = bool(cfg.get('telegram_alert', False))
             self.forbidden_monster_enabled = enabled
             self.forbidden_monster_command_profile = cmd
+            self.forbidden_monster_telegram_alert = tg
         except Exception:
             self.forbidden_monster_enabled = False
             self.forbidden_monster_command_profile = ''
+            self.forbidden_monster_telegram_alert = False
 
     def _save_settings(self) -> None:
         if getattr(self, '_suppress_settings_save', False):
@@ -11063,6 +11130,7 @@ class HuntTab(QWidget):
                 'enabled': bool(getattr(self, 'forbidden_monster_enabled', False)),
                 'command_profile': str(getattr(self, 'forbidden_monster_command_profile', '') or ''),
                 'cooldown_sec': 600,
+                'telegram_alert': bool(getattr(self, 'forbidden_monster_telegram_alert', False)),
             },
         }
 

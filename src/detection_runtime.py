@@ -631,7 +631,8 @@ class DetectionThread(QThread):
 
                 scale_multiplier = 1.0 / self.scale_factor if self.scale_factor < 0.999 else 1.0
 
-                if len(result.boxes) > 0 and use_char_class:
+                # 클래스별 임계치(개별 신뢰도/전역값)를 캐릭터 YOLO 사용 여부와 무관하게 적용
+                if len(result.boxes) > 0:
                     char_indices_with_conf: List[tuple[int, float]] = []
                     other_indices: List[int] = []
                     for i, box in enumerate(result.boxes):
@@ -645,16 +646,20 @@ class DetectionThread(QThread):
                             y2 *= scale_multiplier
                         width = float(x2 - x1)
                         height = float(y2 - y1)
+                        # 캐릭터 클래스는 별도 처리(사용 중일 때만 의미 있음)
                         if cls_id == self.char_class_index:
                             if conf >= self.conf_char:
                                 char_indices_with_conf.append((i, conf))
-                        elif conf >= self._monster_threshold_for_class(cls_id):
+                            continue
+                        # 몬스터 클래스는 개별 신뢰도(없으면 전역)를 항상 적용
+                        if conf >= self._monster_threshold_for_class(cls_id):
                             if (
                                 width >= self.min_monster_box_size
                                 and height >= self.min_monster_box_size
                             ):
                                 other_indices.append(i)
                     final_indices: List[int] = []
+                    # 캐릭터 YOLO를 쓰는 경우에만 최상 신뢰도 1개만 유지(닉네임 미사용 시)
                     if char_indices_with_conf and nickname_info is None:
                         best_char_index = max(
                             char_indices_with_conf, key=lambda item: item[1]
