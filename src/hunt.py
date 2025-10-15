@@ -2482,19 +2482,22 @@ class HuntTab(QWidget):
             group.setSizePolicy(QSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed))
             direction_column.addWidget(group)
 
-        placeholder_column = QVBoxLayout()
-        placeholder_column.addStretch(1)
+        # 자동 대응 그룹을 방향/사다리 설정 우측 열에 배치
+        auto_shutdown_group = self._create_auto_shutdown_group()
+        auto_column = QVBoxLayout()
+        auto_column.setSpacing(10)
+        auto_column.addWidget(auto_shutdown_group)
+        auto_column.addStretch(1)
 
         config_grid.addLayout(range_column, 0, 0)
         config_grid.addLayout(direction_column, 0, 1)
-        config_grid.addLayout(placeholder_column, 0, 2)
-        config_grid.setColumnStretch(0, 1)
-        config_grid.setColumnStretch(1, 1)
+        config_grid.addLayout(auto_column, 0, 2)
+        # 가로 폭 비율: 범위/조건 : 방향/사다리 : 자동대응 = 2:2:1
+        config_grid.setColumnStretch(0, 2)
+        config_grid.setColumnStretch(1, 2)
         config_grid.setColumnStretch(2, 1)
 
         right_column.addLayout(config_grid)
-        auto_shutdown_group = self._create_auto_shutdown_group()
-        right_column.addWidget(auto_shutdown_group)
         right_column.addStretch(1)
 
         main_layout.addLayout(left_column, 1)

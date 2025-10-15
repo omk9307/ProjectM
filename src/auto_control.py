@@ -8,6 +8,10 @@ import random
 import copy
 from collections import defaultdict
 from pathlib import Path
+import sys
+import struct
+import subprocess
+import ctypes
 
 from PyQt6.QtWidgets import (
     QApplication, QWidget, QVBoxLayout, QHBoxLayout, QLabel, QListWidget, QPushButton,
@@ -27,6 +31,12 @@ BAUD_RATE = 115200
 CMD_PRESS = 0x01
 CMD_RELEASE = 0x02
 CMD_CLEAR_ALL = 0x03
+# Mouse command constants
+MOUSE_MOVE_REL = 0x10
+MOUSE_SMOOTH_MOVE = 0x11
+MOUSE_LEFT_CLICK = 0x12
+MOUSE_RIGHT_CLICK = 0x13
+MOUSE_DOUBLE_CLICK = 0x14
 BASE_DIR = Path(__file__).resolve().parents[1]
 
 #  모든 키의 표준 HID 코드를 담는 통합 맵
@@ -390,6 +400,11 @@ class AutoControlTab(QWidget):
         self.sequence_recovery_attempts = defaultdict(int)
 
         self.globally_pressed_keys = set()
+
+        # --- EPP(포인터 정확도 향상) 가드 ---
+        self._epp_guard_refcount = 0
+        self._epp_guard_main_active = False
+        self._epp_guard_parallel_active: dict[str, bool] = {}
         self.global_listener = None
         # [NEW] 현재 실행 중인 순차 시퀀스의 출처 태그 ("[맵]"/"[사냥]")
         self.current_command_source_tag = None
@@ -423,6 +438,13 @@ class AutoControlTab(QWidget):
         return f"parallel::{command_name}"
 
     def _notify_sequence_completed(self, success):
+        # Ensure EPP guard is released for main sequence if held
+        try:
+            if getattr(self, '_epp_guard_main_active', False):
+                self._epp_guard_release(tag=f"main:{self.current_command_name or ''}")
+                self._epp_guard_main_active = False
+        except Exception:
+            pass
         command_name = self.current_command_name
         if command_name:
             try:
@@ -590,7 +612,11 @@ class AutoControlTab(QWidget):
         editor_group = QGroupBox("선택된 액션 상세 편집")
         editor_layout = QFormLayout(editor_group)
         self.action_type_combo = QComboBox()
-        self.action_type_combo.addItems(["press", "release", "delay", "release_all", "release_specific"])
+        self.action_type_combo.addItems([
+            "press", "release", "delay", "release_all", "release_specific",
+            # mouse actions
+            "mouse_move_abs", "mouse_left_click", "mouse_right_click", "mouse_double_click",
+        ])
         self.action_type_combo.currentIndexChanged.connect(self._on_editor_type_changed)
         self.key_combo = QComboBox()
         self.key_combo.addItems(self.key_list_str)
@@ -606,14 +632,28 @@ class AutoControlTab(QWidget):
         delay_layout.addWidget(self.min_delay_spin)
         delay_layout.addWidget(QLabel("~"))
         delay_layout.addWidget(self.max_delay_spin)
+        # Mouse absolute move editor
+        self.mouse_move_widget = QWidget()
+        mm_layout = QHBoxLayout(self.mouse_move_widget)
+        mm_layout.setContentsMargins(0,0,0,0)
+        self.mouse_x_spin = QSpinBox(); self.mouse_x_spin.setRange(-32768, 32767)
+        self.mouse_y_spin = QSpinBox(); self.mouse_y_spin.setRange(-32768, 32767)
+        self.mouse_dur_spin = QSpinBox(); self.mouse_dur_spin.setRange(40, 5000); self.mouse_dur_spin.setSuffix(" ms"); self.mouse_dur_spin.setValue(240)
+        mm_layout.addWidget(QLabel("x:")); mm_layout.addWidget(self.mouse_x_spin)
+        mm_layout.addWidget(QLabel("y:")); mm_layout.addWidget(self.mouse_y_spin)
+        mm_layout.addWidget(QLabel("dur:")); mm_layout.addWidget(self.mouse_dur_spin)
         editor_layout.addRow("타입:", self.action_type_combo)
         editor_layout.addRow("키:", self.key_combo)
         editor_layout.addRow("지연 시간:", self.delay_widget)
+        editor_layout.addRow("마우스 이동:", self.mouse_move_widget)
         editor_layout.addRow("", self.force_checkbox)
         self.action_type_combo.currentTextChanged.connect(self._update_action_from_editor)
         self.key_combo.currentTextChanged.connect(self._update_action_from_editor)
         self.min_delay_spin.valueChanged.connect(self._update_action_from_editor)
         self.max_delay_spin.valueChanged.connect(self._update_action_from_editor)
+        self.mouse_x_spin.valueChanged.connect(self._update_action_from_editor)
+        self.mouse_y_spin.valueChanged.connect(self._update_action_from_editor)
+        self.mouse_dur_spin.valueChanged.connect(self._update_action_from_editor)
         self.force_checkbox.toggled.connect(self._update_action_from_editor)
         editor_group.setEnabled(False)
         return editor_group
@@ -1525,9 +1565,12 @@ class AutoControlTab(QWidget):
         action_type = self.action_type_combo.currentText()
         is_delay = (action_type == 'delay')
         is_key_based = action_type in ['press', 'release', 'release_specific']
+        is_mouse_move_abs = (action_type == 'mouse_move_abs')
+        is_mouse_click = action_type in ['mouse_left_click', 'mouse_right_click', 'mouse_double_click']
         
         self.key_combo.setVisible(is_key_based)
         self.delay_widget.setVisible(is_delay)
+        self.mouse_move_widget.setVisible(is_mouse_move_abs)
         
         form_layout = self.editor_group.layout()
         label_for_key = form_layout.labelForField(self.key_combo)
@@ -1535,8 +1578,11 @@ class AutoControlTab(QWidget):
             
         label_for_delay = form_layout.labelForField(self.delay_widget)
         if label_for_delay: label_for_delay.setVisible(is_delay)
+        label_for_mouse = form_layout.labelForField(self.mouse_move_widget)
+        if label_for_mouse: label_for_mouse.setVisible(is_mouse_move_abs)
 
         if hasattr(self, 'force_checkbox'):
+            # force는 키 기반에서만 사용
             self.force_checkbox.setVisible(is_key_based)
             self.force_checkbox.setEnabled(is_key_based)
             label_for_force = form_layout.labelForField(self.force_checkbox)
@@ -1557,6 +1603,20 @@ class AutoControlTab(QWidget):
         elif action_type == 'delay':
             self.min_delay_spin.setValue(action_data.get("min_ms", 0))
             self.max_delay_spin.setValue(action_data.get("max_ms", 0))
+            if hasattr(self, 'force_checkbox'):
+                self.force_checkbox.blockSignals(True)
+                self.force_checkbox.setChecked(False)
+                self.force_checkbox.blockSignals(False)
+        elif action_type == 'mouse_move_abs':
+            self.mouse_x_spin.setValue(int(action_data.get("x", 0)))
+            self.mouse_y_spin.setValue(int(action_data.get("y", 0)))
+            self.mouse_dur_spin.setValue(int(action_data.get("dur_ms", 240)))
+            if hasattr(self, 'force_checkbox'):
+                self.force_checkbox.blockSignals(True)
+                self.force_checkbox.setChecked(False)
+                self.force_checkbox.blockSignals(False)
+        else:
+            # mouse click types
             if hasattr(self, 'force_checkbox'):
                 self.force_checkbox.blockSignals(True)
                 self.force_checkbox.setChecked(False)
@@ -1583,6 +1643,10 @@ class AutoControlTab(QWidget):
                 new_action_data["force"] = True
         elif action_type == 'delay':
             new_action_data["min_ms"] = self.min_delay_spin.value(); new_action_data["max_ms"] = self.max_delay_spin.value()
+        elif action_type == 'mouse_move_abs':
+            new_action_data["x"] = int(self.mouse_x_spin.value())
+            new_action_data["y"] = int(self.mouse_y_spin.value())
+            new_action_data["dur_ms"] = int(self.mouse_dur_spin.value())
         self.mappings[command_text][row] = new_action_data
         self._update_action_item_text(action_item, new_action_data)
 
@@ -1595,6 +1659,10 @@ class AutoControlTab(QWidget):
         elif type == "delay": step_text = f"지연: {action_data.get('min_ms', 0)}ms ~ {action_data.get('max_ms', 0)}ms"
         elif type == "release_all": step_text = "모든 키 떼기"
         elif type == "release_specific": step_text = f"{force_prefix}특정 키 떼기: {action_data.get('key_str', 'N/A')}"
+        elif type == "mouse_move_abs": step_text = f"마우스 이동(절대): x={action_data.get('x', 0)}, y={action_data.get('y', 0)}, dur={action_data.get('dur_ms', 0)}ms"
+        elif type == "mouse_left_click": step_text = "마우스 좌클릭"
+        elif type == "mouse_right_click": step_text = "마우스 우클릭"
+        elif type == "mouse_double_click": step_text = "마우스 더블클릭"
         item.setText(step_text)
 
     def _populate_action_sequence_list(self, command_text):
@@ -1862,6 +1930,12 @@ class AutoControlTab(QWidget):
             print("[AutoControl] 기존 시리얼 연결을 해제했습니다.")
         try:
             self.ser = serial.Serial(SERIAL_PORT, BAUD_RATE, timeout=1)
+            try:
+                # 일부 환경에서 필요
+                self.ser.dtr = True
+                self.ser.rts = True
+            except Exception:
+                pass
             self.status_label.setText(f"성공: {SERIAL_PORT}에 연결되었습니다.")
             print(f"[AutoControl] {SERIAL_PORT}에 연결되었습니다.")
         except serial.SerialException as e:
@@ -1922,6 +1996,110 @@ class AutoControlTab(QWidget):
             except serial.SerialException as e:
                 print(f"[AutoControl] CLEAR_ALL 전송 실패: {e}")
                 self.connect_to_pi()
+
+    # ---------------------------
+    # Mouse helpers (COM transmit)
+    # ---------------------------
+    def _send_mouse_smooth_move(self, dx_counts: int, dy_counts: int, dur_ms: int) -> bool:
+        if not self.ser or not self.ser.is_open:
+            return False
+        # int16 LE 범위 클램프
+        def clamp16(v: int) -> int:
+            return max(-32768, min(32767, int(v)))
+        dx = clamp16(dx_counts)
+        dy = clamp16(dy_counts)
+        dur = max(10, min(5000, int(dur_ms)))
+        try:
+            payload = bytes([MOUSE_SMOOTH_MOVE]) + struct.pack('<hhh', dx, dy, dur)
+            self.ser.write(payload)
+            return True
+        except Exception as e:
+            print(f"[AutoControl] 마우스 이동 전송 실패: {e}")
+            return False
+
+    def _send_mouse_click_cmd(self, which: str) -> bool:
+        if not self.ser or not self.ser.is_open:
+            return False
+        cmd = None
+        if which == 'left':
+            cmd = MOUSE_LEFT_CLICK
+        elif which == 'right':
+            cmd = MOUSE_RIGHT_CLICK
+        elif which == 'double':
+            cmd = MOUSE_DOUBLE_CLICK
+        if cmd is None:
+            return False
+        try:
+            self.ser.write(bytes([cmd]))
+            return True
+        except Exception as e:
+            print(f"[AutoControl] 마우스 클릭 전송 실패: {e}")
+            return False
+
+    # ---------------------------
+    # Cursor helpers (Windows)
+    # ---------------------------
+    def _get_cursor_pos(self) -> tuple[int, int]:
+        try:
+            class POINT(ctypes.Structure):
+                _fields_ = [("x", ctypes.c_long), ("y", ctypes.c_long)]
+            pt = POINT()
+            if ctypes.windll.user32.GetCursorPos(ctypes.byref(pt)):
+                return int(pt.x), int(pt.y)
+        except Exception:
+            pass
+        return (0, 0)
+
+    # ---------------------------
+    # EPP guard helpers
+    # ---------------------------
+    def _epp_guard_acquire(self, tag: str) -> bool:
+        """Acquire EPP OFF for a sequence. Returns True on success.
+        Uses refcount so nested acquires are safe. Windows only.
+        """
+        if sys.platform != 'win32':
+            # 비Windows에서는 스킵 (정확도 저하 가능성 경고만)
+            self.log_generated.emit("[EPP] Windows가 아니므로 EPP 토글을 건너뜁니다.", "orange")
+            return True
+        try:
+            if self._epp_guard_refcount == 0:
+                script_path = (BASE_DIR / 'scripts' / 'epp_toggle.py').resolve()
+                proc = subprocess.run([sys.executable, str(script_path), 'off'], capture_output=True, text=True)
+                if proc.returncode != 0:
+                    self.log_generated.emit(f"[EPP] OFF 실패: {proc.stdout or proc.stderr}", "red")
+                    return False
+                self.log_generated.emit("[EPP] OFF 적용(획득)", "cyan")
+            self._epp_guard_refcount += 1
+            return True
+        except Exception as e:
+            self.log_generated.emit(f"[EPP] OFF 예외: {e}", "red")
+            return False
+
+    def _epp_guard_release(self, tag: str) -> None:
+        if sys.platform != 'win32':
+            return
+        try:
+            if self._epp_guard_refcount > 0:
+                self._epp_guard_refcount -= 1
+                if self._epp_guard_refcount == 0:
+                    script_path = (BASE_DIR / 'scripts' / 'epp_toggle.py').resolve()
+                    proc = subprocess.run([sys.executable, str(script_path), 'restore'], capture_output=True, text=True)
+                    if proc.returncode == 0:
+                        self.log_generated.emit("[EPP] 복구(해제)", "cyan")
+                    else:
+                        self.log_generated.emit(f"[EPP] 복구 실패: {proc.stdout or proc.stderr}", "red")
+        except Exception as e:
+            self.log_generated.emit(f"[EPP] 복구 예외: {e}", "red")
+
+    def _sequence_contains_mouse(self, sequence: list) -> bool:
+        try:
+            for step in sequence or []:
+                t = (step or {}).get('type')
+                if t in ('mouse_move_abs', 'mouse_left_click', 'mouse_right_click', 'mouse_double_click'):
+                    return True
+        except Exception:
+            pass
+        return False
 
     def _get_key_set_for_owner(self, owner: str) -> set:
         key_set = self.sequence_owned_keys.get(owner)
@@ -2205,6 +2383,22 @@ class AutoControlTab(QWidget):
             self._release_all_keys()
             self._notify_sequence_completed(False)
 
+        # EPP 가드: 시퀀스에 마우스 명령이 있으면 필수로 OFF 적용
+        try:
+            if self._sequence_contains_mouse(sequence):
+                ok = self._epp_guard_acquire(tag=f"main:{command_name}")
+                if not ok:
+                    # 시작 거부
+                    msg = f"[EPP] 적용 실패로 '{command_name}' 실행을 중단합니다."
+                    if source_tag:
+                        msg = f"{source_tag} {msg}"
+                    self.log_generated.emit(msg, "red")
+                    return
+                self._epp_guard_main_active = True
+        except Exception as e:
+            self.log_generated.emit(f"[EPP] 가드 준비 중 예외: {e}", "red")
+            return
+
         # 이제 새 시퀀스 초기화
         self.status_label.setText(f"'{command_name}' 실행 중.")
         if self.console_log_checkbox.isChecked():
@@ -2342,7 +2536,44 @@ class AutoControlTab(QWidget):
                 if self.current_command_source_tag:
                     msg = f"{self.current_command_source_tag} {msg}"
                 self.log_generated.emit(msg, "gray")
-        
+            
+            elif action_type == "mouse_move_abs":
+                # 절대좌표 목표 → 현재 좌표 → Δ 계산 후 전송. 자동 대기 없음.
+                try:
+                    tx = int(step.get('x', 0)); ty = int(step.get('y', 0))
+                    dur = int(step.get('dur_ms', 240))
+                except Exception:
+                    tx, ty, dur = 0, 0, 240
+                cx, cy = self._get_cursor_pos()
+                dx = int(tx) - int(cx)
+                dy = int(ty) - int(cy)
+                sent = self._send_mouse_smooth_move(dx, dy, dur)
+                label = f"(마우스 이동: abs→Δ=({dx},{dy}), dur={dur}ms)"
+                if self.current_command_source_tag:
+                    label = f"{self.current_command_source_tag} {label}"
+                self.log_generated.emit(label, "white" if sent else "red")
+
+            elif action_type == "mouse_left_click":
+                sent = self._send_mouse_click_cmd('left')
+                label = "(마우스 좌클릭)"
+                if self.current_command_source_tag:
+                    label = f"{self.current_command_source_tag} {label}"
+                self.log_generated.emit(label, "white" if sent else "red")
+
+            elif action_type == "mouse_right_click":
+                sent = self._send_mouse_click_cmd('right')
+                label = "(마우스 우클릭)"
+                if self.current_command_source_tag:
+                    label = f"{self.current_command_source_tag} {label}"
+                self.log_generated.emit(label, "white" if sent else "red")
+
+            elif action_type == "mouse_double_click":
+                sent = self._send_mouse_click_cmd('double')
+                label = "(마우스 더블클릭)"
+                if self.current_command_source_tag:
+                    label = f"{self.current_command_source_tag} {label}"
+                self.log_generated.emit(label, "white" if sent else "red")
+
             elif action_type == "release_all":
                 self._release_all_keys(force=True)
                 # '모든 키 떼기' 명령일 때 라즈베리에 CLEAR_ALL 송신으로 하드 초기화
@@ -2416,6 +2647,23 @@ class AutoControlTab(QWidget):
                 parts = clean_reason.split('|', 1)
                 reason_display = parts[1].strip() if len(parts) == 2 else ''
         friendly_reason = self._translate_reason_for_logging(clean_reason, reason_display)
+        # EPP 가드: 병렬 시퀀스에도 동일 적용
+        epp_acquired = False
+        try:
+            if self._sequence_contains_mouse(sequence_copy):
+                ok = self._epp_guard_acquire(tag=f"parallel:{command_name}")
+                if not ok:
+                    msg = f"[{command_name}] [EPP] 적용 실패로 실행을 중단합니다."
+                    if source_tag:
+                        msg = f"{source_tag} {msg}"
+                    self.log_generated.emit(msg, "red")
+                    return
+                epp_acquired = True
+                self._epp_guard_parallel_active[command_name] = True
+        except Exception as e:
+            self.log_generated.emit(f"[{command_name}] [EPP] 가드 준비 중 예외: {e}", "red")
+            return
+
         state = {
             "command_name": command_name,
             "sequence": sequence_copy,
@@ -2427,6 +2675,7 @@ class AutoControlTab(QWidget):
             "owner": owner,
             "is_processing": False,
             "source_tag": source_tag if isinstance(source_tag, str) else None,
+            "epp_guard": epp_acquired,
         }
         self.active_parallel_sequences[command_name] = state
 
@@ -2522,6 +2771,42 @@ class AutoControlTab(QWidget):
                     msg = f"{state['source_tag']} {msg}"
                 self.log_generated.emit(msg, "gray")
 
+            elif action_type == "mouse_move_abs":
+                try:
+                    tx = int(step.get('x', 0)); ty = int(step.get('y', 0))
+                    dur = int(step.get('dur_ms', 240))
+                except Exception:
+                    tx, ty, dur = 0, 0, 240
+                cx, cy = self._get_cursor_pos()
+                dx = int(tx) - int(cx)
+                dy = int(ty) - int(cy)
+                sent = self._send_mouse_smooth_move(dx, dy, dur)
+                label = f"[{command_name}] (마우스 이동: abs→Δ=({dx},{dy}), dur={dur}ms)"
+                if state.get("source_tag"):
+                    label = f"{state['source_tag']} {label}"
+                self.log_generated.emit(label, "white" if sent else "red")
+
+            elif action_type == "mouse_left_click":
+                sent = self._send_mouse_click_cmd('left')
+                label = f"[{command_name}] (마우스 좌클릭)"
+                if state.get("source_tag"):
+                    label = f"{state['source_tag']} {label}"
+                self.log_generated.emit(label, "white" if sent else "red")
+
+            elif action_type == "mouse_right_click":
+                sent = self._send_mouse_click_cmd('right')
+                label = f"[{command_name}] (마우스 우클릭)"
+                if state.get("source_tag"):
+                    label = f"{state['source_tag']} {label}"
+                self.log_generated.emit(label, "white" if sent else "red")
+
+            elif action_type == "mouse_double_click":
+                sent = self._send_mouse_click_cmd('double')
+                label = f"[{command_name}] (마우스 더블클릭)"
+                if state.get("source_tag"):
+                    label = f"{state['source_tag']} {label}"
+                self.log_generated.emit(label, "white" if sent else "red")
+
             elif action_type == "release_all":
                 self._release_all_for_owner(owner, force=True)
                 # 병렬에서도 동일하게 '모든 키 떼기'에 한해 CLEAR_ALL 전송
@@ -2577,6 +2862,14 @@ class AutoControlTab(QWidget):
         self.sequence_owned_keys.pop(owner, None)
         self.active_parallel_sequences.pop(command_name, None)
 
+        # EPP 가드 해제
+        try:
+            if bool(state.get("epp_guard")):
+                self._epp_guard_parallel_active.pop(command_name, None)
+                self._epp_guard_release(tag=f"parallel:{command_name}")
+        except Exception:
+            pass
+
         display_reason = state.get("reason_display") or state.get("reason")
         suffix = f" -원인: {display_reason}" if display_reason else ""
         if success:
@@ -2612,6 +2905,14 @@ class AutoControlTab(QWidget):
         owner = state.get("owner", self._parallel_owner(command_name))
         self._release_all_for_owner(owner, force=forced)
         self.sequence_owned_keys.pop(owner, None)
+
+        # EPP 가드 해제
+        try:
+            if bool(state.get("epp_guard")):
+                self._epp_guard_parallel_active.pop(command_name, None)
+                self._epp_guard_release(tag=f"parallel:{command_name}")
+        except Exception:
+            pass
 
         if forced:
             msg = f"[{command_name}] 병렬 시퀀스를 강제 종료했습니다."
@@ -3114,3 +3415,11 @@ class AutoControlTab(QWidget):
             time.sleep(0.1)
             self.ser.close()
             print("시리얼 포트 연결을 해제했습니다.")
+        # EPP 가드 남아있으면 안전 복구
+        try:
+            while getattr(self, '_epp_guard_refcount', 0) > 0:
+                self._epp_guard_release(tag='cleanup')
+            self._epp_guard_main_active = False
+            self._epp_guard_parallel_active.clear()
+        except Exception:
+            pass
