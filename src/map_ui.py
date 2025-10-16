@@ -857,6 +857,11 @@ class MapTab(QWidget):
             self._wait_nav_kick_suppress_until = 0.0
             # [개선] 걷기 보강 전송 최소 간격(중복 전송 억제)
             self._wait_nav_last_walk_sent_at = 0.0
+            # [신규] 대기모드 안전 재전송(Heartbeat) 파라미터
+            #  - safety_resend_interval: 1초마다 최대 1회
+            #  - stale_held_timeout: 방향키가 눌린 것으로 감지되어도 실제 움직임이 없으면 1.2초 후 강제 재전송 허용
+            self._wait_nav_safety_resend_interval_sec = 1.0
+            self._wait_nav_stale_held_timeout_sec = 1.2
 
             #  탐지 시작 시간을 기록하기 위한 변수
             self.detection_start_time = 0
@@ -7263,6 +7268,47 @@ class MapTab(QWidget):
                 if can_reinforce_walk and (now - self._last_wait_nav_log_at > 1.5):
                     self.update_general_log(f"[대기 이동] 걷기({direction_symbol}) 유지.", "gray")
                     self._last_wait_nav_log_at = now
+
+            # --- [신규] 조건부 안전 재전송(1초 간격) ---
+            #  - 방향키 눌림 감지가 있어도 실제 이동이 없다면 stale 로 간주하고 재전송 허용
+            #  - 사다리/점프 등 보행 차단 상태에서는 전송 금지
+            try:
+                has_map_authority = str(getattr(self, 'current_authority_owner', 'map')) == 'map'
+            except Exception:
+                has_map_authority = True
+
+            safety_interval = float(getattr(self, '_wait_nav_safety_resend_interval_sec', 1.0) or 1.0)
+            stale_timeout = float(getattr(self, '_wait_nav_stale_held_timeout_sec', 1.2) or 1.2)
+            last_walk = float(getattr(self, '_wait_nav_last_walk_sent_at', 0.0) or 0.0)
+            vx = abs(float(self._compute_horizontal_velocity() if hasattr(self, '_compute_horizontal_velocity') else 0.0))
+
+            # 목표까지의 X 거리(너무 근접하면 재전송 불필요)
+            abs_dx = abs(float(dx)) if 'dx' in locals() else 0.0
+
+            # 방향키 눌림 상태 감지(실패 시 보수적으로 False)
+            try:
+                held_same_dir = bool(self._is_walk_direction_active(direction_symbol))
+            except Exception:
+                held_same_dir = False
+
+            safety_conditions = (
+                has_map_authority and
+                context.get('phase') == 'wait_travel' and
+                can_reinforce_walk and  # 준비/점프 등 차단 상태 제외
+                abs_dx > 2.0 and        # 목표에 너무 가까우면 생략
+                (now - last_walk) >= safety_interval and
+                (
+                    vx <= 0.05 or       # 최근 수 프레임 동안 거의 이동 없음
+                    (held_same_dir and (now - last_walk) >= stale_timeout)  # 눌림 감지됐지만 stale
+                )
+            )
+
+            if safety_conditions:
+                if self._emit_control_command(walk_command, "other_player_wait:safety_resend"):
+                    self._wait_nav_last_walk_sent_at = now
+                    if now - self._last_wait_nav_log_at > 1.5:
+                        self.update_general_log(f"[대기 이동] 안전 재전송 {direction_symbol}.", "gray")
+                        self._last_wait_nav_log_at = now
         except Exception:
             pass
 
