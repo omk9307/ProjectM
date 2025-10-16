@@ -8692,6 +8692,70 @@ class HuntTab(QWidget):
                         self._minimap_char_overlay_box = None
                     except Exception:
                         pass
+                    # [NEW] 온라인 캘리브레이션 샘플 업데이트(닉네임 검출 시만)
+                    try:
+                        # 기능 토글/연동 상태 확인
+                        try:
+                            from map_hunt_calibration import is_enabled as _calib_enabled
+                            if not bool(_calib_enabled()):
+                                raise RuntimeError('calibration disabled')
+                        except Exception:
+                            raise RuntimeError('calibration disabled')
+
+                        if not bool(getattr(self, 'map_link_enabled', False)):
+                            raise RuntimeError('map link disabled')
+
+                        # 맵 전역 X
+                        map_tab = getattr(self, 'map_tab', None)
+                        if not map_tab or not hasattr(map_tab, 'api_export_minimap_view_state'):
+                            raise RuntimeError('no map tab')
+                        state = map_tab.api_export_minimap_view_state()
+                        pos = state.get('final_player_pos') if isinstance(state, dict) else None
+                        if pos is None:
+                            raise RuntimeError('no minimap pos')
+                        if hasattr(pos, 'x'):
+                            map_x = float(pos.x())
+                        elif isinstance(pos, dict) and 'x' in pos:
+                            map_x = float(pos['x'])
+                        else:
+                            raise RuntimeError('no minimap x')
+
+                        # ROI/프레임폭/관측 중심X
+                        roi = None
+                        try:
+                            roi = self.api_get_active_capture_region()
+                        except Exception:
+                            roi = None
+                        frame_w = None
+                        try:
+                            info = self.api_get_current_character_position()
+                            if isinstance(info, dict):
+                                frame_w = info.get('frame_width')
+                        except Exception:
+                            frame_w = None
+                        x_obs = float(nickname_box.x) + float(nickname_box.width) / 2.0
+
+                        # 업데이트 호출
+                        try:
+                            from minimap_online_calibrator import update as _calib_update
+                            saved_now = _calib_update(getattr(map_tab, 'active_profile_name', None) or '', roi, map_x, x_obs, frame_w)
+                            if saved_now:
+                                try:
+                                    from map_hunt_calibration import find_calibration as _find_calib
+                                    profile_name = getattr(map_tab, 'active_profile_name', None)
+                                    calib = _find_calib(profile_name or '', roi)
+                                    if calib:
+                                        a_logged, b_logged = calib
+                                        self.append_log(f"[캘리브레이션] 자동 저장 완료: a={a_logged:.5f}, b={b_logged:.2f}", 'info')
+                                    else:
+                                        self.append_log("[캘리브레이션] 자동 저장 완료", 'info')
+                                except Exception:
+                                    self.append_log("[캘리브레이션] 자동 저장 완료", 'info')
+                        except Exception:
+                            pass
+                    except Exception:
+                        # 조건 미충족/실패 시 조용히 무시
+                        pass
                 else:
                     self._latest_nickname_box = None
             else:
@@ -9028,13 +9092,22 @@ class HuntTab(QWidget):
         except Exception:
             roi = None
         calib = None
+        # [NEW] 온라인 추정 우선 사용, 없으면 저장값 사용
         try:
-            calib = find_calibration(profile, roi)
+            from minimap_online_calibrator import get as _calib_get
+            online = _calib_get(profile, roi)
         except Exception:
-            calib = None
-        if not calib:
-            return
-        a, b = calib
+            online = None
+        if online is not None:
+            a, b = online
+        else:
+            try:
+                calib = find_calibration(profile, roi)
+            except Exception:
+                calib = None
+            if not calib:
+                return
+            a, b = calib
         try:
             fw = float(perf_data.get('frame_width', 0.0)) if isinstance(perf_data, dict) else 0.0
         except Exception:
@@ -9110,13 +9183,22 @@ class HuntTab(QWidget):
         except Exception:
             roi = None
         calib = None
+        # [NEW] 온라인 추정 우선 사용, 없으면 저장값 사용
         try:
-            calib = find_calibration(profile, roi)
+            from minimap_online_calibrator import get as _calib_get
+            online = _calib_get(profile, roi)
         except Exception:
-            calib = None
-        if not calib:
-            return False
-        a, b = calib
+            online = None
+        if online is not None:
+            a, b = online
+        else:
+            try:
+                calib = find_calibration(profile, roi)
+            except Exception:
+                calib = None
+            if not calib:
+                return False
+            a, b = calib
         try:
             fw = float(perf_data.get('frame_width', 0.0)) if isinstance(perf_data, dict) else 0.0
         except Exception:

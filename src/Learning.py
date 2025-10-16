@@ -6320,11 +6320,13 @@ class LearningTab(QWidget):
         self.calib_right_btn = QPushButton("우측 끝")
         self.calib_save_btn = QPushButton("저장/적용")
         self.calib_reset_btn = QPushButton("초기화")
+        self.calib_relearn_btn = QPushButton("수동 재학습")
         self.calib_left_btn.clicked.connect(lambda: self._capture_calibration_point('left'))
         self.calib_right_btn.clicked.connect(lambda: self._capture_calibration_point('right'))
         self.calib_save_btn.clicked.connect(self._save_calibration_clicked)
         self.calib_reset_btn.clicked.connect(self._reset_calibration_clicked)
-        for b in (self.calib_left_btn, self.calib_right_btn, self.calib_save_btn, self.calib_reset_btn):
+        self.calib_relearn_btn.clicked.connect(self._manual_relearn_clicked)
+        for b in (self.calib_left_btn, self.calib_right_btn, self.calib_save_btn, self.calib_reset_btn, self.calib_relearn_btn):
             btn_row.addWidget(b)
         btn_row.addStretch(1)
         calib_layout.addLayout(btn_row)
@@ -6517,6 +6519,29 @@ class LearningTab(QWidget):
             pass
         state_text = 'ON' if checked else 'OFF'
         self.log_viewer.append(f"[캘리브레이션] 미니맵 X 보정 사용: {state_text}")
+
+    def _manual_relearn_clicked(self) -> None:
+        """수동 재학습: 저장된 (a,b) 삭제 + 온라인 상태 초기화."""
+        profile, roi = self._get_current_profile_and_roi()
+        if not profile or not roi:
+            self.log_viewer.append("[캘리브레이션] 재학습 실패: 프로필/ROI를 확인할 수 없습니다.")
+            return
+        # 저장된 보정 삭제
+        try:
+            from map_hunt_calibration import clear_calibration
+            ok, msg = clear_calibration(profile, roi)
+            color = 'green' if ok else 'red'
+            self.log_viewer.append(f"<font color='{color}'>[캘리브레이션] {msg}</font>")
+        except Exception as exc:
+            self.log_viewer.append(f"[캘리브레이션] 재학습 실패: {exc}")
+            return
+        # 온라인 상태 초기화
+        try:
+            from minimap_online_calibrator import reset as _online_reset
+            _online_reset(profile, roi)
+        except Exception:
+            pass
+        self.log_viewer.append("[캘리브레이션] 온라인 보정 상태를 초기화했습니다. 재수집 대기…")
 
     def update_status_message(self, message):
         """상태바 메시지 업데이트를 위한 슬롯."""

@@ -183,3 +183,32 @@ def clear_calibration(profile: str, roi: dict | None) -> Tuple[bool, str]:
     except Exception as exc:
         return False, f"삭제 실패: {exc}"
 
+
+def save_params(profile: str, roi: dict | None, a: float, b: float) -> Tuple[bool, str]:
+    """직접 추정된 (a,b)을 파일에 저장.
+
+    - 기존 save_calibration(left/right)와 동일한 스키마에 a,b를 기록.
+    - points 필드는 유지/생략 가능. 여기서는 변경하지 않음.
+    """
+    if not isinstance(profile, str) or not profile.strip():
+        return False, "프로필명이 유효하지 않습니다."
+    sig = roi_signature(roi)
+    if sig is None:
+        return False, "ROI 정보가 유효하지 않습니다."
+    try:
+        a = float(a)
+        b = float(b)
+    except Exception:
+        return False, "a/b 값이 유효하지 않습니다."
+
+    payload = _get_cached_payload()
+    entries = payload.setdefault("entries", {})  # type: ignore[assignment]
+    prof = entries.setdefault(profile.strip(), {})  # type: ignore[assignment]
+    entry = prof.get(sig)
+    if not isinstance(entry, dict):
+        entry = {}
+    entry["a"] = float(a)
+    entry["b"] = float(b)
+    prof[sig] = entry
+    _save_payload(payload)
+    return True, "(a,b) 파라미터를 저장했습니다."
