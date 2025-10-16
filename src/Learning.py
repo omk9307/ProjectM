@@ -862,6 +862,11 @@ class MonsterSettingsDialog(QDialog):
         except Exception:
             self.attack_forbidden_checkbox.setChecked(False)
         override_row.addWidget(self.attack_forbidden_checkbox)
+        # [NEW] 라벨링 점검 버튼 (현재 클래스의 모든 이미지에서 2마리 이상 라벨된 파일명 보고)
+        self.check_labeling_btn = QPushButton("라벨링 점검")
+        self.check_labeling_btn.setToolTip("현재 클래스의 모든 이미지를 검사하여 2마리 이상 라벨된 파일을 찾습니다.")
+        self.check_labeling_btn.clicked.connect(self._on_check_labeling_clicked)
+        override_row.addWidget(self.check_labeling_btn)
         override_row.addStretch(1)
 
         settings_layout.addLayout(override_row)
@@ -918,6 +923,61 @@ class MonsterSettingsDialog(QDialog):
         test_group = QGroupBox("이름표 인식 테스트")
         test_layout = QVBoxLayout(test_group)
         test_layout.addWidget(QLabel("예제 이미지와 현재 템플릿으로 인식 가능 여부를 확인합니다."))
+
+    def _on_check_labeling_clicked(self) -> None:
+        """현재 클래스의 모든 이미지에서 동일 클래스 라벨이 2개 이상인 파일명을 팝업으로 보고합니다."""
+        try:
+            if not self.data_manager:
+                QMessageBox.warning(self, "오류", "데이터 매니저를 찾을 수 없습니다.")
+                return
+            class_list = self.data_manager.get_class_list()
+            if self.class_name not in class_list:
+                QMessageBox.warning(self, "오류", f"클래스 '{self.class_name}'를 찾을 수 없습니다.")
+                return
+            class_idx = class_list.index(self.class_name)
+            image_filenames = self.data_manager.get_images_for_class(self.class_name) or []
+
+            if not image_filenames:
+                QMessageBox.information(self, "라벨링 점검", "해당 클래스의 이미지가 없습니다.")
+                return
+
+            labels_dir = getattr(self.data_manager, 'labels_path', None)
+            if not labels_dir or not os.path.isdir(labels_dir):
+                QMessageBox.warning(self, "오류", "라벨 폴더를 찾을 수 없습니다.")
+                return
+
+            duplicates: list[str] = []
+            for filename in image_filenames:
+                base = os.path.splitext(filename)[0]
+                label_path = os.path.join(labels_dir, f"{base}.txt")
+                count = 0
+                try:
+                    if not os.path.exists(label_path):
+                        continue
+                    with open(label_path, 'r', encoding='utf-8') as f:
+                        for line in f:
+                            parts = line.strip().split()
+                            if not parts:
+                                continue
+                            try:
+                                idx = int(parts[0])
+                            except ValueError:
+                                continue
+                            if idx == class_idx:
+                                count += 1
+                    if count >= 2:
+                        duplicates.append(filename)
+                except Exception:
+                    # 파일 파싱 오류는 건너뛰고 계속 진행
+                    continue
+
+            if duplicates:
+                msg = "다음 이미지에서 2마리 이상 라벨링되었습니다:\n\n" + "\n".join(duplicates)
+                QMessageBox.information(self, "라벨링 점검 결과", msg)
+            else:
+                QMessageBox.information(self, "라벨링 점검", "2마리 이상 라벨링된 이미지가 없습니다.")
+        except Exception as e:
+            QMessageBox.warning(self, "오류", f"라벨링 점검 중 오류가 발생했습니다:\n{e}")
 
         self.test_sample_list = QListWidget()
         self.test_sample_list.setViewMode(QListWidget.ViewMode.IconMode)
