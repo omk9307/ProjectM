@@ -6627,7 +6627,9 @@ class LearningTab(QWidget):
                 progress_pct = None
             progress_text = f"완료도={progress_pct}%" if isinstance(progress_pct, int) else "완료도=—"
             meta_text = f"샘플={smp}, 인라이어={inl}, 연속={streak}/12, 관측={fmt(alive,'.1f')}s"
-            self.calib_online_status_label.setText(f"자동 보정 상태: {status_text} | {progress_text} | {ab_text} | {err_text} | {meta_text}")
+            note = st.get('note')
+            note_text = f" | 메모: {note}" if isinstance(note, str) and note else ""
+            self.calib_online_status_label.setText(f"자동 보정 상태: {status_text} | {progress_text} | {ab_text} | {err_text} | {meta_text}{note_text}")
 
             # [NEW] 자동 저장 전환 감지 → 학습탭 로그에 알림 출력
             try:
@@ -6669,8 +6671,10 @@ class LearningTab(QWidget):
                             should_log = True
                     if should_log and hasattr(self, 'log_viewer'):
                         pct_text = f", 완료도={progress_pct}%" if isinstance(progress_pct, int) else ""
+                        note2 = st.get('note')
+                        note_sfx = f", 메모={note2}" if isinstance(note2, str) and note2 else ""
                         self.log_viewer.append(
-                            f"[캘리브레이션] 학습 진행: RMSE={fmt(rmse)}(≤{fmt(thr)}), 인라이어={int(inl)}, 연속={int(streak)}/12, 샘플={int(smp)}{pct_text}"
+                            f"[캘리브레이션] 학습 진행: RMSE={fmt(rmse)}(≤{fmt(thr)}), 인라이어={int(inl)}, 연속={int(streak)}/12, 샘플={int(smp)}{pct_text}{note_sfx}"
                         )
                         self._calib_last_progress_log_ts = now_ts
                     # 상태 저장

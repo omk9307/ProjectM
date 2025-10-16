@@ -40,7 +40,7 @@ except Exception:  # pragma: no cover - import 실패시에도 안전
 # 기본 파라미터
 WINDOW_SIZE = 60
 EDGE_MARGIN_RATIO = 0.05  # 프레임 경계 5% 내 샘플 제외
-MAX_RESIDUAL_RATIO = 0.25  # 25% * frame_width 초과 잔차 이상치 제외
+MAX_RESIDUAL_RATIO = 0.12  # 인라이어 상한: 12% * frame_width
 MIN_STD_MAPX = 120.0  # 맵 X 표준편차가 너무 작으면 a 업데이트 보류
 MIN_INLIERS_SAVE = 20
 RMSE_THRESH_PX_MIN = 8.0
@@ -69,6 +69,7 @@ class OnlineState:
     ok_streak: int = 0
     frozen: bool = False
     first_ts: float = 0.0
+    last_note: Optional[str] = None  # 최근 보류/거부 사유
 
 
 _STATES: Dict[Tuple[str, str], OnlineState] = {}
@@ -205,8 +206,15 @@ def update(
 
     # 잔차 기반 인라이어 추리기
     residuals = [abs(s.obs_x - (a0 * s.map_x + b0)) for s in state.samples]
-    inliers_idx = [i for i, r in enumerate(residuals) if r <= max_residual_px]
+    # 인라이어 임계값: RMSE 임계 기반(3×thr 또는 40px)과 폭 비례 상한(12%W) 중 작은 값
+    fw_last = state.samples[-1].frame_w
+    thr_rmse = max(RMSE_THRESH_PX_MIN, (fw_last * RMSE_THRESH_RATIO) if fw_last > 1.0 else RMSE_THRESH_PX_MIN)
+    inlier_cap = max(40.0, 3.0 * thr_rmse)
+    inlier_thresh = min(max_residual_px, inlier_cap)
+    inliers_idx = [i for i, r in enumerate(residuals) if r <= inlier_thresh]
     if len(inliers_idx) < 2:
+        state.last_note = "인라이어 부족"
+        state.ok_streak = 0
         return False
     inlier_pairs = [pairs_all[i] for i in inliers_idx]
     # 가중치 계산(시간 감쇠 + 잔차 기반 소프트 가중)
@@ -224,19 +232,27 @@ def update(
 
     # map_x 분산 체크(수평 이동 부족): a 업데이트 보류
     std_x = _compute_std([p[0] for p in inlier_pairs])
-    if std_x < MIN_STD_MAPX and state.a is not None:
-        # a는 유지, b만 최신 잔차 중앙값으로 보정 유도(간단화: 기존 b 유지)
-        a = float(state.a)
-        # b 업데이트는 보수적으로: 유지
-        b = float(state.b) if state.b is not None else float(b)
+    if std_x < MIN_STD_MAPX:
+        # 맵 이동이 부족하면 추정 보류(초기엔 a,b 둘 다 고정).
+        state.last_note = "맵X 이동 부족으로 기울기 추정 보류"
+        state.ok_streak = 0
+        return False
 
     # RMSE 계산
     errs = [abs(y - (a * x + b)) for x, y in inlier_pairs]
     rmse = math.sqrt(sum(e * e for e in errs) / len(errs))
+    prev_rmse = state.last_fit_rmse
+    # 품질 게이트: RMSE가 급증하면 추정 거부
+    threshold = max(RMSE_THRESH_PX_MIN, (state.samples[-1].frame_w * RMSE_THRESH_RATIO) if state.samples[-1].frame_w > 1.0 else RMSE_THRESH_PX_MIN)
+    if (prev_rmse is not None and rmse > min(prev_rmse * 1.5, threshold * 2.0)) or (rmse > threshold * 3.0):
+        state.last_note = f"RMSE 증가로 추정 거부({rmse:.1f})"
+        state.ok_streak = 0
+        return False
     state.a, state.b = float(a), float(b)
     state.last_fit_rmse = float(rmse)
     state.last_fit_inliers = int(len(inlier_pairs))
     state.last_fit_ts = ts
+    state.last_note = None
 
     # 수렴 판단
     threshold = max(RMSE_THRESH_PX_MIN, (state.samples[-1].frame_w * RMSE_THRESH_RATIO) if state.samples[-1].frame_w > 1.0 else RMSE_THRESH_PX_MIN)
@@ -349,6 +365,7 @@ def export_status(profile: str, roi: dict | None) -> Optional[dict]:
             'time_sec': float(MIN_OBS_WINDOW_SEC),
         },
         'progress_pct': int(progress_pct),
+        'note': state.last_note,
     }
 
 
@@ -368,6 +385,12 @@ def get(profile: str, roi: dict | None) -> Optional[Tuple[float, float]]:
         return None
     if state.a is None or state.b is None:
         return None
+    # 품질 게이트: RMSE가 임계보다 큰 동안 온라인 값을 소비하지 않음
+    if state.samples:
+        fw = float(state.samples[-1].frame_w)
+        thr = max(RMSE_THRESH_PX_MIN, (fw * RMSE_THRESH_RATIO) if fw > 1.0 else RMSE_THRESH_PX_MIN)
+        if (state.last_fit_rmse is None) or (float(state.last_fit_rmse) > thr * 1.2) or (int(state.last_fit_inliers) < max(4, MIN_INLIERS_SAVE // 2)):
+            return None
     return float(state.a), float(state.b)
 
 
