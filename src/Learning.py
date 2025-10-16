@@ -924,6 +924,50 @@ class MonsterSettingsDialog(QDialog):
         test_layout = QVBoxLayout(test_group)
         test_layout.addWidget(QLabel("예제 이미지와 현재 템플릿으로 인식 가능 여부를 확인합니다."))
 
+        self.test_sample_list = QListWidget()
+        self.test_sample_list.setViewMode(QListWidget.ViewMode.IconMode)
+        self.test_sample_list.setIconSize(QSize(160, 64))
+        self.test_sample_list.setResizeMode(QListWidget.ResizeMode.Adjust)
+        self.test_sample_list.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
+        self.test_sample_list.setMinimumHeight(140)
+        test_layout.addWidget(self.test_sample_list)
+
+        test_button_row = QHBoxLayout()
+        self.add_test_sample_btn = QPushButton("테스트 이미지 추가")
+        self.add_test_sample_btn.clicked.connect(self._add_test_samples)
+        test_button_row.addWidget(self.add_test_sample_btn)
+        self.remove_test_sample_btn = QPushButton("선택 삭제")
+        self.remove_test_sample_btn.clicked.connect(self._remove_selected_test_samples)
+        test_button_row.addWidget(self.remove_test_sample_btn)
+        self.run_test_btn = QPushButton("테스트 실행")
+        self.run_test_btn.clicked.connect(self._run_nameplate_test)
+        test_button_row.addWidget(self.run_test_btn)
+        test_button_row.addStretch(1)
+        test_layout.addLayout(test_button_row)
+
+        self.test_result_label = QLabel("테스트 준비됨")
+        self.test_result_label.setWordWrap(True)
+        self.test_result_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        test_layout.addWidget(self.test_result_label)
+
+        nameplate_layout.addWidget(test_group)
+
+        layout.addWidget(nameplate_group)
+
+        button_layout = QHBoxLayout()
+        self.reset_button = QPushButton("초기화")
+        self.reset_button.clicked.connect(self._reset_to_default)
+        button_layout.addWidget(self.reset_button)
+        button_layout.addStretch(1)
+
+        button_box = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        button_box.accepted.connect(self.accept)
+        button_box.rejected.connect(self.reject)
+        button_layout.addWidget(button_box)
+        layout.addLayout(button_layout)
+
+        self._populate_nameplate_templates()
+
     def _on_check_labeling_clicked(self) -> None:
         """현재 클래스의 모든 이미지에서 동일 클래스 라벨이 2개 이상인 파일명을 팝업으로 보고합니다."""
         try:
@@ -978,50 +1022,6 @@ class MonsterSettingsDialog(QDialog):
                 QMessageBox.information(self, "라벨링 점검", "2마리 이상 라벨링된 이미지가 없습니다.")
         except Exception as e:
             QMessageBox.warning(self, "오류", f"라벨링 점검 중 오류가 발생했습니다:\n{e}")
-
-        self.test_sample_list = QListWidget()
-        self.test_sample_list.setViewMode(QListWidget.ViewMode.IconMode)
-        self.test_sample_list.setIconSize(QSize(160, 64))
-        self.test_sample_list.setResizeMode(QListWidget.ResizeMode.Adjust)
-        self.test_sample_list.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
-        self.test_sample_list.setMinimumHeight(140)
-        test_layout.addWidget(self.test_sample_list)
-
-        test_button_row = QHBoxLayout()
-        self.add_test_sample_btn = QPushButton("테스트 이미지 추가")
-        self.add_test_sample_btn.clicked.connect(self._add_test_samples)
-        test_button_row.addWidget(self.add_test_sample_btn)
-        self.remove_test_sample_btn = QPushButton("선택 삭제")
-        self.remove_test_sample_btn.clicked.connect(self._remove_selected_test_samples)
-        test_button_row.addWidget(self.remove_test_sample_btn)
-        self.run_test_btn = QPushButton("테스트 실행")
-        self.run_test_btn.clicked.connect(self._run_nameplate_test)
-        test_button_row.addWidget(self.run_test_btn)
-        test_button_row.addStretch(1)
-        test_layout.addLayout(test_button_row)
-
-        self.test_result_label = QLabel("테스트 준비됨")
-        self.test_result_label.setWordWrap(True)
-        self.test_result_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
-        test_layout.addWidget(self.test_result_label)
-
-        nameplate_layout.addWidget(test_group)
-
-        layout.addWidget(nameplate_group)
-
-        button_layout = QHBoxLayout()
-        self.reset_button = QPushButton("초기화")
-        self.reset_button.clicked.connect(self._reset_to_default)
-        button_layout.addWidget(self.reset_button)
-        button_layout.addStretch(1)
-
-        button_box = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
-        button_box.accepted.connect(self.accept)
-        button_box.rejected.connect(self.reject)
-        button_layout.addWidget(button_box)
-        layout.addLayout(button_layout)
-
-        self._populate_nameplate_templates()
 
     def _on_override_toggled(self, checked: bool) -> None:
         self.conf_spinbox.setEnabled(checked)

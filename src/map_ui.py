@@ -855,6 +855,8 @@ class MapTab(QWidget):
             self._wait_nav_last_climb_sent_at = 0.0
             self._wait_nav_last_jump_sent_at = 0.0
             self._wait_nav_kick_suppress_until = 0.0
+            # [개선] 걷기 보강 전송 최소 간격(중복 전송 억제)
+            self._wait_nav_last_walk_sent_at = 0.0
 
             #  탐지 시작 시간을 기록하기 위한 변수
             self.detection_start_time = 0
@@ -6693,6 +6695,17 @@ class MapTab(QWidget):
             self.wait_recover_threshold_px = 10
             self._wait_hp_last_ts = 0.0
 
+        # [개선] 권한 우선 확보 후 키 전송(대기모드 진입 시 맵 권한 우선 보장)
+        self._authority_priority_override = True
+        if self._authority_manager:
+            try:
+                self._authority_manager.notify_priority_event(
+                    "OTHER_PLAYER_WAIT",
+                    metadata={'waypoint_id': waypoint_id, 'source': source or 'hunt'},
+                )
+            except Exception:
+                pass
+
         stop_sent = self._emit_control_command("모든 키 떼기", "other_player_wait:start")
         if not stop_sent:
             self.update_general_log(
@@ -6706,16 +6719,6 @@ class MapTab(QWidget):
         )
 
         self._activate_other_player_wait_goal(waypoint_id_str)
-
-        self._authority_priority_override = True
-        if self._authority_manager:
-            try:
-                self._authority_manager.notify_priority_event(
-                    "OTHER_PLAYER_WAIT",
-                    metadata={'waypoint_id': waypoint_id, 'source': source or 'hunt'},
-                )
-            except Exception:
-                pass
 
         return True
 
@@ -7130,8 +7133,14 @@ class MapTab(QWidget):
         direction_symbol = "→" if dx >= 0.0 else "←"
         walk_command = "걷기(우)" if direction_symbol == "→" else "걷기(좌)"
 
-        # 킥오프: 권한 사유 없이 대기 모드 전용 사유로 전송
-        emit_ok = self._emit_control_command(walk_command, "other_player_wait:travel")
+        # 이미 해당 방향으로 걷기 키가 유지 중이면 재전송하지 않음(토글/중복 방지)
+        try:
+            if self._is_walk_direction_active(direction_symbol):
+                emit_ok = True
+            else:
+                emit_ok = self._emit_control_command(walk_command, "other_player_wait:travel")
+        except Exception:
+            emit_ok = self._emit_control_command(walk_command, "other_player_wait:travel")
         if emit_ok:
             try:
                 self.last_movement_command = walk_command
@@ -7141,6 +7150,8 @@ class MapTab(QWidget):
                 self.last_command_sent_time = sent_at if sent_at is not None else time.time()
                 # 킥오프 직후 짧은 시간(200ms) 동안 걷기 보강 억제
                 self._wait_nav_kick_suppress_until = time.time() + 0.2
+                # 걷기 보강 최소 간격 기준 갱신
+                self._wait_nav_last_walk_sent_at = time.time()
             except Exception:
                 pass
 
@@ -7206,7 +7217,23 @@ class MapTab(QWidget):
             now >= float(getattr(self, '_wait_nav_kick_suppress_until', 0.0) or 0.0)
         )
         if can_reinforce_walk:
-            self._emit_control_command(walk_command, "other_player_wait:travel")
+            # 이미 해당 방향키가 눌려있다면 재전송을 생략(토글/중복 방지)
+            need_walk_reinforce = True
+            try:
+                if self._is_walk_direction_active(direction_symbol):
+                    need_walk_reinforce = False
+            except Exception:
+                need_walk_reinforce = True
+
+            # 최소 간격(예: 0.45초)보다 빠른 재전송은 억제
+            try:
+                last_walk = float(getattr(self, '_wait_nav_last_walk_sent_at', 0.0) or 0.0)
+            except Exception:
+                last_walk = 0.0
+            min_interval = 0.45
+            if need_walk_reinforce and (now - last_walk) >= min_interval:
+                if self._emit_control_command(walk_command, "other_player_wait:travel"):
+                    self._wait_nav_last_walk_sent_at = now
 
         # 2) 액션 준비 상태일 경우 해당 액션도 보강 전송 (권한 사유 금지)
         try:

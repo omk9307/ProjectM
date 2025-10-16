@@ -2110,6 +2110,13 @@ class HuntTab(QWidget):
             return
         if getattr(self, '_direction_active', False):
             return
+        # [Sticky Facing] 전/후 비대칭 모드일 때는 마지막 방향을 무기한 유지한다.
+        # 따라서 방향 리셋 타이머를 예약하지 않는다.
+        try:
+            if getattr(self, 'facing_range_checkbox', None) and self.facing_range_checkbox.isChecked():
+                return
+        except Exception:
+            pass
         min_val = max(0.5, float(self.facing_reset_min_spinbox.value())) if hasattr(self, 'facing_reset_min_spinbox') else 1.0
         max_val = max(min_val, float(self.facing_reset_max_spinbox.value())) if hasattr(self, 'facing_reset_max_spinbox') else 4.0
         interval = random.uniform(min_val, max_val)
@@ -2124,6 +2131,12 @@ class HuntTab(QWidget):
             return
         if getattr(self, '_direction_active', False):
             return
+        # [Sticky Facing] 전/후 비대칭 모드일 때는 마지막 방향을 무기한 유지한다.
+        try:
+            if getattr(self, 'facing_range_checkbox', None) and self.facing_range_checkbox.isChecked():
+                return
+        except Exception:
+            pass
         self._set_current_facing(None, save=False)
         self._schedule_facing_reset()
 
@@ -9728,7 +9741,15 @@ class HuntTab(QWidget):
             self._direction_active = False
             self._direction_last_side = None
             self._last_direction_score = None
-            if self._is_detection_active():
+            # [Sticky Facing] 전/후 비대칭 모드에서는 마지막 방향을 유지한다.
+            # 따라서 리셋 타이머를 예약하지 않는다.
+            do_schedule = self._is_detection_active()
+            try:
+                if getattr(self, 'facing_range_checkbox', None) and self.facing_range_checkbox.isChecked():
+                    do_schedule = False
+            except Exception:
+                pass
+            if do_schedule:
                 self._schedule_facing_reset()
 
     def _select_reference_character_box(self, boxes: List[DetectionBox]) -> DetectionBox:
@@ -9826,7 +9847,12 @@ class HuntTab(QWidget):
             self._last_direction_score = None
         self._update_facing_label()
         if side in ('left', 'right') and not from_direction and not getattr(self, '_direction_active', False):
-            self._schedule_facing_reset()
+            # [Sticky Facing] 전/후 비대칭 모드에서는 방향 리셋을 예약하지 않는다.
+            try:
+                if not (getattr(self, 'facing_range_checkbox', None) and self.facing_range_checkbox.isChecked()):
+                    self._schedule_facing_reset()
+            except Exception:
+                self._schedule_facing_reset()
         self._sync_detection_thread_status()
         if save and not from_direction:
             self._save_settings()
