@@ -586,7 +586,9 @@ class MainWindow(QMainWindow):
         event.accept()
 
     def _update_global_hotkey_state(self) -> None:
-        should_enable = self._hunt_detection_active or self._map_detection_active
+        # [변경] 즉시성 보장을 위해 전역 ESC 핫키는 항상 활성화한다.
+        #  - 탐지 중단/대기모드 등 어떤 상태에서도 ESC가 즉시 동작하도록 함
+        should_enable = True
         currently_enabled = self.esc_hotkey_manager is not None and self.esc_hotkey_filter is not None
 
         if should_enable and not currently_enabled:

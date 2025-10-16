@@ -7604,6 +7604,9 @@ class HuntTab(QWidget):
                 allow_during_cooldown = True
         elif is_primary_release_command:
             allow_during_cooldown = True
+        # [추가] 금지몬 프로필은 쿨다운 우회 허용
+        if reason_str == 'forbidden_monster':
+            allow_during_cooldown = True
 
         # HP 긴급모드 보호: 아래 항목들은 허용
         # - HP 상태 명령(status:hp)
