@@ -915,6 +915,10 @@ class HuntTab(QWidget):
         self._visual_dead_zones: list[dict] = []
         self._last_nameplate_notify_ts: float = 0.0
         self._nameplate_apply_facing: bool = False
+        # [NEW] 미니맵 X 보정 트래킹 상태
+        self._minimap_x_primed: bool = False
+        self._minimap_char_template: Optional[dict] = None  # {'y': float, 'width': float, 'height': float}
+        self._minimap_char_overlay_box: Optional[dict] = None  # {'x','y','width','height'}
 
         self.attack_interval_sec = 0.35
         self.last_attack_ts = 0.0
@@ -4525,6 +4529,10 @@ class HuntTab(QWidget):
         button_row2.setSpacing(12)
         button_row2.addWidget(self.show_cleanup_chase_checkbox)
         button_row2.addWidget(self.show_cluster_window_checkbox)
+        # [NEW] 미니맵 보정 캐릭터 오버레이 토글
+        self.show_minimap_char_checkbox = QCheckBox("미니맵 보정 캐릭터")
+        self.show_minimap_char_checkbox.setChecked(False)
+        button_row2.addWidget(self.show_minimap_char_checkbox)
         button_row2.addStretch(1)
         control_layout.addLayout(button_row2)
 
@@ -5598,14 +5606,30 @@ class HuntTab(QWidget):
                         painter.setBrush(NAMEPLATE_TRACK_BRUSH)
                     painter.drawRect(rect)
                 painter.setBrush(Qt.BrushStyle.NoBrush)
-            if self._nameplate_visual_debug_enabled and self._visual_dead_zones:
-                painter.setPen(NAMEPLATE_DEADZONE_EDGE)
-                painter.setBrush(Qt.BrushStyle.NoBrush)
-                for entry in self._visual_dead_zones:
-                    rect = self._dict_to_rect(entry, image.width(), image.height())
-                    if rect.isNull():
-                        continue
-                    painter.drawRect(rect)
+        if self._nameplate_visual_debug_enabled and self._visual_dead_zones:
+            painter.setPen(NAMEPLATE_DEADZONE_EDGE)
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            for entry in self._visual_dead_zones:
+                rect = self._dict_to_rect(entry, image.width(), image.height())
+                if rect.isNull():
+                    continue
+                painter.drawRect(rect)
+            # fallthrough
+        # [NEW] 미니맵 보정 캐릭터 박스 오버레이(체크된 경우에만)
+        try:
+            if getattr(self, 'show_minimap_char_checkbox', None) and self.show_minimap_char_checkbox.isChecked():
+                box = getattr(self, '_minimap_char_overlay_box', None)
+                if isinstance(box, dict):
+                    x = float(box.get('x', 0.0))
+                    y = float(box.get('y', 0.0))
+                    w = float(box.get('width', 0.0))
+                    h = float(box.get('height', 0.0))
+                    if w > 0 and h > 0:
+                        painter.setPen(QPen(QColor(255, 215, 0), 2))
+                        painter.setBrush(Qt.BrushStyle.NoBrush)
+                        painter.drawRect(int(x), int(y), int(w), int(h))
+        except Exception:
+            pass
         finally:
             painter.end()
 
@@ -8626,6 +8650,17 @@ class HuntTab(QWidget):
                     nickname_used = True
                     nickname_record = nickname_data
                     self._latest_nickname_box = nickname_data.get('nickname_box')
+                    # [NEW] 미니맵 보정 준비: 최초 닉네임 박스 검출 시 템플릿 고정
+                    try:
+                        self._minimap_x_primed = True
+                        self._minimap_char_template = {
+                            'y': float(nickname_box.y),
+                            'width': float(nickname_box.width),
+                            'height': float(nickname_box.height),
+                        }
+                        self._minimap_char_overlay_box = None
+                    except Exception:
+                        pass
                 else:
                     self._latest_nickname_box = None
             else:
@@ -8679,7 +8714,20 @@ class HuntTab(QWidget):
                     self._maybe_apply_minimap_x_correction(characters, characters_data, perf)
                     fallback_used = True
                 else:
-                    self._reset_character_cache()
+                    # [NEW] 캐시 만료 이후에도 미니맵 보정으로 synthetic 캐릭터 박스를 생성 시도
+                    try:
+                        perf = payload.get("perf") or {}
+                    except Exception:
+                        perf = {}
+                    # synthetic 박스를 생성하고 characters에 반영
+                    if self._maybe_create_minimap_character(perf, characters_data):
+                        try:
+                            box = self._last_character_boxes[0]
+                            characters = [DetectionBox(**vars(box))]
+                        except Exception:
+                            pass
+                    else:
+                        self._reset_character_cache()
 
         rely_message: Optional[str] = None
         best_nameplate_entry: Optional[dict] = None
@@ -8973,6 +9021,99 @@ class HuntTab(QWidget):
             except Exception:
                 continue
         self._minimap_x_fallback_used_ts = time.time()
+
+    def _maybe_create_minimap_character(self, perf_data: dict, characters_data: Optional[list]) -> bool:
+        """닉네임 미검/캐시 만료 이후에도 미니맵 보정으로 synthetic 캐릭터 박스를 생성.
+        - 최초 1회 닉네임 박스 검출로 템플릿(y,width,height) 확보 후에만 동작.
+        - 성공 시 characters_data에도 항목을 추가할 수 있다.
+        """
+        try:
+            from map_hunt_calibration import is_enabled, find_calibration
+        except Exception:
+            return False
+        if not getattr(self, '_minimap_x_primed', False):
+            return False
+        if not getattr(self, 'map_link_enabled', False):
+            return False
+        template = getattr(self, '_minimap_char_template', None)
+        if not isinstance(template, dict):
+            return False
+        map_tab = getattr(self, 'map_tab', None)
+        if not map_tab or not hasattr(map_tab, 'api_export_minimap_view_state'):
+            return False
+        try:
+            if not is_enabled():
+                return False
+        except Exception:
+            return False
+        # 맵 전역 X
+        try:
+            state = map_tab.api_export_minimap_view_state()
+            pos = state.get('final_player_pos') if isinstance(state, dict) else None
+            if pos is None:
+                return False
+            if hasattr(pos, 'x'):
+                map_x = float(pos.x())
+            elif isinstance(pos, dict) and 'x' in pos:
+                map_x = float(pos['x'])
+            else:
+                return False
+        except Exception:
+            return False
+        # 보정 파라미터
+        try:
+            profile = getattr(map_tab, 'active_profile_name', None)
+        except Exception:
+            profile = None
+        try:
+            roi = self.api_get_active_capture_region()
+        except Exception:
+            roi = None
+        calib = None
+        try:
+            calib = find_calibration(profile, roi)
+        except Exception:
+            calib = None
+        if not calib:
+            return False
+        a, b = calib
+        try:
+            fw = float(perf_data.get('frame_width', 0.0)) if isinstance(perf_data, dict) else 0.0
+        except Exception:
+            fw = 0.0
+        # 템플릿으로 높이/폭/Y 고정, X만 미니맵 보정
+        width = float(template.get('width', 0.0) or 0.0)
+        height = float(template.get('height', 0.0) or 0.0)
+        y = float(template.get('y', 0.0) or 0.0)
+        if width <= 0.0 or height <= 0.0:
+            return False
+        center_x = float(a) * float(map_x) + float(b)
+        new_x = center_x - width / 2.0
+        if fw > 1.0:
+            new_x = max(0.0, min(new_x, fw - width))
+        # synthetic 박스 생성
+        try:
+            box = DetectionBox(x=float(new_x), y=float(y), width=float(width), height=float(height), score=0.0, label='minimap')
+        except Exception:
+            return False
+        # characters_data에도 표시용 항목 추가
+        if isinstance(characters_data, list):
+            try:
+                characters_data.append({'x': box.x, 'y': box.y, 'width': box.width, 'height': box.height, 'score': 0.0, 'class_name': '미니맵'})
+            except Exception:
+                pass
+        # 오버레이 박스 저장(체크박스가 꺼져 있으면 그리지는 않음)
+        self._minimap_char_overlay_box = {'x': box.x, 'y': box.y, 'width': box.width, 'height': box.height}
+        # 캐시 갱신: synthetic도 최근 본 것으로 처리(지속 추적 목적)
+        try:
+            self._last_character_boxes = [DetectionBox(**vars(box))]
+            self._last_character_details = [{'x': box.x, 'y': box.y, 'width': box.width, 'height': box.height, 'score': 0.0, 'class_name': '미니맵'}]
+            self._last_character_seen_ts = time.time()
+            self._using_character_fallback = True
+        except Exception:
+            pass
+        self._minimap_x_fallback_used_ts = time.time()
+        return True
 
     def _reset_character_cache(self) -> None:
         self._last_character_boxes = []
