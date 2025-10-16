@@ -349,6 +349,17 @@ class MonitoringTab(QWidget):
         self.chk_exp_standalone.toggled.connect(self._on_toggle_exp_standalone)
         info_ctrl_layout.addWidget(self.chk_mp_standalone)
         info_ctrl_layout.addWidget(self.chk_exp_standalone)
+        # [NEW] 강제중지 버튼: 모든 동작/키 입력을 즉시 중단
+        try:
+            self.emergency_stop_btn = QPushButton("강제중지")
+            self.emergency_stop_btn.setToolTip("완전한 중지: 모든 탭 정지 + 모든 키 떼기")
+            # 가벼운 강조 스타일
+            self.emergency_stop_btn.setStyleSheet("QPushButton { background-color: #c62828; color: white; padding: 4px 8px; } QPushButton:hover { background-color: #b71c1c; }")
+            self.emergency_stop_btn.clicked.connect(self._on_click_emergency_full_stop)
+            info_ctrl_layout.addSpacing(8)
+            info_ctrl_layout.addWidget(self.emergency_stop_btn)
+        except Exception:
+            pass
         info_ctrl_layout.addStretch(1)
         # 실행시간 라벨 폭 고정(체크박스 흔들림 방지)
         try:
@@ -804,9 +815,9 @@ class MonitoringTab(QWidget):
         # 초기 동기화(외부 상태를 모니터링 탭으로 가져옴)
         self._sync_monitor_buttons_enabled()
         self._sync_link_checkbox_from_external()
-        # [NEW] 오버레이 선반영: 기본 OFF를 사냥 탭에 즉시 적용
+        # 오버레이 초기 상태: QSettings 저장값이 없을 때만 사냥 설정을 초기값으로 채택
         try:
-            self._on_monitor_overlay_toggled(False)
+            self._maybe_init_overlay_from_hunt_if_no_saved_state()
         except Exception:
             pass
         # 권한 변경 구독 및 초기 상태
@@ -821,6 +832,77 @@ class MonitoringTab(QWidget):
                 mgr.authority_changed.connect(self._on_authority_changed)
         except Exception:
             pass
+
+    def _sync_overlay_checkboxes_from_hunt(self) -> None:
+        """사냥탭의 표시 설정을 읽어 모니터링 탭 오버레이 체크박스를 동기화."""
+        ht = self._hunt_tab
+        if not ht:
+            return
+        def _set(cb: QCheckBox | None, val: bool) -> None:
+            if not cb:
+                return
+            try:
+                b = cb.blockSignals(True)
+                cb.setChecked(bool(val))
+                cb.blockSignals(b)
+            except Exception:
+                pass
+        prefs = getattr(ht, 'overlay_preferences', None)
+        if isinstance(prefs, dict):
+            hunt_on = bool(prefs.get('hunt_area', True))
+            primary_on = bool(prefs.get('primary_area', True))
+            _set(self.chk_hunt_bundle, bool(hunt_on or primary_on))
+            _set(self.chk_nickname_range, bool(prefs.get('nickname_range', False)))
+            _set(self.chk_nameplate_track, bool(prefs.get('nameplate_tracking', False)))
+            _set(self.chk_cleanup_band, bool(prefs.get('cleanup_chase_area', True)))
+            _set(self.chk_cluster_window, bool(prefs.get('cluster_window_area', True)))
+        else:
+            # 폴백: 사냥탭 체크박스가 있으면 그대로 읽어옴
+            try:
+                h = getattr(ht, 'show_hunt_area_checkbox', None)
+                p = getattr(ht, 'show_primary_skill_checkbox', None)
+                _set(self.chk_hunt_bundle, bool(h and h.isChecked()) or bool(p and p.isChecked()))
+            except Exception:
+                pass
+            try:
+                n = getattr(ht, 'show_nickname_range_checkbox', None)
+                _set(self.chk_nickname_range, bool(n and n.isChecked()))
+            except Exception:
+                pass
+            try:
+                t = getattr(ht, 'show_nameplate_tracking_checkbox', None)
+                _set(self.chk_nameplate_track, bool(t and t.isChecked()))
+            except Exception:
+                pass
+            try:
+                c = getattr(ht, 'show_cleanup_chase_checkbox', None)
+                _set(self.chk_cleanup_band, bool(c and c.isChecked()))
+            except Exception:
+                pass
+            try:
+                cw = getattr(ht, 'show_cluster_window_checkbox', None)
+                _set(self.chk_cluster_window, bool(cw and cw.isChecked()))
+            except Exception:
+                pass
+
+    def _maybe_init_overlay_from_hunt_if_no_saved_state(self) -> None:
+        """QSettings에 모니터링 오버레이 저장이 없다면 사냥 설정을 초기값으로 가져온다."""
+        try:
+            settings = QSettings("Gemini Inc.", "Maple AI Trainer")
+            keys = (
+                "monitoring/ovl_hunt_bundle",
+                "monitoring/ovl_nickname_range",
+                "monitoring/ovl_nameplate_track",
+                "monitoring/ovl_cleanup_band",
+                "monitoring/ovl_cluster_window",
+                "monitoring/ovl_character_boxes",
+            )
+            has_any = any(settings.contains(k) for k in keys)
+        except Exception:
+            has_any = True  # 안전하게 덮어쓰지 않음
+        if not has_any:
+            self._sync_overlay_checkboxes_from_hunt()
+            self._persist_checkbox_states()
 
     # --- 맵 프리뷰 ---
     def _start_map_preview(self) -> None:
@@ -2006,6 +2088,57 @@ class MonitoringTab(QWidget):
                 pass
         self._sync_monitor_buttons_enabled()
 
+    def _on_click_emergency_full_stop(self) -> None:
+        """모든 탭 동작을 즉시 정지하고 현재 눌린 키를 전부 해제한다.
+
+        - 맵/사냥탭 탐지를 강제 중단
+        - AutoControl에 긴급 정지(api_emergency_stop_all) 전송 → CLEAR_ALL
+        - (보강) 짧은 quiet 모드로 잔여 발행을 일시 차단
+        """
+        # 1) 맵/사냥 강제 중단
+        try:
+            if self._map_tab and hasattr(self._map_tab, 'force_stop_detection'):
+                try:
+                    self._map_tab.set_detection_stop_reason('monitoring_emergency')
+                except Exception:
+                    pass
+                try:
+                    self._map_tab.force_stop_detection(reason='monitoring_emergency')
+                except Exception:
+                    pass
+        except Exception:
+            pass
+        try:
+            if self._hunt_tab and hasattr(self._hunt_tab, 'force_stop_detection'):
+                self._hunt_tab.force_stop_detection(reason='monitoring_emergency')
+        except Exception:
+            pass
+
+        # 2) 자동제어: 모든 키 즉시 해제(CLEAR_ALL 우선)
+        try:
+            ac = self._auto_tab
+            if ac is not None:
+                if hasattr(ac, 'api_emergency_stop_all'):
+                    ac.api_emergency_stop_all(reason='monitoring:emergency_stop')
+                elif hasattr(ac, 'api_release_all_keys_global'):
+                    ac.api_release_all_keys_global()
+                else:
+                    ac.receive_control_command("모든 키 떼기", reason='monitoring:emergency_stop')
+                # (선택) 1초간 quiet 모드로 잔여 발행을 차단
+                try:
+                    if hasattr(ac, 'api_set_quiet_mode'):
+                        ac.api_set_quiet_mode(1000, whitelist_owners=set())
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
+        # 3) 버튼 상태/연동 UI 갱신
+        try:
+            self._sync_monitor_buttons_enabled()
+        except Exception:
+            pass
+
     def _on_link_toggled_from_monitor(self, checked: bool) -> None:
         """모니터링 탭의 연동 체크박스 변경 → 두 탭 모두에 전파."""
         self._apply_link_checkbox_state(bool(checked), propagate=True)
@@ -2149,7 +2282,20 @@ class MonitoringTab(QWidget):
                 'cluster_window_area': bool(self.chk_cluster_window.isChecked()),
             }
             if hasattr(self._hunt_tab, 'set_overlay_preferences'):
-                self._hunt_tab.set_overlay_preferences(prefs)
+                # 모니터링 탭 토글은 사냥 설정 파일에 영구 반영하지 않도록 일시 저장 억제
+                had_flag = hasattr(self._hunt_tab, '_suppress_settings_save')
+                prev_flag = False
+                try:
+                    if had_flag:
+                        prev_flag = bool(getattr(self._hunt_tab, '_suppress_settings_save', False))
+                        setattr(self._hunt_tab, '_suppress_settings_save', True)
+                    self._hunt_tab.set_overlay_preferences(prefs)
+                finally:
+                    try:
+                        if had_flag:
+                            setattr(self._hunt_tab, '_suppress_settings_save', prev_flag)
+                    except Exception:
+                        pass
         except Exception:
             pass
 
