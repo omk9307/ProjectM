@@ -1910,6 +1910,87 @@ class HuntTab(QWidget):
             return True, "대기 모드를 해제했습니다."
         return True, "대기 모드가 활성화되어 있지 않습니다."
 
+    # ---------------------- 금지몬스터 테스트 트리거/해제 ----------------------
+    def api_trigger_forbidden_monster(self) -> tuple[bool, str]:
+        """금지몬스터 감지 플로우를 수동으로 트리거한다.
+
+        - 실제 감지와 동일한 순서로 모든 키 떼기, 경고음, 대기 모드 진입을 수행
+        - 이전 상태를 초기화하고 새 쿨다운(3분)을 시작
+        - 웨이포인트/명령 프로필이 없으면 친절한 오류 메시지 반환
+        """
+        import time as _t
+        # 선 조건 검사
+        cmd = (getattr(self, 'forbidden_monster_command_profile', '') or '').strip()
+        if not bool(getattr(self, 'forbidden_monster_enabled', False)):
+            return False, "[금지] 기능이 비활성화되어 있습니다. 사냥탭 설정에서 활성화하세요."
+        if not cmd:
+            return False, "[금지] 실행할 명령 프로필이 설정되어 있지 않습니다."
+        if not self._has_wait_waypoint_configured():
+            return False, "[금지] 대기 모드를 실행하려면 먼저 웨이포인트를 설정해주세요."
+
+        # 이미 금지 플로우가 진행 중이면 중복 시작 방지
+        if bool(getattr(self, '_forbidden_active', False)):
+            return True, "[금지] 이미 금지 플로우가 진행 중입니다."
+
+        # 초기화: 기존 쿨다운/상태 정리 후 실제 감지와 동일 플로우 실행
+        try:
+            self._forbidden_cooldown_until = 0.0
+        except Exception:
+            pass
+        try:
+            self._issue_all_keys_release("forbidden_monster:manual_trigger")
+        except Exception:
+            pass
+        try:
+            self._play_forbidden_alert()
+        except Exception:
+            pass
+
+        # 새 쿨다운 시작(3분)
+        try:
+            self._forbidden_cooldown_until = float(_t.time()) + 180.0
+        except Exception:
+            self._forbidden_cooldown_until = 0.0
+
+        # 대기 모드 플로우 트리거(실제 감지와 동일 경로)
+        try:
+            self._trigger_forbidden_wait_flow(float(_t.time()))
+        except Exception as exc:
+            return False, f"[금지] 대기 모드 시작 실패: {exc}"
+        return True, "[금지] 금지몬스터 감지로 간주하고 대기 모드에 진입합니다."
+
+    def api_cancel_forbidden_and_restart(self) -> tuple[bool, str]:
+        """금지 플로우를 강제 해제하고 탐지를 다시 시작한다.
+
+        - 진행 중인 대기 모드가 있으면 종료
+        - 금지 상태/쿨다운 초기화(즉시 재테스트 가능)
+        - 탐지가 정지 상태면 재시작
+        """
+        # 진행 중 플로우 종료
+        if bool(getattr(self, 'shutdown_other_player_wait_active', False)):
+            try:
+                self._finish_other_player_wait_mode(reason='forbidden_manual_cancel')
+            except Exception as exc:
+                return False, f"[금지] 해제 중 오류: {exc}"
+        # 상태/쿨다운 초기화
+        try:
+            self._forbidden_active = False
+        except Exception:
+            pass
+        try:
+            self._forbidden_cooldown_until = 0.0
+        except Exception:
+            pass
+
+        # 탐지 재시작 보장
+        try:
+            if not self._is_detection_active():
+                self._restart_hunt_detection_after_wait()
+        except Exception:
+            # 실패해도 메시지 반환은 계속
+            pass
+        return True, "[금지] 해제하고 탐지를 다시 시작했습니다."
+
     # ---------------------- 사냥범위 오버라이드 제어(맵 탭 연동) ----------------------
     def api_get_current_ranges(self) -> dict:
         """현재 사냥탭 스핀박스 상태를 전/후 비대칭 포맷으로 반환.

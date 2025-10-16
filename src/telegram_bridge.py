@@ -241,6 +241,8 @@ class TelegramBridge(QObject):
                                 "- /정보 | /info: HP/MP/EXP 요약\n"
                                 "- /정지 | /stop: 탐지 강제중단(ESC 효과)\n"
                                 "- /시작 | /start: 사냥 시작\n"
+                                "- /금지 | /금지몹: 금지몬스터 감지 테스트(대기 모드 진입)\n"
+                                "- /금지해제: 금지 플로우 해제 후 탐지 재시작\n"
                                 "- /화면출력 | /display: 사냥탭 화면출력 토글\n"
                                 "- /대기모드 | /wait: 즉시 대기모드(무기한) 진입\n"
                                 "- /대기종료 | /wait_end: 대기모드 해제\n"
@@ -283,6 +285,18 @@ class TelegramBridge(QObject):
                     # 시작
                     if lower in ("/시작", "/start"):
                         ok, msg = self._start_hunt()
+                        await context.bot.send_message(chat_id=chat_id, text=msg)
+                        return
+
+                    # 금지몬스터 테스트 트리거
+                    if lower in ("/금지", "/금지몹"):
+                        ok, msg = self._trigger_forbidden_test()
+                        await context.bot.send_message(chat_id=chat_id, text=msg)
+                        return
+
+                    # 금지몬스터 해제 + 재시작
+                    if lower in ("/금지해제",):
+                        ok, msg = self._cancel_forbidden_test()
                         await context.bot.send_message(chat_id=chat_id, text=msg)
                         return
 
@@ -579,6 +593,32 @@ class TelegramBridge(QObject):
             return _run_in_main_thread(_call)  # type: ignore[return-value]
         except Exception as exc:
             return False, f"대기 모드 해제 실패: {exc}"
+
+    def _trigger_forbidden_test(self) -> tuple[bool, str]:
+        if self._hunt_tab is None:
+            return False, "사냥탭을 찾을 수 없습니다."
+        def _call() -> tuple[bool, str]:
+            api = getattr(self._hunt_tab, "api_trigger_forbidden_monster", None)
+            if callable(api):
+                return api()
+            return False, "금지몬스터 테스트 API를 찾을 수 없습니다."
+        try:
+            return _run_in_main_thread(_call)  # type: ignore[return-value]
+        except Exception as exc:
+            return False, f"금지몬스터 테스트 실패: {exc}"
+
+    def _cancel_forbidden_test(self) -> tuple[bool, str]:
+        if self._hunt_tab is None:
+            return False, "사냥탭을 찾을 수 없습니다."
+        def _call() -> tuple[bool, str]:
+            api = getattr(self._hunt_tab, "api_cancel_forbidden_and_restart", None)
+            if callable(api):
+                return api()
+            return False, "금지 플로우 해제 API를 찾을 수 없습니다."
+        try:
+            return _run_in_main_thread(_call)  # type: ignore[return-value]
+        except Exception as exc:
+            return False, f"금지 플로우 해제 실패: {exc}"
 
     def _toggle_screen_output(self) -> tuple[bool, str]:
         if self._hunt_tab is None:
