@@ -2538,6 +2538,9 @@ class HuntTab(QWidget):
             try:
                 self._pre_delay_timers.pop(command, None)
             finally:
+                # 탐지 비활성(ESC 등) 상태에서는 예약된 콜백을 실행하지 않음(즉시성 보장)
+                if not self._is_detection_active():
+                    return
                 self._next_command_ready_ts = time.time()
                 callback()
 
@@ -7279,13 +7282,18 @@ class HuntTab(QWidget):
         self._condition_debounce_timer.start(max(1, int(delay_ms)))
 
     def _on_condition_debounce_timeout(self) -> None:
+        # 탐지 비활성 시 조건 폴링을 수행하지 않음
+        if not self._is_detection_active():
+            return
         self._poll_hunt_conditions()
 
     def _handle_request_timeout(self) -> None:
         self._request_pending = False
-        if self.current_authority != "hunt":
-            self.append_log("사냥 권한 요청 응답이 지연되어 재평가합니다.", "warn")
-            self._poll_hunt_conditions(force=True)
+        # 탐지 비활성 또는 사냥 권한 아님: 재평가 생략(불필요한 재요청/명령 방지)
+        if not self._is_detection_active() or self.current_authority != "hunt":
+            return
+        self.append_log("사냥 권한 요청 응답이 지연되어 재평가합니다.", "warn")
+        self._poll_hunt_conditions(force=True)
 
     def _handle_max_hold_changed(self, value: float) -> None:
         self.control_release_timeout = max(0.0, float(value))
@@ -12023,6 +12031,9 @@ class HuntTab(QWidget):
 
     def _poll_hunt_conditions(self, *, force: bool = False) -> None:
         now = time.time()
+        # 탐지 비활성(ESC 등) 시 조건 평가 중단: 즉시성 보장
+        if not self._is_detection_active():
+            return
         if not force:
             if self._request_pending:
                 return
@@ -12159,6 +12170,9 @@ class HuntTab(QWidget):
             self.request_control(request_reason)
 
     def _run_hunt_loop(self) -> None:
+        # 탐지 비활성 상태에서는 즉시 반환(잔여 명령 방지)
+        if not self._is_detection_active():
+            return
         # 대기 모드(active)에서는 어떤 공격/버프도 수행하지 않고 즉시 유휴 상태를 유지한다.
         try:
             if bool(getattr(self, 'shutdown_other_player_wait_active', False)):

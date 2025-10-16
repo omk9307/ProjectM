@@ -679,10 +679,8 @@ class MonitoringTab(QWidget):
                 map_checked = bool(settings.value("monitoring/map_preview_checked", False, type=bool))
             except Exception:
                 map_checked = _to_bool(settings.value("monitoring/map_preview_checked"), False)
-            try:
-                hunt_checked = bool(settings.value("monitoring/hunt_preview_checked", False, type=bool))
-            except Exception:
-                hunt_checked = _to_bool(settings.value("monitoring/hunt_preview_checked"), False)
+            # [fix] QSettings가 문자열("true"/"false")로 저장된 경우에도 정확히 파싱되도록 통일
+            hunt_checked = _to_bool(settings.value("monitoring/hunt_preview_checked", None), False)
             try:
                 link_checked = bool(settings.value("monitoring/map_hunt_link", False, type=bool))
             except Exception:
@@ -955,6 +953,11 @@ class MonitoringTab(QWidget):
             settings.setValue("monitoring/ovl_cleanup_band", bool(self.chk_cleanup_band.isChecked()))
             settings.setValue("monitoring/ovl_cluster_window", bool(self.chk_cluster_window.isChecked()))
             settings.setValue("monitoring/ovl_character_boxes", bool(self.chk_character_box.isChecked()))
+            try:
+                # 강제 동기화로 비정상 종료/강제 종료 시에도 최대한 저장 보장
+                settings.sync()
+            except Exception:
+                pass
         except Exception:
             pass
 
@@ -2279,6 +2282,10 @@ class MonitoringTab(QWidget):
             settings.setValue("monitoring/ovl_cleanup_band", bool(self.chk_cleanup_band.isChecked()))
             settings.setValue("monitoring/ovl_cluster_window", bool(self.chk_cluster_window.isChecked()))
             settings.setValue("monitoring/ovl_character_boxes", bool(self.chk_character_box.isChecked()))
+            try:
+                settings.sync()
+            except Exception:
+                pass
         except Exception:
             pass
         # 사냥 프리뷰 해제
