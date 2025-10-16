@@ -1057,6 +1057,9 @@ class HuntTab(QWidget):
         self._forbidden_active: bool = False
         # [신규] 금지 명령 1회 실행 래치(도착 다중 통지 시 중복 실행 방지)
         self._forbidden_cmd_inflight: bool = False
+        # [신규] 금지 명령 완료 워치독(6초, 1회 재발행)
+        self._forbidden_watchdog_retry_count: int = 0
+        self._FORBIDDEN_WATCHDOG_MAX_RETRY: int = 1
         self._forbidden_cooldown_until: float = 0.0
         # [NEW] 금지몬스터 감지 시 텔레그램 알림 여부(전역)
         self.forbidden_monster_telegram_alert: bool = False
@@ -2597,6 +2600,7 @@ class HuntTab(QWidget):
         # [NEW] 금지몬스터 명령 완료 시 1초 뒤 대기모드 종료 + 쿨다운
         try:
             if isinstance(reason, str) and reason == 'forbidden_monster':
+                self.append_log("금지 프로필 완료 콜백 수신 → 1초 뒤 대기모드 종료 예약", 'info')
                 self._schedule_forbidden_finish()
         except Exception:
             pass
@@ -9686,10 +9690,54 @@ class HuntTab(QWidget):
                     map_tab.on_other_player_wait_command_started(source='hunt.forbidden')
             except Exception:
                 pass
+            # [워치독] 완료 감시 시작(6초)
+            try:
+                self._forbidden_watchdog_retry_count = 0
+                self._forbidden_command_name = cmd
+                QTimer.singleShot(6000, self._forbidden_watchdog_check)
+            except Exception:
+                pass
             self.append_log(f"금지몬스터 도착 → 명령 실행: '{cmd}'", 'info')
         except Exception:
             # 에러 시에도 종료 예약
             self._schedule_forbidden_finish()
+
+    def _forbidden_watchdog_check(self) -> None:
+        """금지 명령 완료 감시(6초). 미완료 시 1회 재발행, 재차 실패 시 종료."""
+        try:
+            # 탐지/대기모드 상태 점검: 비활성/종료면 무시
+            if not bool(getattr(self, '_forbidden_active', False)):
+                return
+            if not bool(getattr(self, '_forbidden_cmd_inflight', False)):
+                return
+            # 아직 완료 콜백이 오지 않음
+            if int(getattr(self, '_forbidden_watchdog_retry_count', 0) or 0) < int(getattr(self, '_FORBIDDEN_WATCHDOG_MAX_RETRY', 1) or 1):
+                # 1회 재발행
+                cmd = (getattr(self, '_forbidden_command_name', '') or '').strip()
+                if cmd:
+                    self.append_log("[금지] 완료 지연: 금지 프로필 재발행(1/1)", 'warn')
+                    self._emit_control_command(cmd, reason='forbidden_monster')
+                    try:
+                        map_tab = getattr(self, 'map_tab', None)
+                        if map_tab and hasattr(map_tab, 'on_other_player_wait_command_started'):
+                            map_tab.on_other_player_wait_command_started(source='hunt.forbidden')
+                    except Exception:
+                        pass
+                    self._forbidden_watchdog_retry_count = int(getattr(self, '_forbidden_watchdog_retry_count', 0) or 0) + 1
+                    QTimer.singleShot(6000, self._forbidden_watchdog_check)
+                else:
+                    # 프로필명이 없다면 안전 종료
+                    self.append_log("[금지] 완료 지연: 프로필 미상 → 대기모드 종료", 'warn')
+                    self._schedule_forbidden_finish()
+            else:
+                # 재시도 초과: 안전 종료
+                self.append_log("[금지] 완료 지연: 재시도 초과 → 대기모드 종료", 'warn')
+                self._schedule_forbidden_finish()
+        except Exception:
+            try:
+                self._schedule_forbidden_finish()
+            except Exception:
+                pass
 
     def _schedule_forbidden_finish(self) -> None:
         """금지 플로우 종료(1초 후 대기모드 종료 + 3분 쿨다운)."""
@@ -9701,8 +9749,9 @@ class HuntTab(QWidget):
             except Exception:
                 pass
         self._forbidden_active = False
-        # [신규] 명령 완료 처리: 래치 해제
+        # [신규] 명령 완료 처리: 래치/워치독 초기화
         self._forbidden_cmd_inflight = False
+        self._forbidden_watchdog_retry_count = 0
         try:
             import time as _t
             # [변경] 이미 감지 시점에 쿨다운이 설정되었다면 덮어쓰지 않음

@@ -7537,7 +7537,7 @@ class MapTab(QWidget):
         if retry_count < retry_max:
             try:
                 waypoint_name = context.get('goal_name', str(context.get('goal_id', '')))
-                self.update_general_log("[대기 모드] 도착 ACK 지연 → 재통지 시도.", "orange")
+                self.update_general_log(f"[대기 모드] 도착 ACK 지연 → 재통지 시도 ({retry_count+1}/{retry_max}).", "orange")
                 hunt_tab = getattr(self, '_hunt_tab', None)
                 if hunt_tab and hasattr(hunt_tab, 'on_other_player_wait_arrived'):
                     source = str(context.get('source') or '')
@@ -7553,6 +7553,21 @@ class MapTab(QWidget):
                     pass
             except Exception:
                 pass
+        else:
+            # 재시도 초과 → 시작 실패로 간주하고 안전 종료
+            try:
+                waypoint_name = context.get('goal_name', str(context.get('goal_id', '')))
+                self.update_general_log("[대기 모드] 도착 ACK 실패(재시도 초과) → 대기모드 종료.", "red")
+                hunt_tab = getattr(self, '_hunt_tab', None)
+                if hunt_tab and hasattr(hunt_tab, '_finish_other_player_wait_mode'):
+                    hunt_tab._finish_other_player_wait_mode(reason='ack_timeout')
+                else:
+                    self.finish_other_player_wait_operation(reason='ack_timeout')
+            except Exception:
+                try:
+                    self.finish_other_player_wait_operation(reason='ack_timeout')
+                except Exception:
+                    pass
 
     def on_other_player_wait_command_started(self, source: str = '') -> None:
         try:
@@ -7562,8 +7577,49 @@ class MapTab(QWidget):
             context['arrival_ack_received'] = True
             self.other_player_wait_context = context
             self.update_general_log("[대기 모드] 도착 명령 시작 ACK 수신.", "gray")
+            # [신규] 종료 지연 감시(ACK 후 10초 내 미종료 시 경고 1회)
+            try:
+                context['exit_deadline_ts'] = time.time() + 10.0
+                context['exit_delay_logged'] = False
+                self.other_player_wait_context = context
+                QTimer.singleShot(10500, self._check_other_player_wait_exit_delay)
+            except Exception:
+                pass
         except Exception:
             pass
+
+    def _check_other_player_wait_exit_delay(self) -> None:
+        if not self._is_other_player_wait_active():
+            return
+        context = dict(getattr(self, 'other_player_wait_context', {}) or {})
+        exit_deadline = float(context.get('exit_deadline_ts', 0.0) or 0.0)
+        if exit_deadline <= 0.0:
+            return
+        if bool(context.get('exit_delay_logged', False)):
+            return
+        now_ts = time.time()
+        if now_ts < exit_deadline:
+            # 아직 기한 전이면 재확인 예약
+            try:
+                QTimer.singleShot(int((exit_deadline - now_ts) * 1000) + 600, self._check_other_player_wait_exit_delay)
+            except Exception:
+                pass
+            return
+        # 기한 경과: 원인 추정 후 1회 경고 로그
+        reason_hint = "원인 미상"
+        try:
+            hunt_tab = getattr(self, '_hunt_tab', None)
+            if hunt_tab is not None:
+                inflight = bool(getattr(hunt_tab, '_forbidden_cmd_inflight', False))
+                if inflight:
+                    reason_hint = "명령 진행 중(완료 콜백 지연)"
+                else:
+                    reason_hint = "명령 완료로 보이나 종료 미수행"
+        except Exception:
+            pass
+        self.update_general_log(f"[대기 모드] 종료 지연 경고(10s 경과): {reason_hint}", "orange")
+        context['exit_delay_logged'] = True
+        self.other_player_wait_context = context
 
     def on_detection_ready(self, frame_bgr, found_features, my_player_rects, other_player_rects):
         map_perf = {

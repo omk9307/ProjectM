@@ -689,31 +689,14 @@ class MonitoringTab(QWidget):
             self.hunt_preview_checkbox.setChecked(hunt_checked)
             self._apply_link_checkbox_state(link_checked, propagate=False)
             # [NEW] 오버레이 체크박스 상태 복원(기본 OFF)
-            try:
-                self.chk_hunt_bundle.setChecked(bool(settings.value("monitoring/ovl_hunt_bundle", False, type=bool)))
-            except Exception:
-                self.chk_hunt_bundle.setChecked(_to_bool(settings.value("monitoring/ovl_hunt_bundle"), False))
-            try:
-                self.chk_nickname_range.setChecked(bool(settings.value("monitoring/ovl_nickname_range", False, type=bool)))
-            except Exception:
-                self.chk_nickname_range.setChecked(_to_bool(settings.value("monitoring/ovl_nickname_range"), False))
-            try:
-                self.chk_nameplate_track.setChecked(bool(settings.value("monitoring/ovl_nameplate_track", False, type=bool)))
-            except Exception:
-                self.chk_nameplate_track.setChecked(_to_bool(settings.value("monitoring/ovl_nameplate_track"), False))
-            try:
-                self.chk_cleanup_band.setChecked(bool(settings.value("monitoring/ovl_cleanup_band", False, type=bool)))
-            except Exception:
-                self.chk_cleanup_band.setChecked(_to_bool(settings.value("monitoring/ovl_cleanup_band"), False))
-            try:
-                self.chk_cluster_window.setChecked(bool(settings.value("monitoring/ovl_cluster_window", False, type=bool)))
-            except Exception:
-                self.chk_cluster_window.setChecked(_to_bool(settings.value("monitoring/ovl_cluster_window"), False))
+            # 오버레이 체크 상태 복원(문자열/정수/불리언 모두 안전 파싱)
+            self.chk_hunt_bundle.setChecked(_to_bool(settings.value("monitoring/ovl_hunt_bundle", None), False))
+            self.chk_nickname_range.setChecked(_to_bool(settings.value("monitoring/ovl_nickname_range", None), False))
+            self.chk_nameplate_track.setChecked(_to_bool(settings.value("monitoring/ovl_nameplate_track", None), False))
+            self.chk_cleanup_band.setChecked(_to_bool(settings.value("monitoring/ovl_cleanup_band", None), False))
+            self.chk_cluster_window.setChecked(_to_bool(settings.value("monitoring/ovl_cluster_window", None), False))
             # [NEW] 캐릭터박스 상태 복원(기본 OFF)
-            try:
-                self.chk_character_box.setChecked(bool(settings.value("monitoring/ovl_character_boxes", False, type=bool)))
-            except Exception:
-                self.chk_character_box.setChecked(_to_bool(settings.value("monitoring/ovl_character_boxes"), False))
+            self.chk_character_box.setChecked(_to_bool(settings.value("monitoring/ovl_character_boxes", None), False))
         except Exception:
             pass
 
@@ -938,7 +921,7 @@ class MonitoringTab(QWidget):
         except Exception:
             pass
 
-    def _persist_checkbox_states(self) -> None:
+    def _persist_checkbox_states(self, _checked: bool | None = None) -> None:
         try:
             settings = QSettings("Gemini Inc.", "Maple AI Trainer")
             settings.setValue("monitoring/map_preview_checked", bool(self.map_preview_checkbox.isChecked()))
