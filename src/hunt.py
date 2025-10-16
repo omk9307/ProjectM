@@ -5606,30 +5606,30 @@ class HuntTab(QWidget):
                         painter.setBrush(NAMEPLATE_TRACK_BRUSH)
                     painter.drawRect(rect)
                 painter.setBrush(Qt.BrushStyle.NoBrush)
-        if self._nameplate_visual_debug_enabled and self._visual_dead_zones:
-            painter.setPen(NAMEPLATE_DEADZONE_EDGE)
-            painter.setBrush(Qt.BrushStyle.NoBrush)
-            for entry in self._visual_dead_zones:
-                rect = self._dict_to_rect(entry, image.width(), image.height())
-                if rect.isNull():
-                    continue
-                painter.drawRect(rect)
-            # fallthrough
-        # [NEW] 미니맵 보정 캐릭터 박스 오버레이(체크된 경우에만)
-        try:
+            if self._nameplate_visual_debug_enabled and self._visual_dead_zones:
+                painter.setPen(NAMEPLATE_DEADZONE_EDGE)
+                painter.setBrush(Qt.BrushStyle.NoBrush)
+                for entry in self._visual_dead_zones:
+                    rect = self._dict_to_rect(entry, image.width(), image.height())
+                    if rect.isNull():
+                        continue
+                    painter.drawRect(rect)
+                # fallthrough
+            # [NEW] 미니맵 보정 캐릭터 박스 오버레이(체크된 경우에만)
             if getattr(self, 'show_minimap_char_checkbox', None) and self.show_minimap_char_checkbox.isChecked():
                 box = getattr(self, '_minimap_char_overlay_box', None)
                 if isinstance(box, dict):
-                    x = float(box.get('x', 0.0))
-                    y = float(box.get('y', 0.0))
-                    w = float(box.get('width', 0.0))
-                    h = float(box.get('height', 0.0))
-                    if w > 0 and h > 0:
-                        painter.setPen(QPen(QColor(255, 215, 0), 2))
-                        painter.setBrush(Qt.BrushStyle.NoBrush)
-                        painter.drawRect(int(x), int(y), int(w), int(h))
-        except Exception:
-            pass
+                    try:
+                        x = float(box.get('x', 0.0))
+                        y = float(box.get('y', 0.0))
+                        w = float(box.get('width', 0.0))
+                        h = float(box.get('height', 0.0))
+                        if w > 0 and h > 0:
+                            painter.setPen(QPen(QColor(255, 215, 0), 2))
+                            painter.setBrush(Qt.BrushStyle.NoBrush)
+                            painter.drawRect(int(x), int(y), int(w), int(h))
+                    except Exception:
+                        pass
         finally:
             painter.end()
 
@@ -9021,6 +9021,15 @@ class HuntTab(QWidget):
             except Exception:
                 continue
         self._minimap_x_fallback_used_ts = time.time()
+        # 오버레이 박스도 최신 교정 값으로 갱신(그리기는 체크박스가 제어)
+        try:
+            if characters:
+                b0 = characters[0]
+                self._minimap_char_overlay_box = {
+                    'x': float(b0.x), 'y': float(b0.y), 'width': float(b0.width), 'height': float(b0.height)
+                }
+        except Exception:
+            pass
 
     def _maybe_create_minimap_character(self, perf_data: dict, characters_data: Optional[list]) -> bool:
         """닉네임 미검/캐시 만료 이후에도 미니맵 보정으로 synthetic 캐릭터 박스를 생성.
