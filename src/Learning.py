@@ -1684,16 +1684,6 @@ class PolygonAnnotationEditor(QDialog):
         self.count_label.setWordWrap(True)
         self.count_label.setVisible(False)
         main_layout.addWidget(self.count_label)
-        # [NEW] 클래스별 완료 폴리곤 카운트 라벨(좌측 하단 '준비' 아랫줄)
-        self.count_label = QLabel("")
-        self.count_label.setWordWrap(True)
-        self.count_label.setVisible(False)
-        main_layout.addWidget(self.count_label)
-        # [NEW] 클래스별 완료 폴리곤 카운트 라벨(좌측 하단 '준비' 아랫줄)
-        self.count_label = QLabel("")
-        self.count_label.setWordWrap(True)
-        self.count_label.setVisible(False)
-        main_layout.addWidget(self.count_label)
         main_layout.addWidget(self.button_box)
         self.setLayout(main_layout)
         self._preferred_size = self._compute_preferred_size(pixmap)
@@ -1842,51 +1832,7 @@ class PolygonAnnotationEditor(QDialog):
 
         self.class_selector.blockSignals(False)
 
-    # [NEW] 완료된(확정된) 클래스 폴리곤 카운트 갱신
-    def _update_polygon_counts(self):
-        try:
-            if not hasattr(self, 'count_label'):
-                return
-            counts: dict[str, int] = {}
-            for poly in self.canvas.polygons:
-                class_id = poly.get('class_id')
-                if class_id is None:
-                    continue
-                if 0 <= int(class_id) < len(self.full_class_list):
-                    name = self.full_class_list[int(class_id)]
-                    counts[name] = counts.get(name, 0) + 1
-            if not counts:
-                self.count_label.setVisible(False)
-                self.count_label.setText("")
-                return
-            parts = [f"{name} {counts[name]}마리" for name in sorted(counts.keys())]
-            self.count_label.setText(", ".join(parts))
-            self.count_label.setVisible(True)
-        except Exception:
-            pass
-
-    # [NEW] 완료된(엔터 등으로 확정된) 클래스 폴리곤 카운트 갱신
-    def _update_polygon_counts(self):
-        try:
-            if not hasattr(self, 'count_label'):
-                return
-            counts: dict[str, int] = {}
-            for poly in self.canvas.polygons:
-                class_id = poly.get('class_id')
-                if class_id is None:
-                    continue
-                if 0 <= int(class_id) < len(self.full_class_list):
-                    name = self.full_class_list[int(class_id)]
-                    counts[name] = counts.get(name, 0) + 1
-            if not counts:
-                self.count_label.setVisible(False)
-                self.count_label.setText("")
-                return
-            parts = [f"{name} {counts[name]}마리" for name in sorted(counts.keys())]
-            self.count_label.setText(", ".join(parts))
-            self.count_label.setVisible(True)
-        except Exception:
-            pass
+    
 
     # [NEW] 체크된 클래스가 존재하는 카테고리만 노출
     def populate_category_selector(self):

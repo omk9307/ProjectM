@@ -567,6 +567,8 @@ class MapTab(QWidget):
             self.other_player_alert_enabled = False
             self._other_player_alert_active = False
             self._other_player_alert_last_time = 0.0
+            # [NEW] 다른 유저 감지 임계값(프로필별 저장)
+            self.other_player_min_count = 1
             self.map_link_checkbox = None
             self.map_link_enabled = False
             self.telegram_alert_checkbox = None
@@ -1630,6 +1632,16 @@ class MapTab(QWidget):
         self.other_player_alert_checkbox.setChecked(False)
         self.other_player_alert_checkbox.toggled.connect(self._on_other_player_alert_toggled)
         third_row_layout.addWidget(self.other_player_alert_checkbox)
+
+        # [NEW] 다른 유저 감지 임계값 UI
+        third_row_layout.addSpacing(8)
+        third_row_layout.addWidget(QLabel("최소 유저 수:"))
+        self.other_player_min_count_spinbox = QSpinBox()
+        self.other_player_min_count_spinbox.setRange(1, 20)
+        self.other_player_min_count_spinbox.setValue(int(getattr(self, 'other_player_min_count', 1) or 1))
+        self.other_player_min_count_spinbox.setToolTip("이 수 이상일 때만 감지로 간주하여 알림/사냥탭에 전달합니다.")
+        self.other_player_min_count_spinbox.valueChanged.connect(self._on_other_player_min_count_changed)
+        third_row_layout.addWidget(self.other_player_min_count_spinbox)
         telegram_controls_layout = QHBoxLayout()
         telegram_controls_layout.setContentsMargins(0, 0, 0, 0)
         telegram_controls_layout.setSpacing(6)
@@ -2908,6 +2920,20 @@ class MapTab(QWidget):
                 self.other_player_alert_checkbox.setChecked(other_alert_enabled)
                 del blocker
             self.other_player_alert_enabled = other_alert_enabled
+
+            # [NEW] 다른 유저 감지 임계값 로드
+            try:
+                loaded_min = int(config.get('other_player_min_count', getattr(self, 'other_player_min_count', 1) or 1))
+            except Exception:
+                loaded_min = getattr(self, 'other_player_min_count', 1) or 1
+            self.other_player_min_count = max(1, int(loaded_min))
+            try:
+                if hasattr(self, 'other_player_min_count_spinbox') and self.other_player_min_count_spinbox:
+                    blocker = QSignalBlocker(self.other_player_min_count_spinbox)
+                    self.other_player_min_count_spinbox.setValue(int(self.other_player_min_count))
+                    del blocker
+            except Exception:
+                pass
             if not other_alert_enabled:
                 self._clear_other_player_presence_test(
                     reason="유저 테스트가 감지 옵션 비활성화로 종료되었습니다.",
@@ -3404,6 +3430,8 @@ class MapTab(QWidget):
                 'telegram_send_mode': self.telegram_send_mode,
                 'telegram_send_interval': float(self.telegram_send_interval),
                 'telegram_send_custom_count': int(self.telegram_send_custom_count),
+                # [NEW] 다른 유저 감지 임계값 저장
+                'other_player_min_count': int(getattr(self, 'other_player_min_count', 1) or 1),
                 'other_player_test_enabled': bool(
                     getattr(self, 'other_player_test_checkbox', None)
                     and self.other_player_test_checkbox.isChecked()
@@ -6081,10 +6109,9 @@ class MapTab(QWidget):
 
         self.my_player_global_rects = my_player_global_rects
         self.other_player_global_rects = other_player_global_rects
+        # [CHG] 임계값 기반 알림/전달 처리
         self._handle_other_player_detection_alert(self.other_player_global_rects)
-        effective_other_count = self._get_effective_other_player_count(
-            len(self.other_player_global_rects)
-        )
+        effective_other_count = self._get_effective_other_player_count(len(self.other_player_global_rects))
         self._notify_other_player_presence(effective_other_count)
 
         if self.debug_dialog and self.debug_dialog.isVisible():
@@ -6148,12 +6175,24 @@ class MapTab(QWidget):
         self.update_detection_log_from_features(display_inliers, display_outliers)
 
     def _notify_other_player_presence(self, count: int) -> None:
-        has_other = count > 0
+        # [CHG] 임계값 기준으로 사냥탭에 전달. 유저 테스트 활성 시 임계값 무시.
+        try:
+            threshold = int(getattr(self, 'other_player_min_count', 1) or 1)
+        except Exception:
+            threshold = 1
+        test_active = False
+        try:
+            test_active = bool(self._is_other_player_test_active())
+        except Exception:
+            test_active = False
+        meets = bool(count >= threshold) or bool(test_active and count > 0)
+        has_other = meets and (count > 0)
+        gated_count = count if meets else 0
         hunt_tab = getattr(self, '_hunt_tab', None)
         if not hunt_tab or not hasattr(hunt_tab, 'handle_other_player_presence'):
             return
         try:
-            hunt_tab.handle_other_player_presence(has_other, count, time.time())
+            hunt_tab.handle_other_player_presence(has_other, gated_count, time.time())
         except Exception:
             pass
 
@@ -7568,6 +7607,18 @@ class MapTab(QWidget):
             self.save_profile_data()
         self._refresh_other_player_test_status_label()
 
+    def _on_other_player_min_count_changed(self, value: int) -> None:  # noqa: ARG002
+        try:
+            self.other_player_min_count = max(1, int(value))
+        except Exception:
+            self.other_player_min_count = 1
+        # 즉시 저장하여 프로필에 반영
+        try:
+            if self.active_profile_name:
+                self.save_profile_data()
+        except Exception:
+            pass
+
     def _play_other_player_alert_sound(self) -> None:
         """다른 유저 감지 시 알람 소리를 재생합니다."""
         try:
@@ -7587,13 +7638,24 @@ class MapTab(QWidget):
         threading.Thread(target=_beep_sequence, daemon=True).start()
 
     def _handle_other_player_detection_alert(self, other_players: list[QRectF]) -> None:
+        # [CHG] 알림/텔레그램에도 임계값 적용. 유저 테스트 시 임계값 무시.
         if not self.other_player_alert_enabled:
             self._other_player_alert_active = False
             return
 
         now = time.time()
         effective_count = self._get_effective_other_player_count(len(other_players))
-        has_other_player = effective_count > 0
+        try:
+            threshold = int(getattr(self, 'other_player_min_count', 1) or 1)
+        except Exception:
+            threshold = 1
+        test_active = False
+        try:
+            test_active = bool(self._is_other_player_test_active())
+        except Exception:
+            test_active = False
+        meets = bool(effective_count >= threshold) or bool(test_active and effective_count > 0)
+        has_other_player = meets
         if has_other_player:
             first_detection = not self._other_player_alert_active
             if first_detection:
