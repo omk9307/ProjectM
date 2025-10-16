@@ -1110,6 +1110,8 @@ class HuntTab(QWidget):
         self.wait_hotkey_manager = None
         self.wait_hotkey_event_filter = None
         self.waitmode_hotkey = 'f9'
+        # [NEW] 미니맵 X 보정 최근 사용 시각
+        self._minimap_x_fallback_used_ts: float = 0.0
 
         # 자동 대응 상태
         self.shutdown_pid_value: Optional[int] = None
@@ -1748,6 +1750,56 @@ class HuntTab(QWidget):
                 or getattr(self, '_ladder_cleanup_session_active', False)
                 or getattr(self, '_ladder_purge_session_active', False)
             )
+        except Exception:
+            return False
+
+    # ---------------------- 맵-사냥 위치 캘리브레이션 관련 API ----------------------
+    def api_get_current_character_position(self) -> dict:
+        """현재 기준 캐릭터 박스와 프레임 크기 요약을 반환.
+        반환: {'x','y','width','height','center_x','frame_width','frame_height'}
+        """
+        result = {
+            'x': None,
+            'y': None,
+            'width': None,
+            'height': None,
+            'center_x': None,
+            'frame_width': float(self.latest_perf_stats.get('frame_width', 0.0) or 0.0),
+            'frame_height': float(self.latest_perf_stats.get('frame_height', 0.0) or 0.0),
+        }
+        box = None
+        try:
+            if self.latest_snapshot and self.latest_snapshot.character_boxes:
+                box = self._select_reference_character_box(self.latest_snapshot.character_boxes)
+            elif self._last_character_boxes:
+                box = self._select_reference_character_box(self._last_character_boxes)
+        except Exception:
+            box = None
+        if box is not None:
+            try:
+                result.update({
+                    'x': float(box.x),
+                    'y': float(box.y),
+                    'width': float(box.width),
+                    'height': float(box.height),
+                    'center_x': float(box.center_x),
+                })
+            except Exception:
+                pass
+        return result
+
+    def api_get_active_capture_region(self) -> dict | None:
+        """현재 사냥탭 캡처 ROI(절대좌표)를 반환."""
+        try:
+            return self._resolve_manual_capture_region(require_window=True)
+        except Exception:
+            return None
+
+    def api_was_minimap_x_fallback_recent(self, seconds: float = 1.0) -> bool:
+        try:
+            if self._minimap_x_fallback_used_ts <= 0.0:
+                return False
+            return (time.time() - float(self._minimap_x_fallback_used_ts)) <= max(0.1, float(seconds))
         except Exception:
             return False
 
@@ -8619,6 +8671,12 @@ class HuntTab(QWidget):
                             box.x = float(new_x)
                             if idx < len(characters_data) and isinstance(characters_data[idx], dict):
                                 characters_data[idx]['x'] = float(new_x)
+                    # [NEW] 닉네임 미검/캐시 사용 시, 미니맵 X 보정이 가능하면 추가 적용
+                    try:
+                        perf = payload.get("perf") or {}
+                    except Exception:
+                        perf = {}
+                    self._maybe_apply_minimap_x_correction(characters, characters_data, perf)
                     fallback_used = True
                 else:
                     self._reset_character_cache()
@@ -8843,6 +8901,78 @@ class HuntTab(QWidget):
         self._last_character_details = [dict(item) for item in details] if details else []
         self._last_character_seen_ts = float(seen_ts) if seen_ts is not None else time.time()
         self._using_character_fallback = False
+
+    def _maybe_apply_minimap_x_correction(self, characters: List[DetectionBox], characters_data: Optional[list], perf_data: dict) -> None:
+        """학습탭에서 활성화한 미니맵 X 보정이 가능하면 캐릭터 X를 보정.
+        - 전제: 현재 프레임이 닉네임 미검/캐시 사용 상황(강제는 아님)
+        - 조건: 기능 enabled + 연동 On + 맵탭/ROI/프로필/보정값 존재
+        """
+        if not characters:
+            return
+        if not getattr(self, 'map_link_enabled', False):
+            return
+        map_tab = getattr(self, 'map_tab', None)
+        if not map_tab:
+            return
+        try:
+            from map_hunt_calibration import is_enabled, find_calibration
+        except Exception:
+            return
+        try:
+            if not is_enabled():
+                return
+        except Exception:
+            return
+        # 맵 전역 X
+        try:
+            state = map_tab.api_export_minimap_view_state() if hasattr(map_tab, 'api_export_minimap_view_state') else None
+            pos = state.get('final_player_pos') if isinstance(state, dict) else None
+            if pos is None:
+                return
+            if hasattr(pos, 'x'):
+                map_x = float(pos.x())
+            elif isinstance(pos, dict) and 'x' in pos:
+                map_x = float(pos['x'])
+            else:
+                return
+        except Exception:
+            return
+        # ROI/프로필/보정값
+        try:
+            profile = getattr(map_tab, 'active_profile_name', None)
+        except Exception:
+            profile = None
+        if not profile:
+            return
+        try:
+            roi = self.api_get_active_capture_region()
+        except Exception:
+            roi = None
+        calib = None
+        try:
+            calib = find_calibration(profile, roi)
+        except Exception:
+            calib = None
+        if not calib:
+            return
+        a, b = calib
+        try:
+            fw = float(perf_data.get('frame_width', 0.0)) if isinstance(perf_data, dict) else 0.0
+        except Exception:
+            fw = 0.0
+        center_x = float(a) * float(map_x) + float(b)
+        for idx, box in enumerate(characters):
+            try:
+                width = float(box.width)
+                new_x = center_x - width / 2.0
+                if fw > 1.0 and width > 0.0:
+                    new_x = max(0.0, min(new_x, fw - width))
+                box.x = float(new_x)
+                if characters_data and idx < len(characters_data) and isinstance(characters_data[idx], dict):
+                    characters_data[idx]['x'] = float(new_x)
+            except Exception:
+                continue
+        self._minimap_x_fallback_used_ts = time.time()
 
     def _reset_character_cache(self) -> None:
         self._last_character_boxes = []

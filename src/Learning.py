@@ -5224,6 +5224,13 @@ class LearningTab(QWidget):
         # [NEW] 편집 초기 클래스 유지(배치/최근)
         self._batch_initial_class_name: Optional[str] = None
         self._last_used_editor_class: Optional[str] = None
+        # [NEW] 맵-사냥 위치 캘리브레이션 런타임 상태
+        self._map_tab = None
+        self._hunt_tab = None
+        self._calib_left_pair: Optional[tuple[float, float]] = None  # (map_x, hunt_center_x)
+        self._calib_right_pair: Optional[tuple[float, float]] = None
+        self._calib_last_profile: Optional[str] = None
+        self._calib_last_roi: Optional[dict] = None
         self.initUI()
         self.init_sam()
         self.data_manager.register_status_config_listener(self._handle_status_config_changed)
@@ -5956,6 +5963,37 @@ class LearningTab(QWidget):
         pet_feed_group = self._create_pet_feed_group()
         right_layout.addWidget(pet_feed_group)
 
+        # [NEW] 맵-사냥 위치 캘리브레이션 UI
+        calib_group = QGroupBox("맵-사냥 위치 캘리브레이션")
+        calib_layout = QVBoxLayout()
+        self.minimap_x_enabled_checkbox = QCheckBox("미니맵 X 보정 사용")
+        try:
+            from map_hunt_calibration import is_enabled as _is_calib_enabled
+            self.minimap_x_enabled_checkbox.setChecked(bool(_is_calib_enabled()))
+        except Exception:
+            self.minimap_x_enabled_checkbox.setChecked(False)
+        self.minimap_x_enabled_checkbox.toggled.connect(self._on_minimap_x_enabled_toggled)
+        calib_layout.addWidget(self.minimap_x_enabled_checkbox)
+
+        btn_row = QHBoxLayout()
+        self.calib_left_btn = QPushButton("좌측 끝")
+        self.calib_right_btn = QPushButton("우측 끝")
+        self.calib_save_btn = QPushButton("저장/적용")
+        self.calib_reset_btn = QPushButton("초기화")
+        self.calib_left_btn.clicked.connect(lambda: self._capture_calibration_point('left'))
+        self.calib_right_btn.clicked.connect(lambda: self._capture_calibration_point('right'))
+        self.calib_save_btn.clicked.connect(self._save_calibration_clicked)
+        self.calib_reset_btn.clicked.connect(self._reset_calibration_clicked)
+        for b in (self.calib_left_btn, self.calib_right_btn, self.calib_save_btn, self.calib_reset_btn):
+            btn_row.addWidget(b)
+        btn_row.addStretch(1)
+        calib_layout.addLayout(btn_row)
+
+        self.calib_status_label = QLabel("프로필: — | 좌:— / 우:—")
+        calib_layout.addWidget(self.calib_status_label)
+        calib_group.setLayout(calib_layout)
+        right_layout.addWidget(calib_group)
+
         self.log_viewer = QTextEdit()
         self.log_viewer.setReadOnly(True)
         log_metrics = self.log_viewer.fontMetrics()
@@ -6023,6 +6061,122 @@ class LearningTab(QWidget):
         self._load_status_command_options()
         self._apply_status_config_to_ui()
         self._refresh_window_anchor_summary()
+
+    # ----- [NEW] 맵-사냥 위치 캘리브레이션: 탭 연결 및 핸들러 -----
+    def attach_tabs(self, map_tab, hunt_tab) -> None:
+        self._map_tab = map_tab
+        self._hunt_tab = hunt_tab
+        try:
+            from map_hunt_calibration import is_enabled as _is_calib_enabled
+            if hasattr(self, 'minimap_x_enabled_checkbox') and self.minimap_x_enabled_checkbox:
+                prev = self.minimap_x_enabled_checkbox.blockSignals(True)
+                self.minimap_x_enabled_checkbox.setChecked(bool(_is_calib_enabled()))
+                self.minimap_x_enabled_checkbox.blockSignals(prev)
+        except Exception:
+            pass
+
+    def _get_current_profile_and_roi(self) -> tuple[Optional[str], Optional[dict]]:
+        profile = None
+        roi = None
+        try:
+            if self._map_tab and hasattr(self._map_tab, 'active_profile_name'):
+                profile = getattr(self._map_tab, 'active_profile_name')
+        except Exception:
+            profile = None
+        try:
+            if self._hunt_tab and hasattr(self._hunt_tab, 'api_get_active_capture_region'):
+                roi = self._hunt_tab.api_get_active_capture_region()
+        except Exception:
+            roi = None
+        return profile, roi
+
+    def _extract_map_x(self) -> Optional[float]:
+        try:
+            if not self._map_tab or not hasattr(self._map_tab, 'api_export_minimap_view_state'):
+                return None
+            state = self._map_tab.api_export_minimap_view_state()
+            if not isinstance(state, dict):
+                return None
+            pos = state.get('final_player_pos')
+            if pos is None:
+                return None
+            if hasattr(pos, 'x'):
+                return float(pos.x())
+            if isinstance(pos, dict) and 'x' in pos:
+                return float(pos['x'])
+            return None
+        except Exception:
+            return None
+
+    def _capture_calibration_point(self, side: str) -> None:
+        if side not in ('left', 'right'):
+            return
+        map_x = self._extract_map_x()
+        hunt_center_x = None
+        frame_w = None
+        try:
+            if self._hunt_tab and hasattr(self._hunt_tab, 'api_get_current_character_position'):
+                info = self._hunt_tab.api_get_current_character_position()
+                if isinstance(info, dict):
+                    hunt_center_x = info.get('center_x')
+                    frame_w = info.get('frame_width')
+        except Exception:
+            hunt_center_x = None
+        profile, roi = self._get_current_profile_and_roi()
+        if map_x is None or hunt_center_x is None or not isinstance(hunt_center_x, (int, float)):
+            self.log_viewer.append("[캘리브레이션] 좌표 수집 실패: 맵/사냥 좌표를 확인하세요.")
+            return
+        self._calib_last_profile = profile
+        self._calib_last_roi = roi
+        pair = (float(map_x), float(hunt_center_x))
+        if side == 'left':
+            self._calib_left_pair = pair
+        else:
+            self._calib_right_pair = pair
+        self._update_calibration_status_label(frame_w)
+
+    def _update_calibration_status_label(self, frame_w: Optional[float] = None) -> None:
+        if not hasattr(self, 'calib_status_label'):
+            return
+        prof = self._calib_last_profile or '(미확인)'
+        def _fmt(p):
+            if not p:
+                return '—'
+            return f"mapX={p[0]:.1f} → huntX={p[1]:.1f}"
+        extra = f", 프레임폭={int(frame_w)}" if isinstance(frame_w, (int, float)) and frame_w > 0 else ''
+        self.calib_status_label.setText(f"프로필: {prof} | 좌:{_fmt(self._calib_left_pair)} / 우:{_fmt(self._calib_right_pair)}{extra}")
+
+    def _save_calibration_clicked(self) -> None:
+        try:
+            from map_hunt_calibration import save_calibration
+        except Exception:
+            self.log_viewer.append("[캘리브레이션] 모듈 로드 실패")
+            return
+        profile, roi = self._get_current_profile_and_roi()
+        if not profile or not roi:
+            self.log_viewer.append("[캘리브레이션] 프로필/ROI를 확인할 수 없습니다.")
+            return
+        if not (self._calib_left_pair and self._calib_right_pair):
+            self.log_viewer.append("[캘리브레이션] 좌/우 지점을 모두 수집한 뒤 저장하세요.")
+            return
+        ok, msg = save_calibration(profile, roi, self._calib_left_pair, self._calib_right_pair)
+        color = 'green' if ok else 'red'
+        self.log_viewer.append(f"<font color='{color}'>[캘리브레이션] {msg}</font>")
+
+    def _reset_calibration_clicked(self) -> None:
+        self._calib_left_pair = None
+        self._calib_right_pair = None
+        self._update_calibration_status_label()
+        self.log_viewer.append("[캘리브레이션] 임시 수집값을 초기화했습니다.")
+
+    def _on_minimap_x_enabled_toggled(self, checked: bool) -> None:
+        try:
+            from map_hunt_calibration import set_enabled
+            set_enabled(bool(checked))
+        except Exception:
+            pass
+        state_text = 'ON' if checked else 'OFF'
+        self.log_viewer.append(f"[캘리브레이션] 미니맵 X 보정 사용: {state_text}")
 
     def update_status_message(self, message):
         """상태바 메시지 업데이트를 위한 슬롯."""

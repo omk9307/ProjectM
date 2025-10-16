@@ -540,6 +540,7 @@ class MonitoringTab(QWidget):
             ("사다리 위험", "ladder_threat"),
             ("사다리 정리", "ladder_cleanup"),
             ("사다리복구", "ladder_escape"),
+            ("미니맵 X 보정", "minimap_x_fix"),
         ):
             special_rows.addWidget(_mk_special_row(t, k))
 
@@ -1348,11 +1349,22 @@ class MonitoringTab(QWidget):
             hunt_active = isinstance(rem_hunt, float) and rem_hunt > 0.0
             self._set_special_active('hunt_protect', bool(hunt_active))
             lab = self.special_value_labels.get('hunt_protect')
+        if lab:
+            if isinstance(rem_hunt, float):
+                lab.setText(f"{rem_hunt:.1f}s")
+            else:
+                lab.setText('?')
+        # 미니맵 X 보정(최근 사용 여부)
+        try:
+            used = False
+            if self._hunt_tab and hasattr(self._hunt_tab, 'api_was_minimap_x_fallback_recent'):
+                used = bool(self._hunt_tab.api_was_minimap_x_fallback_recent(1.0))
+            self._set_special_active('minimap_x_fix', bool(used))
+            lab = self.special_value_labels.get('minimap_x_fix')
             if lab:
-                if isinstance(rem_hunt, float):
-                    lab.setText(f"{rem_hunt:.1f}s")
-                else:
-                    lab.setText('?')
+                lab.setText('' if used else '—')
+        except Exception:
+            pass
         except Exception:
             pass
 

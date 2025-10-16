@@ -501,6 +501,14 @@ class MainWindow(QMainWindow):
                 hunt_tab_instance.attach_map_tab(map_tab_instance)
             if hasattr(map_tab_instance, 'attach_hunt_tab'):
                 map_tab_instance.attach_hunt_tab(hunt_tab_instance)
+        # [NEW] 학습탭에 맵/사냥 탭 참조 제공(캘리브레이션 UI 연동)
+        learning_tab_instance = self.loaded_tabs.get('학습')
+        if learning_tab_instance and map_tab_instance and hunt_tab_instance:
+            try:
+                if hasattr(learning_tab_instance, 'attach_tabs'):
+                    learning_tab_instance.attach_tabs(map_tab_instance, hunt_tab_instance)
+            except Exception:
+                pass
 
     # ... (add_error_tab, closeEvent 메서드는 기존과 동일) ...
     def _handle_global_authority_changed(self, owner: str, payload: dict) -> None:
