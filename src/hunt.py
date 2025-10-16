@@ -7587,9 +7587,19 @@ class HuntTab(QWidget):
         elif is_primary_release_command:
             allow_during_cooldown = True
 
-        # HP 긴급모드 보호: HP 상태 명령, 초긴급(urgent:*) 및 '모든 키 떼기', '사다리 멈춤복구' 허용
+        # HP 긴급모드 보호: 아래 항목들은 허용
+        # - HP 상태 명령(status:hp)
+        # - 초긴급(urgent:*)
+        # - '모든 키 떼기', '사다리 멈춤복구'
+        # - 금지몬스터 전용 명령(reason='forbidden_monster')
         if getattr(self, '_hp_emergency_active', False):
-            if not (is_status_command and status_resource == 'hp') and not is_urgent_command and normalized not in ('모든 키 떼기', '사다리 멈춤복구'):
+            # 허용 조건 중 하나라도 만족하지 않으면 차단
+            if not (
+                (is_status_command and status_resource == 'hp')
+                or is_urgent_command
+                or normalized in ('모든 키 떼기', '사다리 멈춤복구')
+                or reason_str == 'forbidden_monster'
+            ):
                 return
 
         if (
@@ -9635,10 +9645,15 @@ class HuntTab(QWidget):
         - 금지 플로우일 경우 자동제어 명령 1회 실행(reason='forbidden_monster')
         """
         try:
-            if str(source or '').lower() != 'hunt.forbidden':
-                return
+            # [완화] 소스 문자열이 일치하지 않더라도 금지 플로우 활성 상태이면 처리
             if not self._forbidden_active:
                 return
+            if str(source or '').lower() != 'hunt.forbidden':
+                # 디버그 로깅만 수행(과도한 스팸 방지 위해 info 이하)
+                try:
+                    self.append_log(f"[금지] 도착 알림 source='{source}'(예상 'hunt.forbidden')이지만 금지 플로우 활성 상태이므로 실행 처리.", 'debug')
+                except Exception:
+                    pass
             # [신규] 이미 명령 실행 중이면 중복 실행 방지
             if bool(getattr(self, '_forbidden_cmd_inflight', False)):
                 return

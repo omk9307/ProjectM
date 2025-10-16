@@ -674,20 +674,48 @@ class MonitoringTab(QWidget):
                     return v
                 s = str(v).strip().lower()
                 return s in ("1","true","yes","y","on")
-            map_checked = _to_bool(settings.value("monitoring/map_preview_checked"), False)
-            hunt_checked = _to_bool(settings.value("monitoring/hunt_preview_checked"), False)
-            link_checked = _to_bool(settings.value("monitoring/map_hunt_link"), False)
+            # QSettings에서 바로 bool로 시도 후, 실패 시 문자열 파서로 폴백
+            try:
+                map_checked = bool(settings.value("monitoring/map_preview_checked", False, type=bool))
+            except Exception:
+                map_checked = _to_bool(settings.value("monitoring/map_preview_checked"), False)
+            try:
+                hunt_checked = bool(settings.value("monitoring/hunt_preview_checked", False, type=bool))
+            except Exception:
+                hunt_checked = _to_bool(settings.value("monitoring/hunt_preview_checked"), False)
+            try:
+                link_checked = bool(settings.value("monitoring/map_hunt_link", False, type=bool))
+            except Exception:
+                link_checked = _to_bool(settings.value("monitoring/map_hunt_link"), False)
             self.map_preview_checkbox.setChecked(map_checked)
             self.hunt_preview_checkbox.setChecked(hunt_checked)
             self._apply_link_checkbox_state(link_checked, propagate=False)
             # [NEW] 오버레이 체크박스 상태 복원(기본 OFF)
-            self.chk_hunt_bundle.setChecked(_to_bool(settings.value("monitoring/ovl_hunt_bundle"), False))
-            self.chk_nickname_range.setChecked(_to_bool(settings.value("monitoring/ovl_nickname_range"), False))
-            self.chk_nameplate_track.setChecked(_to_bool(settings.value("monitoring/ovl_nameplate_track"), False))
-            self.chk_cleanup_band.setChecked(_to_bool(settings.value("monitoring/ovl_cleanup_band"), False))
-            self.chk_cluster_window.setChecked(_to_bool(settings.value("monitoring/ovl_cluster_window"), False))
+            try:
+                self.chk_hunt_bundle.setChecked(bool(settings.value("monitoring/ovl_hunt_bundle", False, type=bool)))
+            except Exception:
+                self.chk_hunt_bundle.setChecked(_to_bool(settings.value("monitoring/ovl_hunt_bundle"), False))
+            try:
+                self.chk_nickname_range.setChecked(bool(settings.value("monitoring/ovl_nickname_range", False, type=bool)))
+            except Exception:
+                self.chk_nickname_range.setChecked(_to_bool(settings.value("monitoring/ovl_nickname_range"), False))
+            try:
+                self.chk_nameplate_track.setChecked(bool(settings.value("monitoring/ovl_nameplate_track", False, type=bool)))
+            except Exception:
+                self.chk_nameplate_track.setChecked(_to_bool(settings.value("monitoring/ovl_nameplate_track"), False))
+            try:
+                self.chk_cleanup_band.setChecked(bool(settings.value("monitoring/ovl_cleanup_band", False, type=bool)))
+            except Exception:
+                self.chk_cleanup_band.setChecked(_to_bool(settings.value("monitoring/ovl_cleanup_band"), False))
+            try:
+                self.chk_cluster_window.setChecked(bool(settings.value("monitoring/ovl_cluster_window", False, type=bool)))
+            except Exception:
+                self.chk_cluster_window.setChecked(_to_bool(settings.value("monitoring/ovl_cluster_window"), False))
             # [NEW] 캐릭터박스 상태 복원(기본 OFF)
-            self.chk_character_box.setChecked(_to_bool(settings.value("monitoring/ovl_character_boxes"), False))
+            try:
+                self.chk_character_box.setChecked(bool(settings.value("monitoring/ovl_character_boxes", False, type=bool)))
+            except Exception:
+                self.chk_character_box.setChecked(_to_bool(settings.value("monitoring/ovl_character_boxes"), False))
         except Exception:
             pass
 
@@ -2244,11 +2272,13 @@ class MonitoringTab(QWidget):
             # 체크박스 상태 저장
             settings.setValue("monitoring/map_preview_checked", bool(self.map_preview_checkbox.isChecked()))
             settings.setValue("monitoring/hunt_preview_checked", bool(self.hunt_preview_checkbox.isChecked()))
+            settings.setValue("monitoring/map_hunt_link", bool(self.map_link_checkbox.isChecked() or self.hunt_link_checkbox.isChecked()))
             settings.setValue("monitoring/ovl_hunt_bundle", bool(self.chk_hunt_bundle.isChecked()))
             settings.setValue("monitoring/ovl_nickname_range", bool(self.chk_nickname_range.isChecked()))
             settings.setValue("monitoring/ovl_nameplate_track", bool(self.chk_nameplate_track.isChecked()))
             settings.setValue("monitoring/ovl_cleanup_band", bool(self.chk_cleanup_band.isChecked()))
             settings.setValue("monitoring/ovl_cluster_window", bool(self.chk_cluster_window.isChecked()))
+            settings.setValue("monitoring/ovl_character_boxes", bool(self.chk_character_box.isChecked()))
         except Exception:
             pass
         # 사냥 프리뷰 해제
