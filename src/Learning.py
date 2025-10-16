@@ -6333,6 +6333,8 @@ class LearningTab(QWidget):
 
         self.calib_status_label = QLabel("프로필: — | 좌:— / 우:—")
         calib_layout.addWidget(self.calib_status_label)
+        self.calib_online_status_label = QLabel("자동 보정 상태: —")
+        calib_layout.addWidget(self.calib_online_status_label)
         calib_group.setLayout(calib_layout)
         right_layout.addWidget(calib_group)
 
@@ -6403,6 +6405,27 @@ class LearningTab(QWidget):
         self._load_status_command_options()
         self._apply_status_config_to_ui()
         self._refresh_window_anchor_summary()
+
+        # [NEW] 캘리브레이션 UI 툴팁 및 상태 타이머
+        try:
+            self.calib_left_btn.setToolTip("현재 위치를 '좌측 지점'으로 수집합니다. (mapX → 프레임 중심X)")
+            self.calib_right_btn.setToolTip("현재 위치를 '우측 지점'으로 수집합니다. (mapX → 프레임 중심X)")
+            self.calib_save_btn.setToolTip("좌/우 지점을 모두 수집한 뒤 누르면 (a,b) 보정치를 계산하여 파일에 저장하고 즉시 적용합니다.")
+            self.calib_reset_btn.setToolTip("좌/우 임시 수집값을 초기화합니다.")
+            self.calib_relearn_btn.setToolTip("저장된 (a,b)을 삭제하고 온라인 보정 상태를 초기화합니다.")
+            self.minimap_x_enabled_checkbox.setToolTip("ON: 닉네임 미검 시 미니맵 기반 X 보정을 적용/학습합니다.")
+        except Exception:
+            pass
+
+        try:
+            self._calib_status_timer = QTimer(self)
+            self._calib_status_timer.timeout.connect(self._refresh_online_calibration_status)
+            self._calib_status_timer.start(500)
+        except Exception:
+            pass
+        # 온라인 저장 전환 로그 상태 추적
+        self._calib_prev_sig = None
+        self._calib_prev_has_saved = False
 
     # ----- [NEW] 맵-사냥 위치 캘리브레이션: 탭 연결 및 핸들러 -----
     def attach_tabs(self, map_tab, hunt_tab) -> None:
@@ -6542,6 +6565,73 @@ class LearningTab(QWidget):
         except Exception:
             pass
         self.log_viewer.append("[캘리브레이션] 온라인 보정 상태를 초기화했습니다. 재수집 대기…")
+
+    def _refresh_online_calibration_status(self) -> None:
+        try:
+            profile, roi = self._get_current_profile_and_roi()
+            if not profile or not roi:
+                self.calib_online_status_label.setText("자동 보정 상태: 프로필/ROI 없음")
+                # 프로필/ROI 없을 때 상태 초기화
+                self._calib_prev_sig = None
+                self._calib_prev_has_saved = False
+                return
+            try:
+                from minimap_online_calibrator import export_status as _export
+                st = _export(profile, roi)
+            except Exception:
+                st = None
+            if not isinstance(st, dict):
+                self.calib_online_status_label.setText("자동 보정 상태: —")
+                return
+            # 서명 계산
+            try:
+                from map_hunt_calibration import roi_signature as _roi_sig
+                sig = _roi_sig(roi)
+            except Exception:
+                sig = None
+            frozen = st.get('frozen')
+            has_saved = st.get('has_saved')
+            a = st.get('a'); b = st.get('b')
+            rmse = st.get('rmse'); thr = st.get('threshold')
+            inl = st.get('inliers', 0); smp = st.get('samples', 0)
+            streak = st.get('ok_streak', 0); alive = st.get('alive_sec', 0.0)
+            if frozen:
+                status_text = "저장됨/유지"
+            elif has_saved:
+                status_text = "저장값 사용(학습 대기)"
+            elif smp >= 2:
+                status_text = "학습 중"
+            else:
+                status_text = "대기"
+            def fmt(v, fmtstr=".2f"):
+                try:
+                    return format(float(v), fmtstr)
+                except Exception:
+                    return "—"
+            ab_text = f"a={fmt(a,'.5f')}, b={fmt(b,'.1f')}" if a is not None and b is not None else "a/b=—"
+            err_text = f"RMSE={fmt(rmse)} / 임계={fmt(thr)}" if rmse is not None and thr is not None else "RMSE/임계=—"
+            meta_text = f"샘플={smp}, 인라이어={inl}, 연속={streak}/12, 관측={fmt(alive,'.1f')}s"
+            self.calib_online_status_label.setText(f"자동 보정 상태: {status_text} | {ab_text} | {err_text} | {meta_text}")
+
+            # [NEW] 자동 저장 전환 감지 → 학습탭 로그에 알림 출력
+            try:
+                if sig != self._calib_prev_sig:
+                    # ROI/프로필 변경 시 현재 저장 상태로 초기화
+                    self._calib_prev_sig = sig
+                    self._calib_prev_has_saved = bool(has_saved)
+                else:
+                    if bool(has_saved) and not bool(self._calib_prev_has_saved):
+                        self._calib_prev_has_saved = True
+                        if hasattr(self, 'log_viewer'):
+                            if a is not None and b is not None:
+                                self.log_viewer.append(f"[캘리브레이션] 자동 저장 완료(학습): a={float(a):.5f}, b={float(b):.2f}")
+                            else:
+                                self.log_viewer.append("[캘리브레이션] 자동 저장 완료(학습)")
+            except Exception:
+                pass
+        except Exception:
+            # UI 업데이트 실패 시 조용히 무시
+            pass
 
     def update_status_message(self, message):
         """상태바 메시지 업데이트를 위한 슬롯."""

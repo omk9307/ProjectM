@@ -2109,9 +2109,12 @@ class MapTab(QWidget):
             except Exception:
                 status_resource = ''
 
-        # HP 긴급모드 보호: HP 상태 명령, 초긴급(urgent:*) 및 '모든 키 떼기', '사다리 멈춤복구' 허용
+        # HP 긴급모드 보호
+        # - 일반적으로 비-상태/비-초긴급 명령은 차단하나,
+        # - [변경] 대기 모드에서는 병렬 동작을 허용(이동/준비 명령 보류 금지)
         if getattr(self, '_hp_emergency_active', False):
-            if not (is_status_command and status_resource == 'hp') and not is_urgent_command and command not in ('모든 키 떼기', '사다리 멈춤복구'):
+            wait_mode_active = self._is_other_player_wait_active()
+            if (not wait_mode_active) and not (is_status_command and status_resource == 'hp') and not is_urgent_command and command not in ('모든 키 떼기', '사다리 멈춤복구'):
                 detail = {"command": command, "hp_emergency": True}
                 return _wrap_result(False, "hp_emergency_active", detail)
 
@@ -2170,18 +2173,19 @@ class MapTab(QWidget):
             detail['current_owner'] = getattr(self, 'current_authority_owner', None)
             return _wrap_result(False, "not_owner", detail)
 
-        if (
-            self._status_active_resource
-            and not is_status_command
-            and not is_urgent_command
-            and command != "모든 키 떼기"
-        ):
-            self._status_saved_command = (command, reason)
-            detail: Dict[str, Any] = {
-                "active_resource": self._status_active_resource,
-                "status_saved": True,
-            }
-            return _wrap_result(False, "status_command_active", detail)
+        if self._status_active_resource and not is_status_command and not is_urgent_command and command != "모든 키 떼기":
+            # [변경] 대기 모드에서 HP 상태 명령 활성 중에는 병렬 허용
+            try:
+                active_res = str(self._status_active_resource or '').lower()
+            except Exception:
+                active_res = ''
+            if not (self._is_other_player_wait_active() and active_res == 'hp'):
+                self._status_saved_command = (command, reason)
+                detail: Dict[str, Any] = {
+                    "active_resource": self._status_active_resource,
+                    "status_saved": True,
+                }
+                return _wrap_result(False, "status_command_active", detail)
 
         if self.forbidden_wall_in_progress and not allow_forbidden and reason != self.active_forbidden_wall_reason:
             self.update_general_log("[금지벽] 명령 실행 중이어서 다른 명령은 보류됩니다.", "gray")
@@ -11844,7 +11848,9 @@ class MapTab(QWidget):
                                     ):
                                         # 사다리 상태에서는 긴급모드 진입 금지
                                         if str(getattr(self, 'player_state', '')) not in {'climbing_up', 'climbing_down', 'on_ladder_idle'}:
-                                            self._enter_hp_emergency_mode()
+                                            # [정책] 대기모드에서는 일반 긴급모드 진입 금지(대기 전용 HP만 허용)
+                                            if not self._is_other_player_wait_active():
+                                                self._enter_hp_emergency_mode()
                                         else:
                                             self.update_general_log("[HP] 긴급모드 조건 충족이나 사다리 상태로 진입 보류", "gray")
                         # 긴급모드 시간 초과 검사
@@ -11863,7 +11869,9 @@ class MapTab(QWidget):
                                         f"[HP] 긴급모드 진입: HP 임계값({int(em_thr)}%) 이하 감지 (현재 {int(round(current))}%)",
                                         "orange",
                                     )
-                                    self._enter_hp_emergency_mode()
+                                    # [정책] 대기모드에서는 일반 긴급모드 진입 금지(대기 전용 HP만 허용)
+                                    if not self._is_other_player_wait_active():
+                                        self._enter_hp_emergency_mode()
                                 else:
                                     self.update_general_log(
                                         f"[HP] 긴급모드 조건 충족(HP {int(round(current))}%)이나 사다리 상태로 진입 보류",
@@ -11912,6 +11920,9 @@ class MapTab(QWidget):
                                     self._low_hp_alert_active = False
                             urgent_cmd = getattr(hp_cfg, 'urgent_command_profile', None)
                             if isinstance(urgent_cmd, str) and urgent_cmd.strip():
+                                # [정책] 대기모드에서는 초긴급 HP 명령 금지(대기 전용 HP만 사용)
+                                if self._is_other_player_wait_active():
+                                    raise Exception('skip_urgent_in_wait_mode')
                                 # 초긴급: 매 HP 판단 주기마다 재트리거
                                 try:
                                     interval = float(getattr(hp_cfg, 'interval_sec', 1.0) or 1.0)
@@ -12032,8 +12043,11 @@ class MapTab(QWidget):
         self._hp_emergency_telegram_sent = False
         # 즉시 모든 키 해제 (원인 로그 포함)
         self._emit_control_command("모든 키 떼기", reason="HP회복 긴급모드 진입", allow_forbidden=True)
-        # 최초 진입 로그
-        self.update_general_log("[WARN] [HP] 긴급 회복 모드에 진입했습니다. 다른 명령을 차단합니다.", "orange")
+        # 최초 진입 로그(대기 모드에서는 병렬 허용 안내)
+        if self._is_other_player_wait_active():
+            self.update_general_log("[HP] 긴급 회복 모드 진입(대기 모드 병렬 허용)", "orange")
+        else:
+            self.update_general_log("[WARN] [HP] 긴급 회복 모드에 진입했습니다. 다른 명령을 차단합니다.", "orange")
         # 즉시 HP 회복 명령 1회 발행하여 다음 주기에 회복판단
         try:
             hp_cfg = getattr(self, '_status_config', None).hp if hasattr(self, '_status_config') else None
