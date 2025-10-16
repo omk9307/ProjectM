@@ -9671,6 +9671,13 @@ class HuntTab(QWidget):
             # 실행 래치 세팅(완료 시 해제)
             self._forbidden_cmd_inflight = True
             self._emit_control_command(cmd, reason='forbidden_monster')
+            # [ACK] 맵탭에 명령 시작 알림(핸드셰이크)
+            try:
+                map_tab = getattr(self, 'map_tab', None)
+                if map_tab and hasattr(map_tab, 'on_other_player_wait_command_started'):
+                    map_tab.on_other_player_wait_command_started(source='hunt.forbidden')
+            except Exception:
+                pass
             self.append_log(f"금지몬스터 도착 → 명령 실행: '{cmd}'", 'info')
         except Exception:
             # 에러 시에도 종료 예약

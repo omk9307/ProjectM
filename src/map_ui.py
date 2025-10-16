@@ -6703,6 +6703,10 @@ class MapTab(QWidget):
                 # [신규] 도착 알림 디바운스/1회 통지 플래그
                 'arrival_notified': False,
                 'last_arrival_notify_ts': 0.0,
+                'arrival_ack_received': False,
+                'arrival_ack_deadline_ts': 0.0,
+                'arrival_retry_count': 0,
+                'arrival_retry_max': 2,
             }
         except Exception:
             return False
@@ -7134,7 +7138,14 @@ class MapTab(QWidget):
                 hunt_tab.on_other_player_wait_arrived(source=source, waypoint_name=waypoint_name)
                 context['arrival_notified'] = True
                 context['last_arrival_notify_ts'] = now_ts
+                # ACK 대기 타이머 설정(2.0s)
+                context['arrival_ack_received'] = False
+                context['arrival_ack_deadline_ts'] = now_ts + 2.0
                 self.other_player_wait_context = context
+                try:
+                    QTimer.singleShot(2100, self._check_other_player_wait_arrival_ack)
+                except Exception:
+                    pass
         except Exception:
             pass
 
@@ -7493,6 +7504,66 @@ class MapTab(QWidget):
             self._maintain_other_player_wait_travel(context, final_player_pos)
         elif phase == 'wait_hold':
             self._maintain_other_player_wait_hold(context, final_player_pos)
+
+    def _check_other_player_wait_arrival_ack(self) -> None:
+        if not self._is_other_player_wait_active():
+            return
+        context = dict(getattr(self, 'other_player_wait_context', {}) or {})
+        if context.get('phase') != 'wait_hold':
+            return
+        if not bool(context.get('holding', False)):
+            return
+        now_ts = time.time()
+        ack_received = bool(context.get('arrival_ack_received', False))
+        deadline = float(context.get('arrival_ack_deadline_ts', 0.0) or 0.0)
+        if ack_received:
+            return
+        if deadline <= 0.0 or now_ts < deadline:
+            try:
+                QTimer.singleShot(200, self._check_other_player_wait_arrival_ack)
+            except Exception:
+                pass
+            return
+        retry_count = 0
+        try:
+            retry_count = int(context.get('arrival_retry_count', 0) or 0)
+        except Exception:
+            retry_count = 0
+        retry_max = 2
+        try:
+            retry_max = int(context.get('arrival_retry_max', 2) or 2)
+        except Exception:
+            retry_max = 2
+        if retry_count < retry_max:
+            try:
+                waypoint_name = context.get('goal_name', str(context.get('goal_id', '')))
+                self.update_general_log("[대기 모드] 도착 ACK 지연 → 재통지 시도.", "orange")
+                hunt_tab = getattr(self, '_hunt_tab', None)
+                if hunt_tab and hasattr(hunt_tab, 'on_other_player_wait_arrived'):
+                    source = str(context.get('source') or '')
+                    hunt_tab.on_other_player_wait_arrived(source=source, waypoint_name=waypoint_name)
+                context['arrival_retry_count'] = retry_count + 1
+                context['arrival_notified'] = True
+                context['last_arrival_notify_ts'] = now_ts
+                context['arrival_ack_deadline_ts'] = now_ts + 2.0
+                self.other_player_wait_context = context
+                try:
+                    QTimer.singleShot(2100, self._check_other_player_wait_arrival_ack)
+                except Exception:
+                    pass
+            except Exception:
+                pass
+
+    def on_other_player_wait_command_started(self, source: str = '') -> None:
+        try:
+            if not self._is_other_player_wait_active():
+                return
+            context = dict(getattr(self, 'other_player_wait_context', {}) or {})
+            context['arrival_ack_received'] = True
+            self.other_player_wait_context = context
+            self.update_general_log("[대기 모드] 도착 명령 시작 ACK 수신.", "gray")
+        except Exception:
+            pass
 
     def on_detection_ready(self, frame_bgr, found_features, my_player_rects, other_player_rects):
         map_perf = {
