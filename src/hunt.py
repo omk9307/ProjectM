@@ -12308,7 +12308,18 @@ class HuntTab(QWidget):
 
         character_box = self._select_reference_character_box(self.latest_snapshot.character_boxes)
         # 점프공격(주 스킬 범위 중심 기준) 시도: 성공 시 방향전환 무시하고 종료
-        if self._try_jump_attack(skill, character_box):
+        # - 주 스킬에 점프공격이 켜져 있으면 주 스킬 기준으로 우선 시도
+        # - 아니면 선택된 스킬이 점프공격을 지원하면 그 스킬로 시도(기존 동작 유지)
+        try:
+            primary_skill = next((s for s in getattr(self, 'attack_skills', []) if getattr(s, 'is_primary', False) and getattr(s, 'enabled', True)), None)
+        except Exception:
+            primary_skill = None
+        jump_skill = None
+        if primary_skill and getattr(primary_skill, 'jump_attack_enabled', False):
+            jump_skill = primary_skill
+        elif getattr(skill, 'jump_attack_enabled', False):
+            jump_skill = skill
+        if jump_skill and self._try_jump_attack(jump_skill, character_box):
             return
         target_box = self._select_target_monster(character_box)
         if not target_box:
