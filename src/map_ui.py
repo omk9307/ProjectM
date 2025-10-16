@@ -8599,23 +8599,57 @@ class MapTab(QWidget):
         return chosen
 
     def _maybe_trigger_walk_teleport(self, direction: str, distance_to_target: float | None) -> None:
-        """걷기 중 일정 거리 이상일 때 텔레포트 명령을 확률적으로 실행합니다."""
-        if self._is_other_player_wait_active():
-            self._update_walk_teleport_probability_display(0.0)
-            self._reset_walk_teleport_state()
-            return
+        """걷기 중 일정 거리 이상일 때 텔레포트 명령을 확률적으로 실행합니다.
+
+        [대기 모드 특수 규칙]
+        - 대기 모드에서 대기 웨이포인트와의 X축 절대거리가 300px 이상이면 텔레포트 확률 30%로 강제 적용.
+        - 300px 미만이면 텔레포트 비활성(0%) 유지.
+        - 반드시 걷기 입력이 활성화된 상태에서만 텔레포트 시도(걷기 보장 후 텔레포트).
+        """
+        WAIT_TELEPORT_DISTANCE_PX = 300.0
+        wait_mode_active = self._is_other_player_wait_active()
+        wait_mode_far = False
+        if wait_mode_active:
+            try:
+                context = getattr(self, 'other_player_wait_context', {}) or {}
+                goal_id = context.get('goal_id')
+                goal_id_str = str(goal_id) if goal_id is not None else ''
+                wp_node = self.nav_nodes.get(f"wp_{goal_id_str}", {}) if goal_id_str else {}
+                wp_pos = wp_node.get('pos')
+                player_pos = getattr(self, 'smoothed_player_pos', None) or getattr(self, 'last_player_pos', None)
+                if wp_pos is not None and player_pos is not None:
+                    # X축 절대거리 기준
+                    dx = float(player_pos.x()) - float(wp_pos.x())
+                    distance_x = abs(dx)
+                    wait_mode_far = distance_x >= WAIT_TELEPORT_DISTANCE_PX
+                    # 방향 정보가 없으면 대기 웨이포인트 기준으로 보정
+                    if direction not in ("→", "←"):
+                        direction = "→" if dx < 0 else "←"
+                else:
+                    # 거리 계산 불가 시 안전하게 비활성 처리
+                    wait_mode_far = False
+            except Exception:
+                wait_mode_far = False
+
+            # 대기 모드에서 300px 미만이면 비활성 유지
+            if not wait_mode_far:
+                self._update_walk_teleport_probability_display(0.0)
+                self._reset_walk_teleport_state()
+                return
 
         if not (self.auto_control_checkbox.isChecked() or self.debug_auto_control_checkbox.isChecked()):
             self._update_walk_teleport_probability_display(0.0)
             self._reset_walk_teleport_state()
             return
 
-        if direction not in ("→", "←") or distance_to_target is None:
+        # 대기 모드(원거리)에서는 distance_to_target 검사를 우회하고, 방향만 확인
+        if not wait_mode_far and (direction not in ("→", "←") or distance_to_target is None):
             self._update_walk_teleport_probability_display(0.0)
             self._reset_walk_teleport_state()
             return
 
-        if distance_to_target < 20.0:
+        # 대기 모드(원거리)일 땐 20px 근접 제한을 우회
+        if not wait_mode_far and distance_to_target is not None and distance_to_target < 20.0:
             self._update_walk_teleport_probability_display(0.0)
             return
 
@@ -8631,14 +8665,23 @@ class MapTab(QWidget):
         else:
             elapsed = max(0.0, now - self._walk_teleport_walk_started_at)
 
-        if bonus_step > 0.0:
-            bonus_steps = math.floor(elapsed / bonus_delay)
-            self._walk_teleport_bonus_percent = min(bonus_max, bonus_steps * bonus_step)
+        if wait_mode_far:
+            # 대기 모드 원거리: 보너스 무시, 확률 강제 설정(아래에서 30% 적용)
+            self._walk_teleport_bonus_percent = 0.0
         else:
-            self._walk_teleport_bonus_percent = 0.0 if not self._walk_teleport_active else min(bonus_max, self._walk_teleport_bonus_percent)
+            if bonus_step > 0.0:
+                bonus_steps = math.floor(elapsed / bonus_delay)
+                self._walk_teleport_bonus_percent = min(bonus_max, bonus_steps * bonus_step)
+            else:
+                self._walk_teleport_bonus_percent = 0.0 if not self._walk_teleport_active else min(bonus_max, self._walk_teleport_bonus_percent)
 
-        base_percent = max(min(self.cfg_walk_teleport_probability, 100.0), 0.0)
-        effective_percent = min(100.0, base_percent + self._walk_teleport_bonus_percent)
+        if wait_mode_far:
+            # 대기 모드(원거리) 강제 확률 30%
+            base_percent = 30.0
+            effective_percent = 30.0
+        else:
+            base_percent = max(min(self.cfg_walk_teleport_probability, 100.0), 0.0)
+            effective_percent = min(100.0, base_percent + self._walk_teleport_bonus_percent)
         probability = effective_percent / 100.0
 
         self._update_walk_teleport_probability_display(effective_percent)

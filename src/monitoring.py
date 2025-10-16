@@ -1349,11 +1349,14 @@ class MonitoringTab(QWidget):
             hunt_active = isinstance(rem_hunt, float) and rem_hunt > 0.0
             self._set_special_active('hunt_protect', bool(hunt_active))
             lab = self.special_value_labels.get('hunt_protect')
-        if lab:
-            if isinstance(rem_hunt, float):
-                lab.setText(f"{rem_hunt:.1f}s")
-            else:
-                lab.setText('?')
+            if lab:
+                if isinstance(rem_hunt, float):
+                    lab.setText(f"{rem_hunt:.1f}s")
+                else:
+                    lab.setText('?')
+        except Exception:
+            pass
+
         # 미니맵 X 보정(최근 사용 여부)
         try:
             used = False
@@ -1363,8 +1366,6 @@ class MonitoringTab(QWidget):
             lab = self.special_value_labels.get('minimap_x_fix')
             if lab:
                 lab.setText('' if used else '—')
-        except Exception:
-            pass
         except Exception:
             pass
 
