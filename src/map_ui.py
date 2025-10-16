@@ -8918,9 +8918,9 @@ class MapTab(QWidget):
                 self._walk_teleport_bonus_percent = 0.0 if not self._walk_teleport_active else min(bonus_max, self._walk_teleport_bonus_percent)
 
         if wait_mode_far:
-            # 대기 모드(원거리) 강제 확률 30%
-            base_percent = 30.0
-            effective_percent = 30.0
+            # 대기 모드(원거리) 강제 확률 100%
+            base_percent = 100.0
+            effective_percent = 100.0
         else:
             base_percent = max(min(self.cfg_walk_teleport_probability, 100.0), 0.0)
             effective_percent = min(100.0, base_percent + self._walk_teleport_bonus_percent)
