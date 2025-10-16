@@ -2848,6 +2848,12 @@ class HuntTab(QWidget):
         group.setMinimumWidth(0)
         condition_form = QFormLayout()
 
+        # [NEW] 확장사냥 모드: 사냥조건 첫 줄 체크박스
+        self.expanded_hunt_checkbox = QCheckBox("확장사냥 모드")
+        self.expanded_hunt_checkbox.setChecked(False)
+        self.expanded_hunt_checkbox.toggled.connect(self._handle_setting_changed)
+        condition_form.addRow(self.expanded_hunt_checkbox)
+
         self.hunt_monster_threshold_spinbox = QSpinBox()
         self.hunt_monster_threshold_spinbox.setRange(1, 50)
         self.hunt_monster_threshold_spinbox.setValue(3)
@@ -10865,6 +10871,13 @@ class HuntTab(QWidget):
                 finally:
                     self.floor_hold_spinbox.blockSignals(prev)
 
+            # [NEW] 확장사냥 모드 로드
+            try:
+                if hasattr(self, 'expanded_hunt_checkbox'):
+                    self.expanded_hunt_checkbox.setChecked(bool(conditions.get('expanded_hunt', False)))
+            except Exception:
+                pass
+
         # 사다리 위협 설정 로드
         ladder_cfg = data.get('ladder_threat', {})
         if isinstance(ladder_cfg, dict):
@@ -11605,6 +11618,7 @@ class HuntTab(QWidget):
                 'map_protect_sec': self.map_protect_spinbox.value(),
                 'floor_hold_sec': self.floor_hold_spinbox.value(),
                 'hunt_protect_sec': self.hunt_protect_spinbox.value(),
+                'expanded_hunt': bool(self.expanded_hunt_checkbox.isChecked()) if hasattr(self, 'expanded_hunt_checkbox') else False,
             },
             'display': {
                 'show_hunt_area': self.show_hunt_area_checkbox.isChecked(),
@@ -12510,25 +12524,55 @@ class HuntTab(QWidget):
         return walk_issued
 
     def _try_jump_attack(self, skill: AttackSkill, character_box: DetectionBox) -> bool:
-        """주 스킬 범위 군집 중심을 기준으로 점프공격을 시도.
-        - 조건: 점프공격 On, 주 스킬 범위 교차 몬스터 ≥ 2, 거리 ≥ 설정 px, 확률 성공
-        - 실행: 중심의 좌/우에 따라 반대 방향이 아닌, 중심을 향하는 방향 프로필 실행
-        - 방향전환은 무시(점프 실행 시 자체적으로 방향 포함된 프로필 가정)
-        - 지연: pre-delay는 점프 전용(jump_pre_delay_*), post-delay는 점프 전용(jump_post_delay_*), 완료 지연은 기본 스킬 값 사용
+        """점프공격 시도: 기본(주 스킬 범위 내 ≥2) + [확장사냥] x범위 내 군집(주 스킬 폭) 기반.
+
+        - 기본: 주 스킬 범위 교차 몬스터 ≥ 2일 때 중심으로 점프공격
+        - 확장사냥 모드 On: 사냥범위 내 몬스터들로 주 스킬 폭 내 임계치(최소 2) 충족 군집이 있으면 그 군집 중심으로 점프공격
+        - 방향전환은 무시(점프 프로필 자체가 방향 포함 가정)
+        - 지연: jump_pre_delay_*, jump_post_delay_*, completion 지연은 스킬 기본값
         """
         try:
             if not getattr(skill, 'jump_attack_enabled', False):
                 return False
-            if not self.current_primary_area:
-                return False
+
             monsters = self._get_recent_monster_boxes()
             if not monsters:
                 return False
-            primary_monsters = [m for m in monsters if m.intersects(self.current_primary_area)]
-            if len(primary_monsters) < 2:
-                return False
+
             char_x = character_box.center_x
-            center_x = sum(m.center_x for m in primary_monsters) / float(len(primary_monsters))
+            center_x: Optional[float] = None
+            used_mode = '기본'
+
+            # 1) 기본: 주 스킬 범위 내 2마리 이상이면 중심X 사용
+            if self.current_primary_area:
+                try:
+                    primary_monsters = [m for m in monsters if m.intersects(self.current_primary_area)]
+                except Exception:
+                    primary_monsters = []
+                if len(primary_monsters) >= 2:
+                    center_x = sum(m.center_x for m in primary_monsters) / float(len(primary_monsters))
+                    used_mode = '기본'
+
+            # 2) [확장사냥] 주 스킬 범위가 2 미만일 때, x범위 내 군집(주 스킬 폭/임계 적용) 탐색
+            if center_x is None:
+                expanded_on = bool(getattr(self, 'expanded_hunt_checkbox', None) and self.expanded_hunt_checkbox.isChecked())
+                if expanded_on and self.current_hunt_area:
+                    width, primary_threshold = self._compute_primary_window_width_threshold()
+                    # 최소 2마리 조건 보장 + 사용자가 더 높게 설정한 경우 존중
+                    required = max(2, int(primary_threshold))
+                    if width > 0.0 and required >= 2:
+                        try:
+                            hunt_monsters = [b for b in monsters if b.intersects(self.current_hunt_area)]
+                        except Exception:
+                            hunt_monsters = []
+                        cluster = self._find_best_primary_cluster(hunt_monsters, width, required, char_x)
+                        if cluster is not None:
+                            center_x, _ = cluster
+                            used_mode = '확장'
+
+            if center_x is None:
+                return False
+
             side = 'left' if center_x < char_x else 'right'
             distance = abs(center_x - char_x)
             threshold = max(1, int(getattr(skill, 'jump_attack_distance_px', 120)))
@@ -12550,7 +12594,8 @@ class HuntTab(QWidget):
                 total_monster_count=self.latest_monster_count,
             )
             direction_text = '우' if side == 'right' else '좌'
-            usage_reason = f"{base_reason} | 점프공격({direction_text}, 중심거리 {int(round(distance))}픽셀)"
+            tag = '확장' if used_mode == '확장' else '점프공격'
+            usage_reason = f"{base_reason} | {tag}({direction_text}, 중심거리 {int(round(distance))}픽셀)"
 
             # 점프 전에는 점프 전용 pre-delay를 적용(기본값 0.0)
             pre_delay = self._sample_delay(
