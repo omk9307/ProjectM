@@ -6314,6 +6314,53 @@ class LearningTab(QWidget):
         self.minimap_x_enabled_checkbox.toggled.connect(self._on_minimap_x_enabled_toggled)
         calib_layout.addWidget(self.minimap_x_enabled_checkbox)
 
+        # [NEW] 좁은 맵 모드 토글
+        self.narrow_map_checkbox = QCheckBox("좁은 맵 모드")
+        try:
+            from minimap_online_calibrator import is_narrow_map_mode as _is_narrow
+            self.narrow_map_checkbox.setChecked(bool(_is_narrow()))
+        except Exception:
+            self.narrow_map_checkbox.setChecked(False)
+        self.narrow_map_checkbox.setToolTip("맵 X 이동이 작을 때도 학습이 진행되도록 임계를 완화합니다.")
+        self.narrow_map_checkbox.toggled.connect(self._on_narrow_map_toggled)
+        calib_layout.addWidget(self.narrow_map_checkbox)
+
+        # [NEW] 온라인 학습/반영/저장 제어 토글
+        flags_row = QHBoxLayout()
+        self.online_enabled_checkbox = QCheckBox("온라인 학습 사용")
+        self.apply_online_checkbox = QCheckBox("온라인 결과 즉시 적용")
+        self.auto_save_checkbox = QCheckBox("자동 저장")
+        self.freeze_after_save_checkbox = QCheckBox("저장 후 동결")
+        try:
+            from minimap_online_calibrator import (
+                is_online_enabled as _is_online,
+                is_apply_online_immediately as _is_apply,
+                is_auto_save as _is_autosave,
+                is_freeze_after_save as _is_freeze,
+            )
+            self.online_enabled_checkbox.setChecked(bool(_is_online()))
+            self.apply_online_checkbox.setChecked(bool(_is_apply()))
+            self.auto_save_checkbox.setChecked(bool(_is_autosave()))
+            self.freeze_after_save_checkbox.setChecked(bool(_is_freeze()))
+        except Exception:
+            self.online_enabled_checkbox.setChecked(True)
+            self.apply_online_checkbox.setChecked(True)
+            self.auto_save_checkbox.setChecked(False)
+            self.freeze_after_save_checkbox.setChecked(True)
+        self.online_enabled_checkbox.toggled.connect(self._on_online_enabled_toggled)
+        self.apply_online_checkbox.toggled.connect(self._on_apply_online_toggled)
+        self.auto_save_checkbox.toggled.connect(self._on_auto_save_toggled)
+        self.freeze_after_save_checkbox.toggled.connect(self._on_freeze_after_save_toggled)
+        for w in (
+            self.online_enabled_checkbox,
+            self.apply_online_checkbox,
+            self.auto_save_checkbox,
+            self.freeze_after_save_checkbox,
+        ):
+            flags_row.addWidget(w)
+        flags_row.addStretch(1)
+        calib_layout.addLayout(flags_row)
+
         btn_row = QHBoxLayout()
         self.calib_left_btn = QPushButton("좌측 끝")
         self.calib_right_btn = QPushButton("우측 끝")
@@ -6325,7 +6372,9 @@ class LearningTab(QWidget):
         self.calib_save_btn.clicked.connect(self._save_calibration_clicked)
         self.calib_reset_btn.clicked.connect(self._reset_calibration_clicked)
         self.calib_relearn_btn.clicked.connect(self._manual_relearn_clicked)
-        for b in (self.calib_left_btn, self.calib_right_btn, self.calib_save_btn, self.calib_reset_btn, self.calib_relearn_btn):
+        self.calib_save_now_btn = QPushButton("지금 보정치 저장")
+        self.calib_save_now_btn.clicked.connect(self._manual_save_now_clicked)
+        for b in (self.calib_left_btn, self.calib_right_btn, self.calib_save_btn, self.calib_reset_btn, self.calib_relearn_btn, self.calib_save_now_btn):
             btn_row.addWidget(b)
         btn_row.addStretch(1)
         calib_layout.addLayout(btn_row)
@@ -6416,6 +6465,12 @@ class LearningTab(QWidget):
             self.calib_reset_btn.setToolTip("좌/우 임시 수집값을 초기화합니다.")
             self.calib_relearn_btn.setToolTip("저장된 (a,b)을 삭제하고 온라인 보정 상태를 초기화합니다.")
             self.minimap_x_enabled_checkbox.setToolTip("ON: 닉네임 미검 시 미니맵 기반 X 보정을 적용/학습합니다.")
+            self.narrow_map_checkbox.setToolTip("좁은 맵에서 좌우 이동이 작을 때도 학습이 가능하도록 임계를 완화합니다.")
+            self.online_enabled_checkbox.setToolTip("온라인 보정을 활성/비활성화합니다(샘플 수집 및 학습 자체를 제어).")
+            self.apply_online_checkbox.setToolTip("저장 전이라도 온라인 추정 결과를 즉시 적용할지 제어합니다.")
+            self.auto_save_checkbox.setToolTip("수렴 시 자동으로 (a,b)을 저장합니다.")
+            self.freeze_after_save_checkbox.setToolTip("저장 직후 온라인 보정을 멈추고 저장값만 유지합니다.")
+            self.calib_save_now_btn.setToolTip("현재 추정된 보정치(닉네임 기반 바이어스 포함)를 즉시 파일에 저장하고 적용합니다.")
         except Exception:
             pass
 
@@ -6575,6 +6630,75 @@ class LearningTab(QWidget):
             pass
         self.log_viewer.append("[캘리브레이션] 온라인 보정 상태를 초기화했습니다. 재수집 대기…")
 
+    def _on_narrow_map_toggled(self, checked: bool) -> None:
+        try:
+            from minimap_online_calibrator import set_narrow_map_mode
+            set_narrow_map_mode(bool(checked))
+        except Exception:
+            pass
+        state_text = 'ON' if checked else 'OFF'
+        self.log_viewer.append(f"[캘리브레이션] 좁은 맵 모드: {state_text}")
+
+    def _on_online_enabled_toggled(self, checked: bool) -> None:
+        try:
+            from minimap_online_calibrator import set_online_enabled
+            set_online_enabled(bool(checked))
+        except Exception:
+            pass
+        self.log_viewer.append(f"[캘리브레이션] 온라인 학습 사용: {'ON' if checked else 'OFF'}")
+
+    def _on_apply_online_toggled(self, checked: bool) -> None:
+        try:
+            from minimap_online_calibrator import set_apply_online_immediately
+            set_apply_online_immediately(bool(checked))
+        except Exception:
+            pass
+        self.log_viewer.append(f"[캘리브레이션] 온라인 결과 즉시 적용: {'ON' if checked else 'OFF'}")
+
+    def _on_auto_save_toggled(self, checked: bool) -> None:
+        try:
+            from minimap_online_calibrator import set_auto_save
+            set_auto_save(bool(checked))
+        except Exception:
+            pass
+        self.log_viewer.append(f"[캘리브레이션] 자동 저장: {'ON' if checked else 'OFF'}")
+
+    def _on_freeze_after_save_toggled(self, checked: bool) -> None:
+        try:
+            from minimap_online_calibrator import set_freeze_after_save
+            set_freeze_after_save(bool(checked))
+        except Exception:
+            pass
+        self.log_viewer.append(f"[캘리브레이션] 저장 후 동결: {'ON' if checked else 'OFF'}")
+
+    def _manual_save_now_clicked(self) -> None:
+        profile, roi = self._get_current_profile_and_roi()
+        if not profile or not roi:
+            self.log_viewer.append("[캘리브레이션] 즉시 저장 실패: 프로필/ROI를 확인하세요.")
+            return
+        # 현재 추정치(a, b, bias) 조회
+        a = b = bias = None
+        try:
+            from minimap_online_calibrator import export_status as _export
+            st = _export(profile, roi) or {}
+            a = st.get('a')
+            b = st.get('b')
+            bias = st.get('live_bias', 0.0)
+        except Exception:
+            pass
+        if not isinstance(a, (int, float)) or not isinstance(b, (int, float)):
+            self.log_viewer.append("[캘리브레이션] 즉시 저장 실패: 유효한 추정치가 없습니다. 좌/우 저장 또는 학습 진행 후 다시 시도하세요.")
+            return
+        b_eff = float(b) + float(bias or 0.0)
+        # 파일에 저장
+        try:
+            from map_hunt_calibration import save_params
+            ok, msg = save_params(profile, roi, float(a), float(b_eff))
+        except Exception as exc:
+            ok, msg = False, f"즉시 저장 실패: {exc}"
+        color = 'green' if ok else 'red'
+        self.log_viewer.append(f"<font color='{color}'>[캘리브레이션] {msg}</font>")
+
     def _refresh_online_calibration_status(self) -> None:
         try:
             profile, roi = self._get_current_profile_and_roi()
@@ -6602,6 +6726,7 @@ class LearningTab(QWidget):
             frozen = st.get('frozen')
             has_saved = st.get('has_saved')
             a = st.get('a'); b = st.get('b')
+            live_bias = st.get('live_bias')
             rmse = st.get('rmse'); thr = st.get('threshold')
             inl = st.get('inliers', 0); smp = st.get('samples', 0)
             streak = st.get('ok_streak', 0); alive = st.get('alive_sec', 0.0)
@@ -6618,7 +6743,8 @@ class LearningTab(QWidget):
                     return format(float(v), fmtstr)
                 except Exception:
                     return "—"
-            ab_text = f"a={fmt(a,'.5f')}, b={fmt(b,'.1f')}" if a is not None and b is not None else "a/b=—"
+            bias_text = f", bias={fmt(live_bias,'.1f')}" if isinstance(live_bias, (int, float)) else ""
+            ab_text = f"a={fmt(a,'.5f')}, b={fmt(b,'.1f')}{bias_text}" if a is not None and b is not None else "a/b=—"
             err_text = f"RMSE={fmt(rmse)} / 임계={fmt(thr)}" if rmse is not None and thr is not None else "RMSE/임계=—"
             progress_pct = None
             try:

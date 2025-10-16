@@ -41,13 +41,17 @@ except Exception:  # pragma: no cover - import 실패시에도 안전
 WINDOW_SIZE = 60
 EDGE_MARGIN_RATIO = 0.05  # 프레임 경계 5% 내 샘플 제외
 MAX_RESIDUAL_RATIO = 0.12  # 인라이어 상한: 12% * frame_width
-MIN_STD_MAPX = 120.0  # 맵 X 표준편차가 너무 작으면 a 업데이트 보류
+MIN_STD_MAPX = 120.0  # 기본 모드: 맵 X 표준편차 임계
+MIN_STD_MAPX_NARROW = 60.0  # 좁은맵 모드: 임계 완화
 MIN_INLIERS_SAVE = 20
+MIN_INLIERS_SAVE_NARROW = 15
 RMSE_THRESH_PX_MIN = 8.0
 RMSE_THRESH_RATIO = 0.02  # 2% * frame_width
+RMSE_THRESH_RATIO_NARROW = 0.03  # 좁은맵 모드: 3%
 CONSEC_OK_REQUIRED = 12
 MIN_OBS_WINDOW_SEC = 5.0
 WLS_TIME_DECAY_TAU_SEC = 8.0  # 최신 샘플 가중 강화
+B_EMA_ALPHA_NARROW = 0.2  # 좁은맵 모드: b만 보정 시 EMA 계수
 
 
 @dataclass
@@ -63,6 +67,7 @@ class OnlineState:
     samples: Deque[Sample] = field(default_factory=lambda: deque(maxlen=WINDOW_SIZE))
     a: Optional[float] = None
     b: Optional[float] = None
+    live_bias: float = 0.0
     last_fit_rmse: Optional[float] = None
     last_fit_inliers: int = 0
     last_fit_ts: float = 0.0
@@ -73,6 +78,69 @@ class OnlineState:
 
 
 _STATES: Dict[Tuple[str, str], OnlineState] = {}
+_NARROW_MAP_MODE: bool = False
+_ONLINE_ENABLED: bool = True
+_APPLY_ONLINE: bool = True
+_AUTO_SAVE: bool = False
+_FREEZE_AFTER_SAVE: bool = True
+
+
+def set_narrow_map_mode(enabled: bool) -> None:
+    global _NARROW_MAP_MODE
+    _NARROW_MAP_MODE = bool(enabled)
+
+
+def is_narrow_map_mode() -> bool:
+    return bool(_NARROW_MAP_MODE)
+
+
+def set_online_enabled(enabled: bool) -> None:
+    global _ONLINE_ENABLED
+    _ONLINE_ENABLED = bool(enabled)
+
+
+def is_online_enabled() -> bool:
+    return bool(_ONLINE_ENABLED)
+
+
+def set_apply_online_immediately(enabled: bool) -> None:
+    global _APPLY_ONLINE
+    _APPLY_ONLINE = bool(enabled)
+
+
+def is_apply_online_immediately() -> bool:
+    return bool(_APPLY_ONLINE)
+
+
+def set_auto_save(enabled: bool) -> None:
+    global _AUTO_SAVE
+    _AUTO_SAVE = bool(enabled)
+
+
+def is_auto_save() -> bool:
+    return bool(_AUTO_SAVE)
+
+
+def set_freeze_after_save(enabled: bool) -> None:
+    global _FREEZE_AFTER_SAVE
+    _FREEZE_AFTER_SAVE = bool(enabled)
+
+
+def is_freeze_after_save() -> bool:
+    return bool(_FREEZE_AFTER_SAVE)
+
+
+def _min_std_mapx_threshold() -> float:
+    return float(MIN_STD_MAPX_NARROW if _NARROW_MAP_MODE else MIN_STD_MAPX)
+
+
+def _rmse_threshold(frame_w: float) -> float:
+    ratio = RMSE_THRESH_RATIO_NARROW if _NARROW_MAP_MODE else RMSE_THRESH_RATIO
+    return max(RMSE_THRESH_PX_MIN, (float(frame_w) * ratio) if float(frame_w) > 1.0 else RMSE_THRESH_PX_MIN)
+
+
+def _min_inliers_save() -> int:
+    return int(MIN_INLIERS_SAVE_NARROW if _NARROW_MAP_MODE else MIN_INLIERS_SAVE)
 
 
 def _key(profile: str, roi: dict | None) -> Optional[Tuple[str, str]]:
@@ -150,6 +218,8 @@ def update(
     k = _key(profile, roi)
     if k is None:
         return False
+    if not _ONLINE_ENABLED:
+        return False
     state = _STATES.get(k)
     if state is None:
         state = OnlineState()
@@ -162,7 +232,7 @@ def update(
     # 저장값이 있으면 동결(기본 정책)
     try:
         saved = _find_saved_params(profile, roi)
-        if saved is not None:
+        if saved is not None and _FREEZE_AFTER_SAVE:
             state.frozen = True
             return False
     except Exception:
@@ -201,20 +271,32 @@ def update(
     pairs_all = [(s.map_x, s.obs_x) for s in state.samples]
     fit = _ols_fit(pairs_all)
     if fit is None:
-        return False
-    a0, b0 = fit
+        a0 = state.a if state.a is not None else None
+        b0 = state.b if state.b is not None else None
+        if a0 is None or b0 is None:
+            return False
+    a0, b0 = float(a0), float(b0)
 
     # 잔차 기반 인라이어 추리기
     residuals = [abs(s.obs_x - (a0 * s.map_x + b0)) for s in state.samples]
     # 인라이어 임계값: RMSE 임계 기반(3×thr 또는 40px)과 폭 비례 상한(12%W) 중 작은 값
     fw_last = state.samples[-1].frame_w
-    thr_rmse = max(RMSE_THRESH_PX_MIN, (fw_last * RMSE_THRESH_RATIO) if fw_last > 1.0 else RMSE_THRESH_PX_MIN)
+    thr_rmse = _rmse_threshold(fw_last)
     inlier_cap = max(40.0, 3.0 * thr_rmse)
     inlier_thresh = min(max_residual_px, inlier_cap)
     inliers_idx = [i for i, r in enumerate(residuals) if r <= inlier_thresh]
     if len(inliers_idx) < 2:
         state.last_note = "인라이어 부족"
         state.ok_streak = 0
+        # 닉네임-미니맵 차이를 즉시 바이어스로 소폭 반영
+        try:
+            x_hat = float(a0) * fx + float(b0) + float(state.live_bias)
+            delta = float(ox - x_hat)
+            cap = (fw * 0.2) if fw > 1.0 else 80.0
+            alpha = 0.25 if _NARROW_MAP_MODE else 0.15
+            state.live_bias = float((1.0 - alpha) * float(state.live_bias) + alpha * max(-cap, min(cap, delta)))
+        except Exception:
+            pass
         return False
     inlier_pairs = [pairs_all[i] for i in inliers_idx]
     # 가중치 계산(시간 감쇠 + 잔차 기반 소프트 가중)
@@ -232,8 +314,45 @@ def update(
 
     # map_x 분산 체크(수평 이동 부족): a 업데이트 보류
     std_x = _compute_std([p[0] for p in inlier_pairs])
-    if std_x < MIN_STD_MAPX:
-        # 맵 이동이 부족하면 추정 보류(초기엔 a,b 둘 다 고정).
+    if std_x < _min_std_mapx_threshold():
+        # 맵 이동이 부족: 좁은맵 모드에서는 'b만 보정'(EMA), 기본 모드는 보류
+        if _NARROW_MAP_MODE:
+            a_curr = float(state.a) if state.a is not None else float(a0)
+            # 고정 a에서 최적 b = 평균(y - a*x) (가중치 사용)
+            sw = 0.0
+            sy_ax = 0.0
+            for (x, y), w in zip(inlier_pairs, weights):
+                sw += w
+                sy_ax += w * (y - a_curr * x)
+            if sw > 0.0:
+                b_fixed = sy_ax / sw
+                if state.b is None:
+                    state.b = float(b_fixed)
+                else:
+                    state.b = float((1.0 - B_EMA_ALPHA_NARROW) * float(state.b) + B_EMA_ALPHA_NARROW * float(b_fixed))
+                state.a = float(a_curr)
+                # RMSE(보고용) 계산
+                errs_n = [abs(y - (state.a * x + state.b)) for x, y in inlier_pairs]
+                rmse_n = math.sqrt(sum(e * e for e in errs_n) / len(errs_n))
+                state.last_fit_rmse = float(rmse_n)
+                state.last_fit_inliers = int(len(inlier_pairs))
+                state.last_fit_ts = ts
+                state.last_note = "좁은맵: b만 보정"
+                # 수렴 판단(좁은맵에서도 동일 조건)
+                thr_here = _rmse_threshold(fw_last)
+                ok = (state.last_fit_inliers >= _min_inliers_save()) and (state.last_fit_rmse <= thr_here)
+                state.ok_streak = state.ok_streak + 1 if ok else 0
+                alive_sec = ts - (state.first_ts or ts)
+                if ok and state.ok_streak >= CONSEC_OK_REQUIRED and alive_sec >= MIN_OBS_WINDOW_SEC:
+                    try:
+                        _save_params(profile, roi, state.a, state.b)
+                    except Exception:
+                        return False
+                    state.frozen = True
+                    state.samples.clear()
+                    return True
+                return False
+        # 기본 모드: 보류
         state.last_note = "맵X 이동 부족으로 기울기 추정 보류"
         state.ok_streak = 0
         return False
@@ -243,7 +362,7 @@ def update(
     rmse = math.sqrt(sum(e * e for e in errs) / len(errs))
     prev_rmse = state.last_fit_rmse
     # 품질 게이트: RMSE가 급증하면 추정 거부
-    threshold = max(RMSE_THRESH_PX_MIN, (state.samples[-1].frame_w * RMSE_THRESH_RATIO) if state.samples[-1].frame_w > 1.0 else RMSE_THRESH_PX_MIN)
+    threshold = _rmse_threshold(state.samples[-1].frame_w)
     if (prev_rmse is not None and rmse > min(prev_rmse * 1.5, threshold * 2.0)) or (rmse > threshold * 3.0):
         state.last_note = f"RMSE 증가로 추정 거부({rmse:.1f})"
         state.ok_streak = 0
@@ -255,24 +374,24 @@ def update(
     state.last_note = None
 
     # 수렴 판단
-    threshold = max(RMSE_THRESH_PX_MIN, (state.samples[-1].frame_w * RMSE_THRESH_RATIO) if state.samples[-1].frame_w > 1.0 else RMSE_THRESH_PX_MIN)
-    ok = (state.last_fit_inliers >= MIN_INLIERS_SAVE) and (rmse <= threshold)
+    threshold = _rmse_threshold(state.samples[-1].frame_w)
+    ok = (state.last_fit_inliers >= _min_inliers_save()) and (rmse <= threshold)
     state.ok_streak = state.ok_streak + 1 if ok else 0
 
     # 시간 조건
     alive_sec = ts - (state.first_ts or ts)
     if ok and state.ok_streak >= CONSEC_OK_REQUIRED and alive_sec >= MIN_OBS_WINDOW_SEC:
-        # 저장 & 동결
-        try:
-            _save_params(profile, roi, state.a, state.b)
-        except Exception:
-            # 저장 실패해도 동결은 수행하지 않음(다음 기회에 재시도)
-            return False
-        # 저장 성공 → 동결
-        state.frozen = True
-        # 메모리 최적화: 버퍼 비우기
-        state.samples.clear()
-        return True
+        # 저장 & 동결(옵션)
+        if _AUTO_SAVE:
+            try:
+                _save_params(profile, roi, state.a, state.b)
+            except Exception:
+                # 저장 실패해도 동결은 수행하지 않음(다음 기회에 재시도)
+                return False
+            if _FREEZE_AFTER_SAVE:
+                state.frozen = True
+                state.samples.clear()
+            return True
 
     return False
 
@@ -329,7 +448,7 @@ def export_status(profile: str, roi: dict | None) -> Optional[dict]:
     thr = None
     if state.samples:
         fw = float(state.samples[-1].frame_w)
-        thr = max(RMSE_THRESH_PX_MIN, (fw * RMSE_THRESH_RATIO) if fw > 1.0 else RMSE_THRESH_PX_MIN)
+        thr = _rmse_threshold(fw)
     # 진행도 계산
     progress_pct = 0
     try:
@@ -340,7 +459,7 @@ def export_status(profile: str, roi: dict | None) -> Optional[dict]:
             rmse_ratio = 0.0
             if thr is not None and state.last_fit_rmse is not None and float(thr) > 1e-9:
                 rmse_ratio = max(0.0, min(1.0, (float(thr) - float(state.last_fit_rmse)) / float(thr)))
-            inl_ratio = max(0.0, min(1.0, float(state.last_fit_inliers) / float(MIN_INLIERS_SAVE)))
+            inl_ratio = max(0.0, min(1.0, float(state.last_fit_inliers) / float(_min_inliers_save())))
             streak_ratio = max(0.0, min(1.0, float(state.ok_streak) / float(CONSEC_OK_REQUIRED)))
             time_ratio = max(0.0, min(1.0, float((time.time() - state.first_ts) if state.first_ts else 0.0) / float(MIN_OBS_WINDOW_SEC)))
             score = 0.4 * rmse_ratio + 0.3 * streak_ratio + 0.2 * inl_ratio + 0.1 * time_ratio
@@ -366,6 +485,15 @@ def export_status(profile: str, roi: dict | None) -> Optional[dict]:
         },
         'progress_pct': int(progress_pct),
         'note': state.last_note,
+        'narrow_mode': bool(_NARROW_MAP_MODE),
+        'min_std_mapx': float(_min_std_mapx_threshold()),
+        'live_bias': float(state.live_bias),
+        'flags': {
+            'online_enabled': bool(_ONLINE_ENABLED),
+            'apply_online': bool(_APPLY_ONLINE),
+            'auto_save': bool(_AUTO_SAVE),
+            'freeze_after_save': bool(_FREEZE_AFTER_SAVE),
+        },
     }
 
 
@@ -383,15 +511,25 @@ def get(profile: str, roi: dict | None) -> Optional[Tuple[float, float]]:
         return None
     if state.frozen:
         return None
+    if not _APPLY_ONLINE:
+        return None
     if state.a is None or state.b is None:
         return None
+    # 저장값이 있고 '저장 후 동결' 정책이 켜져 있으면 온라인 적용 억제
+    try:
+        saved = _find_saved_params(profile, roi)
+        if saved is not None and _FREEZE_AFTER_SAVE:
+            return None
+    except Exception:
+        pass
     # 품질 게이트: RMSE가 임계보다 큰 동안 온라인 값을 소비하지 않음
     if state.samples:
         fw = float(state.samples[-1].frame_w)
-        thr = max(RMSE_THRESH_PX_MIN, (fw * RMSE_THRESH_RATIO) if fw > 1.0 else RMSE_THRESH_PX_MIN)
-        if (state.last_fit_rmse is None) or (float(state.last_fit_rmse) > thr * 1.2) or (int(state.last_fit_inliers) < max(4, MIN_INLIERS_SAVE // 2)):
+        thr = _rmse_threshold(fw)
+        min_half_inliers = max(4, _min_inliers_save() // 2)
+        if (state.last_fit_rmse is None) or (float(state.last_fit_rmse) > thr * 1.2) or (int(state.last_fit_inliers) < min_half_inliers):
             return None
-    return float(state.a), float(state.b)
+    return float(state.a), float((state.b if state.b is not None else 0.0) + state.live_bias)
 
 
 def reset(profile: str, roi: dict | None) -> None:
