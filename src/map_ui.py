@@ -862,6 +862,9 @@ class MapTab(QWidget):
             #  - stale_held_timeout: 방향키가 눌린 것으로 감지되어도 실제 움직임이 없으면 1.2초 후 강제 재전송 허용
             self._wait_nav_safety_resend_interval_sec = 1.0
             self._wait_nav_stale_held_timeout_sec = 1.2
+            # [신규] 최근 키 초기화/해제(CLEAR_ALL) 관측 시각(재킥 판단용)
+            self._last_keyboard_reset_at = 0.0
+            self._last_clear_all_sent_at = 0.0
 
             #  탐지 시작 시간을 기록하기 위한 변수
             self.detection_start_time = 0
@@ -1994,6 +1997,10 @@ class MapTab(QWidget):
     def _handle_auto_control_key_reset(self) -> None:
         if self._held_direction_keys:
             self._held_direction_keys.clear()
+        try:
+            self._last_keyboard_reset_at = time.time()
+        except Exception:
+            pass
 
     def _is_walk_direction_active(self, direction: str) -> bool:
         if not self._auto_control_tab:
@@ -2208,6 +2215,14 @@ class MapTab(QWidget):
                 phase = wait_context.get('phase')
                 if phase == 'wait_travel' and wait_navigation_allowed and not is_authority_command:
                     QTimer.singleShot(120, lambda: self._kick_wait_navigation_movement(getattr(self, 'last_player_pos', None)))
+        except Exception:
+            pass
+
+        # CLEAR_ALL 전송 시점 기록(재킥 보조 용도)
+        try:
+            if command == "모든 키 떼기":
+                import time as _time
+                self._last_clear_all_sent_at = _time.time()
         except Exception:
             pass
 
@@ -7269,45 +7284,38 @@ class MapTab(QWidget):
                     self.update_general_log(f"[대기 이동] 걷기({direction_symbol}) 유지.", "gray")
                     self._last_wait_nav_log_at = now
 
-            # --- [신규] 조건부 안전 재전송(1초 간격) ---
-            #  - 방향키 눌림 감지가 있어도 실제 이동이 없다면 stale 로 간주하고 재전송 허용
-            #  - 사다리/점프 등 보행 차단 상태에서는 전송 금지
+            # --- [개선] 무조건 Heartbeat(1초 간격) 재전송 ---
             try:
                 has_map_authority = str(getattr(self, 'current_authority_owner', 'map')) == 'map'
             except Exception:
                 has_map_authority = True
-
             safety_interval = float(getattr(self, '_wait_nav_safety_resend_interval_sec', 1.0) or 1.0)
-            stale_timeout = float(getattr(self, '_wait_nav_stale_held_timeout_sec', 1.2) or 1.2)
             last_walk = float(getattr(self, '_wait_nav_last_walk_sent_at', 0.0) or 0.0)
-            vx = abs(float(self._compute_horizontal_velocity() if hasattr(self, '_compute_horizontal_velocity') else 0.0))
-
-            # 목표까지의 X 거리(너무 근접하면 재전송 불필요)
-            abs_dx = abs(float(dx)) if 'dx' in locals() else 0.0
-
-            # 방향키 눌림 상태 감지(실패 시 보수적으로 False)
-            try:
-                held_same_dir = bool(self._is_walk_direction_active(direction_symbol))
-            except Exception:
-                held_same_dir = False
-
-            safety_conditions = (
-                has_map_authority and
-                context.get('phase') == 'wait_travel' and
-                can_reinforce_walk and  # 준비/점프 등 차단 상태 제외
-                abs_dx > 2.0 and        # 목표에 너무 가까우면 생략
-                (now - last_walk) >= safety_interval and
-                (
-                    vx <= 0.05 or       # 최근 수 프레임 동안 거의 이동 없음
-                    (held_same_dir and (now - last_walk) >= stale_timeout)  # 눌림 감지됐지만 stale
-                )
-            )
-
-            if safety_conditions:
-                if self._emit_control_command(walk_command, "other_player_wait:safety_resend"):
+            if (
+                has_map_authority and context.get('phase') == 'wait_travel' and
+                action not in walking_block_states and (now - last_walk) >= safety_interval
+            ):
+                if self._emit_control_command(walk_command, "other_player_wait:heartbeat"):
                     self._wait_nav_last_walk_sent_at = now
                     if now - self._last_wait_nav_log_at > 1.5:
-                        self.update_general_log(f"[대기 이동] 안전 재전송 {direction_symbol}.", "gray")
+                        self.update_general_log(f"[대기 이동] Heartbeat {direction_symbol}.", "gray")
+                        self._last_wait_nav_log_at = now
+
+            # --- [추가] CLEAR_ALL 직후 강제 재킥(0.08~0.30s 창) ---
+            try:
+                last_reset = max(float(getattr(self, '_last_keyboard_reset_at', 0.0) or 0.0),
+                                 float(getattr(self, '_last_clear_all_sent_at', 0.0) or 0.0))
+            except Exception:
+                last_reset = 0.0
+            if (
+                has_map_authority and action not in walking_block_states and last_reset > 0.0 and
+                (0.08 <= (now - last_reset) <= 0.30)
+            ):
+                if self._emit_control_command(walk_command, "other_player_wait:clearall_kick"):
+                    self._wait_nav_last_walk_sent_at = now
+                    # 로그는 저빈도로만
+                    if now - self._last_wait_nav_log_at > 1.5:
+                        self.update_general_log(f"[대기 이동] CLEAR_ALL 재킥 {direction_symbol}.", "gray")
                         self._last_wait_nav_log_at = now
         except Exception:
             pass

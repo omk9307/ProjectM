@@ -2775,7 +2775,19 @@ class AutoControlTab(QWidget):
                     self.keyboard_state_changed.emit(key_str_id, False)
             except serial.SerialException as e:
                 print(f"[AutoControl] 데이터 전송 실패: {e}")
+                # 연결 복구 시도
                 self.connect_to_pi()
+                # 복구 직후 CLEAR_ALL로 상태 동기화 시도
+                try:
+                    if self.ser and self.ser.is_open:
+                        self.ser.write(bytes([CMD_CLEAR_ALL, 0x00]))
+                        self.last_sent_timestamps.clear()
+                        try:
+                            self.keyboard_state_reset.emit()
+                        except Exception:
+                            pass
+                except Exception:
+                    pass
         elif command == CMD_CLEAR_ALL:
             # 키코드 없이 CLEAR_ALL 명령(0x03, 0x00) 전송
             try:
@@ -2791,6 +2803,17 @@ class AutoControlTab(QWidget):
             except serial.SerialException as e:
                 print(f"[AutoControl] CLEAR_ALL 전송 실패: {e}")
                 self.connect_to_pi()
+                # 재연결 즉시 CLEAR_ALL 재시도하여 장치/상태 동기화
+                try:
+                    if self.ser and self.ser.is_open:
+                        self.ser.write(bytes([CMD_CLEAR_ALL, 0x00]))
+                        self.last_sent_timestamps.clear()
+                        try:
+                            self.keyboard_state_reset.emit()
+                        except Exception:
+                            pass
+                except Exception:
+                    pass
 
     # ---------------------------
     # Mouse helpers (COM transmit)
