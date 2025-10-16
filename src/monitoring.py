@@ -231,6 +231,9 @@ class MonitoringTab(QWidget):
         self._map_static_bound_synced: bool = False
         self._map_preview_enabled: bool = False
         self._hunt_preview_enabled: bool = False
+        # [NEW] 사냥범위/주스킬 범위 최신 캐시(모니터링 측 페인팅용)
+        self._last_hunt_area: dict | None = None
+        self._last_primary_area: dict | None = None
         # 정보칸 표시용 캐시
         self._current_authority_owner: str = "map"
         self._latest_hp: float | None = None
@@ -755,6 +758,17 @@ class MonitoringTab(QWidget):
                 hunt_tab.preview_frame_ready.connect(self._on_hunt_frame)
         except Exception:
             pass
+        # [NEW] 사냥 범위/주 스킬 범위 갱신 신호 구독
+        try:
+            if hasattr(hunt_tab, 'hunt_area_updated'):
+                hunt_tab.hunt_area_updated.connect(self._on_hunt_area_updated)
+        except Exception:
+            pass
+        try:
+            if hasattr(hunt_tab, 'primary_skill_area_updated'):
+                hunt_tab.primary_skill_area_updated.connect(self._on_primary_area_updated)
+        except Exception:
+            pass
 
         # 상태 동기화: 시작/정지 버튼 활성화와 연동 체크박스 미러링
         try:
@@ -968,6 +982,33 @@ class MonitoringTab(QWidget):
         except Exception:
             pass
 
+        # [NEW] 모니터링 측 사냥범위/주스킬 범위 직접 페인팅(체크 시에만)
+        try:
+            if bool(getattr(self, 'chk_hunt_bundle', None) and self.chk_hunt_bundle.isChecked()):
+                painter = QPainter(image)
+                try:
+                    painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+                    # 사냥 범위: 하늘색(동일 톤)
+                    if isinstance(self._last_hunt_area, dict):
+                        rect = self._area_dict_to_rect(self._last_hunt_area, image.width(), image.height())
+                        if not rect.isNull():
+                            pen = QPen(QColor(0, 120, 200, 200)); pen.setWidth(2)
+                            painter.setPen(pen)
+                            painter.setBrush(QBrush(QColor(0, 170, 255, 70)))
+                            painter.drawRect(rect)
+                    # 주 스킬 범위: 주황색(동일 톤)
+                    if isinstance(self._last_primary_area, dict):
+                        rect = self._area_dict_to_rect(self._last_primary_area, image.width(), image.height())
+                        if not rect.isNull():
+                            pen = QPen(QColor(230, 110, 0, 220)); pen.setWidth(2)
+                            painter.setPen(pen)
+                            painter.setBrush(QBrush(QColor(255, 140, 0, 70)))
+                            painter.drawRect(rect)
+                finally:
+                    painter.end()
+        except Exception:
+            pass
+
         self.hunt_preview_label.setPixmap(
             QPixmap.fromImage(image).scaled(
                 self.hunt_preview_label.size(),
@@ -975,6 +1016,51 @@ class MonitoringTab(QWidget):
                 Qt.TransformationMode.SmoothTransformation,
             )
         )
+
+    # [NEW] 사냥탭에서 오는 범위 신호 처리(객체 → dict 캐시)
+    @pyqtSlot(object)
+    def _on_hunt_area_updated(self, area_obj: object) -> None:
+        self._last_hunt_area = self._convert_area_to_dict(area_obj)
+
+    @pyqtSlot(object)
+    def _on_primary_area_updated(self, area_obj: object) -> None:
+        self._last_primary_area = self._convert_area_to_dict(area_obj)
+
+    # [NEW] AreaRect 또는 dict 를 통일된 dict로 변환
+    def _convert_area_to_dict(self, area_obj: object) -> dict | None:
+        if area_obj is None:
+            return None
+        try:
+            if isinstance(area_obj, dict):
+                x = float(area_obj.get('x', 0.0)); y = float(area_obj.get('y', 0.0))
+                w = float(area_obj.get('width', 0.0)); h = float(area_obj.get('height', 0.0))
+                return {'x': x, 'y': y, 'width': w, 'height': h}
+            # dataclass AreaRect 호환 처리
+            x = float(getattr(area_obj, 'x'))
+            y = float(getattr(area_obj, 'y'))
+            w = float(getattr(area_obj, 'width'))
+            h = float(getattr(area_obj, 'height'))
+            return {'x': x, 'y': y, 'width': w, 'height': h}
+        except Exception:
+            return None
+
+    # [NEW] 현재 이미지 크기 기준으로 dict 영역을 QRect로 변환(사냥탭과 동일 규칙)
+    def _area_dict_to_rect(self, box_data: dict, max_w: int, max_h: int):
+        try:
+            x = float(box_data.get('x', 0.0))
+            y = float(box_data.get('y', 0.0))
+            width = float(box_data.get('width', 0.0))
+            height = float(box_data.get('height', 0.0))
+        except Exception:
+            from PyQt6.QtCore import QRect
+            return QRect()
+        from PyQt6.QtCore import QRect
+        x1 = max(0.0, x); y1 = max(0.0, y)
+        x2 = min(float(max_w), x + max(0.0, width))
+        y2 = min(float(max_h), y + max(0.0, height))
+        if x2 <= x1 or y2 <= y1:
+            return QRect()
+        return QRect(int(x1), int(y1), int(x2 - x1), int(y2 - y1))
 
     # --- 컨트롤 핸들러 ---
     def _on_map_preview_toggled(self, checked: bool) -> None:

@@ -1055,6 +1055,8 @@ class HuntTab(QWidget):
         self.forbidden_monster_enabled: bool = False
         self.forbidden_monster_command_profile: str = ''
         self._forbidden_active: bool = False
+        # [신규] 금지 명령 1회 실행 래치(도착 다중 통지 시 중복 실행 방지)
+        self._forbidden_cmd_inflight: bool = False
         self._forbidden_cooldown_until: float = 0.0
         # [NEW] 금지몬스터 감지 시 텔레그램 알림 여부(전역)
         self.forbidden_monster_telegram_alert: bool = False
@@ -5563,9 +5565,8 @@ class HuntTab(QWidget):
     def _handle_detection_frame(self, q_image) -> None:
         if not self._is_screen_output_enabled():
             return
-        # 탭이 보이지 않고 팝업도 없으면 UI 업데이트 생략
+        # 탭이 보이지 않고 팝업도 없으면 UI 업데이트 생략(모니터링이 직접 오버레이를 그릴 수 있도록 원본 전달)
         if not getattr(self, '_ui_runtime_visible', True) and not bool(getattr(self, 'is_popup_active', False)):
-            # 그래도 프리뷰 신호는 방출
             try:
                 self.preview_frame_ready.emit(q_image)
             except Exception:
@@ -9638,11 +9639,16 @@ class HuntTab(QWidget):
                 return
             if not self._forbidden_active:
                 return
+            # [신규] 이미 명령 실행 중이면 중복 실행 방지
+            if bool(getattr(self, '_forbidden_cmd_inflight', False)):
+                return
             cmd = (getattr(self, 'forbidden_monster_command_profile', '') or '').strip()
             if not cmd:
                 # 명령 미지정: 즉시 종료 및 쿨다운 시작
                 self._schedule_forbidden_finish()
                 return
+            # 실행 래치 세팅(완료 시 해제)
+            self._forbidden_cmd_inflight = True
             self._emit_control_command(cmd, reason='forbidden_monster')
             self.append_log(f"금지몬스터 도착 → 명령 실행: '{cmd}'", 'info')
         except Exception:
@@ -9659,6 +9665,8 @@ class HuntTab(QWidget):
             except Exception:
                 pass
         self._forbidden_active = False
+        # [신규] 명령 완료 처리: 래치 해제
+        self._forbidden_cmd_inflight = False
         try:
             import time as _t
             # [변경] 이미 감지 시점에 쿨다운이 설정되었다면 덮어쓰지 않음

@@ -6700,6 +6700,9 @@ class MapTab(QWidget):
                 'fail_reason': None,
                 'allow_navigation': False,
                 'resume_map_detection': bool(getattr(self, 'is_detection_running', False)),
+                # [신규] 도착 알림 디바운스/1회 통지 플래그
+                'arrival_notified': False,
+                'last_arrival_notify_ts': 0.0,
             }
         except Exception:
             return False
@@ -7122,9 +7125,16 @@ class MapTab(QWidget):
         # [NEW] 사냥 탭에 도착 이벤트 통지(금지 몬스터 플로우 등 분기 식별용)
         try:
             hunt_tab = getattr(self, '_hunt_tab', None)
-            if hunt_tab and hasattr(hunt_tab, 'on_other_player_wait_arrived'):
+            now_ts = time.time()
+            # [신규] 도착 알림 디바운스: 이미 통지되었다면 재통지하지 않음
+            last_ts = float(context.get('last_arrival_notify_ts', 0.0) or 0.0)
+            notified = bool(context.get('arrival_notified', False))
+            if hunt_tab and hasattr(hunt_tab, 'on_other_player_wait_arrived') and not notified:
                 source = str(context.get('source') or '')
                 hunt_tab.on_other_player_wait_arrived(source=source, waypoint_name=waypoint_name)
+                context['arrival_notified'] = True
+                context['last_arrival_notify_ts'] = now_ts
+                self.other_player_wait_context = context
         except Exception:
             pass
 
@@ -7357,22 +7367,7 @@ class MapTab(QWidget):
                     self.update_general_log(f"[대기 이동] 걷기({direction_symbol}) 유지.", "gray")
                     self._last_wait_nav_log_at = now
 
-            # --- [개선] 무조건 Heartbeat(1초 간격) 재전송 ---
-            try:
-                has_map_authority = str(getattr(self, 'current_authority_owner', 'map')) == 'map'
-            except Exception:
-                has_map_authority = True
-            safety_interval = float(getattr(self, '_wait_nav_safety_resend_interval_sec', 1.0) or 1.0)
-            last_walk = float(getattr(self, '_wait_nav_last_walk_sent_at', 0.0) or 0.0)
-            if (
-                has_map_authority and context.get('phase') == 'wait_travel' and
-                action not in walking_block_states and (now - last_walk) >= safety_interval
-            ):
-                if self._emit_control_command(walk_command, "other_player_wait:heartbeat"):
-                    self._wait_nav_last_walk_sent_at = now
-                    if now - self._last_wait_nav_log_at > 1.5:
-                        self.update_general_log(f"[대기 이동] Heartbeat {direction_symbol}.", "gray")
-                        self._last_wait_nav_log_at = now
+            # Heartbeat 재전송 제거: 방향키 미유지 시에만 위의 보강 전송 분기로 처리
 
             # --- [추가] CLEAR_ALL 직후 강제 재킥(0.08~0.30s 창) ---
             try:
