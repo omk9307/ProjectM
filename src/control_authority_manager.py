@@ -358,8 +358,13 @@ class ControlAuthorityManager(QObject):
             metadata = dict(metadata or {})
             previous_owner = self._state.owner
             metadata.setdefault("previous_owner", previous_owner)
-            self._priority_lock_deadline = time.time() + PRIORITY_EVENT_TIMEOUT_SEC
-            self._state.map_priority_lock = kind
+            # OTHER_PLAYER_WAIT: 대기모드 종료 시까지 만료 없음(맵 락 유지)
+            if kind == "OTHER_PLAYER_WAIT":
+                self._priority_lock_deadline = 0.0
+                self._state.map_priority_lock = kind
+            else:
+                self._priority_lock_deadline = time.time() + PRIORITY_EVENT_TIMEOUT_SEC
+                self._state.map_priority_lock = kind
             if kind == "FORBIDDEN_WALL":
                 self._priority_override_meta = {
                     "kind": kind,

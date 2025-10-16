@@ -865,6 +865,8 @@ class MapTab(QWidget):
             # [신규] 최근 키 초기화/해제(CLEAR_ALL) 관측 시각(재킥 판단용)
             self._last_keyboard_reset_at = 0.0
             self._last_clear_all_sent_at = 0.0
+            # [신규] 대기모드 권한 우선 잠금(OTHER_PLAYER_WAIT) 주기 갱신 타임스탬프
+            self._last_wait_priority_refresh_ts = 0.0
 
             #  탐지 시작 시간을 기록하기 위한 변수
             self.detection_start_time = 0
@@ -7197,6 +7199,17 @@ class MapTab(QWidget):
         context = getattr(self, 'other_player_wait_context', {})
         if not context.get('allow_navigation') or context.get('phase') != 'wait_travel':
             return
+
+        # [권한 우선 잠금 갱신] OTHER_PLAYER_WAIT 락을 주기적으로 연장하여 사냥 권한 선점 방지
+        try:
+            now_ts = time.time()
+            if self._authority_manager and (now_ts - float(getattr(self, '_last_wait_priority_refresh_ts', 0.0) or 0.0)) >= 1.5:
+                ctx = getattr(self, 'other_player_wait_context', {}) or {}
+                meta = {'waypoint_id': ctx.get('goal_id'), 'phase': ctx.get('phase')}
+                self._authority_manager.notify_priority_event("OTHER_PLAYER_WAIT", metadata=meta)
+                self._last_wait_priority_refresh_ts = now_ts
+        except Exception:
+            pass
 
         pos = getattr(self, 'last_player_pos', None)
         if not isinstance(pos, QPointF):
