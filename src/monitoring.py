@@ -9,7 +9,7 @@ import cv2
 import numpy as np
 from PyQt6.QtCore import Qt, QTimer, QThread, QRectF, pyqtSlot, pyqtSignal, QSettings, QSize
 from datetime import datetime
-from PyQt6.QtGui import QImage, QPixmap, QColor, QKeySequence
+from PyQt6.QtGui import QImage, QPixmap, QColor, QKeySequence, QPainter, QPen, QBrush
 from PyQt6.QtWidgets import (
     QWidget,
     QVBoxLayout,
@@ -425,6 +425,8 @@ class MonitoringTab(QWidget):
         self.hunt_preview_checkbox = QCheckBox("표시")
         self.hunt_preview_checkbox.setChecked(False)
         self.hunt_preview_checkbox.toggled.connect(self._on_hunt_preview_toggled)
+        # [NEW] 캐릭터박스 오버레이 토글(모니터링 전용)
+        self.chk_character_box = QCheckBox("캐릭터박스")
         self.hunt_interval_spin = QDoubleSpinBox()
         self.hunt_interval_spin.setRange(0.5, 5.0)
         self.hunt_interval_spin.setSingleStep(0.5)
@@ -451,6 +453,7 @@ class MonitoringTab(QWidget):
             self.chk_nameplate_track,
             self.chk_cleanup_band,
             self.chk_cluster_window,
+            self.chk_character_box,
         ):
             _cb.setChecked(False)
             _cb.toggled.connect(self._on_monitor_overlay_toggled)
@@ -680,6 +683,8 @@ class MonitoringTab(QWidget):
             self.chk_nameplate_track.setChecked(_to_bool(settings.value("monitoring/ovl_nameplate_track"), False))
             self.chk_cleanup_band.setChecked(_to_bool(settings.value("monitoring/ovl_cleanup_band"), False))
             self.chk_cluster_window.setChecked(_to_bool(settings.value("monitoring/ovl_cluster_window"), False))
+            # [NEW] 캐릭터박스 상태 복원(기본 OFF)
+            self.chk_character_box.setChecked(_to_bool(settings.value("monitoring/ovl_character_boxes"), False))
         except Exception:
             pass
 
@@ -695,6 +700,7 @@ class MonitoringTab(QWidget):
             self.chk_nameplate_track.toggled.connect(self._persist_checkbox_states)
             self.chk_cleanup_band.toggled.connect(self._persist_checkbox_states)
             self.chk_cluster_window.toggled.connect(self._persist_checkbox_states)
+            self.chk_character_box.toggled.connect(self._persist_checkbox_states)
         except Exception:
             pass
 
@@ -906,6 +912,7 @@ class MonitoringTab(QWidget):
             settings.setValue("monitoring/ovl_nameplate_track", bool(self.chk_nameplate_track.isChecked()))
             settings.setValue("monitoring/ovl_cleanup_band", bool(self.chk_cleanup_band.isChecked()))
             settings.setValue("monitoring/ovl_cluster_window", bool(self.chk_cluster_window.isChecked()))
+            settings.setValue("monitoring/ovl_character_boxes", bool(self.chk_character_box.isChecked()))
         except Exception:
             pass
 
@@ -913,6 +920,40 @@ class MonitoringTab(QWidget):
     def _on_hunt_frame(self, image: QImage) -> None:
         if image is None or image.isNull():
             return
+        # [NEW] 캐릭터박스 오버레이(체크 시에만 그리기, 체크 해제 시 리소스 사용 없음)
+        try:
+            if bool(getattr(self, 'chk_character_box', None) and self.chk_character_box.isChecked()) and bool(self._hunt_tab):
+                if hasattr(self._hunt_tab, 'api_get_current_character_position'):
+                    pos = self._hunt_tab.api_get_current_character_position()
+                else:
+                    pos = None
+                if isinstance(pos, dict):
+                    fx = float(pos.get('x')) if isinstance(pos.get('x'), (int, float)) else None
+                    fy = float(pos.get('y')) if isinstance(pos.get('y'), (int, float)) else None
+                    fw = float(pos.get('width')) if isinstance(pos.get('width'), (int, float)) else None
+                    fh = float(pos.get('height')) if isinstance(pos.get('height'), (int, float)) else None
+                    fW = float(pos.get('frame_width', 0.0) or 0.0)
+                    fH = float(pos.get('frame_height', 0.0) or 0.0)
+                    if all(v is not None for v in (fx, fy, fw, fh)) and fW > 0 and fH > 0 and fw > 0 and fh > 0:
+                        sx = float(image.width()) / fW
+                        sy = float(image.height()) / fH
+                        rx = int(round(fx * sx))
+                        ry = int(round(fy * sy))
+                        rw = max(1, int(round(fw * sx)))
+                        rh = max(1, int(round(fh * sy)))
+                        painter = QPainter(image)
+                        try:
+                            painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+                            pen = QPen(QColor(0, 255, 120, 220))
+                            pen.setWidth(2)
+                            painter.setPen(pen)
+                            painter.setBrush(QBrush(QColor(0, 255, 120, 60)))
+                            painter.drawRect(rx, ry, rw, rh)
+                        finally:
+                            painter.end()
+        except Exception:
+            pass
+
         self.hunt_preview_label.setPixmap(
             QPixmap.fromImage(image).scaled(
                 self.hunt_preview_label.size(),
