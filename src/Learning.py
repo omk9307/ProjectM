@@ -45,7 +45,7 @@ from PyQt6.QtWidgets import (
     QPushButton, QListWidget, QLabel, QDialog, QMessageBox, QFileDialog,
     QListWidgetItem, QTextEdit, QDialogButtonBox, QCheckBox,
     QComboBox, QDoubleSpinBox, QGroupBox, QScrollArea, QSpinBox,
-    QProgressBar, QStatusBar, QAbstractItemView, QTreeWidget, QTreeWidgetItem,
+    QProgressBar, QProgressDialog, QStatusBar, QAbstractItemView, QTreeWidget, QTreeWidgetItem,
     QHeaderView, QLineEdit, QFormLayout, QGridLayout, QSizePolicy, QInputDialog,
     QStackedLayout
 )
@@ -3154,6 +3154,188 @@ class DataManager:
         except Exception:
             pass
 
+    # ---- [NEW] 라벨 인덱스 동기화 관련 설정/백업/처리 헬퍼 ----
+    def get_auto_label_index_sync_enabled(self) -> bool:
+        settings = self.load_settings()
+        try:
+            val = settings.get('auto_label_index_sync')
+            return bool(val) if val is not None else True
+        except Exception:
+            return True
+
+    def set_auto_label_index_sync_enabled(self, enabled: bool) -> None:
+        self.save_settings({'auto_label_index_sync': bool(enabled)})
+
+    def get_label_index_backup_dir(self) -> str:
+        """백업 기본 경로. 설정값이 없으면 config 폴더 사용."""
+        try:
+            settings = self.load_settings()
+            path = settings.get('label_index_backup_dir')
+            if isinstance(path, str) and path.strip():
+                return path.strip()
+        except Exception:
+            pass
+        return self.config_path
+
+    def set_label_index_backup_dir(self, path: str) -> None:
+        if isinstance(path, str) and path.strip():
+            self.save_settings({'label_index_backup_dir': path.strip()})
+
+    def _safe_backup_labels_and_manifest(self, base_backup_dir: str) -> tuple[bool, str, str | None]:
+        """
+        라벨 폴더(labels)와 manifest.json을 타임스탬프 폴더에 백업합니다.
+        base_backup_dir가 접근 불가하면 config_path/backups로 폴백합니다.
+        반환: (성공여부, 실제 백업 루트, 에러메시지)
+        """
+        ts = time.strftime('%Y%m%d_%H%M%S')
+        preferred_root = base_backup_dir
+        fallback_root = os.path.join(self.config_path, 'backups')
+        actual_root = preferred_root
+        error_msg = None
+
+        def ensure_dir(path: str) -> bool:
+            try:
+                os.makedirs(path, exist_ok=True)
+                test_file = os.path.join(path, '.write_test')
+                with open(test_file, 'w') as f:
+                    f.write('ok')
+                os.remove(test_file)
+                return True
+            except Exception:
+                return False
+
+        if not ensure_dir(preferred_root):
+            actual_root = fallback_root
+            if not ensure_dir(actual_root):
+                return False, actual_root, '백업 경로 생성 실패'
+            error_msg = f"지정된 백업 경로에 쓸 수 없어 폴백 경로를 사용합니다: {actual_root}"
+
+        dest_root = os.path.join(actual_root, f'label_sync_backup_{ts}')
+        try:
+            os.makedirs(dest_root, exist_ok=True)
+            # labels 전체 복사
+            labels_backup_dir = os.path.join(dest_root, 'labels')
+            shutil.copytree(self.labels_path, labels_backup_dir)
+            # manifest 백업
+            manifest_backup_path = os.path.join(dest_root, f'manifest_{ts}.json')
+            shutil.copy2(self.manifest_path, manifest_backup_path)
+            return True, dest_root, error_msg
+        except Exception as e:
+            return False, dest_root, f'백업 중 오류: {e}'
+
+    def build_class_list_from_manifest(self, manifest: dict) -> list[str]:
+        """주어진 manifest에서 UI 순서 규칙대로 클래스 리스트 생성."""
+        classes: list[str] = []
+        for category in CATEGORIES:
+            entry = manifest.get(category, {})
+            if isinstance(entry, dict):
+                classes.extend(list(entry.keys()))
+        return classes
+
+    def compute_index_remap(self, old_classes: list[str], new_classes: list[str]) -> dict[int, int]:
+        """이름 기준으로 old 인덱스 -> new 인덱스 매핑 계산."""
+        old_map = {name: i for i, name in enumerate(old_classes)}
+        new_map = {name: i for i, name in enumerate(new_classes)}
+        idx_remap: dict[int, int] = {}
+        for name, old_idx in old_map.items():
+            if name in new_map:
+                new_idx = new_map[name]
+                idx_remap[old_idx] = new_idx
+        return idx_remap
+
+    def sync_label_indices(self, old_classes: list[str], new_classes: list[str], *, backup_base_dir: str | None = None, log_cb=None, progress_cb=None) -> dict:
+        """
+        old->new 인덱스 매핑으로 labels/*.txt의 첫 토큰(class_id)을 일괄 변환.
+        - backup_base_dir 지정 시 그 경로 하위에 타임스탬프로 백업 생성(실패 시 config/backups 폴백)
+        반환 통계: { 'files_total', 'files_changed', 'lines_changed', 'backup_root', 'note' }
+        """
+        stats = {
+            'files_total': 0,
+            'files_changed': 0,
+            'lines_changed': 0,
+            'backup_root': '',
+            'note': '',
+        }
+
+        idx_remap = self.compute_index_remap(old_classes, new_classes)
+        # 변화가 없는 경우 빠른 종료
+        has_effect = any(k != v for k, v in idx_remap.items())
+        if not has_effect:
+            if callable(log_cb):
+                log_cb('[동기화] 인덱스 변화가 없어 변환이 필요 없습니다.')
+            return stats
+
+        # 백업
+        backup_dir_setting = backup_base_dir or self.get_label_index_backup_dir()
+        ok, backup_root, err = self._safe_backup_labels_and_manifest(backup_dir_setting)
+        stats['backup_root'] = backup_root
+        if err:
+            stats['note'] = err
+            if callable(log_cb):
+                log_cb(f"[동기화] {err}")
+        if not ok:
+            if callable(log_cb):
+                log_cb('[동기화] 백업 실패로 인해 변환을 중단합니다.')
+            return stats
+
+        # 파일 변환
+        try:
+            label_files = [f for f in os.listdir(self.labels_path) if f.endswith('.txt')]
+        except FileNotFoundError:
+            label_files = []
+        total = len(label_files)
+        stats['files_total'] = total
+
+        for i, label_file in enumerate(label_files):
+            if callable(progress_cb):
+                try:
+                    progress_cb(i, total)
+                except Exception:
+                    pass
+            path = os.path.join(self.labels_path, label_file)
+            changed = False
+            out_lines: list[str] = []
+            try:
+                with open(path, 'r', encoding='utf-8') as f:
+                    lines = f.readlines()
+                for line in lines:
+                    parts = line.strip().split()
+                    if not parts:
+                        out_lines.append(line)
+                        continue
+                    try:
+                        cls_idx = int(parts[0])
+                    except ValueError:
+                        out_lines.append(line)
+                        continue
+                    if cls_idx in idx_remap:
+                        new_idx = idx_remap[cls_idx]
+                        if new_idx != cls_idx:
+                            parts[0] = str(new_idx)
+                            out_lines.append(" ".join(parts) + "\n")
+                            changed = True
+                            stats['lines_changed'] += 1
+                        else:
+                            out_lines.append(line)
+                    else:
+                        # 매핑에 없는 인덱스는 그대로 유지
+                        out_lines.append(line)
+                if changed:
+                    with open(path, 'w', encoding='utf-8') as f:
+                        f.writelines(out_lines)
+                    stats['files_changed'] += 1
+            except Exception as e:
+                if callable(log_cb):
+                    log_cb(f"[동기화] 라벨 변환 오류({label_file}): {e}")
+
+        if callable(progress_cb):
+            try:
+                progress_cb(total, total)
+            except Exception:
+                pass
+
+        return stats
+
     def ensure_dirs_and_files(self):
         os.makedirs(self.images_path, exist_ok=True)
         os.makedirs(self.labels_path, exist_ok=True)
@@ -5368,16 +5550,21 @@ class LearningTab(QWidget):
         self.delete_class_btn = QPushButton('선택 항목 삭제')
         self.recover_data_btn = QPushButton('데이터 복구')
         self.recover_data_btn.setToolTip("라벨(.txt) 파일을 기반으로 이미지 목록을 재구성합니다.")
+        # [NEW] 수동 동기화 버튼
+        self.sync_index_btn = QPushButton('라벨 인덱스 동기화')
+        self.sync_index_btn.setToolTip('현재 트리 순서에 맞춰 모든 라벨의 클래스 숫자를 자동 변환합니다.')
 
         self.add_class_btn.clicked.connect(self.add_class)
         self.rename_class_btn.clicked.connect(self.rename_class)
         self.delete_class_btn.clicked.connect(self.delete_class)
         self.recover_data_btn.clicked.connect(self.recover_data)
+        self.sync_index_btn.clicked.connect(self.sync_label_indices_manual)
 
         class_buttons_layout.addWidget(self.add_class_btn)
         class_buttons_layout.addWidget(self.rename_class_btn)
         class_buttons_layout.addWidget(self.delete_class_btn)
         class_buttons_layout.addWidget(self.recover_data_btn)
+        class_buttons_layout.addWidget(self.sync_index_btn)
         left_layout.addLayout(class_buttons_layout)
 
         preset_group = QGroupBox("탐지 프리셋")
@@ -9478,43 +9665,227 @@ class LearningTab(QWidget):
         self._persist_checked_classes()
 
     def save_tree_state_to_manifest(self):
+        """트리 재정렬 완료 시 호출. 새 순서 저장 + 필요 시 라벨 인덱스 동기화."""
+        # 1) 기존 manifest/클래스 순서 보존
         old_manifest = self.data_manager.get_manifest()
+        old_classes = self.data_manager.build_class_list_from_manifest(old_manifest)
+
+        # 2) 트리에서 새 manifest 구성
         all_class_data = {}
         for category in old_manifest:
-            if category == NEGATIVE_SAMPLES_NAME: continue
+            if category == NEGATIVE_SAMPLES_NAME:
+                continue
             for class_name, img_list in old_manifest[category].items():
                 all_class_data[class_name] = img_list
 
         new_manifest = {category: {} for category in CATEGORIES}
-        # v1.3: 네거티브 샘플 목록은 그대로 유지
         new_manifest[NEGATIVE_SAMPLES_NAME] = old_manifest.get(NEGATIVE_SAMPLES_NAME, [])
-        
-        current_categories_order = [self.class_tree_widget.topLevelItem(i).text(0) for i in range(self.class_tree_widget.topLevelItemCount()) if self.class_tree_widget.topLevelItem(i).parent() is None and self.class_tree_widget.topLevelItem(i).text(0) != NEGATIVE_SAMPLES_NAME]
 
-        for category_name in current_categories_order:
+        top_categories = [
+            self.class_tree_widget.topLevelItem(i).text(0)
+            for i in range(self.class_tree_widget.topLevelItemCount())
+            if self.class_tree_widget.topLevelItem(i).parent() is None and self.class_tree_widget.topLevelItem(i).text(0) != NEGATIVE_SAMPLES_NAME
+        ]
+        for category_name in top_categories:
             if category_name not in new_manifest:
-                 new_manifest[category_name] = {}
+                new_manifest[category_name] = {}
 
         for i in range(self.class_tree_widget.topLevelItemCount()):
             category_item = self.class_tree_widget.topLevelItem(i)
             category_name = category_item.text(0)
-            
-            if category_name == NEGATIVE_SAMPLES_NAME: continue
-
+            if category_name == NEGATIVE_SAMPLES_NAME:
+                continue
             for j in range(category_item.childCount()):
                 class_item = category_item.child(j)
                 class_name = class_item.text(0)
-
                 if class_name in all_class_data:
                     new_manifest[category_name][class_name] = all_class_data.get(class_name, [])
 
-        self.data_manager.save_manifest(new_manifest)
+        new_classes = self.data_manager.build_class_list_from_manifest(new_manifest)
 
+        # 3) 변화 감지
+        idx_remap = self.data_manager.compute_index_remap(old_classes, new_classes)
+        changed = any(k != v for k, v in idx_remap.items()) or (len(old_classes) != len(new_classes))
+
+        # 자동 동기화 설정
+        auto_sync = self.data_manager.get_auto_label_index_sync_enabled()
+
+        # 4) 확인 팝업(요약)
+        if changed and auto_sync:
+            changed_pairs = [
+                f"{name}: {old_classes.index(name)} → {new_classes.index(name)}"
+                for name in old_classes if name in new_classes and old_classes.index(name) != new_classes.index(name)
+            ]
+            # 영향 파일 수(드라이런): 변경된 old 인덱스 집합에 해당하는 라벨이 있는지 빠르게 스캔
+            changed_old_indices = set(k for k, v in idx_remap.items() if k != v)
+            affected_files = 0
+            try:
+                for f in os.listdir(self.data_manager.labels_path):
+                    if not f.endswith('.txt'):
+                        continue
+                    p = os.path.join(self.data_manager.labels_path, f)
+                    try:
+                        with open(p, 'r', encoding='utf-8') as fp:
+                            for line in fp:
+                                parts = line.strip().split()
+                                if not parts:
+                                    continue
+                                try:
+                                    idx = int(parts[0])
+                                except ValueError:
+                                    continue
+                                if idx in changed_old_indices:
+                                    affected_files += 1
+                                    break
+                    except Exception:
+                        continue
+            except Exception:
+                affected_files = 0
+
+            msg = "클래스 순서가 변경되었습니다. 라벨 인덱스를 새 순서에 맞게 동기화합니다.\n\n"
+            if changed_pairs:
+                preview = "\n".join(changed_pairs[:10])
+                if len(changed_pairs) > 10:
+                    preview += "\n…"
+                msg += f"인덱스 변경 요약:\n{preview}\n\n"
+            msg += f"영향 받을 라벨 파일 수(대략): {affected_files}개\n\n동기화를 실행할까요?"
+
+            reply = QMessageBox.question(self, '라벨 인덱스 동기화', msg, QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No, QMessageBox.StandardButton.Yes)
+            if reply != QMessageBox.StandardButton.Yes:
+                # 사용자가 취소 → manifest를 저장하지 않고 UI를 원복
+                checked_states = self.get_checked_states()
+                self.populate_class_list()
+                self.set_checked_states(checked_states)
+                return
+
+        # 5) 동기화 수행(필요 시)
+        if changed and auto_sync:
+            # 진행창
+            progress_dialog = QProgressDialog('라벨 인덱스 동기화 중...', '취소', 0, 100, self)
+            progress_dialog.setWindowModality(Qt.WindowModality.ApplicationModal)
+            progress_dialog.setMinimumDuration(0)
+            progress_dialog.setAutoClose(False)
+            progress_dialog.setAutoReset(False)
+
+            def on_progress(cur, total):
+                try:
+                    val = int((cur / max(1, total)) * 100)
+                except Exception:
+                    val = 0
+                progress_dialog.setValue(val)
+                QApplication.processEvents()
+
+            backup_dir = self.data_manager.get_label_index_backup_dir()
+            stats = self.data_manager.sync_label_indices(
+                old_classes, new_classes,
+                backup_base_dir=backup_dir,
+                log_cb=self.log_viewer.append,
+                progress_cb=on_progress,
+            )
+            progress_dialog.setValue(100)
+
+            # 로그 요약
+            note = stats.get('note') or ''
+            backup_root = stats.get('backup_root') or ''
+            self.log_viewer.append(f"[동기화] 처리 파일: {stats.get('files_changed', 0)}/{stats.get('files_total', 0)}, 변경 라인: {stats.get('lines_changed', 0)}")
+            if backup_root:
+                self.log_viewer.append(f"[동기화] 백업 위치: {backup_root}")
+            if note:
+                self.log_viewer.append(f"[동기화] 참고: {note}")
+
+        # 6) manifest 저장 및 UI 갱신
+        self.data_manager.save_manifest(new_manifest)
         checked_states = self.get_checked_states()
         self.populate_class_list()
         self.set_checked_states(checked_states)
         self.populate_preset_list()
         self.log_viewer.append("클래스 순서 또는 카테고리가 변경되었습니다.")
+
+    def sync_label_indices_manual(self):
+        """수동 동기화 버튼 액션: 현재 트리 순서를 기준으로 강제 동기화."""
+        old_manifest = self.data_manager.get_manifest()
+        old_classes = self.data_manager.build_class_list_from_manifest(old_manifest)
+
+        # 트리에서 new manifest 빌드만 수행하되 이 시점에는 저장하지 않음
+        all_class_data = {}
+        for category in old_manifest:
+            if category == NEGATIVE_SAMPLES_NAME:
+                continue
+            for class_name, img_list in old_manifest[category].items():
+                all_class_data[class_name] = img_list
+
+        new_manifest = {category: {} for category in CATEGORIES}
+        new_manifest[NEGATIVE_SAMPLES_NAME] = old_manifest.get(NEGATIVE_SAMPLES_NAME, [])
+        for i in range(self.class_tree_widget.topLevelItemCount()):
+            category_item = self.class_tree_widget.topLevelItem(i)
+            category_name = category_item.text(0)
+            if category_name == NEGATIVE_SAMPLES_NAME:
+                continue
+            for j in range(category_item.childCount()):
+                class_item = category_item.child(j)
+                class_name = class_item.text(0)
+                if class_name in all_class_data:
+                    new_manifest[category_name][class_name] = all_class_data.get(class_name, [])
+
+        new_classes = self.data_manager.build_class_list_from_manifest(new_manifest)
+        idx_remap = self.data_manager.compute_index_remap(old_classes, new_classes)
+        changed = any(k != v for k, v in idx_remap.items()) or (len(old_classes) != len(new_classes))
+
+        if not changed:
+            QMessageBox.information(self, '라벨 인덱스 동기화', '변경된 인덱스가 없습니다.')
+            return
+
+        changed_pairs = [
+            f"{name}: {old_classes.index(name)} → {new_classes.index(name)}"
+            for name in old_classes if name in new_classes and old_classes.index(name) != new_classes.index(name)
+        ]
+        msg = "현재 트리 순서에 맞춰 라벨 인덱스를 동기화합니다.\n\n"
+        if changed_pairs:
+            preview = "\n".join(changed_pairs[:10])
+            if len(changed_pairs) > 10:
+                preview += "\n…"
+            msg += f"인덱스 변경 요약:\n{preview}\n\n"
+        msg += "동기화를 실행할까요?"
+        reply = QMessageBox.question(self, '라벨 인덱스 동기화', msg, QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No, QMessageBox.StandardButton.Yes)
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+
+        progress_dialog = QProgressDialog('라벨 인덱스 동기화 중...', '취소', 0, 100, self)
+        progress_dialog.setWindowModality(Qt.WindowModality.ApplicationModal)
+        progress_dialog.setMinimumDuration(0)
+        progress_dialog.setAutoClose(False)
+        progress_dialog.setAutoReset(False)
+
+        def on_progress(cur, total):
+            try:
+                val = int((cur / max(1, total)) * 100)
+            except Exception:
+                val = 0
+            progress_dialog.setValue(val)
+            QApplication.processEvents()
+
+        backup_dir = self.data_manager.get_label_index_backup_dir()
+        stats = self.data_manager.sync_label_indices(
+            old_classes, new_classes,
+            backup_base_dir=backup_dir,
+            log_cb=self.log_viewer.append,
+            progress_cb=on_progress,
+        )
+        progress_dialog.setValue(100)
+
+        self.data_manager.save_manifest(new_manifest)
+        checked_states = self.get_checked_states()
+        self.populate_class_list()
+        self.set_checked_states(checked_states)
+        self.populate_preset_list()
+
+        note = stats.get('note') or ''
+        backup_root = stats.get('backup_root') or ''
+        self.log_viewer.append(f"[동기화] 처리 파일: {stats.get('files_changed', 0)}/{stats.get('files_total', 0)}, 변경 라인: {stats.get('lines_changed', 0)}")
+        if backup_root:
+            self.log_viewer.append(f"[동기화] 백업 위치: {backup_root}")
+        if note:
+            self.log_viewer.append(f"[동기화] 참고: {note}")
 
     def get_checked_states(self):
         """현재 트리의 모든 클래스 아이템의 체크 상태를 dict로 저장합니다."""

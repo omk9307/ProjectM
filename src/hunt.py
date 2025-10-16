@@ -3950,6 +3950,24 @@ class HuntTab(QWidget):
         self._update_shutdown_labels()
 
     def _reset_other_player_progress(self, *, reset_state_only: bool = False) -> None:
+        """다른 캐릭터 감지 진행상태 초기화.
+
+        주의: 금지몬스터 플로우(hunt.forbidden)로 인해 진입한 대기모드는
+        '다른 캐릭터 감지 사용' 토글과 무관하게 유지되어야 한다.
+        따라서 해당 경우에는 종료/리셋을 건너뛴다.
+        """
+        # 금지몬스터 유도 대기모드인 경우: 강제 리셋/종료를 스킵
+        try:
+            if not reset_state_only and self.shutdown_other_player_wait_active:
+                map_tab = getattr(self, 'map_tab', None)
+                ctx = getattr(map_tab, 'other_player_wait_context', {}) if map_tab else {}
+                source = str(ctx.get('source', '') or '') if isinstance(ctx, dict) else ''
+                if source == 'hunt.forbidden':
+                    # 금지 플로우는 자체 스케줄에 따라 종료되므로 건드리지 않음
+                    return
+        except Exception:
+            pass
+
         if not reset_state_only and self.shutdown_other_player_wait_active:
             self._finish_other_player_wait_mode(reason="reset")
 
