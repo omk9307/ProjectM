@@ -1679,6 +1679,11 @@ class PolygonAnnotationEditor(QDialog):
         main_layout.addLayout(top_controls_layout)
         main_layout.addWidget(self.scroll_area)
         main_layout.addWidget(self.status_bar)
+        # [NEW] 클래스별 완료 폴리곤 카운트 라벨(상태바 아래)
+        self.count_label = QLabel("")
+        self.count_label.setWordWrap(True)
+        self.count_label.setVisible(False)
+        main_layout.addWidget(self.count_label)
         # [NEW] 클래스별 완료 폴리곤 카운트 라벨(좌측 하단 '준비' 아랫줄)
         self.count_label = QLabel("")
         self.count_label.setWordWrap(True)
@@ -1836,6 +1841,29 @@ class PolygonAnnotationEditor(QDialog):
             self.class_selector.setCurrentText(new_class_to_select)
 
         self.class_selector.blockSignals(False)
+
+    # [NEW] 완료된(확정된) 클래스 폴리곤 카운트 갱신
+    def _update_polygon_counts(self):
+        try:
+            if not hasattr(self, 'count_label'):
+                return
+            counts: dict[str, int] = {}
+            for poly in self.canvas.polygons:
+                class_id = poly.get('class_id')
+                if class_id is None:
+                    continue
+                if 0 <= int(class_id) < len(self.full_class_list):
+                    name = self.full_class_list[int(class_id)]
+                    counts[name] = counts.get(name, 0) + 1
+            if not counts:
+                self.count_label.setVisible(False)
+                self.count_label.setText("")
+                return
+            parts = [f"{name} {counts[name]}마리" for name in sorted(counts.keys())]
+            self.count_label.setText(", ".join(parts))
+            self.count_label.setVisible(True)
+        except Exception:
+            pass
 
     # [NEW] 완료된(엔터 등으로 확정된) 클래스 폴리곤 카운트 갱신
     def _update_polygon_counts(self):
@@ -2378,6 +2406,11 @@ class SAMAnnotationEditor(QDialog):
         main_layout.addLayout(top_controls_layout)
         main_layout.addWidget(self.scroll_area)
         main_layout.addWidget(self.status_bar)
+        # [NEW] 클래스별 완료 폴리곤 카운트 라벨(상태바 아래)
+        self.count_label = QLabel("")
+        self.count_label.setWordWrap(True)
+        self.count_label.setVisible(False)
+        main_layout.addWidget(self.count_label)
         main_layout.addWidget(self.button_box)
         self.setLayout(main_layout)
         self._preferred_size = self._compute_preferred_size(pixmap)
@@ -2390,6 +2423,11 @@ class SAMAnnotationEditor(QDialog):
         self.create_local_color_map()
         self.set_initial_selection(initial_class_name)
         self.setFocus()
+        # [NEW] 초기 카운트 표시
+        try:
+            self._update_polygon_counts()
+        except Exception:
+            pass
 
     def _compute_preferred_size(self, pixmap: QPixmap) -> QSize:
         screen_geometry = QApplication.primaryScreen().availableGeometry()
@@ -2486,6 +2524,29 @@ class SAMAnnotationEditor(QDialog):
             self.class_selector.setCurrentText(new_class_to_select)
 
         self.class_selector.blockSignals(False)
+
+    # [NEW] 완료된(확정된) 클래스 폴리곤 카운트 갱신
+    def _update_polygon_counts(self):
+        try:
+            if not hasattr(self, 'count_label'):
+                return
+            counts: dict[str, int] = {}
+            for poly in self.canvas.polygons:
+                class_id = poly.get('class_id')
+                if class_id is None:
+                    continue
+                if 0 <= int(class_id) < len(self.full_class_list):
+                    name = self.full_class_list[int(class_id)]
+                    counts[name] = counts.get(name, 0) + 1
+            if not counts:
+                self.count_label.setVisible(False)
+                self.count_label.setText("")
+                return
+            parts = [f"{name} {counts[name]}마리" for name in sorted(counts.keys())]
+            self.count_label.setText(", ".join(parts))
+            self.count_label.setVisible(True)
+        except Exception:
+            pass
 
     def populate_category_selector(self):
         """체크된 클래스가 존재하는 카테고리만 표시합니다."""
@@ -5513,6 +5574,7 @@ class LearningTab(QWidget):
         # [NEW] 펫 먹이 스케줄러 상태
         self._pet_feed_cfg = self.data_manager.get_pet_feed_config()
         self._pet_feed_next_due_ts: float = 0.0
+        self._pet_feed_last_tick_ts: float = time.time()
         try:
             self._pet_feed_timer = QTimer(self)
             self._pet_feed_timer.setSingleShot(False)
@@ -7035,7 +7097,9 @@ class LearningTab(QWidget):
 
     def _schedule_next_pet_feed(self) -> None:
         try:
-            self._pet_feed_next_due_ts = time.time() + float(self._random_pet_interval_sec())
+            now = time.time()
+            self._pet_feed_next_due_ts = now + float(self._random_pet_interval_sec())
+            self._pet_feed_last_tick_ts = now
             if hasattr(self, 'pet_feed_next_label') and self.pet_feed_next_label is not None:
                 self.pet_feed_next_label.setText(self._format_due_text(self._pet_feed_next_due_ts))
         except Exception:
@@ -7060,8 +7124,16 @@ class LearningTab(QWidget):
             self._pet_feed_cfg = cfg
             if not bool(cfg.get('enabled', False)):
                 return
+            now = time.time()
+            last = float(getattr(self, '_pet_feed_last_tick_ts', 0.0) or 0.0)
+            if last <= 0.0:
+                last = now
+            dt = max(0.0, now - last)
+            self._pet_feed_last_tick_ts = now
             # Maple 창 포그라운드 게이트
             if not is_maple_window_foreground():
+                if float(getattr(self, '_pet_feed_next_due_ts', 0.0) or 0.0) > 0.0 and dt > 0.0:
+                    self._pet_feed_next_due_ts += dt
                 # 라벨만 갱신
                 if float(getattr(self, '_pet_feed_next_due_ts', 0.0) or 0.0) > 0:
                     try:
@@ -7071,6 +7143,8 @@ class LearningTab(QWidget):
                 return
             # 조건 게이트(OR)
             if not self._pet_feed_conditions_ok():
+                if float(getattr(self, '_pet_feed_next_due_ts', 0.0) or 0.0) > 0.0 and dt > 0.0:
+                    self._pet_feed_next_due_ts += dt
                 if float(getattr(self, '_pet_feed_next_due_ts', 0.0) or 0.0) > 0:
                     try:
                         self.pet_feed_next_label.setText(self._format_due_text(self._pet_feed_next_due_ts))
@@ -7087,7 +7161,6 @@ class LearningTab(QWidget):
             except Exception:
                 pass
             # 만기 처리
-            now = time.time()
             if now < float(self._pet_feed_next_due_ts):
                 return
             # 명령 유효성 검사
