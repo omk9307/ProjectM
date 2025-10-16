@@ -47,6 +47,7 @@ RMSE_THRESH_PX_MIN = 8.0
 RMSE_THRESH_RATIO = 0.02  # 2% * frame_width
 CONSEC_OK_REQUIRED = 12
 MIN_OBS_WINDOW_SEC = 5.0
+WLS_TIME_DECAY_TAU_SEC = 8.0  # 최신 샘플 가중 강화
 
 
 @dataclass
@@ -107,6 +108,26 @@ def _compute_std(values: list[float]) -> float:
     mean = sum(values) / n
     var = sum((v - mean) ** 2 for v in values) / (n - 1)
     return math.sqrt(max(0.0, var))
+
+
+def _wls_fit(pairs: list[Tuple[float, float]], weights: list[float]) -> Optional[Tuple[float, float]]:
+    n = len(pairs)
+    if n < 2 or len(weights) != n:
+        return None
+    sw = sx = sy = sxx = sxy = 0.0
+    for (x, y), w in zip(pairs, weights):
+        w = float(max(0.0, w))
+        sw += w
+        sx += w * x
+        sy += w * y
+        sxx += w * x * x
+        sxy += w * x * y
+    den = sw * sxx - sx * sx
+    if abs(den) < 1e-6 or sw <= 0.0:
+        return None
+    a = (sw * sxy - sx * sy) / den
+    b = (sy - a * sx) / sw
+    return a, b
 
 
 def update(
@@ -188,7 +209,15 @@ def update(
     if len(inliers_idx) < 2:
         return False
     inlier_pairs = [pairs_all[i] for i in inliers_idx]
-    fit2 = _ols_fit(inlier_pairs)
+    # 가중치 계산(시간 감쇠 + 잔차 기반 소프트 가중)
+    inlier_samples = [state.samples[i] for i in inliers_idx]
+    now_ts_eff = ts
+    w_time = [math.exp(-max(0.0, (now_ts_eff - s.ts)) / max(1e-3, WLS_TIME_DECAY_TAU_SEC)) for s in inlier_samples]
+    # 잔차 기준 소프트 가중: w = 1/(1+(r/r0)^2)
+    r0 = max(1.0, max_residual_px / 3.0)
+    w_res = [1.0 / (1.0 + (abs(s.obs_x - (a0 * s.map_x + b0)) / r0) ** 2.0) for s in inlier_samples]
+    weights = [wt * wr for wt, wr in zip(w_time, w_res)]
+    fit2 = _wls_fit(inlier_pairs, weights)
     if fit2 is None:
         return False
     a, b = fit2
@@ -230,6 +259,97 @@ def update(
         return True
 
     return False
+
+
+def export_status(profile: str, roi: dict | None) -> Optional[dict]:
+    """현재 온라인 보정 상태/지표를 조회.
+
+    반환 예시:
+    {
+      'frozen': bool,
+      'has_saved': bool,
+      'a': float|None,
+      'b': float|None,
+      'rmse': float|None,
+      'inliers': int,
+      'samples': int,
+      'ok_streak': int,
+      'alive_sec': float,
+      'threshold': float|None,
+    }
+    """
+    k = _key(profile, roi)
+    if k is None:
+        return None
+    # 저장값 확인
+    saved = None
+    try:
+        saved = _find_saved_params(profile, roi)
+    except Exception:
+        saved = None
+    state = _STATES.get(k)
+    if state is None:
+        # 온라인 상태 없음: 저장값 유무만 보고 반환
+        base = {
+            'frozen': bool(saved is not None),
+            'has_saved': bool(saved is not None),
+            'a': float(saved[0]) if saved else None,
+            'b': float(saved[1]) if saved else None,
+            'rmse': None,
+            'inliers': 0,
+            'samples': 0,
+            'ok_streak': 0,
+            'alive_sec': 0.0,
+            'threshold': None,
+        }
+        base['targets'] = {
+            'inliers': int(MIN_INLIERS_SAVE),
+            'streak': int(CONSEC_OK_REQUIRED),
+            'time_sec': float(MIN_OBS_WINDOW_SEC),
+        }
+        base['progress_pct'] = 100 if saved is not None else 0
+        return base
+    # 온라인 상태 존재
+    thr = None
+    if state.samples:
+        fw = float(state.samples[-1].frame_w)
+        thr = max(RMSE_THRESH_PX_MIN, (fw * RMSE_THRESH_RATIO) if fw > 1.0 else RMSE_THRESH_PX_MIN)
+    # 진행도 계산
+    progress_pct = 0
+    try:
+        if saved is not None or state.frozen:
+            progress_pct = 100
+        else:
+            # ratios
+            rmse_ratio = 0.0
+            if thr is not None and state.last_fit_rmse is not None and float(thr) > 1e-9:
+                rmse_ratio = max(0.0, min(1.0, (float(thr) - float(state.last_fit_rmse)) / float(thr)))
+            inl_ratio = max(0.0, min(1.0, float(state.last_fit_inliers) / float(MIN_INLIERS_SAVE)))
+            streak_ratio = max(0.0, min(1.0, float(state.ok_streak) / float(CONSEC_OK_REQUIRED)))
+            time_ratio = max(0.0, min(1.0, float((time.time() - state.first_ts) if state.first_ts else 0.0) / float(MIN_OBS_WINDOW_SEC)))
+            score = 0.4 * rmse_ratio + 0.3 * streak_ratio + 0.2 * inl_ratio + 0.1 * time_ratio
+            progress_pct = int(round(max(0.0, min(1.0, score)) * 100.0))
+    except Exception:
+        progress_pct = 0
+
+    return {
+        'frozen': bool(state.frozen or (saved is not None)),
+        'has_saved': bool(saved is not None),
+        'a': float(state.a) if state.a is not None else (float(saved[0]) if saved else None),
+        'b': float(state.b) if state.b is not None else (float(saved[1]) if saved else None),
+        'rmse': float(state.last_fit_rmse) if state.last_fit_rmse is not None else None,
+        'inliers': int(state.last_fit_inliers),
+        'samples': int(len(state.samples)),
+        'ok_streak': int(state.ok_streak),
+        'alive_sec': float((time.time() - state.first_ts) if state.first_ts else 0.0),
+        'threshold': thr,
+        'targets': {
+            'inliers': int(MIN_INLIERS_SAVE),
+            'streak': int(CONSEC_OK_REQUIRED),
+            'time_sec': float(MIN_OBS_WINDOW_SEC),
+        },
+        'progress_pct': int(progress_pct),
+    }
 
 
 def get(profile: str, roi: dict | None) -> Optional[Tuple[float, float]]:

@@ -6045,8 +6045,6 @@ class LearningTab(QWidget):
         window_anchor_layout.addLayout(anchor_button_row)
         window_anchor_group.setLayout(window_anchor_layout)
         center_layout.addWidget(window_anchor_group)
-        # 중앙 스택을 상단 정렬로 고정하고 남는 공간은 하단으로
-        center_layout.addStretch(1)
 
         main_layout.addLayout(left_layout, 1)
         main_layout.addLayout(center_layout, 2)
@@ -6301,7 +6299,8 @@ class LearningTab(QWidget):
 
         # [NEW] 펫 먹이 설정 (HP/MP/EXP 바로 아래)
         pet_feed_group = self._create_pet_feed_group()
-        right_layout.addWidget(pet_feed_group)
+        # [이동] 펫 먹이 설정 그룹을 중앙 UI로 이동 (Mapleland 창 좌표 관리 바로 아래)
+        center_layout.addWidget(pet_feed_group)
 
         # [NEW] 맵-사냥 위치 캘리브레이션 UI
         calib_group = QGroupBox("맵-사냥 위치 캘리브레이션")
@@ -6336,7 +6335,10 @@ class LearningTab(QWidget):
         self.calib_online_status_label = QLabel("자동 보정 상태: —")
         calib_layout.addWidget(self.calib_online_status_label)
         calib_group.setLayout(calib_layout)
-        right_layout.addWidget(calib_group)
+        # [이동] 맵-사냥 위치 캘리브레이션 그룹을 중앙 UI로 이동 (펫 먹이 설정 아래)
+        center_layout.addWidget(calib_group)
+        # 중앙 스택을 상단 정렬로 고정하고 남는 공간은 하단으로
+        center_layout.addStretch(1)
 
         self.log_viewer = QTextEdit()
         self.log_viewer.setReadOnly(True)
@@ -6426,6 +6428,13 @@ class LearningTab(QWidget):
         # 온라인 저장 전환 로그 상태 추적
         self._calib_prev_sig = None
         self._calib_prev_has_saved = False
+        # 온라인 진행 상황 로그 스로틀/상태
+        self._calib_prev_learning = False
+        self._calib_prev_rmse = None
+        self._calib_prev_inliers = 0
+        self._calib_prev_streak = 0
+        self._calib_prev_samples = 0
+        self._calib_last_progress_log_ts = 0.0
 
     # ----- [NEW] 맵-사냥 위치 캘리브레이션: 탭 연결 및 핸들러 -----
     def attach_tabs(self, map_tab, hunt_tab) -> None:
@@ -6574,6 +6583,7 @@ class LearningTab(QWidget):
                 # 프로필/ROI 없을 때 상태 초기화
                 self._calib_prev_sig = None
                 self._calib_prev_has_saved = False
+                self._calib_prev_learning = False
                 return
             try:
                 from minimap_online_calibrator import export_status as _export
@@ -6610,8 +6620,14 @@ class LearningTab(QWidget):
                     return "—"
             ab_text = f"a={fmt(a,'.5f')}, b={fmt(b,'.1f')}" if a is not None and b is not None else "a/b=—"
             err_text = f"RMSE={fmt(rmse)} / 임계={fmt(thr)}" if rmse is not None and thr is not None else "RMSE/임계=—"
+            progress_pct = None
+            try:
+                progress_pct = int(st.get('progress_pct')) if st.get('progress_pct') is not None else None
+            except Exception:
+                progress_pct = None
+            progress_text = f"완료도={progress_pct}%" if isinstance(progress_pct, int) else "완료도=—"
             meta_text = f"샘플={smp}, 인라이어={inl}, 연속={streak}/12, 관측={fmt(alive,'.1f')}s"
-            self.calib_online_status_label.setText(f"자동 보정 상태: {status_text} | {ab_text} | {err_text} | {meta_text}")
+            self.calib_online_status_label.setText(f"자동 보정 상태: {status_text} | {progress_text} | {ab_text} | {err_text} | {meta_text}")
 
             # [NEW] 자동 저장 전환 감지 → 학습탭 로그에 알림 출력
             try:
@@ -6619,6 +6635,11 @@ class LearningTab(QWidget):
                     # ROI/프로필 변경 시 현재 저장 상태로 초기화
                     self._calib_prev_sig = sig
                     self._calib_prev_has_saved = bool(has_saved)
+                    self._calib_prev_learning = (status_text == '학습 중')
+                    self._calib_prev_rmse = rmse if rmse is not None else None
+                    self._calib_prev_inliers = int(inl)
+                    self._calib_prev_streak = int(streak)
+                    self._calib_prev_samples = int(smp)
                 else:
                     if bool(has_saved) and not bool(self._calib_prev_has_saved):
                         self._calib_prev_has_saved = True
@@ -6627,6 +6648,37 @@ class LearningTab(QWidget):
                                 self.log_viewer.append(f"[캘리브레이션] 자동 저장 완료(학습): a={float(a):.5f}, b={float(b):.2f}")
                             else:
                                 self.log_viewer.append("[캘리브레이션] 자동 저장 완료(학습)")
+                    # 진행 상황 주기 로그(학습 중 상태에서만, 3초 간격, 의미있는 변화 시)
+                    import time as _t
+                    now_ts = _t.time()
+                    is_learning = (status_text == '학습 중')
+                    should_log = False
+                    # 상태 전환
+                    if is_learning and not self._calib_prev_learning:
+                        should_log = True
+                    # 값 변화 감지
+                    try:
+                        rmse_changed = (rmse is not None and self._calib_prev_rmse is not None and abs(float(rmse) - float(self._calib_prev_rmse)) >= 0.5)
+                    except Exception:
+                        rmse_changed = False
+                    inl_changed = (int(inl) != int(self._calib_prev_inliers))
+                    streak_changed = (int(streak) != int(self._calib_prev_streak))
+                    smp_changed = (int(smp) != int(self._calib_prev_samples))
+                    if is_learning and (rmse_changed or inl_changed or streak_changed or smp_changed):
+                        if now_ts - float(self._calib_last_progress_log_ts or 0.0) >= 3.0:
+                            should_log = True
+                    if should_log and hasattr(self, 'log_viewer'):
+                        pct_text = f", 완료도={progress_pct}%" if isinstance(progress_pct, int) else ""
+                        self.log_viewer.append(
+                            f"[캘리브레이션] 학습 진행: RMSE={fmt(rmse)}(≤{fmt(thr)}), 인라이어={int(inl)}, 연속={int(streak)}/12, 샘플={int(smp)}{pct_text}"
+                        )
+                        self._calib_last_progress_log_ts = now_ts
+                    # 상태 저장
+                    self._calib_prev_learning = is_learning
+                    self._calib_prev_rmse = rmse if rmse is not None else self._calib_prev_rmse
+                    self._calib_prev_inliers = int(inl)
+                    self._calib_prev_streak = int(streak)
+                    self._calib_prev_samples = int(smp)
             except Exception:
                 pass
         except Exception:
