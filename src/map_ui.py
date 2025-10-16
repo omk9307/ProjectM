@@ -7699,7 +7699,7 @@ class MapTab(QWidget):
         try:
             logs_dir = self._ensure_perf_log_dir()
             file_name = time.strftime('map_perf_%Y%m%d_%H%M%S.csv')
-        path = os.path.join(logs_dir, file_name)
+            path = os.path.join(logs_dir, file_name)
             handle = open(path, 'w', newline='', encoding='utf-8')
             writer = csv.writer(handle)
             writer.writerow(self._perf_log_headers)
