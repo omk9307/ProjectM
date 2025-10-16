@@ -1500,6 +1500,11 @@ class CanvasLabel(BaseCanvasLabel):
     def mousePressEvent(self, event):
         if self.parent_dialog.is_change_mode and event.button() == Qt.MouseButton.LeftButton:
             if self.change_hovered_polygon_class():
+                # 클래스 변경 시 카운트 갱신
+                try:
+                    self.parent_dialog._update_polygon_counts()
+                except Exception:
+                    pass
                 return
 
         if event.button() == Qt.MouseButton.LeftButton:
@@ -1674,6 +1679,16 @@ class PolygonAnnotationEditor(QDialog):
         main_layout.addLayout(top_controls_layout)
         main_layout.addWidget(self.scroll_area)
         main_layout.addWidget(self.status_bar)
+        # [NEW] 클래스별 완료 폴리곤 카운트 라벨(좌측 하단 '준비' 아랫줄)
+        self.count_label = QLabel("")
+        self.count_label.setWordWrap(True)
+        self.count_label.setVisible(False)
+        main_layout.addWidget(self.count_label)
+        # [NEW] 클래스별 완료 폴리곤 카운트 라벨(좌측 하단 '준비' 아랫줄)
+        self.count_label = QLabel("")
+        self.count_label.setWordWrap(True)
+        self.count_label.setVisible(False)
+        main_layout.addWidget(self.count_label)
         main_layout.addWidget(self.button_box)
         self.setLayout(main_layout)
         self._preferred_size = self._compute_preferred_size(pixmap)
@@ -1688,6 +1703,35 @@ class PolygonAnnotationEditor(QDialog):
         self.populate_category_selector()
         self.set_initial_selection(initial_class_name)
         self.setFocus()
+        # 초기 카운트 표시
+        self._update_polygon_counts()
+        # 초기 카운트 표시
+        self._update_polygon_counts()
+
+    # [NEW] 완료된(엔터 등으로 확정된) 클래스 폴리곤 카운트 갱신
+    def _update_polygon_counts(self):
+        try:
+            if not hasattr(self, 'count_label'):
+                return
+            # class_id가 None(방해 요소)은 제외
+            counts: dict[str, int] = {}
+            for poly in self.canvas.polygons:
+                class_id = poly.get('class_id')
+                if class_id is None:
+                    continue
+                if 0 <= int(class_id) < len(self.full_class_list):
+                    name = self.full_class_list[int(class_id)]
+                    counts[name] = counts.get(name, 0) + 1
+            if not counts:
+                self.count_label.setVisible(False)
+                self.count_label.setText("")
+                return
+            parts = [f"{name} {counts[name]}마리" for name in sorted(counts.keys())]
+            self.count_label.setText(", ".join(parts))
+            self.count_label.setVisible(True)
+        except Exception:
+            # 표시 실패는 무시
+            pass
 
     # [NEW] 외부에서 AI 임시 마스크 설정(수동 전환 시 전달)
     def set_pending_ai_mask(self, mask: Optional[np.ndarray]):
@@ -1793,6 +1837,29 @@ class PolygonAnnotationEditor(QDialog):
 
         self.class_selector.blockSignals(False)
 
+    # [NEW] 완료된(엔터 등으로 확정된) 클래스 폴리곤 카운트 갱신
+    def _update_polygon_counts(self):
+        try:
+            if not hasattr(self, 'count_label'):
+                return
+            counts: dict[str, int] = {}
+            for poly in self.canvas.polygons:
+                class_id = poly.get('class_id')
+                if class_id is None:
+                    continue
+                if 0 <= int(class_id) < len(self.full_class_list):
+                    name = self.full_class_list[int(class_id)]
+                    counts[name] = counts.get(name, 0) + 1
+            if not counts:
+                self.count_label.setVisible(False)
+                self.count_label.setText("")
+                return
+            parts = [f"{name} {counts[name]}마리" for name in sorted(counts.keys())]
+            self.count_label.setText(", ".join(parts))
+            self.count_label.setVisible(True)
+        except Exception:
+            pass
+
     # [NEW] 체크된 클래스가 존재하는 카테고리만 노출
     def populate_category_selector(self):
         self.category_selector.blockSignals(True)
@@ -1880,10 +1947,11 @@ class PolygonAnnotationEditor(QDialog):
                     self.canvas.current_add_points.clear();
                     self.canvas.current_sub_points.clear();
                     self.pending_ai_mask = None; self.canvas.pending_mask = None;
-                    self.canvas.update()
+                    self.canvas.update();
+                    self._update_polygon_counts()
         elif event.key() == Qt.Key.Key_Z:
-            if self.canvas.polygons: self.canvas.polygons.pop(); self.canvas.update()
-        elif event.key() == Qt.Key.Key_D: self.canvas.delete_hovered_polygon()
+            if self.canvas.polygons: self.canvas.polygons.pop(); self.canvas.update(); self._update_polygon_counts()
+        elif event.key() == Qt.Key.Key_D: self.canvas.delete_hovered_polygon(); self._update_polygon_counts()
         elif event.key() == Qt.Key.Key_T:
             self.on_switch_to_ai()
         elif event.key() == Qt.Key.Key_C:
@@ -1966,6 +2034,8 @@ class PolygonAnnotationEditor(QDialog):
                 self.canvas.polygons = new_list
                 self.canvas.current_sub_points.clear()
                 self.canvas.update()
+                # 변경 반영 후 카운트 갱신
+                self._update_polygon_counts()
                 return True
             return False
 
@@ -2034,6 +2104,8 @@ class PolygonAnnotationEditor(QDialog):
         self.pending_ai_mask = None
         self.canvas.pending_mask = None
         self.canvas.update()
+        # 변경 반영 (합집합/차집합 후 결과) → 카운트 갱신
+        self._update_polygon_counts()
         return True
 
     def on_switch_to_ai(self):
@@ -2079,6 +2151,8 @@ class PolygonAnnotationEditor(QDialog):
         self.canvas.current_add_points.clear()
         self.canvas.current_sub_points.clear()
         self.canvas.update()
+        # 외부에서 폴리곤 세트 변경 시 카운트 갱신
+        self._update_polygon_counts()
 
 # --- 3.5. 위젯: SAM(AI) 편집기 ---
 class SAMCanvasLabel(BaseCanvasLabel):
@@ -2140,6 +2214,11 @@ class SAMCanvasLabel(BaseCanvasLabel):
     def mousePressEvent(self, event):
         if self.parent_dialog.is_change_mode and event.button() == Qt.MouseButton.LeftButton:
             if self.change_hovered_polygon_class():
+                # 클래스 변경 시 카운트 갱신
+                try:
+                    self.parent_dialog._update_polygon_counts()
+                except Exception:
+                    pass
                 return
 
         if event.button() == Qt.MouseButton.RightButton:
@@ -2508,8 +2587,8 @@ class SAMAnnotationEditor(QDialog):
             if getattr(self.canvas, 'current_sub_points', None):
                 self.canvas.current_sub_points.clear(); self.canvas.update()
         elif event.key() == Qt.Key.Key_Z:
-            if self.canvas.polygons: self.canvas.polygons.pop(); self.canvas.update()
-        elif event.key() == Qt.Key.Key_D: self.canvas.delete_hovered_polygon()
+            if self.canvas.polygons: self.canvas.polygons.pop(); self.canvas.update(); self._update_polygon_counts()
+        elif event.key() == Qt.Key.Key_D: self.canvas.delete_hovered_polygon(); self._update_polygon_counts()
         elif event.key() == Qt.Key.Key_C:
             self.change_class_btn.setChecked(not self.change_class_btn.isChecked())
         else: super().keyPressEvent(event)
@@ -2539,6 +2618,8 @@ class SAMAnnotationEditor(QDialog):
         poly_points = [QPoint(p[0][0], p[0][1]) for p in largest_contour]
         self.canvas.polygons.append({'class_id': class_id, 'points': poly_points})
         self.reset_current_mask()
+        # 카운트 갱신
+        self._update_polygon_counts()
         return True
 
     # [NEW] AI 모드에서 완료 후 우클릭 폴리곤 차집합 적용
@@ -2581,6 +2662,8 @@ class SAMAnnotationEditor(QDialog):
             self.canvas.polygons = new_list
             self.canvas.current_sub_points.clear()
             self.canvas.update()
+            # 카운트 갱신
+            self._update_polygon_counts()
             return True
         return False
 
@@ -2630,6 +2713,8 @@ class SAMAnnotationEditor(QDialog):
         self.create_local_color_map()
         self.reset_current_mask()
         self.canvas.update()
+        # 외부에서 폴리곤 세트 변경 시 카운트 갱신
+        self._update_polygon_counts()
 
 # --- 4. 위젯: 편집 모드 및 다중 캡처 선택 ---
 class EditModeDialog(QDialog):
