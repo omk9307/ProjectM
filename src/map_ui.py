@@ -8843,7 +8843,7 @@ class MapTab(QWidget):
         - 300px 미만이면 텔레포트 비활성(0%) 유지.
         - 반드시 걷기 입력이 활성화된 상태에서만 텔레포트 시도(걷기 보장 후 텔레포트).
         """
-        WAIT_TELEPORT_DISTANCE_PX = 300.0
+        WAIT_TELEPORT_DISTANCE_PX = 20.0
         wait_mode_active = self._is_other_player_wait_active()
         wait_mode_far = False
         if wait_mode_active:

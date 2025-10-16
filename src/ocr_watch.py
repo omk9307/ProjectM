@@ -970,6 +970,20 @@ class OCRWatchThread(QThread):
                 pass
         self._consumers.clear()
 
+    # 협조적 슬립: 긴 대기 시간을 잘게 쪼개 _running 플래그를 주기적으로 확인
+    def _cooperative_sleep(self, total_seconds: float) -> None:
+        try:
+            remaining = max(0.0, float(total_seconds))
+        except (TypeError, ValueError):
+            remaining = 0.0
+        if remaining <= 0.0:
+            return
+        step = 0.05
+        while self._running and remaining > 0.0:
+            slice_sec = step if remaining > step else remaining
+            time.sleep(slice_sec)
+            remaining -= slice_sec
+
     def _ensure_consumers(self, regions: List[Dict[str, int]]) -> List[str]:
         names: List[str] = []
         # 간단히: 현재는 전부 재등록 (규모가 작아 과도한 오버헤드 아님)
@@ -1014,7 +1028,7 @@ class OCRWatchThread(QThread):
             profile_name = self._get_active_profile()
             profile = self._get_profile_data(profile_name) if profile_name else None
             if not isinstance(profile, dict):
-                time.sleep(0.5)
+                self._cooperative_sleep(0.5)
                 continue
             # 프로필 변경 시 전송 카운터 리셋
             if profile_name != self._last_profile_name:
@@ -1086,12 +1100,12 @@ class OCRWatchThread(QThread):
                 roi_parts = profile.get("rois", [])
 
             if not roi_parts:
-                time.sleep(min(interval, 2.0))
+                self._cooperative_sleep(min(interval, 2.0))
                 continue
 
             absolute_parts = self._resolve_absolute_regions(roi_parts)
             if not absolute_parts:
-                time.sleep(min(interval, 2.0))
+                self._cooperative_sleep(min(interval, 2.0))
                 continue
 
             # 복합 ROI의 바운딩 박스를 만들고, 파츠는 바운딩 기준 상대좌표로 변환
@@ -1115,12 +1129,12 @@ class OCRWatchThread(QThread):
             all_texts: List[str] = []
             ts = time.time()
             if name is None:
-                time.sleep(min(interval, 1.0))
+                self._cooperative_sleep(min(interval, 1.0))
                 continue
             frame = self._manager.get_frame(name, timeout=2.0)
             if frame is None or frame.size == 0:
                 self.ocr_status.emit("[OCR] 캡처 실패")
-                time.sleep(min(interval, 1.0))
+                self._cooperative_sleep(min(interval, 1.0))
                 continue
             # 마스킹: 바운딩 내에서 파츠 영역만 남기고 나머지는 흰색 처리
             masked = _apply_parts_mask(frame, rel_parts)
@@ -1198,8 +1212,8 @@ class OCRWatchThread(QThread):
                     self._last_send_ts = now
                     if send_count != 0:
                         self._sent_count += 1
-            # 대기
-            time.sleep(interval)
+            # 대기(협조적)
+            self._cooperative_sleep(interval)
 
 
 __all__ = [

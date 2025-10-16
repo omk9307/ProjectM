@@ -798,8 +798,13 @@ class MainWindow(QMainWindow):
             th.stop()
         except Exception:
             pass
+        # 협조적 슬립으로 즉시 깨어나도록 수정했지만, 안전을 위해 최대 5초까지 대기
         try:
-            th.wait(2000)
+            total_wait_ms = 0
+            step_ms = 100
+            while th.isRunning() and total_wait_ms < 5000:
+                th.wait(step_ms)
+                total_wait_ms += step_ms
         except Exception:
             pass
         # 학습 탭 연결 해제
