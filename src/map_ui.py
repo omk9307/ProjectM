@@ -955,6 +955,11 @@ class MapTab(QWidget):
             # [NEW] 런타임 가시성 상태
             self._ui_runtime_visible: bool = True
 
+            # [NEW] 앵커 미탐지(0개) 지속 감지 → ESC 효과 트리거
+            self.NO_ANCHOR_STOP_SECONDS: float = 5.0
+            self._no_anchor_start_ts: float = 0.0
+            self._no_anchor_triggered: bool = False
+
     def collect_authority_snapshot(self) -> Optional[PlayerStatusSnapshot]:
         """ControlAuthorityManager가 요구하는 맵 상태 스냅샷을 구성한다."""
         if self._authority_manager is None:
@@ -5176,6 +5181,49 @@ class MapTab(QWidget):
                 self._forced_detection_stop_reason = None
         return stopped
 
+    def _trigger_no_anchor_global_stop(self) -> None:
+        """
+        [NEW] 앵커(핵심 지형 템플릿) 미탐지 상태가 5초 지속되었을 때
+        ESC 효과와 동일하게 모든 동작을 즉시 중지한다.
+        - 맵탭 탐지 중단
+        - 사냥탭 탐지 중단(+권한 보유 시 반납)
+        - 자동제어 탭에 '모든 키 떼기' 즉시 전송
+        """
+        try:
+            self.update_general_log("[안전정지] 5초 동안 앵커가 감지되지 않아 모든 동작을 중지합니다.", "orange")
+        except Exception:
+            pass
+
+        # 맵탭 정지
+        try:
+            self.set_detection_stop_reason('no_anchor_5s')
+            self.force_stop_detection(reason='no_anchor_5s')
+        except Exception:
+            pass
+
+        # 사냥탭 정지 및 권한 반납
+        try:
+            hunt_tab = getattr(self, '_hunt_tab', None)
+            if hunt_tab and hasattr(hunt_tab, 'force_stop_detection'):
+                hunt_tab.force_stop_detection(reason='no_anchor_5s')
+                if getattr(hunt_tab, 'current_authority', None) == 'hunt' and hasattr(hunt_tab, 'release_control'):
+                    hunt_tab.release_control(reason='no_anchor_5s')
+        except Exception:
+            pass
+
+        # 자동제어: 모든 키 즉시 해제(가능한 최상위 API → 폴백 순서)
+        try:
+            ac = getattr(self, '_auto_control_tab', None)
+            if ac is not None:
+                if hasattr(ac, 'api_emergency_stop_all'):
+                    ac.api_emergency_stop_all(reason='no_anchor_5s')
+                elif hasattr(ac, 'api_release_all_keys_global'):
+                    ac.api_release_all_keys_global()
+                else:
+                    ac.receive_control_command("모든 키 떼기", reason='no_anchor_5s')
+        except Exception:
+            pass
+
     def set_detection_stop_reason(self, reason: str) -> None:
         self._forced_detection_stop_reason = reason or 'manual'
 
@@ -5328,6 +5376,10 @@ class MapTab(QWidget):
                 self.detection_thread.perf_sampled.connect(self._handle_detection_perf_sample)
                 self.detection_thread.start()
 
+                # [NEW] 앵커 미탐지 5초 감지 상태 초기화
+                self._no_anchor_start_ts = 0.0
+                self._no_anchor_triggered = False
+
                 if self._perf_logging_enabled:
                     self._start_perf_logging()
 
@@ -5408,6 +5460,10 @@ class MapTab(QWidget):
                 self.capture_thread = None
                 self._map_perf_queue.clear()
                 self.latest_perf_stats = {}
+
+                # [NEW] 앵커 미탐지 5초 감지 상태 초기화
+                self._no_anchor_start_ts = 0.0
+                self._no_anchor_triggered = False
                 self._last_walk_teleport_check_time = 0.0
 
                 self._player_icon_roi = None
@@ -7462,6 +7518,32 @@ class MapTab(QWidget):
             self._finalize_map_perf_sample(map_perf)
             return
 
+        # [NEW] 앵커(핵심 지형 템플릿) 0개 연속 감지 타이머
+        try:
+            anchor_count = int(len(found_features)) if isinstance(found_features, list) else 0
+        except Exception:
+            anchor_count = 0
+
+        now_ts = time.time()
+        if anchor_count <= 0:
+            if not self._no_anchor_start_ts:
+                self._no_anchor_start_ts = now_ts
+            elif (not self._no_anchor_triggered) and (now_ts - self._no_anchor_start_ts >= self.NO_ANCHOR_STOP_SECONDS):
+                # 5초 연속 앵커 미탐지 → ESC 효과와 동일하게 전체 정지
+                self._no_anchor_triggered = True
+                map_perf['map_status'] = 'no_anchor_5s'
+                map_perf['map_warning'] = 'anchor_missing_5s'
+                map_perf['processing_end_monotonic'] = time.perf_counter()
+                self._finalize_map_perf_sample(map_perf)
+                try:
+                    self._trigger_no_anchor_global_stop()
+                except Exception:
+                    pass
+                return
+        else:
+            # 앵커가 다시 탐지되면 타이머 초기화
+            self._no_anchor_start_ts = 0.0
+
         if not isinstance(my_player_rects, list) or not my_player_rects:
             map_perf['map_status'] = 'no_player_icon'
             map_perf['map_warning'] = 'player_icon_missing'
@@ -7617,7 +7699,7 @@ class MapTab(QWidget):
         try:
             logs_dir = self._ensure_perf_log_dir()
             file_name = time.strftime('map_perf_%Y%m%d_%H%M%S.csv')
-            path = os.path.join(logs_dir, file_name)
+        path = os.path.join(logs_dir, file_name)
             handle = open(path, 'w', newline='', encoding='utf-8')
             writer = csv.writer(handle)
             writer.writerow(self._perf_log_headers)
