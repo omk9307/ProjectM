@@ -5132,7 +5132,7 @@ class TrainingThread(QThread):
     results_path_ready = pyqtSignal(str)
     finished = pyqtSignal(bool, str)
 
-    def __init__(self, yaml_path, epochs, base_model_name, training_runs_path, selected_class_indices=None):
+    def __init__(self, yaml_path, epochs, base_model_name, training_runs_path, selected_class_indices=None, patience: Optional[int] = None):
         super().__init__()
         self.yaml_path = yaml_path
         self.epochs = epochs
@@ -5140,6 +5140,8 @@ class TrainingThread(QThread):
         self.training_runs_path = training_runs_path  # (v1.2) 훈련 결과 저장 경로 추가
         # v1.5: 선택된 클래스만 학습하도록 인덱스 전달(없으면 전체 학습)
         self.selected_class_indices = selected_class_indices if selected_class_indices else None
+        # (v1.6) 조기종료 허용 에폭 수
+        self.patience = patience
 
     def run(self):
         try:
@@ -5151,7 +5153,8 @@ class TrainingThread(QThread):
             )
             model = YOLO(f"{self.base_model_name}-seg.pt")
             # (v1.2) project 경로를 workspace/training_runs로 지정
-            results = model.train(
+            # Ultralytics YOLOv8-seg 학습 호출. 조기종료(patience) 지원.
+            kwargs = dict(
                 data=self.yaml_path,
                 epochs=self.epochs,
                 imgsz=640,
@@ -5160,6 +5163,10 @@ class TrainingThread(QThread):
                 # v1.5: 선택된 클래스만 학습
                 classes=self.selected_class_indices,
             )
+            if self.patience is not None:
+                kwargs["patience"] = int(self.patience)
+
+            results = model.train(**kwargs)
             self.results_path_ready.emit(str(results.save_dir))
             self.finished.emit(True, "훈련 성공! '최신 훈련 저장'으로 모델을 저장하세요.")
         except Exception as e:
@@ -5706,13 +5713,27 @@ class LearningTab(QWidget):
         train_options_layout.addWidget(QLabel("기본 모델:"))
         self.base_model_selector = QComboBox()
         self.base_model_selector.addItems(['yolov8n', 'yolov8s', 'yolov8m'])
+        # 소량 데이터 기본 권장: yolov8s 우선 선택
+        try:
+            self.base_model_selector.setCurrentText('yolov8s')
+        except Exception:
+            pass
         train_options_layout.addWidget(self.base_model_selector)
         train_options_layout.addWidget(QLabel("Epochs:"))
         self.epoch_spinbox = QSpinBox()
         self.epoch_spinbox.setRange(10, 500)
-        self.epoch_spinbox.setValue(100)
+        # 조기종료 도입에 맞춰 기본 에폭을 60으로 완화
+        self.epoch_spinbox.setValue(60)
         self.epoch_spinbox.setSingleStep(10)
         train_options_layout.addWidget(self.epoch_spinbox)
+        # 조기종료(patience) 옵션 추가: 검증 성능이 개선되지 않을 때 조기 종료
+        train_options_layout.addWidget(QLabel("Patience:"))
+        self.patience_spinbox = QSpinBox()
+        self.patience_spinbox.setRange(5, 50)
+        self.patience_spinbox.setValue(18)
+        self.patience_spinbox.setSingleStep(1)
+        self.patience_spinbox.setToolTip("검증 성능이 개선되지 않는 에폭 허용 수 (조기종료)")
+        train_options_layout.addWidget(self.patience_spinbox)
         train_options_layout.addStretch(1)
         self.train_btn = QPushButton('훈련 시작'); self.train_btn.clicked.connect(self.start_training)
         train_options_layout.addWidget(self.train_btn)
@@ -9057,6 +9078,7 @@ class LearningTab(QWidget):
         self.log_viewer.append(f"데이터셋 설정 파일 생성 완료: '{yaml_path}'")
         epochs = self.epoch_spinbox.value()
         base_model = self.base_model_selector.currentText()
+        patience = self.patience_spinbox.value()
 
         # v1.5: 체크된 클래스만 학습할지 여부 판단 및 로깅
         all_classes = self.data_manager.get_class_list()
@@ -9094,6 +9116,7 @@ class LearningTab(QWidget):
             base_model,
             training_runs_path,
             selected_class_indices=selected_indices if use_selected_only else None,
+            patience=patience,
         )
         
         self.training_thread.progress.connect(self.log_viewer.append)

@@ -1054,6 +1054,9 @@ class HuntTab(QWidget):
         self._forbidden_cooldown_until: float = 0.0
         # [NEW] 금지몬스터 감지 시 텔레그램 알림 여부(전역)
         self.forbidden_monster_telegram_alert: bool = False
+        # [NEW] 금지몬스터 탐지 히스토리(탐지중지 시 초기화)
+        self._forbidden_detect_history: List[str] = []
+        self._forbidden_detect_last_log_ts: float = 0.0
 
         self.teleport_settings = TeleportSettings()
         self.teleport_command_left = "텔레포트(좌)"
@@ -5241,6 +5244,12 @@ class HuntTab(QWidget):
                 self._release_pending = False
             except Exception:
                 pass
+            # [NEW] 탐지 중지 시 금지몬스터 히스토리 초기화
+            try:
+                self._forbidden_detect_history = []
+                self._forbidden_detect_last_log_ts = 0.0
+            except Exception:
+                pass
             self._stop_perf_logging()
             self._stop_detection_thread()
             self._set_detection_status(False)
@@ -5640,6 +5649,14 @@ class HuntTab(QWidget):
                 lines.append("이름표: " + ", ".join(nameplate_summaries))
             else:
                 lines.append("이름표 없음")
+
+            # [NEW] 금지몬스터 감지 히스토리 표시
+            try:
+                hist = list(getattr(self, '_forbidden_detect_history', []) or [])
+            except Exception:
+                hist = []
+            if hist:
+                lines.append("사냥금지 몬스터: " + " , ".join(hist))
 
             self.confidence_summary_view.setPlainText('\n'.join(lines))
         elif self.confidence_summary_view.toPlainText():
@@ -8358,6 +8375,11 @@ class HuntTab(QWidget):
             self._maybe_trigger_forbidden_flow(monsters_data, received_ts)
         except Exception:
             pass
+        # [NEW] 금지몬스터 감지 히스토리 기록(탐지신뢰도 영역에 표시)
+        try:
+            self._append_forbidden_detection_log(monsters_data, received_ts)
+        except Exception:
+            pass
         if track_events:
             self._handle_nameplate_track_events(track_events, received_ts)
 
@@ -9091,7 +9113,7 @@ class HuntTab(QWidget):
             self._play_forbidden_alert()
         except Exception:
             pass
-        # [NEW] 텔레그램 알림(옵션) + 1분 쿨다운 즉시 시작
+        # [NEW] 텔레그램 알림(옵션) + 3분 쿨다운 즉시 시작
         try:
             if bool(getattr(self, 'forbidden_monster_telegram_alert', False)):
                 try:
@@ -9099,9 +9121,9 @@ class HuntTab(QWidget):
                     self._notify_telegram(msg)
                 except Exception:
                     pass
-            # 감지 시점 기준 1분 쿨다운 시작(중복 트리거 방지)
+            # 감지 시점 기준 3분 쿨다운 시작(중복 트리거 방지)
             try:
-                self._forbidden_cooldown_until = float(now) + 60.0
+                self._forbidden_cooldown_until = float(now) + 180.0
             except Exception:
                 self._forbidden_cooldown_until = 0.0
         except Exception:
@@ -9154,7 +9176,7 @@ class HuntTab(QWidget):
             self._schedule_forbidden_finish()
 
     def _schedule_forbidden_finish(self) -> None:
-        """금지 플로우 종료(1초 후 대기모드 종료 + 1분 쿨다운)."""
+        """금지 플로우 종료(1초 후 대기모드 종료 + 3분 쿨다운)."""
         try:
             QTimer.singleShot(1000, lambda: self._finish_other_player_wait_mode(reason='forbidden_done'))
         except Exception:
@@ -9168,7 +9190,7 @@ class HuntTab(QWidget):
             # [변경] 이미 감지 시점에 쿨다운이 설정되었다면 덮어쓰지 않음
             now_ts = float(_t.time())
             if float(getattr(self, '_forbidden_cooldown_until', 0.0) or 0.0) <= now_ts:
-                self._forbidden_cooldown_until = now_ts + 60.0
+                self._forbidden_cooldown_until = now_ts + 180.0
         except Exception:
             self._forbidden_cooldown_until = 0.0
 
@@ -9178,6 +9200,85 @@ class HuntTab(QWidget):
         self._nameplate_dead_zones = [
             zone for zone in self._nameplate_dead_zones if float(zone.get('expires_at', 0.0)) > now
         ]
+
+    # [NEW] 금지몬스터 감지 히스토리 기록 함수
+    def _append_forbidden_detection_log(self, monsters: List[dict], ts: float) -> None:
+        # 데이터 관리자에서 공격 금지 맵을 가져옴
+        fmap: dict[str, bool] = {}
+        if self.data_manager and hasattr(self.data_manager, 'get_monster_attack_forbidden_map'):
+            try:
+                fmap = self.data_manager.get_monster_attack_forbidden_map() or {}
+            except Exception:
+                fmap = {}
+        forbidden_set = {name for name, enabled in fmap.items() if enabled}
+        if not forbidden_set:
+            return
+
+        # 각 탐지 항목 중 금지 대상 + 신뢰도 임계 통과하는 최고 항목만 1건 기록(스팸 방지)
+        best_entry: Optional[tuple[str, float]] = None
+        for item in (monsters or []):
+            if not isinstance(item, dict):
+                continue
+            if str(item.get('source') or 'yolo') != 'yolo':
+                continue
+            cname = str(item.get('class_name') or '')
+            if not cname or cname not in forbidden_set:
+                continue
+            try:
+                score = float(item.get('score', 0.0))
+            except (TypeError, ValueError):
+                continue
+            # 임계치: 개별 오버라이드 우선, 없으면 전역 몬스터 신뢰도
+            try:
+                class_id = int(item.get('class_id', -1))
+            except (TypeError, ValueError):
+                class_id = -1
+            try:
+                overrides = getattr(self, '_active_monster_confidence_overrides', {}) or {}
+                if class_id in overrides:
+                    threshold = float(overrides.get(class_id, 0.0))
+                else:
+                    threshold = float(self.conf_monster_spinbox.value()) if hasattr(self, 'conf_monster_spinbox') else 0.85
+            except Exception:
+                threshold = 0.85
+            thr = max(0.05, min(0.95, float(threshold)))
+            if score < thr:
+                continue
+            if best_entry is None or score > best_entry[1]:
+                best_entry = (cname, score)
+
+        if best_entry is None:
+            return
+
+        # 너무 잦은 기록 방지(최소 1초 간격)
+        try:
+            last_ts = float(getattr(self, '_forbidden_detect_last_log_ts', 0.0) or 0.0)
+        except Exception:
+            last_ts = 0.0
+        if ts - last_ts < 1.0:
+            return
+        self._forbidden_detect_last_log_ts = float(ts)
+
+        # "리치 (0.94) 13:33:23" 형식으로 저장
+        name, score = best_entry
+        try:
+            import time as _t
+            timetext = _t.strftime("%H:%M:%S", _t.localtime(ts))
+        except Exception:
+            timetext = "--:--:--"
+        entry_text = f"{name} ({score:.2f}) {timetext}"
+
+        try:
+            hist = getattr(self, '_forbidden_detect_history', None)
+            if not isinstance(hist, list):
+                hist = []
+            hist.append(entry_text)
+            # 길이 제한(최근 50개)
+            if len(hist) > 50:
+                del hist[: len(hist) - 50]
+            self._forbidden_detect_history = hist
+        except Exception:
+            pass
 
     def _handle_nameplate_track_events(self, events: List[dict], now: float) -> None:
         if not events:
@@ -11140,7 +11241,7 @@ class HuntTab(QWidget):
             'forbidden_monster': {
                 'enabled': bool(getattr(self, 'forbidden_monster_enabled', False)),
                 'command_profile': str(getattr(self, 'forbidden_monster_command_profile', '') or ''),
-                'cooldown_sec': 60,
+                'cooldown_sec': 180,
                 'telegram_alert': bool(getattr(self, 'forbidden_monster_telegram_alert', False)),
             },
         }
