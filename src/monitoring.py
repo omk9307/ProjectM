@@ -944,10 +944,24 @@ class MonitoringTab(QWidget):
                         painter = QPainter(image)
                         try:
                             painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-                            pen = QPen(QColor(0, 255, 120, 220))
+                            # 닉네임 기반(일반): 초록색, 미니맵 X 보정 기반 최근 사용: 빨간색
+                            use_fallback = False
+                            try:
+                                if hasattr(self._hunt_tab, 'api_was_minimap_x_fallback_recent'):
+                                    # 미리보기 최소 주기가 0.5~5.0초이므로 2초 윈도우로 완화
+                                    use_fallback = bool(self._hunt_tab.api_was_minimap_x_fallback_recent(2.0))
+                            except Exception:
+                                use_fallback = False
+                            if use_fallback:
+                                edge_color = QColor(255, 64, 64, 230)
+                                fill_color = QColor(255, 32, 32, 60)
+                            else:
+                                edge_color = QColor(0, 255, 120, 220)
+                                fill_color = QColor(0, 255, 120, 60)
+                            pen = QPen(edge_color)
                             pen.setWidth(2)
                             painter.setPen(pen)
-                            painter.setBrush(QBrush(QColor(0, 255, 120, 60)))
+                            painter.setBrush(QBrush(fill_color))
                             painter.drawRect(rx, ry, rw, rh)
                         finally:
                             painter.end()

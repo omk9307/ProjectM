@@ -271,10 +271,20 @@ def update(
     pairs_all = [(s.map_x, s.obs_x) for s in state.samples]
     fit = _ols_fit(pairs_all)
     if fit is None:
-        a0 = state.a if state.a is not None else None
-        b0 = state.b if state.b is not None else None
-        if a0 is None or b0 is None:
-            return False
+        # 부트스트랩: map_x 분산이 거의 없을 때 초기 추정이 없으면 a0=1.0, b0=평균(y-x)로 시작
+        if state.a is None and state.b is None and len(pairs_all) >= 1:
+            try:
+                a0 = 1.0
+                b0 = sum((y - a0 * x) for x, y in pairs_all) / float(len(pairs_all))
+            except Exception:
+                return False
+        else:
+            a0 = state.a if state.a is not None else None
+            b0 = state.b if state.b is not None else None
+            if a0 is None or b0 is None:
+                return False
+    else:
+        a0, b0 = fit
     a0, b0 = float(a0), float(b0)
 
     # 잔차 기반 인라이어 추리기
@@ -286,7 +296,18 @@ def update(
     inlier_thresh = min(max_residual_px, inlier_cap)
     inliers_idx = [i for i, r in enumerate(residuals) if r <= inlier_thresh]
     if len(inliers_idx) < 2:
-        state.last_note = "인라이어 부족"
+        # [워밍업] 인라이어가 아직 부족하면 전체 샘플로 임시 적합하여 a,b,RMSE를 산출(저장/연속은 증가시키지 않음)
+        try:
+            a_all, b_all = a0, b0
+            state.a, state.b = float(a_all), float(b_all)
+            errs_all = [abs(y - (state.a * x + state.b)) for x, y in pairs_all]
+            rmse_all = math.sqrt(sum(e * e for e in errs_all) / len(errs_all)) if pairs_all else None
+            state.last_fit_rmse = float(rmse_all) if rmse_all is not None else None
+            state.last_fit_inliers = 0
+            state.last_fit_ts = ts
+            state.last_note = "워밍업: 인라이어 부족(임시 적합)"
+        except Exception:
+            state.last_note = "인라이어 부족"
         state.ok_streak = 0
         # 닉네임-미니맵 차이를 즉시 바이어스로 소폭 반영
         try:
@@ -309,6 +330,47 @@ def update(
     weights = [wt * wr for wt, wr in zip(w_time, w_res)]
     fit2 = _wls_fit(inlier_pairs, weights)
     if fit2 is None:
+        # WLS도 실패: 좁은맵 모드라면 b만 보정(EMA) 시도
+        std_x_tmp = _compute_std([p[0] for p in inlier_pairs]) if inlier_pairs else 0.0
+        if _NARROW_MAP_MODE and std_x_tmp < _min_std_mapx_threshold() and len(inlier_pairs) >= 1:
+            try:
+                a_curr = float(state.a) if state.a is not None else float(a0)
+                # 고정 a에서 최적 b = 평균(y - a*x) (가중치 사용)
+                sw = 0.0
+                sy_ax = 0.0
+                for (x, y), w in zip(inlier_pairs, weights):
+                    sw += w
+                    sy_ax += w * (y - a_curr * x)
+                if sw > 0.0:
+                    b_fixed = sy_ax / sw
+                    if state.b is None:
+                        state.b = float(b_fixed)
+                    else:
+                        state.b = float((1.0 - B_EMA_ALPHA_NARROW) * float(state.b) + B_EMA_ALPHA_NARROW * float(b_fixed))
+                    state.a = float(a_curr)
+                    # RMSE(보고용)
+                    errs_n = [abs(y - (state.a * x + state.b)) for x, y in inlier_pairs]
+                    rmse_n = math.sqrt(sum(e * e for e in errs_n) / len(errs_n)) if errs_n else None
+                    state.last_fit_rmse = float(rmse_n) if rmse_n is not None else None
+                    state.last_fit_inliers = int(len(inlier_pairs))
+                    state.last_fit_ts = ts
+                    state.last_note = "좁은맵: b만 보정(WLS 실패 대체)"
+                    # 수렴 판단 및 저장
+                    thr_here = _rmse_threshold(fw_last)
+                    ok = (state.last_fit_inliers >= _min_inliers_save()) and (state.last_fit_rmse is not None and state.last_fit_rmse <= thr_here)
+                    state.ok_streak = state.ok_streak + 1 if ok else 0
+                    alive_sec = ts - (state.first_ts or ts)
+                    if ok and state.ok_streak >= CONSEC_OK_REQUIRED and alive_sec >= MIN_OBS_WINDOW_SEC:
+                        try:
+                            _save_params(profile, roi, state.a, state.b)
+                        except Exception:
+                            return False
+                        state.frozen = True
+                        state.samples.clear()
+                        return True
+                    return False
+            except Exception:
+                return False
         return False
     a, b = fit2
 
