@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from typing import Optional
+import os
+import json
 from collections import deque
 import time
 import re
@@ -676,6 +678,7 @@ class MonitoringTab(QWidget):
             self._bottom_hsplitter.setSizes([240, 260, 260, 260])
 
         # 체크박스 상태 복원(마지막 표시 상태 + 연동)
+        self._restoring_settings = True
         try:
             settings = QSettings("Gemini Inc.", "Maple AI Trainer")
             def _to_bool(v, default=False):
@@ -708,8 +711,15 @@ class MonitoringTab(QWidget):
             self.chk_cluster_window.setChecked(_to_bool(settings.value("monitoring/ovl_cluster_window", None), False))
             # [NEW] 캐릭터박스 상태 복원(기본 OFF)
             self.chk_character_box.setChecked(_to_bool(settings.value("monitoring/ovl_character_boxes", None), False))
+            # [NEW] 별도 파일에 저장된 오버레이 선호가 있으면 우선 적용
+            try:
+                self._apply_overlay_prefs_from_file_if_any()
+            except Exception:
+                pass
         except Exception:
             pass
+        finally:
+            self._restoring_settings = False
 
         # 체크 상태 변경시 즉시 저장
         try:
@@ -815,11 +825,7 @@ class MonitoringTab(QWidget):
         # 초기 동기화(외부 상태를 모니터링 탭으로 가져옴)
         self._sync_monitor_buttons_enabled()
         self._sync_link_checkbox_from_external()
-        # 오버레이 초기 상태: QSettings 저장값이 없을 때만 사냥 설정을 초기값으로 채택
-        try:
-            self._maybe_init_overlay_from_hunt_if_no_saved_state()
-        except Exception:
-            pass
+        # 모니터링 오버레이는 모니터링 자체 QSettings만 사용(사냥 설정 비동기)
         # 권한 변경 구독 및 초기 상태
         try:
             if ControlAuthorityManager is not None:
@@ -1004,6 +1010,9 @@ class MonitoringTab(QWidget):
             pass
 
     def _persist_checkbox_states(self, _checked: bool | None = None) -> None:
+        # 초기 복원 중에는 저장하지 않음(초기 False로 덮어쓰기 방지)
+        if getattr(self, '_restoring_settings', False):
+            return
         try:
             settings = QSettings("Gemini Inc.", "Maple AI Trainer")
             settings.setValue("monitoring/map_preview_checked", bool(self.map_preview_checkbox.isChecked()))
@@ -1021,6 +1030,10 @@ class MonitoringTab(QWidget):
             try:
                 # 강제 동기화로 비정상 종료/강제 종료 시에도 최대한 저장 보장
                 settings.sync()
+            except Exception:
+                pass
+            try:
+                self._save_overlay_prefs_to_file()
             except Exception:
                 pass
         except Exception:
@@ -2271,6 +2284,8 @@ class MonitoringTab(QWidget):
     # [NEW] 모니터링 오버레이 토글 핸들러 → 사냥 탭에 반영
     def _on_monitor_overlay_toggled(self, _checked: bool) -> None:
         if not self._hunt_tab:
+            # 모니터링 자체 상태만 저장
+            self._persist_checkbox_states()
             return
         try:
             prefs = {
@@ -2296,6 +2311,8 @@ class MonitoringTab(QWidget):
                             setattr(self._hunt_tab, '_suppress_settings_save', prev_flag)
                     except Exception:
                         pass
+            # 모니터링 자체 저장(QSettings)
+            self._persist_checkbox_states()
         except Exception:
             pass
 
@@ -2415,6 +2432,79 @@ class MonitoringTab(QWidget):
                 settings.sync()
             except Exception:
                 pass
+        except Exception:
+            pass
+        # 별도 파일에도 저장(이중화)
+        try:
+            self._save_overlay_prefs_to_file()
+        except Exception:
+            pass
+
+    # --- 모니터링 전용 오버레이 선호 저장(JSON) ---
+    def _overlay_prefs_file(self) -> str:
+        try:
+            src_root = os.path.dirname(os.path.abspath(__file__))
+        except Exception:
+            src_root = os.getcwd()
+        workspace = os.path.abspath(os.path.join(src_root, '..', 'workspace'))
+        config_dir = os.path.join(workspace, 'config')
+        try:
+            os.makedirs(config_dir, exist_ok=True)
+        except Exception:
+            pass
+        return os.path.join(config_dir, 'monitoring_prefs.json')
+
+    def _collect_overlay_prefs(self) -> dict:
+        return {
+            'ovl_hunt_bundle': bool(self.chk_hunt_bundle.isChecked()),
+            'ovl_nickname_range': bool(self.chk_nickname_range.isChecked()),
+            'ovl_nameplate_track': bool(self.chk_nameplate_track.isChecked()),
+            'ovl_cleanup_band': bool(self.chk_cleanup_band.isChecked()),
+            'ovl_cluster_window': bool(self.chk_cluster_window.isChecked()),
+            'ovl_character_boxes': bool(self.chk_character_box.isChecked()),
+        }
+
+    def _save_overlay_prefs_to_file(self) -> None:
+        path = self._overlay_prefs_file()
+        data = self._collect_overlay_prefs()
+        try:
+            with open(path, 'w', encoding='utf-8') as f:
+                json.dump(data, f, ensure_ascii=False, indent=2)
+        except Exception:
+            pass
+
+    def _apply_overlay_prefs_from_file_if_any(self) -> None:
+        path = self._overlay_prefs_file()
+        if not os.path.exists(path):
+            return
+        try:
+            with open(path, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+        except Exception:
+            return
+        if not isinstance(data, dict):
+            return
+        mapping = [
+            ('ovl_hunt_bundle', self.chk_hunt_bundle),
+            ('ovl_nickname_range', self.chk_nickname_range),
+            ('ovl_nameplate_track', self.chk_nameplate_track),
+            ('ovl_cleanup_band', self.chk_cleanup_band),
+            ('ovl_cluster_window', self.chk_cluster_window),
+            ('ovl_character_boxes', self.chk_character_box),
+        ]
+        for key, cb in mapping:
+            if cb is None or key not in data:
+                continue
+            try:
+                val = bool(data.get(key, False))
+                b = cb.blockSignals(True)
+                cb.setChecked(val)
+                cb.blockSignals(b)
+            except Exception:
+                pass
+        # QSettings와 동기화
+        try:
+            self._persist_checkbox_states()
         except Exception:
             pass
         # 사냥 프리뷰 해제
