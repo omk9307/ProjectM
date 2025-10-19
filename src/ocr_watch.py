@@ -1196,14 +1196,28 @@ class OCRWatchThread(QThread):
                         pass
                     annotated = annotated_frame
                     timestr = time.strftime("%y%m%d_%H%M%S", time.localtime(ts))
-                    raw_path = os.path.join(log_dir, f"{timestr}.png")
                     ocr_path = os.path.join(log_dir, f"{timestr}_OCR.png")
                     try:
-                        cv2.imwrite(raw_path, frame)
+                        cv2.imwrite(ocr_path, annotated)
                     except Exception:
                         pass
                     try:
-                        cv2.imwrite(ocr_path, annotated)
+                        existing = []
+                        for fname in os.listdir(log_dir):
+                            if fname.endswith("_OCR.png"):
+                                full = os.path.join(log_dir, fname)
+                                try:
+                                    stat = os.stat(full)
+                                    existing.append((stat.st_mtime, full))
+                                except Exception:
+                                    continue
+                        existing.sort()
+                        while len(existing) > 1000:
+                            _, oldest_path = existing.pop(0)
+                            try:
+                                os.remove(oldest_path)
+                            except Exception:
+                                pass
                     except Exception:
                         pass
                 except Exception:
