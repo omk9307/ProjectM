@@ -337,22 +337,30 @@ class StatusMonitorThread(QThread):
         with QMutexLocker(self._lock):
             self._roi_payloads = copy.deepcopy(payloads)
 
-    def set_tab_active(self, *, hunt: Optional[bool] = None, map_tab: Optional[bool] = None) -> None:
+    def set_tab_active(
+        self,
+        *,
+        hunt: Optional[bool] = None,
+        map_tab: Optional[bool] = None,
+        preserve_exp: bool = False,
+    ) -> None:
         with QMutexLocker(self._lock):
             if hunt is not None:
                 previous = self._active_hunt
                 self._active_hunt = bool(hunt)
                 if self._active_hunt and not previous:
-                    self._last_capture["exp"] = 0.0
-                    self._last_exp_snapshot = None
-                    self._exp_roi_warned = False
-                    self._exp_capture_warned = False
-                    self._exp_failure_cache = None
-                    self._exp_last_log_signature = None
-                    self._emit_exp_log("info", "[EXP] 감시를 시작합니다.", dedupe=False)
+                    if not preserve_exp:
+                        self._last_capture["exp"] = 0.0
+                        self._last_exp_snapshot = None
+                        self._exp_roi_warned = False
+                        self._exp_capture_warned = False
+                        self._exp_failure_cache = None
+                        self._exp_last_log_signature = None
+                        self._emit_exp_log("info", "[EXP] 감시를 시작합니다.", dedupe=False)
                 if not self._active_hunt and previous:
-                    self._emit_exp_log("info", "[EXP] 감시를 종료합니다.", dedupe=False)
-                    self._last_capture["exp"] = 0.0
+                    if not preserve_exp:
+                        self._emit_exp_log("info", "[EXP] 감시를 종료합니다.", dedupe=False)
+                        self._last_capture["exp"] = 0.0
             if map_tab is not None:
                 self._active_map = bool(map_tab)
 

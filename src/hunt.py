@@ -1047,6 +1047,8 @@ class HuntTab(QWidget):
             'exp': 'EXP: -- / --',
         }
         self._status_exp_records: list[dict] = []
+        self._preserve_exp_on_stop: bool = False
+        self._resume_exp_after_pause: bool = False
         self._primary_release_command: str = ""
         self._primary_reset_range: tuple[int, int] = (0, 0)
         self._primary_reset_remaining: Optional[int] = None
@@ -4444,12 +4446,16 @@ class HuntTab(QWidget):
                 map_tab.suppress_hunt_sync_once('other_player_wait_start')
             except Exception:
                 pass
+        self._preserve_exp_on_stop = True
+        stopped = False
         previous_sync = bool(getattr(self, '_syncing_with_map', False))
         self._syncing_with_map = True
         try:
-            self.force_stop_detection(reason='other_player_wait_start')
+            stopped = self.force_stop_detection(reason='other_player_wait_start')
         finally:
             self._syncing_with_map = previous_sync
+        if not stopped:
+            self._preserve_exp_on_stop = False
         # [추가] 대기 모드에서는 맵이 권한을 갖도록 즉시 반납
         try:
             if self.current_authority == 'hunt':
@@ -5398,18 +5404,26 @@ class HuntTab(QWidget):
             self._sync_detection_thread_status()
             if self.detection_view:
                 self.detection_view.setText("탐지 준비 중...")
-                self.detection_view.setPixmap(QPixmap())
+            self.detection_view.setPixmap(QPixmap())
             self.detect_btn.setText("사냥중지")
+            resume_exp = bool(getattr(self, '_resume_exp_after_pause', False))
+            if resume_exp:
+                self._resume_exp_after_pause = False
             if self.status_monitor:
-                self.status_monitor.set_tab_active(hunt=True)
-            self._status_detection_start_ts = time.time()
-            self._status_exp_records = []
-            self._status_exp_start_snapshot = None
-            self._status_ocr_warned = False
+                try:
+                    self.status_monitor.set_tab_active(hunt=True, preserve_exp=resume_exp)
+                except TypeError:
+                    self.status_monitor.set_tab_active(hunt=True)
+            if not resume_exp or not self._status_detection_start_ts:
+                self._status_detection_start_ts = time.time()
+            if not resume_exp:
+                self._status_exp_records = []
+                self._status_exp_start_snapshot = None
+                self._status_ocr_warned = False
+                self._status_display_values = {'hp': None, 'mp': None}
+                self._update_status_summary_cache()
             self._hp_guard_active = False
             self._hp_guard_timer.stop()
-            self._status_display_values = {'hp': None, 'mp': None}
-            self._update_status_summary_cache()
             self._last_command_issued = None
             self._status_mp_saved_command = None
 
@@ -5521,12 +5535,22 @@ class HuntTab(QWidget):
         self._save_settings()
 
     def _stop_detection_thread(self) -> None:
+        preserve_exp = bool(getattr(self, '_preserve_exp_on_stop', False))
+        self._preserve_exp_on_stop = False
         if self.status_monitor:
-            self.status_monitor.set_tab_active(hunt=False)
-        self._finalize_exp_tracking()
-        self._status_exp_records = []
-        self._status_exp_start_snapshot = None
-        self._status_detection_start_ts = None
+            try:
+                self.status_monitor.set_tab_active(hunt=False, preserve_exp=preserve_exp)
+            except TypeError:
+                # 구버전 호환: preserve_exp 미지원
+                self.status_monitor.set_tab_active(hunt=False)
+        if preserve_exp:
+            self._resume_exp_after_pause = True
+        else:
+            self._finalize_exp_tracking()
+            self._status_exp_records = []
+            self._status_exp_start_snapshot = None
+            self._status_detection_start_ts = None
+            self._resume_exp_after_pause = False
         self._update_status_summary_cache()
         self._status_mp_saved_command = None
         self._set_detection_status(False)
@@ -9875,12 +9899,15 @@ class HuntTab(QWidget):
             return
         name = candidate.get('class_name', '금지몬스터')
         match_pct = float(evaluation.get('score', 0.0)) * 100.0
+        image_bgr: Optional[np.ndarray]
         if matched:
+            image_bgr = self._build_forbidden_result_image(evaluation)
             if locked:
                 message = f"금지몬스터 문양 판정: '{name}' 문양 有 (매칭 {match_pct:.1f}%) → 3분 잠금 재적용"
             else:
                 message = f"금지몬스터 문양 판정: '{name}' 문양 有 (매칭 {match_pct:.1f}%)"
         else:
+            image_bgr = self._get_latest_detection_bgr()
             if triggered:
                 message = f"금지몬스터 문양 판정: '{name}' 문양 無 → 재실행 및 쿨다운 리셋"
             else:
@@ -9889,7 +9916,6 @@ class HuntTab(QWidget):
             self.append_log(message, 'info')
         except Exception:
             pass
-        image_bgr = self._get_latest_detection_bgr()
         label = f"result:{name}:{int(bool(matched))}:{int(locked)}"
         self._emit_forbidden_notification(label, message, image_bgr)
 
@@ -9921,6 +9947,26 @@ class HuntTab(QWidget):
             self._notify_telegram(text)
         except Exception:
             pass
+
+    def _build_forbidden_result_image(self, evaluation: dict) -> Optional[np.ndarray]:
+        base = self._get_latest_detection_bgr()
+        if base is None:
+            return None
+        match_rect = evaluation.get('match_rect')
+        if not match_rect or len(match_rect) != 4:
+            return base
+        x, y, w, h = match_rect
+        x1 = max(0, int(round(x)))
+        y1 = max(0, int(round(y)))
+        x2 = max(x1 + 1, int(round(x + w)))
+        y2 = max(y1 + 1, int(round(y + h)))
+        annotated = base.copy()
+        color = (0, 0, 255)  # BGR red
+        try:
+            cv2.rectangle(annotated, (x1, y1), (x2, y2), color, 2)
+        except Exception:
+            return base
+        return annotated
 
     def _trigger_forbidden_wait_flow(self, now: float) -> None:
         if self._forbidden_active:
