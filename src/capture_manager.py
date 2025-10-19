@@ -214,7 +214,18 @@ class CaptureManager:
                 self._wake_event.clear()
                 continue
 
-            frame = self._backend.grab(base_region)
+            try:
+                frame = self._backend.grab(base_region)
+            except mss.exception.ScreenShotError as exc:  # type: ignore[attr-defined]
+                try:
+                    print(f"[CaptureManager] ScreenShotError 발생: {exc}")
+                except Exception:
+                    pass
+                self._backend.close()
+                time.sleep(0.05)
+                self._wake_event.wait(timeout=0.1)
+                self._wake_event.clear()
+                continue
 
             with self._consumers_lock:
                 self._latest_frame = frame
