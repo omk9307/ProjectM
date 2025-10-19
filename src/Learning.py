@@ -83,6 +83,7 @@ from ocr_watch import (
     get_ocr_last_error,
     is_paddle_available,
     set_paddle_use_gpu,
+    send_telegram_text_and_screenshot,
 )
 
 from window_anchors import (
@@ -5713,6 +5714,7 @@ class LearningTab(QWidget):
         self._mp_standalone_last_ts: float = 0.0
         self._hunt_active: bool = False
         self._map_active: bool = False
+        self._hp_zero_triggered: bool = False
         self._status_ui_updating = False
         self._status_command_options: list[tuple[str, str]] = []
         self._thumbnail_cache = OrderedDict()
@@ -8547,7 +8549,14 @@ class LearningTab(QWidget):
     def attach_status_monitor(self, thread: StatusMonitorThread) -> None:
         try:
             self._status_thread = thread
-            thread.status_captured.connect(self._handle_status_snapshot_for_mp_standalone)
+            thread.status_captured.connect(
+                self._handle_status_snapshot_for_hp_zero,
+                Qt.ConnectionType.UniqueConnection,
+            )
+            thread.status_captured.connect(
+                self._handle_status_snapshot_for_mp_standalone,
+                Qt.ConnectionType.UniqueConnection,
+            )
         except Exception:
             pass
 
@@ -8558,6 +8567,27 @@ class LearningTab(QWidget):
             self._tick_standalone_ui()
         except Exception:
             pass
+
+    def _handle_status_snapshot_for_hp_zero(self, payload: dict) -> None:
+        try:
+            hp_info = payload.get('hp') if isinstance(payload, dict) else None
+            if not isinstance(hp_info, dict):
+                return
+            hp_value = hp_info.get('percentage')
+            if not isinstance(hp_value, (int, float)):
+                return
+            current = float(hp_value)
+        except Exception:
+            return
+
+        if current <= 0.0:
+            if self._hp_zero_triggered:
+                return
+            self._hp_zero_triggered = True
+            self._handle_hp_zero_shutdown(current)
+        else:
+            if self._hp_zero_triggered and current > 0.0:
+                self._hp_zero_triggered = False
 
     def _handle_status_snapshot_for_mp_standalone(self, payload: dict) -> None:
         try:
@@ -8596,6 +8626,85 @@ class LearningTab(QWidget):
             reason = f'status:mp:{percent_text}'
             self._emit_control_command(command, reason)
         except Exception:
+            pass
+
+    def _handle_hp_zero_shutdown(self, hp_percent: float) -> None:
+        map_tab = getattr(self, '_map_tab', None)
+        hunt_tab = getattr(self, '_hunt_tab', None)
+
+        timestamp_text = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(time.time()))
+        profile_name = ""
+        try:
+            profile_name = str(getattr(map_tab, 'active_profile_name', '') or '').strip()
+        except Exception:
+            profile_name = ""
+        if not profile_name:
+            profile_name = "(미지정)"
+
+        # 1) 맵/사냥 탐지 정지
+        try:
+            if map_tab and hasattr(map_tab, 'set_detection_stop_reason'):
+                map_tab.set_detection_stop_reason('hp_zero')
+        except Exception:
+            pass
+        try:
+            if map_tab and hasattr(map_tab, 'force_stop_detection'):
+                map_tab.force_stop_detection(reason='hp_zero')
+        except Exception:
+            pass
+        try:
+            if map_tab and hasattr(map_tab, 'update_general_log'):
+                map_tab.update_general_log(
+                    "[안전정지] HP 0% 감지로 탐지를 중단하고 모든 키를 해제합니다.",
+                    "red",
+                )
+        except Exception:
+            pass
+
+        try:
+            if hunt_tab and hasattr(hunt_tab, 'force_stop_detection'):
+                hunt_tab.force_stop_detection(reason='hp_zero')
+        except Exception:
+            pass
+        try:
+            if hunt_tab and hasattr(hunt_tab, 'release_control'):
+                current_auth = getattr(hunt_tab, 'current_authority', None)
+                if current_auth == 'hunt':
+                    hunt_tab.release_control(reason='hp_zero')
+        except Exception:
+            pass
+        try:
+            if hunt_tab and hasattr(hunt_tab, 'append_log'):
+                hunt_tab.append_log("[HP] HP 0% 감지로 탐지를 중단했습니다.", 'warn')
+        except Exception:
+            pass
+
+        # 2) 자동 제어: 모든 키 해제
+        try:
+            self._emit_control_command("모든 키 떼기", "hp_zero")
+        except Exception:
+            pass
+
+        # 3) 학습 탭 로그
+        try:
+            if hasattr(self, 'log_viewer') and self.log_viewer:
+                self.log_viewer.append(
+                    "<font color='red'>[HP] 0% 감지 → 맵/사냥을 중지하고 모든 키를 해제했습니다.</font>"
+                )
+        except Exception:
+            pass
+
+        # 4) 텔레그램 알림 전송 (텍스트 + Mapleland 창 스크린샷)
+        message = (
+            "[Project Maple] HP 0% 감지로 자동 중지\n"
+            f"프로필: {profile_name}\n"
+            f"HP: {max(0, int(round(hp_percent)))}%\n"
+            f"시각: {timestamp_text}"
+        )
+        try:
+            send_telegram_text_and_screenshot(message)
+        except Exception:
+            # 전송 실패 시에는 조용히 넘어간다 (ocr_watch 내부에서 대부분 처리)
             pass
 
     # ----- [NEW] 이름표 OCR 보조 메서드들 -----

@@ -32,6 +32,7 @@ from typing import Any, Dict, Optional, TextIO
 from status_monitor import StatusMonitorThread, StatusMonitorConfig
 from control_authority_manager import ControlAuthorityManager, PlayerStatusSnapshot
 from authority_reason_formatter import format_authority_reason
+from ocr_watch import send_telegram_text_and_screenshot
 
 from window_anchors import (
     ensure_relative_roi,
@@ -5222,6 +5223,36 @@ class MapTab(QWidget):
                 else:
                     ac.receive_control_command("모든 키 떼기", reason='no_anchor_5s')
         except Exception:
+            pass
+        try:
+            self._notify_no_anchor_telegram()
+        except Exception:
+            pass
+
+    def _notify_no_anchor_telegram(self) -> None:
+        """핵심지형 미검출로 인한 정지 상황을 텔레그램으로 알린다."""
+        profile_name = ""
+        try:
+            profile_name = str(getattr(self, 'active_profile_name', '') or '').strip()
+        except Exception:
+            profile_name = ""
+        if not profile_name:
+            profile_name = "(미지정)"
+        timestamp_text = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(time.time()))
+        message = (
+            "[Project Maple] 핵심지형 미검출로 자동 중지\n"
+            f"프로필: {profile_name}\n"
+            "사유: 핵심 지형 미검출 5초 지속\n"
+            f"시각: {timestamp_text}"
+        )
+        try:
+            self.update_general_log("(텔레그램) 핵심지형 미검출 알림을 전송합니다.", "gray")
+        except Exception:
+            pass
+        try:
+            send_telegram_text_and_screenshot(message)
+        except Exception:
+            # 전송 실패는 조용히 무시(내부에서 대부분 처리됨)
             pass
 
     def set_detection_stop_reason(self, reason: str) -> None:
