@@ -976,6 +976,37 @@ def send_telegram_text_and_screenshot(message: str, image_bgr: Optional[np.ndarr
     threading.Thread(target=_send_photo, daemon=True).start()
 
 
+def _play_keyword_alert_sound() -> None:
+    """키워드 감지 시 재생할 경고음을 비동기 실행."""
+    if _play_keyword_alert_sound._toggle:  # type: ignore[attr-defined]
+        sound_path = r"G:\Coding\Project_Maple\workspace\sounds\lier_dectecor2.mp3"
+    else:
+        sound_path = r"G:\Coding\Project_Maple\workspace\sounds\lier_dectecor.mp3"
+    _play_keyword_alert_sound._toggle = not _play_keyword_alert_sound._toggle  # type: ignore[attr-defined]
+
+    def _worker() -> None:
+        try:
+            import playsound  # type: ignore
+            playsound.playsound(sound_path, block=False)
+            return
+        except Exception:
+            try:
+                import winsound  # type: ignore
+                winsound.PlaySound(sound_path, winsound.SND_FILENAME | winsound.SND_ASYNC)
+                return
+            except Exception:
+                pass
+        for _ in range(2):
+            try:
+                print("\a", end="", flush=True)
+            except Exception:
+                pass
+            time.sleep(0.2)
+
+    threading.Thread(target=_worker, daemon=True).start()
+_play_keyword_alert_sound._toggle = False  # type: ignore[attr-defined]
+
+
 class OCRWatchThread(QThread):
     """다중 ROI에 대해 주기적으로 한글 OCR을 수행하는 워커."""
 
@@ -1291,6 +1322,7 @@ class OCRWatchThread(QThread):
                             message_lines.append(f"전체 텍스트: {joined[:300]}")
                         msg = "\n".join(message_lines)
                         image_for_send = annotated_frame
+                        _play_keyword_alert_sound()
                     else:
                         msg = "[OCR] 한글 감지"
                         if joined:

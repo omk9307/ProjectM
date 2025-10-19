@@ -6767,21 +6767,21 @@ class MapTab(QWidget):
                 self.wait_hp_command_profile = str(cmd).strip() if isinstance(cmd, str) else ''
                 # [NEW] 대기모드 위치 복구(px) 수신 및 보관
                 try:
-                    rec_px = int(wait_hp_config.get('recover_threshold_px', 10))
+                    rec_px = int(wait_hp_config.get('recover_threshold_px', 70))
                 except Exception:
-                    rec_px = 10
+                    rec_px = 70
                 self.wait_recover_threshold_px = max(0, min(100, rec_px))
             else:
                 self.wait_hp_enabled = False
                 self.wait_hp_threshold = 0
                 self.wait_hp_command_profile = ''
-                self.wait_recover_threshold_px = 10
+                self.wait_recover_threshold_px = 70
             self._wait_hp_last_ts = 0.0
         except Exception:
             self.wait_hp_enabled = False
             self.wait_hp_threshold = 0
             self.wait_hp_command_profile = ''
-            self.wait_recover_threshold_px = 10
+            self.wait_recover_threshold_px = 70
             self._wait_hp_last_ts = 0.0
 
         # [개선] 권한 우선 확보 후 키 전송(대기모드 진입 시 맵 권한 우선 보장)
@@ -7415,11 +7415,11 @@ class MapTab(QWidget):
             return
 
         distance = abs(final_player_pos.x() - waypoint_pos.x())
-        # [변경] 대기모드 전용 위치 복구 임계값(px) 사용 (기본 10, 0~100 범위)
+        # [변경] 대기모드 전용 위치 복구 임계값(px) 사용 (기본 70, 0~100 범위)
         try:
-            threshold = float(getattr(self, 'wait_recover_threshold_px', 10) or 10)
+            threshold = float(getattr(self, 'wait_recover_threshold_px', 70) or 70)
         except Exception:
-            threshold = 10.0
+            threshold = 70.0
         if threshold < 0.0:
             threshold = 0.0
         elif threshold > 100.0:
