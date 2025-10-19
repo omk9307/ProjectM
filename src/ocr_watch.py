@@ -15,6 +15,7 @@ import os
 import re
 import threading
 import time
+import uuid
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple
 import traceback
@@ -1322,6 +1323,20 @@ class OCRWatchThread(QThread):
                             message_lines.append(f"전체 텍스트: {joined[:300]}")
                         msg = "\n".join(message_lines)
                         image_for_send = annotated_frame
+                        try:
+                            keyword_log_dir = r"G:\\Coding\\Project_Maple\\log\\keyword"
+                            os.makedirs(keyword_log_dir, exist_ok=True)
+                            stamp = time.strftime("%y%m%d_%H%M%S", time.localtime(ts))
+                            unique = uuid.uuid4().hex[:8]
+                            base_name = f"{stamp}_{unique}"
+                            raw_path = os.path.join(keyword_log_dir, f"{base_name}_raw.png")
+                            annotated_path = os.path.join(keyword_log_dir, f"{base_name}_ocr.png")
+                            if frame is not None and frame.size > 0:
+                                cv2.imwrite(raw_path, frame)
+                            if annotated_frame is not None and annotated_frame.size > 0:
+                                cv2.imwrite(annotated_path, annotated_frame)
+                        except Exception:
+                            pass
                         _play_keyword_alert_sound()
                     else:
                         msg = "[OCR] 한글 감지"
