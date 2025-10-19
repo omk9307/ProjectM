@@ -890,13 +890,40 @@ def send_telegram_message(message: str) -> None:
     threading.Thread(target=_worker, daemon=True).start()
 
 
-def send_telegram_text_and_screenshot(message: str) -> None:
+def send_telegram_text_and_screenshot(message: str, image_bgr: Optional[np.ndarray] = None) -> None:
     """텍스트와 Mapleland 창 스크린샷을 동시에 전송.
     - 자격 없거나 의존성 누락 시 조용히 무시
     - 텍스트/사진 각각 별도의 스레드에서 전송
     """
     token, chat_id = _load_telegram_credentials()
     if not token or not chat_id:
+        return
+
+    if image_bgr is not None:
+        def _send_photo_with_caption() -> None:
+            try:
+                import requests  # type: ignore
+                import cv2  # type: ignore
+            except Exception:
+                return
+            try:
+                ok, buf = cv2.imencode(".png", image_bgr)
+                if not ok:
+                    return
+                png_bytes = bytes(buf)
+            except Exception:
+                return
+            try:
+                url = f"https://api.telegram.org/bot{token}/sendPhoto"
+                data = {"chat_id": chat_id}
+                if message:
+                    data["caption"] = message
+                files = {"photo": ("ocr_detected.png", png_bytes, "image/png")}
+                requests.post(url, data=data, files=files, timeout=8)
+            except Exception:
+                pass
+
+        threading.Thread(target=_send_photo_with_caption, daemon=True).start()
         return
 
     def _send_text() -> None:
@@ -959,6 +986,7 @@ class OCRWatchThread(QThread):
         self._last_send_ts: Optional[float] = None
         self._sent_count: int = 0
         self._last_profile_name: Optional[str] = None
+        self._keyword_alert_active: bool = False
 
     def stop(self) -> None:
         self._running = False
@@ -1035,6 +1063,7 @@ class OCRWatchThread(QThread):
                 self._last_profile_name = profile_name
                 self._sent_count = 0
                 self._last_send_ts = None
+                self._keyword_alert_active = False
             # 엔진 가용성 알림: Paddle 미설치/초기화 실패 시 안내
             if (not is_paddle_available()) or (_get_paddle_ocr() is None):
                 detail = get_ocr_last_error()
@@ -1149,6 +1178,7 @@ class OCRWatchThread(QThread):
                 max_width_px=max_width_px,
                 preprocess="auto",
             )
+            annotated_frame = draw_word_boxes(frame, words)
             if words:
                 any_detected = True
             all_texts.extend([w.text for w in words])
@@ -1164,7 +1194,7 @@ class OCRWatchThread(QThread):
                         os.makedirs(log_dir, exist_ok=True)
                     except Exception:
                         pass
-                    annotated = draw_word_boxes(frame, words)
+                    annotated = annotated_frame
                     timestr = time.strftime("%y%m%d_%H%M%S", time.localtime(ts))
                     raw_path = os.path.join(log_dir, f"{timestr}.png")
                     ocr_path = os.path.join(log_dir, f"{timestr}_OCR.png")
@@ -1181,39 +1211,70 @@ class OCRWatchThread(QThread):
 
             # 텔레그램 전송 판단
             joined = " ".join(all_texts).strip()
-            matched_keyword = None
-            for kw in keywords:
-                if isinstance(kw, str) and kw.strip() and kw.strip() in joined:
-                    matched_keyword = kw.strip()
-                    break
+            matched_word_infos: List[Tuple[str, OCRWord]] = []
+            for w in words:
+                for kw in keywords:
+                    if not isinstance(kw, str):
+                        continue
+                    kw_clean = kw.strip()
+                    if not kw_clean:
+                        continue
+                    if kw_clean in w.text:
+                        matched_word_infos.append((kw_clean, w))
+                        break
+
+            alert_triggered = bool(matched_word_infos) if telegram_keyword_mode else False
+            if telegram_keyword_mode:
+                if alert_triggered:
+                    self._keyword_alert_active = True
+                else:
+                    self._keyword_alert_active = False
+            else:
+                self._keyword_alert_active = False
 
             # 텔레그램 전송 조건
             should_send = False
             if any_detected:
                 if telegram_keyword_mode:
-                    should_send = bool(matched_keyword)
+                    should_send = alert_triggered
                 else:
                     should_send = True
             if should_send:
                 now = time.time()
+                bypass_limits = bool(telegram_keyword_mode and self._keyword_alert_active)
                 can_send = False
-                if self._last_send_ts is None:
+                if bypass_limits:
                     can_send = True
                 else:
-                    if (now - self._last_send_ts) >= send_itv:
-                        can_send = True
-                if can_send and (send_count == 0 or self._sent_count < send_count):
-                    msg = "[OCR] 한글 감지"
-                    if matched_keyword:
-                        msg += f" (키워드: {matched_keyword})"
-                    if joined:
-                        msg += f"\n텍스트: {joined[:300]}"
-                    send_telegram_text_and_screenshot(msg)
+                    if self._last_send_ts is None or (now - self._last_send_ts) >= send_itv:
+                        if send_count == 0 or self._sent_count < send_count:
+                            can_send = True
+                if can_send:
+                    if telegram_keyword_mode and self._keyword_alert_active:
+                        message_lines: List[str] = ["[OCR] 키워드 감지"]
+                        count = len(matched_word_infos)
+                        message_lines.append(f"감지한 키워드 수: {count}개")
+                        for idx, (_, word) in enumerate(matched_word_infos, start=1):
+                            conf_pct = int(round(word.conf))
+                            message_lines.append(
+                                f"[{idx}] {word.text} (신뢰도: {conf_pct}%, 가로: {int(word.width)}px, 세로: {int(word.height)}px)"
+                            )
+                        if joined:
+                            message_lines.append(f"전체 텍스트: {joined[:300]}")
+                        msg = "\n".join(message_lines)
+                        image_for_send = annotated_frame
+                    else:
+                        msg = "[OCR] 한글 감지"
+                        if joined:
+                            msg += f"\n텍스트: {joined[:300]}"
+                        image_for_send = None
+                    send_telegram_text_and_screenshot(msg, image_for_send)
                     self._last_send_ts = now
-                    if send_count != 0:
+                    if not bypass_limits and send_count != 0:
                         self._sent_count += 1
             # 대기(협조적)
-            self._cooperative_sleep(interval)
+            effective_interval = 5.0 if (telegram_keyword_mode and self._keyword_alert_active) else interval
+            self._cooperative_sleep(effective_interval)
 
 
 __all__ = [
