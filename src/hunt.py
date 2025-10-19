@@ -9890,7 +9890,7 @@ class HuntTab(QWidget):
             self.append_log(message, 'info')
         except Exception:
             pass
-        image_bgr = self._get_latest_detection_bgr()
+        image_bgr = self._build_forbidden_detection_image(candidate, evaluation)
         label = f"detect:{name}:{reason}"
         self._emit_forbidden_notification(label, message, image_bgr)
 
@@ -9901,14 +9901,13 @@ class HuntTab(QWidget):
         name = candidate.get('class_name', '금지몬스터')
         match_pct = float(evaluation.get('score', 0.0)) * 100.0
         image_bgr: Optional[np.ndarray]
+        image_bgr = self._build_forbidden_result_image(evaluation)
         if matched:
-            image_bgr = self._build_forbidden_result_image(evaluation)
             if locked:
                 message = f"금지몬스터 문양 판정: '{name}' 문양 有 (매칭 {match_pct:.1f}%) → 3분 잠금 재적용"
             else:
                 message = f"금지몬스터 문양 판정: '{name}' 문양 有 (매칭 {match_pct:.1f}%)"
         else:
-            image_bgr = self._get_latest_detection_bgr()
             if triggered:
                 message = f"금지몬스터 문양 판정: '{name}' 문양 無 → 재실행 및 쿨다운 리셋"
             else:
@@ -9953,21 +9952,57 @@ class HuntTab(QWidget):
         base = self._get_latest_detection_bgr()
         if base is None:
             return None
-        match_rect = evaluation.get('match_rect')
-        if not match_rect or len(match_rect) != 4:
-            return base
-        x, y, w, h = match_rect
-        x1 = max(0, int(round(x)))
-        y1 = max(0, int(round(y)))
-        x2 = max(x1 + 1, int(round(x + w)))
-        y2 = max(y1 + 1, int(round(y + h)))
         annotated = base.copy()
-        color = (0, 0, 255)  # BGR red
-        try:
-            cv2.rectangle(annotated, (x1, y1), (x2, y2), color, 2)
-        except Exception:
-            return base
+        self._overlay_forbidden_regions(annotated, evaluation, include_match=True)
         return annotated
+
+    def _build_forbidden_detection_image(self, candidate: dict, evaluation: Optional[dict]) -> Optional[np.ndarray]:
+        base = self._get_latest_detection_bgr()
+        if base is None:
+            return None
+        annotated = base.copy()
+        box = candidate.get('box') if isinstance(candidate, dict) else None
+        if isinstance(box, dict):
+            try:
+                x = float(box.get('x', 0.0))
+                y = float(box.get('y', 0.0))
+                w = float(box.get('width', 0.0))
+                h = float(box.get('height', 0.0))
+                x1 = max(0, int(round(x)))
+                y1 = max(0, int(round(y)))
+                x2 = max(x1 + 1, int(round(x + w)))
+                y2 = max(y1 + 1, int(round(y + h)))
+                cv2.rectangle(annotated, (x1, y1), (x2, y2), (0, 0, 255), 2)
+            except Exception:
+                pass
+        if evaluation and evaluation.get('roi_rect'):
+            self._overlay_forbidden_regions(annotated, evaluation, include_match=True)
+        return annotated
+
+    def _overlay_forbidden_regions(self, image: np.ndarray, evaluation: dict, *, include_match: bool) -> None:
+        if image is None or evaluation is None:
+            return
+        roi_rect = evaluation.get('roi_rect')
+        if roi_rect and len(roi_rect) == 4:
+            rx, ry, rw, rh = roi_rect
+            rx1 = max(0, int(round(rx)))
+            ry1 = max(0, int(round(ry)))
+            rx2 = max(rx1 + 1, int(round(rx + rw)))
+            ry2 = max(ry1 + 1, int(round(ry + rh)))
+            try:
+                cv2.rectangle(image, (rx1, ry1), (rx2, ry2), (0, 255, 255), 2)
+            except Exception:
+                pass
+        if include_match and evaluation.get('matched') and evaluation.get('match_rect') and len(evaluation['match_rect']) == 4:
+            x, y, w, h = evaluation['match_rect']
+            x1 = max(0, int(round(x)))
+            y1 = max(0, int(round(y)))
+            x2 = max(x1 + 1, int(round(x + w)))
+            y2 = max(y1 + 1, int(round(y + h)))
+            try:
+                cv2.rectangle(image, (x1, y1), (x2, y2), (0, 0, 255), 2)
+            except Exception:
+                pass
 
     def _trigger_forbidden_wait_flow(self, now: float) -> None:
         if self._forbidden_active:
