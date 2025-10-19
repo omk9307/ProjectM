@@ -657,6 +657,28 @@ class TelegramBridge(QObject):
         except Exception:
             return False
 
+    def send_photo(self, image_bytes: bytes, caption: Optional[str] = None) -> bool:
+        """현재 설정된 챗ID로 사진을 전송(가능하면 즉시, 실패 시 False)."""
+        if not image_bytes:
+            return False
+        if not self._running or not self._bot_app or not self._loop:
+            return False
+        if not self._creds or self._creds.allowed_chat_id is None:
+            return False
+        try:
+            import asyncio
+            kwargs = {
+                'chat_id': int(self._creds.allowed_chat_id),
+                'photo': image_bytes,
+            }
+            if caption:
+                kwargs['caption'] = caption
+            coro = self._bot_app.bot.send_photo(**kwargs)
+            asyncio.run_coroutine_threadsafe(coro, self._loop)
+            return True
+        except Exception:
+            return False
+
 
 def _parse_minutes_korean(text: str) -> Optional[int]:
     # 예: "/종료예약 10분" 또는 공백 여러개 허용
@@ -723,5 +745,16 @@ def send_telegram_text(text: str) -> bool:
         return False
     try:
         return bridge.send_text(text)
+    except Exception:
+        return False
+
+
+def send_telegram_photo(image_bytes: bytes, caption: Optional[str] = None) -> bool:
+    """활성 브리지로 사진을 보낸다. 실패 시 False."""
+    bridge = _ACTIVE_BRIDGE
+    if bridge is None:
+        return False
+    try:
+        return bridge.send_photo(image_bytes, caption=caption)
     except Exception:
         return False

@@ -10,6 +10,8 @@ import ctypes
 import signal
 import html
 import copy
+import numpy as np
+import cv2
 from ctypes import wintypes
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, Iterable, List, Optional, TextIO
@@ -46,7 +48,7 @@ from PyQt6.QtWidgets import (
     QSizePolicy,
 )
 
-from PyQt6.QtGui import QPixmap, QPainter, QPen, QColor, QBrush, QTextCursor, QGuiApplication
+from PyQt6.QtGui import QPixmap, QPainter, QPen, QColor, QBrush, QTextCursor, QGuiApplication, QImage
 
 from detection_runtime import DetectionPopup, DetectionThread, ScreenSnipper
 from direction_detection import DirectionDetector
@@ -73,9 +75,10 @@ from window_anchors import (
 
 # 텔레그램 알림(선택적): 브리지가 활성일 때만 전송
 try:
-    from telegram_bridge import send_telegram_text as _tg_send_text
+    from telegram_bridge import send_telegram_text as _tg_send_text, send_telegram_photo as _tg_send_photo
 except Exception:  # pragma: no cover - 환경에 따라 브리지 미설치/미활성 가능
     _tg_send_text = None
+    _tg_send_photo = None
 
 if os.name == 'nt':
     MOD_ALT = 0x0001
@@ -185,6 +188,11 @@ NAMEPLATE_TRACK_BRUSH = QBrush(QColor(255, 32, 32, 40))
 NAMEPLATE_DEADZONE_EDGE = QPen(QColor(20, 20, 20, 230), 3, Qt.PenStyle.SolidLine)
 NAMEPLATE_DEADZONE_SIZE = 100  # 사망 모션 무시 영역 크기(px)
 LOG_LINE_LIMIT = 200
+
+FORBIDDEN_GLYPH_MARGIN_PX = 80
+FORBIDDEN_GLYPH_VISUAL_HOLD_SEC = 5.0
+FORBIDDEN_GLYPH_ROI_EDGE = QPen(QColor(255, 0, 0, 200), 2, Qt.PenStyle.DashLine)
+FORBIDDEN_GLYPH_MATCH_EDGE = QPen(QColor(255, 0, 0, 255), 2, Qt.PenStyle.SolidLine)
 
 try:
     COMPOSITION_MODE_DEST_OVER = QPainter.CompositionMode.CompositionMode_DestinationOver
@@ -919,6 +927,19 @@ class HuntTab(QWidget):
         self._minimap_x_primed: bool = False
         self._minimap_char_template: Optional[dict] = None  # {'y': float, 'width': float, 'height': float}
         self._minimap_char_overlay_box: Optional[dict] = None  # {'x','y','width','height'}
+        self._forbidden_glyph_config: dict = {}
+        self._forbidden_glyph_templates: list[dict] = []
+        self._forbidden_glyph_threshold: float = 0.70
+        self._forbidden_watch_window_until: float = 0.0
+        self._forbidden_lock_until: float = 0.0
+        self._forbidden_visual_overlays: list[dict] = []
+        self._latest_forbidden_detection: Optional[dict] = None
+        self._forbidden_notify_cache: dict[str, float] = {}
+        self._latest_detection_qimage: Optional[QImage] = None
+        self._latest_detection_frame_ts: float = 0.0
+        self._latest_detection_bgr: Optional[np.ndarray] = None
+        self._latest_detection_bgr_ts: float = 0.0
+        self._latest_frame_size: tuple[int, int] = (0, 0)
 
         self.attack_interval_sec = 0.35
         self.last_attack_ts = 0.0
@@ -1986,6 +2007,9 @@ class HuntTab(QWidget):
             self._forbidden_cooldown_until = 0.0
         except Exception:
             pass
+        self._forbidden_watch_window_until = 0.0
+        self._forbidden_lock_until = 0.0
+        self._forbidden_visual_overlays = []
 
         # 탐지 재시작 보장
         try:
@@ -5563,6 +5587,10 @@ class HuntTab(QWidget):
             self.append_log(msg, "debug")
 
     def _handle_detection_frame(self, q_image) -> None:
+        try:
+            self._cache_latest_detection_frame(q_image)
+        except Exception:
+            pass
         if not self._is_screen_output_enabled():
             return
         # 탭이 보이지 않고 팝업도 없으면 UI 업데이트 생략(모니터링이 직접 오버레이를 그릴 수 있도록 원본 전달)
@@ -5583,6 +5611,45 @@ class HuntTab(QWidget):
             self.preview_frame_ready.emit(image)
         except Exception:
             pass
+
+    def _cache_latest_detection_frame(self, q_image) -> None:
+        if not getattr(self, 'forbidden_monster_enabled', False) and not self._forbidden_active:
+            if time.time() > float(self._forbidden_watch_window_until or 0.0):
+                return
+        if not isinstance(q_image, QImage) or q_image.isNull():
+            return
+        image = q_image
+        if image.format() != QImage.Format.Format_RGB888:
+            try:
+                image = image.convertToFormat(QImage.Format.Format_RGB888)
+            except Exception:
+                return
+        self._latest_detection_qimage = image.copy()
+        self._latest_detection_frame_ts = time.time()
+        self._latest_detection_bgr = None
+        self._latest_detection_bgr_ts = 0.0
+
+    def _get_latest_detection_bgr(self) -> Optional[np.ndarray]:
+        qimg = self._latest_detection_qimage
+        if qimg is None or qimg.isNull():
+            return None
+        if self._latest_detection_bgr is not None:
+            if abs(self._latest_detection_bgr_ts - self._latest_detection_frame_ts) < 1e-6:
+                return self._latest_detection_bgr
+        width = qimg.width()
+        height = qimg.height()
+        bytes_per_line = qimg.bytesPerLine()
+        ptr = qimg.bits()
+        try:
+            ptr.setsize(qimg.sizeInBytes())
+        except Exception:
+            return None
+        arr = np.frombuffer(ptr, np.uint8).reshape(height, bytes_per_line)
+        arr = arr[:, : width * 3].reshape(height, width, 3)
+        bgr = cv2.cvtColor(arr, cv2.COLOR_RGB2BGR)
+        self._latest_detection_bgr = bgr
+        self._latest_detection_bgr_ts = self._latest_detection_frame_ts
+        return bgr
 
     def _paint_overlays(self, image) -> None:
         if image is None or image.isNull():
@@ -5623,6 +5690,23 @@ class HuntTab(QWidget):
                     painter.setPen(CLEANUP_CHASE_EDGE)
                     painter.setBrush(CLEANUP_CHASE_BRUSH)
                     painter.drawRect(rect)
+            if self._forbidden_visual_overlays:
+                painter.setBrush(Qt.BrushStyle.NoBrush)
+                for entry in self._forbidden_visual_overlays:
+                    rect_info = entry.get('rect')
+                    if rect_info and len(rect_info) == 4:
+                        rx, ry, rw, rh = rect_info
+                        roi_rect = QRect(int(round(rx)), int(round(ry)), int(round(rw)), int(round(rh)))
+                        if not roi_rect.isNull():
+                            painter.setPen(FORBIDDEN_GLYPH_ROI_EDGE)
+                            painter.drawRect(roi_rect)
+                    match_info = entry.get('match_rect')
+                    if match_info and len(match_info) == 4:
+                        mx, my, mw, mh = match_info
+                        match_rect = QRect(int(round(mx)), int(round(my)), int(round(mw)), int(round(mh)))
+                        if not match_rect.isNull():
+                            painter.setPen(FORBIDDEN_GLYPH_MATCH_EDGE)
+                            painter.drawRect(match_rect)
             # [NEW] 군집 중심 윈도우 오버레이
             if (
                 self.overlay_preferences.get('cluster_window_area', True)
@@ -8575,8 +8659,19 @@ class HuntTab(QWidget):
         nameplate_data = payload.get('nameplates') or []
         track_events = payload.get('nameplate_track_events') or []
         perf_data = payload.get('perf') or {}
+        frame_width = 0
+        frame_height = 0
+        if isinstance(perf_data, dict):
+            try:
+                frame_width = int(float(perf_data.get('frame_width', 0.0) or 0.0))
+                frame_height = int(float(perf_data.get('frame_height', 0.0) or 0.0))
+            except (TypeError, ValueError):
+                frame_width = frame_height = 0
+        if frame_width > 0 and frame_height > 0:
+            self._latest_frame_size = (frame_width, frame_height)
 
         self._expire_nameplate_dead_zones(received_ts)
+        self._expire_forbidden_visuals(received_ts)
         # [NEW] 금지몬스터 감지 → 대기모드 트리거(쿨다운 및 플래그 검사 포함)
         try:
             self._maybe_trigger_forbidden_flow(monsters_data, received_ts)
@@ -9359,6 +9454,11 @@ class HuntTab(QWidget):
         self._latest_nameplate_rois = []
         self._active_nameplate_track_ids = set()
         self._nameplate_hold_until = 0.0
+        self._forbidden_visual_overlays = []
+        self._latest_detection_qimage = None
+        self._latest_detection_bgr = None
+        self._latest_detection_frame_ts = 0.0
+        self._latest_detection_bgr_ts = 0.0
         self._update_detection_summary()
 
     def _recalculate_hunt_metrics(self) -> None:
@@ -9533,26 +9633,51 @@ class HuntTab(QWidget):
 
     # ----- [NEW] 금지몬스터 감지 플로우 -----
     def _maybe_trigger_forbidden_flow(self, monsters: List[dict], now: float) -> None:
-        """YOLO 몬스터 목록에서 '공격 금지'로 지정된 클래스가 보이면 대기모드 트리거.
-
-        - 조건: 기능 활성, 프로필 지정, 웨이포인트 유효, 쿨다운 만료, 현재 비활성
-        - 트리거 시: 사냥탭 탐지를 중단하고 맵탭 대기모드 진입(flow='forbidden')
-        """
         if not bool(getattr(self, 'forbidden_monster_enabled', False)):
             return
-        if self._forbidden_active:
-            return
-        try:
-            if now < float(getattr(self, '_forbidden_cooldown_until', 0.0) or 0.0):
-                return
-        except Exception:
-            pass
         cmd = (getattr(self, 'forbidden_monster_command_profile', '') or '').strip()
         if not cmd:
             return
         if not self._has_wait_waypoint_configured():
             return
-        # 금지 클래스 집합 로드
+        candidate = self._extract_forbidden_candidate(monsters)
+        self._expire_forbidden_visuals(now)
+        if candidate is None:
+            return
+
+        watch_until = float(getattr(self, '_forbidden_watch_window_until', 0.0) or 0.0)
+        cooldown_until = float(getattr(self, '_forbidden_cooldown_until', 0.0) or 0.0)
+        perform_match = False
+        if now <= watch_until or now < cooldown_until or bool(getattr(self, '_forbidden_active', False)):
+            perform_match = True
+        evaluation = self._evaluate_forbidden_glyph(candidate, now, perform_match=perform_match)
+        if perform_match and evaluation.get('roi_rect'):
+            self._append_forbidden_visual(evaluation['roi_rect'], evaluation.get('match_rect'), now)
+
+        if bool(getattr(self, '_forbidden_active', False)):
+            if evaluation.get('matched') is not None:
+                self._notify_forbidden_result_event(candidate, evaluation, now, triggered=False, locked=False)
+            return
+
+        lock_until = float(getattr(self, '_forbidden_lock_until', 0.0) or 0.0)
+        if now < lock_until:
+            if evaluation.get('matched') is not None:
+                self._notify_forbidden_result_event(candidate, evaluation, now, triggered=False, locked=True)
+            return
+
+        matched_flag = evaluation.get('matched')
+        if now < cooldown_until:
+            if matched_flag is True:
+                self._apply_forbidden_lock(candidate, evaluation, now)
+                return
+            if matched_flag is False:
+                self._start_forbidden_sequence(candidate, now, reason='cooldown_override', evaluation=evaluation)
+                return
+            return
+
+        self._start_forbidden_sequence(candidate, now, reason='normal', evaluation=evaluation)
+
+    def _get_forbidden_class_set(self) -> set[str]:
         forbidden_set: set[str] = set()
         if self.data_manager and hasattr(self.data_manager, 'get_monster_attack_forbidden_map'):
             try:
@@ -9560,21 +9685,32 @@ class HuntTab(QWidget):
                 forbidden_set = {name for name, enabled in fmap.items() if enabled}
             except Exception:
                 forbidden_set = set()
+        return forbidden_set
+
+    def _resolve_monster_threshold(self, class_id: int) -> float:
+        try:
+            overrides = getattr(self, '_active_monster_confidence_overrides', {}) or {}
+            if class_id in overrides:
+                threshold = float(overrides.get(class_id, 0.0))
+            else:
+                threshold = float(self.conf_monster_spinbox.value()) if hasattr(self, 'conf_monster_spinbox') else 0.85
+        except Exception:
+            threshold = 0.85
+        return max(0.05, min(0.95, threshold))
+
+    def _extract_forbidden_candidate(self, monsters: List[dict]) -> Optional[dict]:
+        forbidden_set = self._get_forbidden_class_set()
         if not forbidden_set:
-            return
-        # YOLO 박스(class_name)만 확인 + 개별 신뢰도(또는 전역) 임계치 이상일 때만 유효
-        found = False
-        found_name: str = ''
-        for item in (monsters or []):
+            return None
+        best_entry: Optional[dict] = None
+        for item in monsters or []:
             if not isinstance(item, dict):
                 continue
-            src = str(item.get('source') or 'yolo')
-            if src != 'yolo':
+            if str(item.get('source') or 'yolo') != 'yolo':
                 continue
             cname = str(item.get('class_name') or '')
-            if not (cname and cname in forbidden_set):
+            if not cname or cname not in forbidden_set:
                 continue
-            # 신뢰도 임계치 계산(개별 신뢰도 우선, 없으면 전역 몬스터 신뢰도)
             try:
                 score = float(item.get('score', 0.0))
             except (TypeError, ValueError):
@@ -9583,21 +9719,110 @@ class HuntTab(QWidget):
                 class_id = int(item.get('class_id', -1))
             except (TypeError, ValueError):
                 class_id = -1
+            threshold = self._resolve_monster_threshold(class_id)
+            if score < threshold:
+                continue
             try:
-                overrides = getattr(self, '_active_monster_confidence_overrides', {}) or {}
-                if class_id in overrides:
-                    threshold = float(overrides.get(class_id, 0.0))
-                else:
-                    threshold = float(self.conf_monster_spinbox.value()) if hasattr(self, 'conf_monster_spinbox') else 0.85
-            except Exception:
-                threshold = 0.85
-            if score >= max(0.05, min(0.95, threshold)):
-                found = True
-                found_name = cname
-                break
-        if not found:
-            return
-        # 즉시 모든 키 떼기(쿨다운 중은 발행하지 않음) + 경고음
+                box = {
+                    'x': float(item.get('x', 0.0)),
+                    'y': float(item.get('y', 0.0)),
+                    'width': float(item.get('width', 0.0)),
+                    'height': float(item.get('height', 0.0)),
+                }
+            except (TypeError, ValueError):
+                continue
+            if box['width'] <= 0.0 or box['height'] <= 0.0:
+                continue
+            if best_entry is None or score > best_entry['score']:
+                best_entry = {
+                    'class_name': cname,
+                    'score': score,
+                    'class_id': class_id,
+                    'box': box,
+                    'raw': item,
+                }
+        return best_entry
+
+    def _evaluate_forbidden_glyph(self, detection: dict, now: float, *, perform_match: bool) -> dict:
+        result = {
+            'timestamp': now,
+            'matched': None,
+            'score': 0.0,
+            'template_id': None,
+            'match_rect': None,
+            'roi_rect': None,
+            'reason': None,
+        }
+        box = detection.get('box') if isinstance(detection, dict) else None
+        if not isinstance(box, dict):
+            result['reason'] = 'no_box'
+            return result
+        frame_width, frame_height = self._latest_frame_size
+        if frame_width <= 0 or frame_height <= 0:
+            qimg = self._latest_detection_qimage
+            if qimg is not None and not qimg.isNull():
+                frame_width = qimg.width()
+                frame_height = qimg.height()
+        if frame_width <= 0 or frame_height <= 0:
+            result['reason'] = 'no_frame_size'
+            return result
+        margin = FORBIDDEN_GLYPH_MARGIN_PX
+        try:
+            x = float(box.get('x', 0.0))
+            y = float(box.get('y', 0.0))
+            width = float(box.get('width', 0.0))
+            height = float(box.get('height', 0.0))
+        except (TypeError, ValueError):
+            result['reason'] = 'invalid_box'
+            return result
+        roi_left = max(0, int(math.floor(x - margin)))
+        roi_top = max(0, int(math.floor(y - margin)))
+        roi_right = min(frame_width, int(math.ceil(x + width + margin)))
+        roi_bottom = min(frame_height, int(math.ceil(y + height + margin)))
+        roi_width = max(0, roi_right - roi_left)
+        roi_height = max(0, roi_bottom - roi_top)
+        if roi_width <= 0 or roi_height <= 0:
+            result['reason'] = 'empty_roi'
+            return result
+        result['roi_rect'] = (roi_left, roi_top, roi_width, roi_height)
+        if not perform_match:
+            return result
+        if not self._forbidden_glyph_templates:
+            result['reason'] = 'no_templates'
+            return result
+        roi_image_bgr = self._get_latest_detection_bgr()
+        if roi_image_bgr is None:
+            result['reason'] = 'no_frame'
+            return result
+        if roi_bottom > roi_image_bgr.shape[0] or roi_right > roi_image_bgr.shape[1]:
+            result['reason'] = 'roi_out_of_bounds'
+            return result
+        roi_view = roi_image_bgr[roi_top:roi_bottom, roi_left:roi_right]
+        if roi_view.size == 0:
+            result['reason'] = 'empty_roi'
+            return result
+        roi_gray = cv2.cvtColor(roi_view, cv2.COLOR_BGR2GRAY)
+        for template in self._forbidden_glyph_templates:
+            tpl_img = template.get('image')
+            if tpl_img is None:
+                continue
+            h, w = tpl_img.shape[:2]
+            if roi_gray.shape[0] < h or roi_gray.shape[1] < w:
+                continue
+            res = cv2.matchTemplate(roi_gray, tpl_img, cv2.TM_CCOEFF_NORMED)
+            _, max_val, _, max_loc = cv2.minMaxLoc(res)
+            if max_val >= self._forbidden_glyph_threshold:
+                match_left = roi_left + max_loc[0]
+                match_top = roi_top + max_loc[1]
+                result['matched'] = True
+                result['score'] = float(max_val)
+                result['template_id'] = template.get('id')
+                result['match_rect'] = (match_left, match_top, w, h)
+                return result
+        result['matched'] = False
+        return result
+
+    def _prepare_forbidden_detection(self) -> None:
         try:
             self._issue_all_keys_release("forbidden_monster:detect")
         except Exception:
@@ -9606,23 +9831,96 @@ class HuntTab(QWidget):
             self._play_forbidden_alert()
         except Exception:
             pass
-        # [NEW] 텔레그램 알림(옵션) + 3분 쿨다운 즉시 시작
+
+    def _start_forbidden_sequence(self, candidate: dict, now: float, *, reason: str, evaluation: Optional[dict]) -> None:
+        self._prepare_forbidden_detection()
+        cooldown_until = now + 180.0
+        self._forbidden_cooldown_until = cooldown_until
+        self._forbidden_watch_window_until = cooldown_until
+        self._latest_forbidden_detection = {
+            'class_name': candidate.get('class_name'),
+            'score': float(candidate.get('score', 0.0)),
+            'timestamp': now,
+        }
+        self._notify_forbidden_detection_event(candidate, reason, evaluation)
+        if evaluation and evaluation.get('matched') is not None:
+            self._notify_forbidden_result_event(candidate, evaluation, now, triggered=True, locked=False)
+        self._trigger_forbidden_wait_flow(now)
+
+    def _apply_forbidden_lock(self, candidate: dict, evaluation: Optional[dict], now: float) -> None:
+        lock_until = now + 180.0
+        self._forbidden_lock_until = max(self._forbidden_lock_until, lock_until)
+        self._forbidden_cooldown_until = max(self._forbidden_cooldown_until, lock_until)
+        self._forbidden_watch_window_until = max(self._forbidden_watch_window_until, lock_until)
+        if evaluation:
+            self._notify_forbidden_result_event(candidate, evaluation, now, triggered=False, locked=True)
+
+    def _notify_forbidden_detection_event(self, candidate: dict, reason: str, evaluation: Optional[dict]) -> None:
+        name = candidate.get('class_name', '금지몬스터')
+        score_pct = float(candidate.get('score', 0.0)) * 100.0
+        message = f"금지몬스터 감지: '{name}(신뢰도:{score_pct:.1f}%)' → 대기 모드 진입"
+        if reason == 'cooldown_override':
+            message += " (문양 無 재실행)"
         try:
-            if bool(getattr(self, 'forbidden_monster_telegram_alert', False)):
-                try:
-                    msg = f"금지몬스터 감지: '{found_name}' → 대기 모드 진입"
-                    self._notify_telegram(msg)
-                except Exception:
-                    pass
-            # 감지 시점 기준 3분 쿨다운 시작(중복 트리거 방지)
-            try:
-                self._forbidden_cooldown_until = float(now) + 180.0
-            except Exception:
-                self._forbidden_cooldown_until = 0.0
+            self.append_log(message, 'info')
         except Exception:
             pass
-        # 트리거
-        self._trigger_forbidden_wait_flow(now)
+        image_bgr = self._get_latest_detection_bgr()
+        label = f"detect:{name}:{reason}"
+        self._emit_forbidden_notification(label, message, image_bgr)
+
+    def _notify_forbidden_result_event(self, candidate: dict, evaluation: dict, now: float, *, triggered: bool, locked: bool) -> None:
+        matched = evaluation.get('matched')
+        if matched is None:
+            return
+        name = candidate.get('class_name', '금지몬스터')
+        match_pct = float(evaluation.get('score', 0.0)) * 100.0
+        if matched:
+            if locked:
+                message = f"금지몬스터 문양 판정: '{name}' 문양 有 (매칭 {match_pct:.1f}%) → 3분 잠금 재적용"
+            else:
+                message = f"금지몬스터 문양 판정: '{name}' 문양 有 (매칭 {match_pct:.1f}%)"
+        else:
+            if triggered:
+                message = f"금지몬스터 문양 판정: '{name}' 문양 無 → 재실행 및 쿨다운 리셋"
+            else:
+                message = f"금지몬스터 문양 판정: '{name}' 문양 無"
+        try:
+            self.append_log(message, 'info')
+        except Exception:
+            pass
+        image_bgr = self._get_latest_detection_bgr()
+        label = f"result:{name}:{int(bool(matched))}:{int(locked)}"
+        self._emit_forbidden_notification(label, message, image_bgr)
+
+    def _emit_forbidden_notification(self, label: str, text: str, image_bgr: Optional[np.ndarray]) -> None:
+        if not bool(getattr(self, 'forbidden_monster_telegram_alert', False)):
+            return
+        now_ts = time.time()
+        last_ts = self._forbidden_notify_cache.get(label)
+        if last_ts and (now_ts - last_ts) < 2.0:
+            return
+        self._forbidden_notify_cache[label] = now_ts
+        self._send_forbidden_telegram(text, image_bgr=image_bgr)
+
+    def _send_forbidden_telegram(self, text: str, *, image_bgr: Optional[np.ndarray] = None) -> None:
+        if not text:
+            return
+        sent = False
+        if image_bgr is not None and _tg_send_photo:
+            try:
+                success, buffer = cv2.imencode(".png", image_bgr)
+                if success:
+                    image_bytes = buffer.tobytes()
+                    sent = bool(_tg_send_photo(image_bytes, caption=text))
+            except Exception:
+                sent = False
+        if sent:
+            return
+        try:
+            self._notify_telegram(text)
+        except Exception:
+            pass
 
     def _trigger_forbidden_wait_flow(self, now: float) -> None:
         if self._forbidden_active:
@@ -9757,6 +10055,26 @@ class HuntTab(QWidget):
         self._nameplate_dead_zones = [
             zone for zone in self._nameplate_dead_zones if float(zone.get('expires_at', 0.0)) > now
         ]
+
+    def _expire_forbidden_visuals(self, now: float) -> None:
+        if not self._forbidden_visual_overlays:
+            return
+        remaining: list[dict] = []
+        for entry in self._forbidden_visual_overlays:
+            expires_at = float(entry.get('expires_at', 0.0) or 0.0)
+            if expires_at > now:
+                remaining.append(entry)
+        self._forbidden_visual_overlays = remaining
+
+    def _append_forbidden_visual(self, rect: tuple[float, float, float, float], match_rect: Optional[tuple[float, float, float, float]], now: float) -> None:
+        entry = {
+            'rect': rect,
+            'match_rect': match_rect,
+            'expires_at': now + FORBIDDEN_GLYPH_VISUAL_HOLD_SEC,
+        }
+        self._forbidden_visual_overlays.append(entry)
+        if len(self._forbidden_visual_overlays) > 6:
+            self._forbidden_visual_overlays = self._forbidden_visual_overlays[-6:]
 
     # [NEW] 금지몬스터 감지 히스토리 기록 함수
     def _append_forbidden_detection_log(self, monsters: List[dict], ts: float) -> None:
@@ -10519,6 +10837,41 @@ class HuntTab(QWidget):
             checkbox.blockSignals(False)
         self._update_detection_thread_overlay_flags()
 
+    def _load_forbidden_glyph_resources(self) -> None:
+        self._forbidden_glyph_config = {}
+        self._forbidden_glyph_templates = []
+        self._forbidden_glyph_threshold = 0.70
+        if not self.data_manager or not hasattr(self.data_manager, 'get_forbidden_glyph_config'):
+            return
+        try:
+            cfg = self.data_manager.get_forbidden_glyph_config()
+            templates = self.data_manager.list_forbidden_glyph_templates()
+        except Exception as exc:
+            self.append_log(f"금지 문양 템플릿을 불러오지 못했습니다: {exc}", 'warn')
+            return
+        if isinstance(cfg, dict):
+            self._forbidden_glyph_config = cfg
+            try:
+                thr = float(cfg.get('match_threshold', 0.70))
+            except (TypeError, ValueError):
+                thr = 0.70
+            self._forbidden_glyph_threshold = max(0.50, min(0.95, thr))
+        loaded_templates: list[dict] = []
+        for entry in templates if isinstance(templates, list) else []:
+            if not isinstance(entry, dict):
+                continue
+            path = entry.get('path')
+            if not path or not os.path.exists(path):
+                continue
+            image = cv2.imread(path, cv2.IMREAD_GRAYSCALE)
+            if image is None or image.size == 0:
+                continue
+            tpl = dict(entry)
+            tpl['image'] = image
+            tpl['height'], tpl['width'] = image.shape[:2]
+            loaded_templates.append(tpl)
+        self._forbidden_glyph_templates = loaded_templates
+
     def _load_nameplate_configuration(self) -> None:
         if not self.data_manager or not hasattr(self.data_manager, 'get_monster_nameplate_resources'):
             self._nameplate_config = {}
@@ -10754,6 +11107,7 @@ class HuntTab(QWidget):
         self._save_settings()
         self._load_nickname_configuration()
         self._load_direction_configuration()
+        self._load_forbidden_glyph_resources()
         self._load_nameplate_configuration()
         # [신규] 탈출 명령프로필 콤보 갱신
         try:

@@ -33,7 +33,7 @@ import requests
 import copy
 from pathlib import Path
 from collections import OrderedDict
-from typing import Optional, ClassVar
+from typing import Optional, ClassVar, List, Dict
 
 try:
     import pytesseract  # type: ignore
@@ -51,9 +51,9 @@ from PyQt6.QtWidgets import (
 )
 from PyQt6.QtGui import (
     QPixmap, QImage, QIcon, QPainter, QPen, QColor, QBrush, QCursor, QPolygon,
-    QDropEvent, QGuiApplication, QIntValidator, QDoubleValidator, QFont
+    QDropEvent, QGuiApplication, QIntValidator, QDoubleValidator, QFont, QDesktopServices
 )
-from PyQt6.QtCore import Qt, QThread, pyqtSignal, QSize, QRect, QPoint, QPointF, QObject, QMimeData, QTimer
+from PyQt6.QtCore import Qt, QThread, pyqtSignal, QSize, QRect, QPoint, QPointF, QObject, QMimeData, QTimer, QUrl
 
 from capture_manager import get_capture_manager
 
@@ -3197,6 +3197,9 @@ class DataManager:
         self.direction_left_dir = os.path.join(self.direction_templates_dir, 'left')
         self.direction_right_dir = os.path.join(self.direction_templates_dir, 'right')
         self.direction_config_path = os.path.join(self.direction_dir, 'config.json')
+        self.forbidden_glyph_dir = os.path.join(self.config_path, 'forbidden_monster')
+        self.forbidden_glyph_templates_dir = os.path.join(self.forbidden_glyph_dir, 'glyph_templates')
+        self.forbidden_glyph_config_path = os.path.join(self.forbidden_glyph_dir, 'glyph_config.json')
         self.nameplate_dir = os.path.join(self.config_path, 'monster_nameplate')
         self.nameplate_templates_dir = os.path.join(self.nameplate_dir, 'templates')
         self.nameplate_config_path = os.path.join(self.nameplate_dir, 'config.json')
@@ -3414,6 +3417,8 @@ class DataManager:
         os.makedirs(self.direction_templates_dir, exist_ok=True)
         os.makedirs(self.direction_left_dir, exist_ok=True)
         os.makedirs(self.direction_right_dir, exist_ok=True)
+        os.makedirs(self.forbidden_glyph_dir, exist_ok=True)
+        os.makedirs(self.forbidden_glyph_templates_dir, exist_ok=True)
         os.makedirs(self.nameplate_dir, exist_ok=True)
         os.makedirs(self.nameplate_templates_dir, exist_ok=True)
         # v1.3: manifest 생성/확인 시 네거티브 샘플 항목 추가
@@ -3474,6 +3479,19 @@ class DataManager:
                 direction_config, changed = self._merge_direction_config(loaded_direction_config)
                 if changed:
                     self._write_direction_config(direction_config)
+        default_forbidden_glyph_config = self._default_forbidden_glyph_config()
+        if not os.path.exists(self.forbidden_glyph_config_path):
+            self._write_forbidden_glyph_config(default_forbidden_glyph_config)
+        else:
+            try:
+                with open(self.forbidden_glyph_config_path, 'r', encoding='utf-8') as f:
+                    loaded_forbidden_glyph_config = json.load(f)
+            except (json.JSONDecodeError, FileNotFoundError):
+                self._write_forbidden_glyph_config(default_forbidden_glyph_config)
+            else:
+                merged_fg, changed = self._merge_forbidden_glyph_config(loaded_forbidden_glyph_config)
+                if changed:
+                    self._write_forbidden_glyph_config(merged_fg)
         default_nameplate_config = self._default_nameplate_config()
         if not os.path.exists(self.nameplate_config_path):
             self._write_nameplate_config(default_nameplate_config)
@@ -3622,6 +3640,30 @@ class DataManager:
             if not isinstance(merged.get(side_key), list):
                 merged[side_key] = []
                 changed = True
+        return merged, changed
+
+    def _default_forbidden_glyph_config(self) -> dict:
+        return {
+            'match_threshold': 0.70,
+            'templates': [],
+        }
+
+    def _write_forbidden_glyph_config(self, config_data: dict) -> None:
+        with open(self.forbidden_glyph_config_path, 'w', encoding='utf-8') as f:
+            json.dump(config_data, f, indent=4, ensure_ascii=False)
+
+    def _merge_forbidden_glyph_config(self, loaded_config: Optional[dict]) -> tuple[dict, bool]:
+        default_config = self._default_forbidden_glyph_config()
+        if not isinstance(loaded_config, dict):
+            return default_config, True
+        merged = dict(loaded_config)
+        changed = False
+        if 'match_threshold' not in merged:
+            merged['match_threshold'] = default_config['match_threshold']
+            changed = True
+        if not isinstance(merged.get('templates'), list):
+            merged['templates'] = []
+            changed = True
         return merged, changed
 
     def _default_nameplate_config(self):
@@ -5332,6 +5374,128 @@ class DataManager:
         self._write_direction_config(config)
         return removed
 
+    def get_forbidden_glyph_config(self) -> dict:
+        try:
+            with open(self.forbidden_glyph_config_path, 'r', encoding='utf-8') as f:
+                loaded = json.load(f)
+        except (FileNotFoundError, json.JSONDecodeError):
+            loaded = None
+        merged, changed = self._merge_forbidden_glyph_config(loaded)
+        if changed:
+            self._write_forbidden_glyph_config(merged)
+        return merged
+
+    def update_forbidden_glyph_config(self, updates: dict) -> dict:
+        if not isinstance(updates, dict):
+            return self.get_forbidden_glyph_config()
+        config = self.get_forbidden_glyph_config()
+        changed = False
+        if 'match_threshold' in updates:
+            try:
+                value = float(updates['match_threshold'])
+            except (TypeError, ValueError):
+                value = config.get('match_threshold', 0.7)
+            value = max(0.5, min(0.95, value))
+            if abs(config.get('match_threshold', 0.7) - value) > 1e-6:
+                config['match_threshold'] = value
+                changed = True
+        if changed:
+            self._write_forbidden_glyph_config(config)
+        return config
+
+    def list_forbidden_glyph_templates(self) -> list[dict]:
+        config = self.get_forbidden_glyph_config()
+        entries = config.get('templates', [])
+        if not isinstance(entries, list):
+            entries = []
+        results: list[dict] = []
+        changed = False
+        valid_entries: list[dict] = []
+        for entry in entries:
+            if not isinstance(entry, dict):
+                changed = True
+                continue
+            template_id = entry.get('id')
+            filename = entry.get('filename')
+            if not template_id or not filename:
+                changed = True
+                continue
+            path = os.path.join(self.forbidden_glyph_templates_dir, filename)
+            if not os.path.exists(path):
+                changed = True
+                continue
+            resolved = dict(entry)
+            resolved['path'] = path
+            results.append(resolved)
+            valid_entries.append(entry)
+        if changed:
+            config['templates'] = valid_entries
+            self._write_forbidden_glyph_config(config)
+        return results
+
+    def import_forbidden_glyph_template(self, file_path: str) -> dict:
+        if not file_path:
+            raise ValueError('파일 경로가 필요합니다.')
+        image = cv2.imread(file_path, cv2.IMREAD_UNCHANGED)
+        if image is None:
+            raise IOError(f'이미지를 불러올 수 없습니다: {file_path}')
+        if image.ndim == 3 and image.shape[2] == 4:
+            image = cv2.cvtColor(image, cv2.COLOR_BGRA2BGR)
+        template_id = f"forbidden_{int(time.time()*1000)%1_000_000:06d}_{uuid.uuid4().hex[:6]}"
+        filename = f"{template_id}.png"
+        save_path = os.path.join(self.forbidden_glyph_templates_dir, filename)
+        if not cv2.imwrite(save_path, image):
+            raise IOError('금지 문양 템플릿을 저장하지 못했습니다.')
+        config = self.get_forbidden_glyph_config()
+        entry = {
+            'id': template_id,
+            'filename': filename,
+            'source': 'import',
+            'original_name': os.path.basename(file_path),
+            'created_at': time.time(),
+            'width': int(image.shape[1]),
+            'height': int(image.shape[0]),
+        }
+        templates = list(config.get('templates', [])) if isinstance(config.get('templates'), list) else []
+        templates.append(entry)
+        config['templates'] = templates
+        self._write_forbidden_glyph_config(config)
+        entry_with_path = dict(entry)
+        entry_with_path['path'] = save_path
+        return entry_with_path
+
+    def delete_forbidden_glyph_templates(self, template_ids) -> int:
+        if not template_ids:
+            return 0
+        if isinstance(template_ids, str):
+            template_ids = [template_ids]
+        if not isinstance(template_ids, (list, tuple, set)):
+            return 0
+        template_ids = {tid for tid in template_ids if isinstance(tid, str)}
+        if not template_ids:
+            return 0
+        config = self.get_forbidden_glyph_config()
+        templates = list(config.get('templates', [])) if isinstance(config.get('templates'), list) else []
+        remaining: list[dict] = []
+        removed = 0
+        for entry in templates:
+            template_id = entry.get('id')
+            if template_id in template_ids:
+                filename = entry.get('filename')
+                if filename:
+                    path = os.path.join(self.forbidden_glyph_templates_dir, filename)
+                    if os.path.exists(path):
+                        try:
+                            os.remove(path)
+                        except OSError:
+                            pass
+                removed += 1
+            else:
+                remaining.append(entry)
+        config['templates'] = remaining
+        self._write_forbidden_glyph_config(config)
+        return removed
+
     # v1.3: 방해 요소 추가 메서드 신설
     def add_distractor(self, cropped_image_data):
         """
@@ -5539,6 +5703,9 @@ class LearningTab(QWidget):
         self._nickname_ui_updating = False
         self.direction_config = self.data_manager.get_direction_config()
         self._direction_ui_updating = False
+        self.forbidden_glyph_config = self.data_manager.get_forbidden_glyph_config()
+        self._forbidden_glyph_ui_updating = False
+        self.forbidden_glyph_templates = self.data_manager.list_forbidden_glyph_templates()
         self.nameplate_config = self.data_manager.get_monster_nameplate_config()
         self._nameplate_ui_updating = False
         self._status_config = self.data_manager.load_status_monitor_config()
@@ -6294,6 +6461,44 @@ class LearningTab(QWidget):
         direction_group.setLayout(direction_layout)
         right_layout.addWidget(direction_group)
 
+        forbidden_group = QGroupBox("공격금지 몬스터 문양")
+        forbidden_layout = QVBoxLayout()
+
+        forbidden_threshold_layout = QHBoxLayout()
+        forbidden_threshold_layout.addWidget(QLabel("템플릿 임계값:"))
+        self.forbidden_glyph_threshold_spin = QDoubleSpinBox()
+        self.forbidden_glyph_threshold_spin.setRange(0.50, 0.95)
+        self.forbidden_glyph_threshold_spin.setSingleStep(0.01)
+        self.forbidden_glyph_threshold_spin.setDecimals(2)
+        self.forbidden_glyph_threshold_spin.valueChanged.connect(self._on_forbidden_glyph_threshold_changed)
+        forbidden_threshold_layout.addWidget(self.forbidden_glyph_threshold_spin)
+        forbidden_threshold_layout.addStretch(1)
+        forbidden_layout.addLayout(forbidden_threshold_layout)
+
+        self.forbidden_glyph_list = QListWidget()
+        self.forbidden_glyph_list.setViewMode(QListWidget.ViewMode.IconMode)
+        self.forbidden_glyph_list.setIconSize(QSize(160, 120))
+        self.forbidden_glyph_list.setResizeMode(QListWidget.ResizeMode.Adjust)
+        self.forbidden_glyph_list.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
+        self.forbidden_glyph_list.setMinimumHeight(120)
+        self.forbidden_glyph_list.setSizePolicy(QSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed))
+        forbidden_layout.addWidget(self.forbidden_glyph_list, 1)
+
+        forbidden_btn_layout = QHBoxLayout()
+        self.add_forbidden_glyph_btn = QPushButton("파일 추가")
+        self.add_forbidden_glyph_btn.clicked.connect(self.import_forbidden_glyph_templates)
+        self.preview_forbidden_glyph_btn = QPushButton("선택")
+        self.preview_forbidden_glyph_btn.clicked.connect(self.preview_selected_forbidden_glyph_templates)
+        self.delete_forbidden_glyph_btn = QPushButton("선택 삭제")
+        self.delete_forbidden_glyph_btn.clicked.connect(self.delete_selected_forbidden_glyph_templates)
+        forbidden_btn_layout.addWidget(self.add_forbidden_glyph_btn)
+        forbidden_btn_layout.addWidget(self.preview_forbidden_glyph_btn)
+        forbidden_btn_layout.addWidget(self.delete_forbidden_glyph_btn)
+        forbidden_layout.addLayout(forbidden_btn_layout)
+
+        forbidden_group.setLayout(forbidden_layout)
+        right_layout.addWidget(forbidden_group)
+
         status_group = self._create_status_monitor_group()
         right_layout.addWidget(status_group)
 
@@ -6422,6 +6627,7 @@ class LearningTab(QWidget):
         self._apply_ocr_config_to_ui()
         self._apply_nickname_config_to_ui()
         self._apply_direction_config_to_ui()
+        self._apply_forbidden_glyph_config_to_ui()
         self.nickname_text_input.editingFinished.connect(self.on_nickname_text_changed)
         for spin in (
             self.nickname_threshold_spin,
@@ -6433,6 +6639,7 @@ class LearningTab(QWidget):
             self.nickname_full_scan_delay_spin,
         ):
             spin.setKeyboardTracking(False)
+        self.forbidden_glyph_threshold_spin.setKeyboardTracking(False)
 
         self.nickname_threshold_spin.editingFinished.connect(self.on_nickname_threshold_committed)
         self.nickname_offset_x_spin.editingFinished.connect(self.on_nickname_offset_committed)
@@ -9023,6 +9230,123 @@ class LearningTab(QWidget):
             self._refresh_direction_config_cache()
             self.populate_direction_template_lists()
             self.log_viewer.append(f"방향 템플릿 {removed}개를 삭제했습니다. (측: {side})")
+
+    def _refresh_forbidden_glyph_config_cache(self) -> None:
+        if not self.data_manager:
+            return
+        self.forbidden_glyph_config = self.data_manager.get_forbidden_glyph_config()
+        self.forbidden_glyph_templates = self.data_manager.list_forbidden_glyph_templates()
+
+    def _apply_forbidden_glyph_config_to_ui(self) -> None:
+        if self._forbidden_glyph_ui_updating:
+            return
+        self._forbidden_glyph_ui_updating = True
+        try:
+            cfg = self.forbidden_glyph_config or {}
+            try:
+                value = float(cfg.get('match_threshold', 0.70))
+            except (TypeError, ValueError):
+                value = 0.70
+            value = max(0.50, min(0.95, value))
+            if abs(self.forbidden_glyph_threshold_spin.value() - value) > 1e-6:
+                prev = self.forbidden_glyph_threshold_spin.blockSignals(True)
+                self.forbidden_glyph_threshold_spin.setValue(value)
+                self.forbidden_glyph_threshold_spin.blockSignals(prev)
+            self.populate_forbidden_glyph_templates()
+        finally:
+            self._forbidden_glyph_ui_updating = False
+
+    def populate_forbidden_glyph_templates(self) -> None:
+        self.forbidden_glyph_list.clear()
+        templates = self.forbidden_glyph_templates if isinstance(self.forbidden_glyph_templates, list) else []
+        if not templates:
+            return
+        for entry in templates:
+            if not isinstance(entry, dict):
+                continue
+            path = entry.get('path')
+            if not path or not os.path.exists(path):
+                continue
+            pixmap = QPixmap(path)
+            icon = QIcon(pixmap) if not pixmap.isNull() else QIcon()
+            label = entry.get('original_name') or entry.get('id') or os.path.basename(path)
+            item = QListWidgetItem(icon, label)
+            item.setData(Qt.ItemDataRole.UserRole, dict(entry))
+            self.forbidden_glyph_list.addItem(item)
+
+    def _on_forbidden_glyph_threshold_changed(self, value: float) -> None:
+        if self._forbidden_glyph_ui_updating:
+            return
+        if not self.data_manager:
+            return
+        clamped = max(0.50, min(0.95, float(value)))
+        if abs(value - clamped) > 1e-6:
+            prev = self.forbidden_glyph_threshold_spin.blockSignals(True)
+            self.forbidden_glyph_threshold_spin.setValue(clamped)
+            self.forbidden_glyph_threshold_spin.blockSignals(prev)
+        self.forbidden_glyph_config = self.data_manager.update_forbidden_glyph_config({'match_threshold': clamped})
+
+    def import_forbidden_glyph_templates(self) -> None:
+        file_paths, _ = QFileDialog.getOpenFileNames(self, '금지 문양 템플릿 불러오기', '', '이미지 파일 (*.png *.jpg *.jpeg *.bmp *.webp)')
+        if not file_paths or not self.data_manager:
+            return
+        added = 0
+        errors: list[tuple[str, str]] = []
+        for path in file_paths:
+            try:
+                entry = self.data_manager.import_forbidden_glyph_template(path)
+                if isinstance(entry, dict):
+                    added += 1
+            except Exception as exc:
+                errors.append((path, str(exc)))
+        self._refresh_forbidden_glyph_config_cache()
+        self.populate_forbidden_glyph_templates()
+        if added:
+            self.log_viewer.append(f"금지 문양 템플릿 {added}개를 추가했습니다.")
+        if errors:
+            text = '\n'.join(f"- {os.path.basename(p)}: {msg}" for p, msg in errors)
+            QMessageBox.warning(self, '일부 템플릿 추가 실패', text)
+
+    def preview_selected_forbidden_glyph_templates(self) -> None:
+        selected = self.forbidden_glyph_list.selectedItems()
+        if not selected:
+            QMessageBox.information(self, '미리보기', '미리볼 템플릿을 선택하세요.')
+            return
+        entry = selected[0].data(Qt.ItemDataRole.UserRole)
+        path = entry.get('path') if isinstance(entry, dict) else None
+        if not path or not os.path.exists(path):
+            QMessageBox.warning(self, '오류', '선택한 템플릿 파일을 찾을 수 없습니다.')
+            return
+        QDesktopServices.openUrl(QUrl.fromLocalFile(path))
+
+    def delete_selected_forbidden_glyph_templates(self) -> None:
+        selected_items = [
+            item for item in self.forbidden_glyph_list.selectedItems()
+            if item.flags() != Qt.ItemFlag.NoItemFlags
+        ]
+        if not selected_items:
+            QMessageBox.information(self, '삭제', '삭제할 템플릿을 선택하세요.')
+            return
+        ids = []
+        for item in selected_items:
+            entry = item.data(Qt.ItemDataRole.UserRole)
+            if isinstance(entry, dict) and entry.get('id'):
+                ids.append(entry['id'])
+        if not ids or not self.data_manager:
+            return
+        if QMessageBox.question(
+            self,
+            '삭제 확인',
+            f"선택한 템플릿 {len(ids)}개를 삭제하시겠습니까?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        ) != QMessageBox.StandardButton.Yes:
+            return
+        removed = self.data_manager.delete_forbidden_glyph_templates(ids)
+        if removed:
+            self._refresh_forbidden_glyph_config_cache()
+            self.populate_forbidden_glyph_templates()
+            self.log_viewer.append(f"금지 문양 템플릿 {removed}개를 삭제했습니다.")
 
     def populate_class_list(self):
         """manifest.json 데이터를 기반으로 QTreeWidget을 채웁니다."""
