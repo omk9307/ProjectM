@@ -9664,8 +9664,11 @@ class HuntTab(QWidget):
             return
         if not self._has_wait_waypoint_configured():
             return
-        candidate = self._extract_forbidden_candidate(monsters)
         self._expire_forbidden_visuals(now)
+        lock_until = float(getattr(self, '_forbidden_lock_until', 0.0) or 0.0)
+        if now < lock_until:
+            return
+        candidate = self._extract_forbidden_candidate(monsters)
         if candidate is None:
             return
 
@@ -9679,14 +9682,12 @@ class HuntTab(QWidget):
             self._append_forbidden_visual(evaluation['roi_rect'], evaluation.get('match_rect'), now)
 
         if bool(getattr(self, '_forbidden_active', False)):
-            if evaluation.get('matched') is not None:
-                self._notify_forbidden_result_event(candidate, evaluation, now, triggered=False, locked=False)
-            return
-
-        lock_until = float(getattr(self, '_forbidden_lock_until', 0.0) or 0.0)
-        if now < lock_until:
-            if evaluation.get('matched') is not None:
+            match_flag = evaluation.get('matched')
+            if match_flag is True:
+                self._apply_forbidden_lock(candidate, evaluation, now)
                 self._notify_forbidden_result_event(candidate, evaluation, now, triggered=False, locked=True)
+            elif match_flag is not None:
+                self._notify_forbidden_result_event(candidate, evaluation, now, triggered=False, locked=False)
             return
 
         matched_flag = evaluation.get('matched')
