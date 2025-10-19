@@ -5254,6 +5254,43 @@ class MapTab(QWidget):
         except Exception:
             # 전송 실패는 조용히 무시(내부에서 대부분 처리됨)
             pass
+        try:
+            QTimer.singleShot(1000, lambda: self._apply_followup_stop('no_anchor_5s_followup'))
+        except Exception:
+            pass
+
+    def _apply_followup_stop(self, reason: str) -> None:
+        try:
+            self.set_detection_stop_reason(reason)
+        except Exception:
+            pass
+        try:
+            self.force_stop_detection(reason=reason)
+        except Exception:
+            pass
+        try:
+            hunt_tab = getattr(self, '_hunt_tab', None)
+            if hunt_tab and hasattr(hunt_tab, 'force_stop_detection'):
+                hunt_tab.force_stop_detection(reason=reason)
+                if getattr(hunt_tab, 'current_authority', None) == 'hunt' and hasattr(hunt_tab, 'release_control'):
+                    hunt_tab.release_control(reason=reason)
+        except Exception:
+            pass
+        try:
+            ac = getattr(self, '_auto_control_tab', None)
+            if ac is not None:
+                if hasattr(ac, 'api_emergency_stop_all'):
+                    ac.api_emergency_stop_all(reason=reason)
+                elif hasattr(ac, 'api_release_all_keys_global'):
+                    ac.api_release_all_keys_global()
+                else:
+                    ac.receive_control_command("모든 키 떼기", reason=reason)
+        except Exception:
+            pass
+        try:
+            self.update_general_log("[안전정지] 추가 ESC 효과를 적용했습니다.", "orange")
+        except Exception:
+            pass
 
     def set_detection_stop_reason(self, reason: str) -> None:
         self._forced_detection_stop_reason = reason or 'manual'

@@ -8706,6 +8706,48 @@ class LearningTab(QWidget):
         except Exception:
             # 전송 실패 시에는 조용히 넘어간다 (ocr_watch 내부에서 대부분 처리)
             pass
+        try:
+            QTimer.singleShot(1000, lambda: self._apply_additional_stop('hp_zero_repeat'))
+        except Exception:
+            pass
+
+    def _apply_additional_stop(self, reason: str) -> None:
+        map_tab = getattr(self, '_map_tab', None)
+        hunt_tab = getattr(self, '_hunt_tab', None)
+
+        try:
+            if map_tab and hasattr(map_tab, 'set_detection_stop_reason'):
+                map_tab.set_detection_stop_reason(reason)
+        except Exception:
+            pass
+        try:
+            if map_tab and hasattr(map_tab, 'force_stop_detection'):
+                map_tab.force_stop_detection(reason=reason)
+        except Exception:
+            pass
+        try:
+            if hunt_tab and hasattr(hunt_tab, 'force_stop_detection'):
+                hunt_tab.force_stop_detection(reason=reason)
+        except Exception:
+            pass
+        try:
+            if hunt_tab and hasattr(hunt_tab, 'release_control'):
+                current_auth = getattr(hunt_tab, 'current_authority', None)
+                if current_auth == 'hunt':
+                    hunt_tab.release_control(reason=reason)
+        except Exception:
+            pass
+        try:
+            self._emit_control_command("모든 키 떼기", reason)
+        except Exception:
+            pass
+        try:
+            if hasattr(self, 'log_viewer') and self.log_viewer:
+                self.log_viewer.append(
+                    "<font color='orange'>[HP] 추가 안전정지(ESC 효과)를 적용했습니다.</font>"
+                )
+        except Exception:
+            pass
 
     # ----- [NEW] 이름표 OCR 보조 메서드들 -----
     def _apply_ocr_config_to_ui(self) -> None:
