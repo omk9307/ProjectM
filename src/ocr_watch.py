@@ -115,7 +115,13 @@ def _extract_korean(text: str) -> str:
     s = s.replace("\n", " ")
     # 허용 문자만 추출하여 공백으로 연결
     tokens = _ALLOWED_CHARS.findall(s)
-    s2 = " ".join(tokens).strip()
+    filtered: List[str] = []
+    for token in tokens:
+        digit_sequences = re.findall(r"\d+", token)
+        if any(len(seq) > 2 for seq in digit_sequences):
+            continue
+        filtered.append(token)
+    s2 = " ".join(filtered).strip()
     s2 = _TEXT_NORMALIZE_WS.sub(" ", s2)
     return s2
 
@@ -1265,13 +1271,21 @@ class OCRWatchThread(QThread):
                             can_send = True
                 if can_send:
                     if telegram_keyword_mode and self._keyword_alert_active:
-                        message_lines: List[str] = ["[OCR] 키워드 감지"]
+                        time_local = time.localtime(ts)
+                        time_label = f"{time_local.tm_hour:02d}시 {time_local.tm_min:02d}분 {time_local.tm_sec:02d}초"
+                        keyword_names: List[str] = []
+                        for kw_name, _ in matched_word_infos:
+                            if kw_name not in keyword_names:
+                                keyword_names.append(kw_name)
+                        keyword_summary = ", ".join(keyword_names) if keyword_names else "-"
+                        message_lines: List[str] = [f"[OCR] 키워드 감지 {time_label}"]
                         count = len(matched_word_infos)
-                        message_lines.append(f"감지한 키워드 수: {count}개")
-                        for idx, (_, word) in enumerate(matched_word_infos, start=1):
+                        message_lines.append(f"감지한 키워드 수: {count}개 ({keyword_summary})")
+                        for idx, (keyword_name, word) in enumerate(matched_word_infos, start=1):
                             conf_pct = int(round(word.conf))
                             message_lines.append(
-                                f"[{idx}] {word.text} (신뢰도: {conf_pct}%, 가로: {int(word.width)}px, 세로: {int(word.height)}px)"
+                                f"[{idx}] 키워드: {keyword_name} > {word.text} "
+                                f"(신뢰도: {conf_pct}%, 가로: {int(word.width)}px, 세로: {int(word.height)}px)"
                             )
                         if joined:
                             message_lines.append(f"전체 텍스트: {joined[:300]}")
