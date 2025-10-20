@@ -2049,6 +2049,12 @@ class HuntTab(QWidget):
         self._forbidden_watch_window_until = 0.0
         self._forbidden_lock_until = 0.0
         self._forbidden_visual_overlays = []
+        map_tab = getattr(self, 'map_tab', None)
+        if map_tab and hasattr(map_tab, 'set_forbidden_wall_suppressed'):
+            try:
+                map_tab.set_forbidden_wall_suppressed(False, reason='hunt_forbidden_manual_cancel')
+            except Exception:
+                pass
 
         # 탐지 재시작 보장
         try:
@@ -10351,6 +10357,7 @@ class HuntTab(QWidget):
         if self._forbidden_active:
             return
         self._forbidden_active = True
+        map_tab = getattr(self, 'map_tab', None)
         ok = False
         try:
             ok = bool(self._start_other_player_wait_mode(now, flow='forbidden'))
@@ -10358,8 +10365,18 @@ class HuntTab(QWidget):
             self.append_log(f"금지몬스터 대기모드 시작 실패: {exc}", 'warn')
             ok = False
         if not ok:
+            if map_tab and hasattr(map_tab, 'set_forbidden_wall_suppressed'):
+                try:
+                    map_tab.set_forbidden_wall_suppressed(False, reason='hunt_forbidden_abort')
+                except Exception:
+                    pass
             self._forbidden_active = False
             return
+        if map_tab and hasattr(map_tab, 'set_forbidden_wall_suppressed'):
+            try:
+                map_tab.set_forbidden_wall_suppressed(True, reason='hunt_forbidden')
+            except Exception:
+                pass
         try:
             self.append_log("금지몬스터 감지 → 대기 모드 진입", 'info')
             # 맵 탭 일반 로그에도 표시(가능 시)
@@ -10462,6 +10479,12 @@ class HuntTab(QWidget):
             except Exception:
                 pass
         self._forbidden_active = False
+        map_tab = getattr(self, 'map_tab', None)
+        if map_tab and hasattr(map_tab, 'set_forbidden_wall_suppressed'):
+            try:
+                map_tab.set_forbidden_wall_suppressed(False, reason='hunt_forbidden_finish')
+            except Exception:
+                pass
         # [신규] 명령 완료 처리: 래치/워치독 초기화
         self._forbidden_cmd_inflight = False
         self._forbidden_watchdog_retry_count = 0
@@ -10499,6 +10522,12 @@ class HuntTab(QWidget):
             except Exception:
                 self._forbidden_glyph_retry_state = {}
         self._set_forbidden_glyph_status('idle')
+        map_tab = getattr(self, 'map_tab', None)
+        if map_tab and hasattr(map_tab, 'set_forbidden_wall_suppressed'):
+            try:
+                map_tab.set_forbidden_wall_suppressed(False, reason='hunt_forbidden_reset')
+            except Exception:
+                pass
 
     def _expire_nameplate_dead_zones(self, now: float) -> None:
         if not self._nameplate_dead_zones:

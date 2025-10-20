@@ -638,6 +638,7 @@ class MapTab(QWidget):
             self.forbidden_wall_started_at = 0.0
             self.active_forbidden_wall_trigger = ""
             self.forbidden_wall_touch_threshold = 2.0
+            self._forbidden_wall_suppressed = False
             self.pending_forbidden_command = None
 
             # 중앙 권한 매니저 연동 상태
@@ -4407,7 +4408,7 @@ class MapTab(QWidget):
         if not (is_auto_enabled or is_debug_enabled):
             return False
 
-        if self._is_hunt_forbidden_wait_active():
+        if self._is_hunt_forbidden_wait_active() or self._forbidden_wall_suppressed:
             return False
 
         skills = wall.get('skill_profiles') or []
@@ -4621,7 +4622,7 @@ class MapTab(QWidget):
         if not walls or final_player_pos is None:
             return
 
-        if self._is_hunt_forbidden_wait_active():
+        if self._is_hunt_forbidden_wait_active() or self._forbidden_wall_suppressed:
             return
 
         current_line_id = contact_terrain.get('id') if contact_terrain else None
@@ -6765,6 +6766,20 @@ class MapTab(QWidget):
         except Exception:
             source = ''
         return source == 'hunt.forbidden'
+
+    def set_forbidden_wall_suppressed(self, suppressed: bool, reason: str = '') -> None:
+        """금지벽 트리거를 일시적으로 비활성화하거나 해제한다."""
+        state = bool(suppressed)
+        if self._forbidden_wall_suppressed == state:
+            return
+        self._forbidden_wall_suppressed = state
+        try:
+            message = "[금지벽] 감지를 일시 중지합니다." if state else "[금지벽] 감지 중지를 해제합니다."
+            if reason:
+                message += f" (사유: {reason})"
+            self.update_general_log(message, "crimson" if state else "gray")
+        except Exception:
+            pass
 
     def _initialize_other_player_wait_context(
         self,
