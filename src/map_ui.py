@@ -2095,6 +2095,13 @@ class MapTab(QWidget):
         if not command:
             return _wrap_result(False, "empty_command", {"message": "empty_command"})
 
+        auto_checkbox = getattr(self, "auto_control_checkbox", None)
+        debug_checkbox = getattr(self, "debug_auto_control_checkbox", None)
+        auto_enabled = bool(auto_checkbox and auto_checkbox.isChecked())
+        debug_enabled = bool(debug_checkbox and debug_checkbox.isChecked())
+        if not (auto_enabled or debug_enabled):
+            return _wrap_result(False, "auto_control_disabled", {"command": command})
+
         # [긴급 경로] 모든 키 떼기는 즉시 라즈베리 측까지 반영되도록 전용 API를 우선 사용
         try:
             if str(command).strip() == '모든 키 떼기' and getattr(self, '_auto_control_tab', None):
@@ -6798,6 +6805,13 @@ class MapTab(QWidget):
         source: str = '',
         wait_hp_config: Optional[dict] = None,
     ) -> bool:
+        auto_checkbox = getattr(self, "auto_control_checkbox", None)
+        debug_checkbox = getattr(self, "debug_auto_control_checkbox", None)
+        auto_enabled = bool(auto_checkbox and auto_checkbox.isChecked())
+        debug_enabled = bool(debug_checkbox and debug_checkbox.isChecked())
+        if not (auto_enabled or debug_enabled):
+            self.update_general_log("[대기 모드] 자동 제어가 비활성화되어 있어 대기 모드를 시작할 수 없습니다.", "red")
+            return False
         if not self.is_detection_running:
             self.update_general_log("[대기 모드] 탐지 실행 중에만 사용할 수 있습니다.", "red")
             return False

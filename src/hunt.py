@@ -1984,6 +1984,8 @@ class HuntTab(QWidget):
         import time as _t
         # 선 조건 검사
         cmd = (getattr(self, 'forbidden_monster_command_profile', '') or '').strip()
+        if not bool(getattr(self, 'auto_hunt_enabled', True)):
+            return False, "[금지] 자동 사냥이 비활성화되어 있어 금지 플로우를 실행할 수 없습니다."
         if not bool(getattr(self, 'forbidden_monster_enabled', False)):
             return False, "[금지] 기능이 비활성화되어 있습니다. 사냥탭 설정에서 활성화하세요."
         if not cmd:
@@ -9701,6 +9703,8 @@ class HuntTab(QWidget):
 
     # ----- [NEW] 금지몬스터 감지 플로우 -----
     def _maybe_trigger_forbidden_flow(self, monsters: List[dict], now: float) -> None:
+        if not bool(getattr(self, 'auto_hunt_enabled', True)):
+            return
         if not bool(getattr(self, 'forbidden_monster_enabled', False)):
             return
         cmd = (getattr(self, 'forbidden_monster_command_profile', '') or '').strip()
