@@ -4407,6 +4407,9 @@ class MapTab(QWidget):
         if not (is_auto_enabled or is_debug_enabled):
             return False
 
+        if self._is_hunt_forbidden_wait_active():
+            return False
+
         skills = wall.get('skill_profiles') or []
         if not skills:
             return False
@@ -4616,6 +4619,9 @@ class MapTab(QWidget):
     def _update_forbidden_wall_logic(self, final_player_pos: QPointF, contact_terrain: Optional[dict]) -> None:
         walls = self.geometry_data.get("forbidden_walls", [])
         if not walls or final_player_pos is None:
+            return
+
+        if self._is_hunt_forbidden_wait_active():
             return
 
         current_line_id = contact_terrain.get('id') if contact_terrain else None
@@ -6748,6 +6754,17 @@ class MapTab(QWidget):
     def _is_other_player_wait_active(self) -> bool:
         context = getattr(self, 'other_player_wait_context', None)
         return bool(context and context.get('active'))
+
+    def _is_hunt_forbidden_wait_active(self) -> bool:
+        """사냥 탭의 금지몬스터 플로우용 대기 모드 여부를 반환한다."""
+        if not self._is_other_player_wait_active():
+            return False
+        context = getattr(self, 'other_player_wait_context', {}) or {}
+        try:
+            source = str(context.get('source') or '').lower()
+        except Exception:
+            source = ''
+        return source == 'hunt.forbidden'
 
     def _initialize_other_player_wait_context(
         self,
