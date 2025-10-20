@@ -1530,6 +1530,7 @@ class HuntTab(QWidget):
             stopped = True
 
         if stopped:
+            self._reset_forbidden_status(reason=str(reason or 'force_stop'))
             if reason == 'esc_shortcut':
                 self.append_log("ESC 단축키로 탐지를 강제 중단했습니다.", "warn")
             else:
@@ -5480,6 +5481,7 @@ class HuntTab(QWidget):
             except Exception:
                 pass
             self._stop_perf_logging()
+            self._reset_forbidden_status(reason='toggle_off')
             self._stop_detection_thread()
             self._set_detection_status(False)
             self.detect_btn.setText("사냥시작")
@@ -10161,6 +10163,25 @@ class HuntTab(QWidget):
             self._forbidden_cooldown_until = 0.0
         if getattr(self, '_forbidden_glyph_status', 'idle') == 'pending':
             self._set_forbidden_glyph_status('idle')
+
+    def _reset_forbidden_status(self, reason: str = '') -> None:
+        """금지 몬스터 관련 상태를 완전히 초기화한다."""
+        try:
+            self._forbidden_active = False
+        except Exception:
+            pass
+        if hasattr(self, '_forbidden_cmd_inflight'):
+            self._forbidden_cmd_inflight = False
+        if hasattr(self, '_forbidden_watchdog_retry_count'):
+            self._forbidden_watchdog_retry_count = 0
+        if hasattr(self, '_forbidden_command_name'):
+            self._forbidden_command_name = ''
+        self._forbidden_watch_window_until = 0.0
+        self._forbidden_lock_until = 0.0
+        self._forbidden_cooldown_until = 0.0
+        self._latest_forbidden_detection = None
+        self._forbidden_visual_overlays = []
+        self._set_forbidden_glyph_status('idle')
 
     def _expire_nameplate_dead_zones(self, now: float) -> None:
         if not self._nameplate_dead_zones:
