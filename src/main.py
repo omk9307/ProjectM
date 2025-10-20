@@ -206,6 +206,7 @@ class MainWindow(QMainWindow):
         self._ocr_thread: object | None = None
         self._ocr_profile_provider: tuple | None = None  # (get_active_profile, get_profile_data)
         self._ocr_force_running: bool = False  # 학습탭 단독 실행 모드
+        self._ocr_next_run_ts: Optional[float] = None
 
         self.load_tabs()
         # 텔레그램 브리지 핸들러 보관용
@@ -779,6 +780,10 @@ class MainWindow(QMainWindow):
             return
         self._ocr_thread = OCRWatchThread(get_active_profile=get_active, get_profile_data=get_data)
         try:
+            self._ocr_thread.next_run_scheduled.connect(self._handle_ocr_next_run_scheduled)
+        except Exception:
+            pass
+        try:
             self._ocr_thread.start()
             print('[Main] OCR 워커를 시작했습니다.')
             # 학습 탭에 워커 전달
@@ -818,6 +823,13 @@ class MainWindow(QMainWindow):
                 pass
         self._ocr_thread = None
         print('[Main] OCR 워커를 중지했습니다.')
+        monitoring_tab = self.loaded_tabs.get('모니터링')
+        self._ocr_next_run_ts = None
+        if monitoring_tab and hasattr(monitoring_tab, 'update_ocr_next_run'):
+            try:
+                monitoring_tab.update_ocr_next_run(None)
+            except Exception:
+                pass
 
     def _update_ocr_watch_state(self) -> None:
         should_run = bool(self._ocr_force_running or self._hunt_detection_active or self._map_detection_active)
@@ -830,6 +842,20 @@ class MainWindow(QMainWindow):
     def api_set_ocr_standalone(self, enabled: bool) -> None:
         self._ocr_force_running = bool(enabled)
         self._update_ocr_watch_state()
+
+    def _handle_ocr_next_run_scheduled(self, ts_obj) -> None:
+        ts: Optional[float]
+        if isinstance(ts_obj, (int, float)):
+            ts = float(ts_obj)
+        else:
+            ts = None
+        self._ocr_next_run_ts = ts
+        monitoring_tab = self.loaded_tabs.get('모니터링')
+        if monitoring_tab and hasattr(monitoring_tab, 'update_ocr_next_run'):
+            try:
+                monitoring_tab.update_ocr_next_run(ts)
+            except Exception:
+                pass
 
 
 if __name__ == '__main__':

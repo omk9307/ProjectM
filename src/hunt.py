@@ -940,6 +940,8 @@ class HuntTab(QWidget):
         self._latest_detection_bgr: Optional[np.ndarray] = None
         self._latest_detection_bgr_ts: float = 0.0
         self._latest_frame_size: tuple[int, int] = (0, 0)
+        self._forbidden_glyph_status: str = 'idle'
+        self._forbidden_glyph_status_ts: float = 0.0
 
         self.attack_interval_sec = 0.35
         self.last_attack_ts = 0.0
@@ -1547,6 +1549,21 @@ class HuntTab(QWidget):
             'exp': str(cache.get('exp', 'EXP: -- / --')),
         }
         return result
+
+    def api_get_forbidden_status(self) -> dict[str, object]:
+        """금지몬스터 관련 쿨타임 및 문양 감지 상태를 반환한다."""
+        now = time.time()
+        cooldown_until = float(getattr(self, '_forbidden_cooldown_until', 0.0) or 0.0)
+        watch_until = float(getattr(self, '_forbidden_watch_window_until', 0.0) or 0.0)
+        status = getattr(self, '_forbidden_glyph_status', 'idle')
+        status_ts = float(getattr(self, '_forbidden_glyph_status_ts', 0.0) or 0.0)
+        return {
+            'cooldown_remaining': max(0.0, cooldown_until - now),
+            'watch_remaining': max(0.0, watch_until - now),
+            'active': bool(getattr(self, '_forbidden_active', False)),
+            'glyph_status': status,
+            'glyph_status_ts': status_ts,
+        }
 
     # ---------------------- 외부 조회용 얇은 API ----------------------
     def api_get_hunt_condition_snapshot(self) -> Optional[HuntConditionSnapshot]:
@@ -9847,6 +9864,13 @@ class HuntTab(QWidget):
         result['matched'] = False
         return result
 
+    def _set_forbidden_glyph_status(self, status: str) -> None:
+        self._forbidden_glyph_status = status
+        try:
+            self._forbidden_glyph_status_ts = float(time.time())
+        except Exception:
+            self._forbidden_glyph_status_ts = 0.0
+
     def _prepare_forbidden_detection(self) -> None:
         try:
             self._issue_all_keys_release("forbidden_monster:detect")
@@ -9858,6 +9882,7 @@ class HuntTab(QWidget):
             pass
 
     def _start_forbidden_sequence(self, candidate: dict, now: float, *, reason: str, evaluation: Optional[dict]) -> None:
+        self._set_forbidden_glyph_status('pending')
         self._prepare_forbidden_detection()
         cooldown_until = now + 180.0
         self._forbidden_cooldown_until = cooldown_until
@@ -9918,6 +9943,10 @@ class HuntTab(QWidget):
             pass
         label = f"result:{name}:{int(bool(matched))}:{int(locked)}"
         self._emit_forbidden_notification(label, message, image_bgr)
+        if matched:
+            self._set_forbidden_glyph_status('success')
+        else:
+            self._set_forbidden_glyph_status('failure')
 
     def _emit_forbidden_notification(self, label: str, text: str, image_bgr: Optional[np.ndarray]) -> None:
         if not bool(getattr(self, 'forbidden_monster_telegram_alert', False)):
@@ -10130,6 +10159,8 @@ class HuntTab(QWidget):
                 self._forbidden_cooldown_until = now_ts + 180.0
         except Exception:
             self._forbidden_cooldown_until = 0.0
+        if getattr(self, '_forbidden_glyph_status', 'idle') == 'pending':
+            self._set_forbidden_glyph_status('idle')
 
     def _expire_nameplate_dead_zones(self, now: float) -> None:
         if not self._nameplate_dead_zones:

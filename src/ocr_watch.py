@@ -1013,6 +1013,7 @@ class OCRWatchThread(QThread):
 
     ocr_status = pyqtSignal(str)
     ocr_detected = pyqtSignal(list)  # list[dict]: roi_index, words, timestamp
+    next_run_scheduled = pyqtSignal(object)  # Optional[float]: 다음 실행 예정 시각(UNIX epoch)
 
     def __init__(self, *, get_active_profile: callable, get_profile_data: callable) -> None:
         super().__init__()
@@ -1025,6 +1026,7 @@ class OCRWatchThread(QThread):
         self._sent_count: int = 0
         self._last_profile_name: Optional[str] = None
         self._keyword_alert_active: bool = False
+        self._next_run_ts: Optional[float] = None
 
     def stop(self) -> None:
         self._running = False
@@ -1035,6 +1037,11 @@ class OCRWatchThread(QThread):
             except Exception:
                 pass
         self._consumers.clear()
+        self._next_run_ts = None
+        try:
+            self.next_run_scheduled.emit(None)
+        except Exception:
+            pass
 
     # 협조적 슬립: 긴 대기 시간을 잘게 쪼개 _running 플래그를 주기적으로 확인
     def _cooperative_sleep(self, total_seconds: float) -> None:
@@ -1043,7 +1050,20 @@ class OCRWatchThread(QThread):
         except (TypeError, ValueError):
             remaining = 0.0
         if remaining <= 0.0:
+            now = time.time()
+            self._next_run_ts = now
+            try:
+                self.next_run_scheduled.emit(now)
+            except Exception:
+                pass
             return
+        now = time.time()
+        target_ts = now + remaining
+        self._next_run_ts = target_ts
+        try:
+            self.next_run_scheduled.emit(target_ts)
+        except Exception:
+            pass
         step = 0.05
         while self._running and remaining > 0.0:
             slice_sec = step if remaining > step else remaining

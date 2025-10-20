@@ -274,6 +274,12 @@ class MonitoringTab(QWidget):
         self._special_name_style_active = (
             "color: #FFFFFF; background: #1e7f2f; padding: 2px 6px; border: 1px solid #2e9d45;"
         )
+        self._special_value_style_default = "color: #FFFFFF; padding: 2px 6px;"
+        self._special_value_style_cooldown = "color: #FFFFFF; background: #6a1b9a; border: 1px solid #8e24aa; padding: 2px 6px;"
+        self._special_value_style_pending = "color: #FFFFFF; background: #c77800; border: 1px solid #ffb74d; padding: 2px 6px;"
+        self._special_value_style_success = "color: #FFFFFF; background: #1e7f2f; border: 1px solid #2e9d45; padding: 2px 6px;"
+        self._special_value_style_failure = "color: #FFFFFF; background: #aa2e25; border: 1px solid #d32f2f; padding: 2px 6px;"
+        self._ocr_next_run_ts: Optional[float] = None
 
         self._init_ui()
         # AutoControl 실시간 로그와 동일한 Δ 및 구분선 처리를 위해 마지막 키로그 시각 저장
@@ -543,7 +549,7 @@ class MonitoringTab(QWidget):
             vline = QFrame(); vline.setFrameShape(QFrame.Shape.VLine); vline.setFrameShadow(QFrame.Shadow.Sunken)
             value = QLabel("?")
             value.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
-            value.setStyleSheet("color: #FFFFFF; padding: 2px 6px;")
+            value.setStyleSheet(self._special_value_style_default)
             h.addWidget(name)
             h.addWidget(vline)
             h.addWidget(value, 1)
@@ -555,11 +561,13 @@ class MonitoringTab(QWidget):
         for t, k in (
             ("클린업", "cleanup"),
             ("점프공격", "jump_attack"),
-            ("조작권한 위임", "handover"),
             ("사다리 위험", "ladder_threat"),
             ("사다리 정리", "ladder_cleanup"),
             ("사다리복구", "ladder_escape"),
             ("미니맵 X 보정", "minimap_x_fix"),
+            ("OCR 분석", "ocr_analysis"),
+            ("금지몬스터 쿨타임", "forbidden_cooldown"),
+            ("금지몬스터 문양감지", "forbidden_glyph"),
         ):
             special_rows.addWidget(_mk_special_row(t, k))
 
@@ -1472,6 +1480,15 @@ class MonitoringTab(QWidget):
         except Exception:
             pass
 
+    def _set_special_value_style(self, key: str, style: str) -> None:
+        value = self.special_value_labels.get(key)
+        if not value:
+            return
+        try:
+            value.setStyleSheet(style)
+        except Exception:
+            pass
+
     def _update_special_status(self) -> None:
         # 클린업(동작중)
         cleanup_val = None
@@ -1548,28 +1565,6 @@ class MonitoringTab(QWidget):
         if lbl:
             lbl.setText('' if ladder_escape else '—' if ladder_escape is False else '?')
 
-        # 조작권한 위임(현재 소유자 반대측으로 즉시 양도 가능?)
-        handover = None
-        try:
-            if ControlAuthorityManager is not None:
-                mgr = ControlAuthorityManager.instance()
-                owner = (self._current_authority_owner or 'map').lower()
-                if owner == 'map':
-                    hsnap = None
-                    if self._hunt_tab and hasattr(self._hunt_tab, 'api_get_hunt_condition_snapshot'):
-                        hsnap = self._hunt_tab.api_get_hunt_condition_snapshot()
-                    decision = mgr.peek_decision_for('hunt', hunt_snapshot=hsnap)
-                    handover = (decision.status.value == 'accepted')
-                elif owner == 'hunt':
-                    decision = mgr.peek_decision_for('map')
-                    handover = (decision.status.value == 'accepted')
-        except Exception:
-            handover = None
-        self._set_special_active('handover', bool(handover))
-        lbl = self.special_value_labels.get('handover')
-        if lbl:
-            lbl.setText('' if handover else '—' if handover is False else '?')
-
         # 보호 시간 표시(활성 시 이름 초록, 우측에 남은 시간)
         try:
             rem_map = None
@@ -1618,6 +1613,64 @@ class MonitoringTab(QWidget):
                 lab.setText('' if used else '—')
         except Exception:
             pass
+
+        # OCR 분석 남은 시간
+        ocr_label = self.special_value_labels.get('ocr_analysis')
+        remaining = None
+        if isinstance(self._ocr_next_run_ts, (int, float)):
+            remaining = max(0.0, float(self._ocr_next_run_ts) - time.time())
+        if ocr_label:
+            if remaining is None:
+                ocr_label.setText('정지')
+                self._set_special_value_style('ocr_analysis', self._special_value_style_default)
+            else:
+                secs = int(remaining)
+                ocr_label.setText(f"{secs}s")
+                self._set_special_value_style('ocr_analysis', self._special_value_style_default)
+        self._set_special_active('ocr_analysis', remaining is not None)
+
+        # 금지몬스터 상태
+        forbidden_status: dict = {}
+        try:
+            if self._hunt_tab and hasattr(self._hunt_tab, 'api_get_forbidden_status'):
+                forbidden_status = self._hunt_tab.api_get_forbidden_status() or {}
+        except Exception:
+            forbidden_status = {}
+
+        cooldown_rem = forbidden_status.get('cooldown_remaining')
+        cooldown_active = isinstance(cooldown_rem, (int, float)) and cooldown_rem > 0.0
+        self._set_special_active('forbidden_cooldown', cooldown_active)
+        cooldown_label = self.special_value_labels.get('forbidden_cooldown')
+        if cooldown_label:
+            if isinstance(cooldown_rem, (int, float)):
+                cooldown_label.setText(f"{int(cooldown_rem)}s")
+            else:
+                cooldown_label.setText('--')
+            self._set_special_value_style(
+                'forbidden_cooldown',
+                self._special_value_style_cooldown if cooldown_active else self._special_value_style_default,
+            )
+
+        glyph_status = str(forbidden_status.get('glyph_status', 'idle') or 'idle')
+        glyph_label = self.special_value_labels.get('forbidden_glyph')
+        glyph_active = glyph_status in ('pending',)
+        glyph_text = '--'
+        glyph_style = self._special_value_style_default
+        if glyph_status == 'pending':
+            glyph_text = '감지 예정'
+            glyph_style = self._special_value_style_pending
+        elif glyph_status == 'success':
+            glyph_text = '감지 성공'
+            glyph_style = self._special_value_style_success
+        elif glyph_status == 'failure':
+            glyph_text = '감지 실패'
+            glyph_style = self._special_value_style_failure
+        elif glyph_status == 'idle':
+            glyph_text = '대기'
+        if glyph_label:
+            glyph_label.setText(glyph_text)
+            self._set_special_value_style('forbidden_glyph', glyph_style)
+        self._set_special_active('forbidden_glyph', glyph_active)
 
     # --- 모니터링에서 MP/EXP 단독 토글 → 학습 DataManager로 반영 ---
     def _on_toggle_mp_standalone(self, checked: bool) -> None:
@@ -2408,7 +2461,7 @@ class MonitoringTab(QWidget):
                         self._exp_start_amount = None
                         self.runtime_label.setText("")
         except Exception:
-            pass
+                pass
 
     def cleanup_on_close(self) -> None:
         self._stop_map_preview()
@@ -2437,6 +2490,13 @@ class MonitoringTab(QWidget):
         # 별도 파일에도 저장(이중화)
         try:
             self._save_overlay_prefs_to_file()
+        except Exception:
+            pass
+
+    def update_ocr_next_run(self, ts: Optional[float]) -> None:
+        self._ocr_next_run_ts = ts
+        try:
+            self._update_special_status()
         except Exception:
             pass
 
