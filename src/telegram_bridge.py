@@ -667,9 +667,11 @@ class TelegramBridge(QObject):
             return False
         try:
             import asyncio
+            # python-telegram-bot 호환성을 위해 파일류로 래핑
+            buf = io.BytesIO(image_bytes if isinstance(image_bytes, (bytes, bytearray)) else bytes(image_bytes))
             kwargs = {
                 'chat_id': int(self._creds.allowed_chat_id),
-                'photo': image_bytes,
+                'photo': buf,
             }
             if caption:
                 kwargs['caption'] = caption

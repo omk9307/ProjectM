@@ -191,6 +191,9 @@ LOG_LINE_LIMIT = 200
 
 FORBIDDEN_GLYPH_MARGIN_PX = 80
 FORBIDDEN_GLYPH_VISUAL_HOLD_SEC = 5.0
+FORBIDDEN_GLYPH_RETRY_INTERVAL_SEC = 0.2
+FORBIDDEN_GLYPH_MAX_ATTEMPTS = 3
+FORBIDDEN_GLYPH_SCALES = (1.0, 0.9, 1.1)  # 간단 다중 스케일 매칭(조기종료)
 FORBIDDEN_GLYPH_ROI_EDGE = QPen(QColor(255, 0, 0, 200), 2, Qt.PenStyle.DashLine)
 FORBIDDEN_GLYPH_MATCH_EDGE = QPen(QColor(255, 0, 0, 255), 2, Qt.PenStyle.SolidLine)
 
@@ -930,11 +933,13 @@ class HuntTab(QWidget):
         self._forbidden_glyph_config: dict = {}
         self._forbidden_glyph_templates: list[dict] = []
         self._forbidden_glyph_threshold: float = 0.70
+        self._forbidden_glyph_vertical_bias: float = 0.0
         self._forbidden_watch_window_until: float = 0.0
         self._forbidden_lock_until: float = 0.0
         self._forbidden_visual_overlays: list[dict] = []
         self._latest_forbidden_detection: Optional[dict] = None
         self._forbidden_notify_cache: dict[str, float] = {}
+        self._forbidden_glyph_retry_state: dict[tuple, dict] = {}
         self._latest_detection_qimage: Optional[QImage] = None
         self._latest_detection_frame_ts: float = 0.0
         self._latest_detection_bgr: Optional[np.ndarray] = None
@@ -1503,7 +1508,7 @@ class HuntTab(QWidget):
         except Exception:
             pass
 
-    def force_stop_detection(self, reason: str = 'force_stop') -> bool:
+    def force_stop_detection(self, reason: str = 'force_stop', *, preserve_forbidden: bool = False) -> bool:
         stopped = False
         if not hasattr(self, 'detect_btn'):
             return False
@@ -1512,6 +1517,12 @@ class HuntTab(QWidget):
             is_checked = bool(self.detect_btn.isChecked())
         except Exception:
             is_checked = False
+
+        if preserve_forbidden:
+            try:
+                self._preserve_forbidden_on_stop = True
+            except Exception:
+                self._preserve_forbidden_on_stop = True
 
         if is_checked:
             # 팝업 닫힘 사유 설정
@@ -1530,11 +1541,17 @@ class HuntTab(QWidget):
             stopped = True
 
         if stopped:
-            self._reset_forbidden_status(reason=str(reason or 'force_stop'))
+            if not preserve_forbidden:
+                self._reset_forbidden_status(reason=str(reason or 'force_stop'))
             if reason == 'esc_shortcut':
                 self.append_log("ESC 단축키로 탐지를 강제 중단했습니다.", "warn")
             else:
                 self.append_log(f"탐지를 중단합니다. (사유: {reason})", "warn")
+        elif preserve_forbidden:
+            try:
+                self._preserve_forbidden_on_stop = False
+            except Exception:
+                pass
         return stopped
 
     # ---------------------- Telegram 브리지용 얇은 API ----------------------
@@ -4469,7 +4486,7 @@ class HuntTab(QWidget):
         previous_sync = bool(getattr(self, '_syncing_with_map', False))
         self._syncing_with_map = True
         try:
-            stopped = self.force_stop_detection(reason='other_player_wait_start')
+            stopped = self.force_stop_detection(reason='other_player_wait_start', preserve_forbidden=True)
         finally:
             self._syncing_with_map = previous_sync
         if not stopped:
@@ -5422,7 +5439,7 @@ class HuntTab(QWidget):
             self._sync_detection_thread_status()
             if self.detection_view:
                 self.detection_view.setText("탐지 준비 중...")
-            self.detection_view.setPixmap(QPixmap())
+                self.detection_view.setPixmap(QPixmap())
             self.detect_btn.setText("사냥중지")
             resume_exp = bool(getattr(self, '_resume_exp_after_pause', False))
             if resume_exp:
@@ -5468,20 +5485,23 @@ class HuntTab(QWidget):
         else:
             thread_active = self.detection_thread is not None and self.detection_thread.isRunning()
             self._release_pending = True
+            preserve_forbidden = bool(getattr(self, '_preserve_forbidden_on_stop', False))
             # 탐지 중단을 누른 즉시 모든 키를 해제해 캐릭터가 바로 멈추도록 함
             try:
                 self._issue_all_keys_release("사냥중지")
                 self._release_pending = False
             except Exception:
                 pass
-            # [NEW] 탐지 중지 시 금지몬스터 히스토리 초기화
-            try:
-                self._forbidden_detect_history = []
-                self._forbidden_detect_last_log_ts = 0.0
-            except Exception:
-                pass
+            # [NEW] 탐지 중지 시 금지몬스터 히스토리 초기화(보존 모드에서는 유지)
+            if not preserve_forbidden:
+                try:
+                    self._forbidden_detect_history = []
+                    self._forbidden_detect_last_log_ts = 0.0
+                except Exception:
+                    pass
             self._stop_perf_logging()
-            self._reset_forbidden_status(reason='toggle_off')
+            if not preserve_forbidden:
+                self._reset_forbidden_status(reason='toggle_off')
             self._stop_detection_thread()
             self._set_detection_status(False)
             self.detect_btn.setText("사냥시작")
@@ -5492,6 +5512,12 @@ class HuntTab(QWidget):
             self._cancel_facing_reset_timer()
             if self._release_pending:
                 self._issue_all_keys_release("사냥중지")
+
+            if preserve_forbidden:
+                try:
+                    self._preserve_forbidden_on_stop = False
+                except Exception:
+                    pass
 
             if self.map_link_enabled and self.map_tab and not self._syncing_with_map:
                 self._syncing_with_map = True
@@ -7800,7 +7826,6 @@ class HuntTab(QWidget):
     def attach_auto_control_tab(self, auto_control_tab) -> None:
         """자동 제어 탭 참조를 보관해 긴급 정지 경로에 사용한다."""
         self._auto_control_tab = auto_control_tab
-        self._append_keyboard_log(message, timestamp=timestamp, color=color)
 
     def _set_command_cooldown(self, delay_sec: float) -> None:
         delay_sec = max(0.0, float(delay_sec))
@@ -9698,7 +9723,30 @@ class HuntTab(QWidget):
             perform_match = True
         evaluation = self._evaluate_forbidden_glyph(candidate, now, perform_match=perform_match)
         if perform_match and evaluation.get('roi_rect'):
-            self._append_forbidden_visual(evaluation['roi_rect'], evaluation.get('match_rect'), now)
+            highlight_rect = evaluation.get('match_rect') or evaluation.get('best_rect')
+            self._append_forbidden_visual(evaluation['roi_rect'], highlight_rect, now)
+
+        if evaluation.get('retry_pending'):
+            attempts = int(evaluation.get('retry_attempts', 0) or 0)
+            try:
+                if attempts > 0:
+                    self.append_log(
+                        f"[금지] 문양 판정 대기 중... ({min(attempts, FORBIDDEN_GLYPH_MAX_ATTEMPTS)}/{FORBIDDEN_GLYPH_MAX_ATTEMPTS})",
+                        'debug',
+                    )
+                    # [조정] 대기(reason='retry_wait') 상태는 텔레그램 전송 생략
+                    if str(evaluation.get('reason') or '').lower() != 'retry_wait':
+                        try:
+                            self._emit_forbidden_retry_attempt(
+                                candidate,
+                                evaluation,
+                                min(attempts, FORBIDDEN_GLYPH_MAX_ATTEMPTS),
+                            )
+                        except Exception:
+                            pass
+            except Exception:
+                pass
+            return
 
         if bool(getattr(self, '_forbidden_active', False)):
             match_flag = evaluation.get('matched')
@@ -9819,52 +9867,187 @@ class HuntTab(QWidget):
         except (TypeError, ValueError):
             result['reason'] = 'invalid_box'
             return result
-        roi_left = max(0, int(math.floor(x - margin)))
-        roi_top = max(0, int(math.floor(y - margin)))
-        roi_right = min(frame_width, int(math.ceil(x + width + margin)))
-        roi_bottom = min(frame_height, int(math.ceil(y + height + margin)))
+        cx = x + width * 0.5
+        cy = y + height * 0.5
+        bias_ratio = float(getattr(self, '_forbidden_glyph_vertical_bias', 0.0) or 0.0)
+        target_cy = cy + height * bias_ratio
+        half_w = (width * 0.5) + margin
+        half_h = (height * 0.5) + margin
+        desired_width = max(1, int(math.ceil(half_w * 2.0)))
+        desired_height = max(1, int(math.ceil(half_h * 2.0)))
+
+        left_f = cx - half_w
+        right_f = cx + half_w
+        top_f = target_cy - half_h
+        bottom_f = target_cy + half_h
+
+        roi_left = int(math.floor(left_f))
+        roi_right = int(math.ceil(right_f))
+        roi_top = int(math.floor(top_f))
+        roi_bottom = int(math.ceil(bottom_f))
+
+        roi_left = max(0, roi_left)
+        roi_top = max(0, roi_top)
+        roi_right = min(frame_width, roi_right)
+        roi_bottom = min(frame_height, roi_bottom)
+
+        # 부족한 폭/높이 보정(가능한 범위 내에서 원래 크기 유지)
+        if roi_right - roi_left < desired_width:
+            deficit = desired_width - (roi_right - roi_left)
+            add_right = min(deficit // 2 + deficit % 2, frame_width - roi_right)
+            roi_right += add_right
+            deficit -= add_right
+            add_left = min(deficit // 2 + deficit % 2, roi_left)
+            roi_left -= add_left
+        if roi_bottom - roi_top < desired_height:
+            deficit_h = desired_height - (roi_bottom - roi_top)
+            add_bottom = min(deficit_h // 2 + deficit_h % 2, frame_height - roi_bottom)
+            roi_bottom += add_bottom
+            deficit_h -= add_bottom
+            add_top = min(deficit_h // 2 + deficit_h % 2, roi_top)
+            roi_top -= add_top
+
         roi_width = max(0, roi_right - roi_left)
         roi_height = max(0, roi_bottom - roi_top)
         if roi_width <= 0 or roi_height <= 0:
             result['reason'] = 'empty_roi'
             return result
         result['roi_rect'] = (roi_left, roi_top, roi_width, roi_height)
+        result['roi_bias_ratio'] = bias_ratio
+        result['roi_center'] = (cx, target_cy)
         if not perform_match:
             return result
+
+        retry_key: Optional[tuple] = None
+        retry_state: Optional[dict] = None
+        try:
+            class_label = str(detection.get('class_name') or '')
+            if class_label:
+                retry_key = (class_label,)
+        except Exception:
+            retry_key = None
+
+        if retry_key is not None:
+            retry_state = self._forbidden_glyph_retry_state.get(retry_key)
+            max_window = FORBIDDEN_GLYPH_RETRY_INTERVAL_SEC * (FORBIDDEN_GLYPH_MAX_ATTEMPTS + 1)
+            if retry_state is None:
+                retry_state = {
+                    'attempts': 0,
+                    'first_ts': now,
+                    'next_ts': now,
+                }
+                self._forbidden_glyph_retry_state[retry_key] = retry_state
+            else:
+                first_ts = float(retry_state.get('first_ts', now) or now)
+                if now - first_ts > max_window:
+                    retry_state = {
+                        'attempts': 0,
+                        'first_ts': now,
+                        'next_ts': now,
+                    }
+                    self._forbidden_glyph_retry_state[retry_key] = retry_state
+
+            def schedule_retry(reason: str) -> dict:
+                nonlocal retry_state
+                if retry_state is None:
+                    retry_state = {
+                        'attempts': 0,
+                        'first_ts': now,
+                        'next_ts': now,
+                    }
+                    self._forbidden_glyph_retry_state[retry_key] = retry_state
+                attempts = int(retry_state.get('attempts', 0) or 0)
+                next_ts = float(retry_state.get('next_ts', now) or now)
+                if attempts > 0 and now < next_ts:
+                    result['reason'] = 'retry_wait'
+                    result['retry_pending'] = True
+                    result['matched'] = None
+                    result['retry_attempts'] = attempts
+                    return result
+                attempts += 1
+                retry_state['attempts'] = attempts
+                retry_state['next_ts'] = now + FORBIDDEN_GLYPH_RETRY_INTERVAL_SEC
+                result['reason'] = reason
+                if attempts < FORBIDDEN_GLYPH_MAX_ATTEMPTS:
+                    result['matched'] = None
+                    result['retry_pending'] = True
+                    result['retry_attempts'] = attempts
+                else:
+                    self._forbidden_glyph_retry_state.pop(retry_key, None)
+                    result['matched'] = False
+                return result
+        else:
+            def schedule_retry(reason: str) -> dict:
+                result['reason'] = reason
+                result['matched'] = False
+                return result
+
+        if retry_state and retry_state.get('attempts', 0) > 0:
+            next_ts = float(retry_state.get('next_ts', now) or now)
+            if now < next_ts:
+                result['reason'] = 'retry_wait'
+                result['retry_pending'] = True
+                result['matched'] = None
+                result['retry_attempts'] = int(retry_state.get('attempts', 0) or 0)
+                return result
+
         if not self._forbidden_glyph_templates:
-            result['reason'] = 'no_templates'
-            return result
+            return schedule_retry('no_templates')
         roi_image_bgr = self._get_latest_detection_bgr()
         if roi_image_bgr is None:
-            result['reason'] = 'no_frame'
-            return result
+            return schedule_retry('no_frame')
         if roi_bottom > roi_image_bgr.shape[0] or roi_right > roi_image_bgr.shape[1]:
-            result['reason'] = 'roi_out_of_bounds'
-            return result
+            return schedule_retry('roi_out_of_bounds')
         roi_view = roi_image_bgr[roi_top:roi_bottom, roi_left:roi_right]
         if roi_view.size == 0:
-            result['reason'] = 'empty_roi'
-            return result
+            return schedule_retry('empty_roi')
         roi_gray = cv2.cvtColor(roi_view, cv2.COLOR_BGR2GRAY)
+        best_val: float = 0.0
+        best_loc: Optional[tuple[int, int]] = None
+        best_wh: Optional[tuple[int, int]] = None
         for template in self._forbidden_glyph_templates:
             tpl_img = template.get('image')
             if tpl_img is None:
                 continue
-            h, w = tpl_img.shape[:2]
-            if roi_gray.shape[0] < h or roi_gray.shape[1] < w:
-                continue
-            res = cv2.matchTemplate(roi_gray, tpl_img, cv2.TM_CCOEFF_NORMED)
-            _, max_val, _, max_loc = cv2.minMaxLoc(res)
-            if max_val >= self._forbidden_glyph_threshold:
-                match_left = roi_left + max_loc[0]
-                match_top = roi_top + max_loc[1]
-                result['matched'] = True
-                result['score'] = float(max_val)
-                result['template_id'] = template.get('id')
-                result['match_rect'] = (match_left, match_top, w, h)
-                return result
-        result['matched'] = False
-        return result
+            th, tw = tpl_img.shape[:2]
+            # 다중 스케일 시도(조기 종료)
+            for scale in FORBIDDEN_GLYPH_SCALES:
+                if abs(scale - 1.0) < 1e-9:
+                    scaled = tpl_img
+                    h, w = th, tw
+                else:
+                    h = max(1, int(round(th * scale)))
+                    w = max(1, int(round(tw * scale)))
+                    # 너무 작아지면 매칭 품질 저하, 10x10 미만은 스킵
+                    if h < 10 or w < 10:
+                        continue
+                    scaled = cv2.resize(tpl_img, (w, h), interpolation=cv2.INTER_LINEAR)
+                if roi_gray.shape[0] < h or roi_gray.shape[1] < w:
+                    continue
+                res = cv2.matchTemplate(roi_gray, scaled, cv2.TM_CCOEFF_NORMED)
+                _, max_val, _, max_loc = cv2.minMaxLoc(res)
+                # 최고값 추적(디버그/보고용)
+                if max_val > best_val:
+                    best_val = float(max_val)
+                    best_loc = (int(max_loc[0]), int(max_loc[1]))
+                    best_wh = (w, h)
+                if max_val >= self._forbidden_glyph_threshold:
+                    match_left = roi_left + max_loc[0]
+                    match_top = roi_top + max_loc[1]
+                    result['matched'] = True
+                    result['score'] = float(max_val)
+                    result['template_id'] = template.get('id')
+                    result['match_rect'] = (match_left, match_top, w, h)
+                    if retry_key is not None:
+                        self._forbidden_glyph_retry_state.pop(retry_key, None)
+                    return result
+        if best_val > 0.0:
+            result['best_score'] = float(best_val)
+            if best_loc is not None and best_wh is not None:
+                bx, by = best_loc
+                bw, bh = best_wh
+                result['best_rect'] = (roi_left + bx, roi_top + by, bw, bh)
+        return schedule_retry('no_match')
 
     def _set_forbidden_glyph_status(self, status: str) -> None:
         self._forbidden_glyph_status = status
@@ -9955,7 +10138,9 @@ class HuntTab(QWidget):
             return
         now_ts = time.time()
         last_ts = self._forbidden_notify_cache.get(label)
-        if last_ts and (now_ts - last_ts) < 2.0:
+        # 재시도 라벨은 스로틀을 완화하여(거의 즉시) 0.1초 간격 3회 로그 전송 허용
+        min_interval = 0.0 if isinstance(label, str) and label.startswith('retry:') else 2.0
+        if last_ts and (now_ts - last_ts) < min_interval:
             return
         self._forbidden_notify_cache[label] = now_ts
         self._send_forbidden_telegram(text, image_bgr=image_bgr)
@@ -9974,23 +10159,77 @@ class HuntTab(QWidget):
                 sent = False
         if sent:
             return
+        # [폴백] 브리지가 없거나 실패 시, OCR 경로의 간단 전송 함수를 사용(사진 포함)
+        if image_bgr is not None:
+            try:
+                from ocr_watch import send_telegram_text_and_screenshot as _tg_text_and_shot  # 지연 임포트
+                _tg_text_and_shot(text, image_bgr=image_bgr)
+                return
+            except Exception:
+                pass
         try:
             self._notify_telegram(text)
         except Exception:
             pass
 
+    def _emit_forbidden_retry_attempt(self, candidate: dict, evaluation: dict, attempts: int) -> None:
+        """문양 재시도 로그를 텔레그램으로 전송(사진 포함).
+
+        - 라벨: retry:{name}:{attempt}
+        - 스로틀 완화: 재시도 라벨은 즉시 전송(상단 스로틀 로직 참고)
+        """
+        try:
+            name = str((candidate or {}).get('class_name') or '금지몬스터')
+        except Exception:
+            name = '금지몬스터'
+        total = int(FORBIDDEN_GLYPH_MAX_ATTEMPTS)
+        reason_key = str(evaluation.get('reason') or '')
+        reason_map = {
+            'retry_wait': '대기',
+            'no_templates': '템플릿 없음',
+            'no_frame': '프레임 없음',
+            'roi_out_of_bounds': 'ROI 범위 오류',
+            'empty_roi': 'ROI 비어있음',
+            'no_match': '매칭 미달',
+        }
+        reason_text = reason_map.get(reason_key, reason_key or '-')
+        # 부가정보: best_score 존재 시 표시(디버그)
+        best_info = ''
+        try:
+            best_val = float(evaluation.get('best_score', 0.0) or 0.0)
+            if best_val > 0.0:
+                best_info = f", 최고매칭 {best_val*100.0:.1f}%"
+        except Exception:
+            best_info = ''
+        msg = f"[금지] 문양 판정 재시도 {attempts}/{total} (사유: {reason_text}{best_info})"
+        image_bgr = self._build_forbidden_result_image(evaluation)
+        label = f"retry:{name}:{attempts}"
+        self._emit_forbidden_notification(label, msg, image_bgr)
+
     def _build_forbidden_result_image(self, evaluation: dict) -> Optional[np.ndarray]:
         base = self._get_latest_detection_bgr()
+        offset = (0, 0)
         if base is None:
-            return None
+            # [폴백] 화면 캡처로 대체
+            base = self._capture_maple_window_bgr()
+            if base is None:
+                return None
+            offset = self._resolve_forbidden_overlay_offset()
+        ox, oy = offset
         annotated = base.copy()
-        self._overlay_forbidden_regions(annotated, evaluation, include_match=True)
+        self._overlay_forbidden_regions(annotated, evaluation, include_match=True, offset=(ox, oy))
         return annotated
 
     def _build_forbidden_detection_image(self, candidate: dict, evaluation: Optional[dict]) -> Optional[np.ndarray]:
         base = self._get_latest_detection_bgr()
+        offset = (0, 0)
         if base is None:
-            return None
+            # [폴백] 화면 캡처로 대체
+            base = self._capture_maple_window_bgr()
+            if base is None:
+                return None
+            offset = self._resolve_forbidden_overlay_offset()
+        ox, oy = offset
         annotated = base.copy()
         box = candidate.get('box') if isinstance(candidate, dict) else None
         if isinstance(box, dict):
@@ -9999,41 +10238,110 @@ class HuntTab(QWidget):
                 y = float(box.get('y', 0.0))
                 w = float(box.get('width', 0.0))
                 h = float(box.get('height', 0.0))
-                x1 = max(0, int(round(x)))
-                y1 = max(0, int(round(y)))
-                x2 = max(x1 + 1, int(round(x + w)))
-                y2 = max(y1 + 1, int(round(y + h)))
+                x1 = max(0, int(round(x + ox)))
+                y1 = max(0, int(round(y + oy)))
+                x2 = max(x1 + 1, int(round(x + w + ox)))
+                y2 = max(y1 + 1, int(round(y + h + oy)))
                 cv2.rectangle(annotated, (x1, y1), (x2, y2), (0, 0, 255), 2)
             except Exception:
                 pass
         if evaluation and evaluation.get('roi_rect'):
-            self._overlay_forbidden_regions(annotated, evaluation, include_match=True)
+            self._overlay_forbidden_regions(annotated, evaluation, include_match=True, offset=(ox, oy))
         return annotated
 
-    def _overlay_forbidden_regions(self, image: np.ndarray, evaluation: dict, *, include_match: bool) -> None:
+    def _overlay_forbidden_regions(
+        self,
+        image: np.ndarray,
+        evaluation: dict,
+        *,
+        include_match: bool,
+        offset: Optional[tuple[int, int]] = None,
+    ) -> None:
         if image is None or evaluation is None:
             return
+        dx = dy = 0
+        if offset is not None:
+            try:
+                dx = int(round(offset[0]))
+                dy = int(round(offset[1]))
+            except Exception:
+                dx = dy = 0
         roi_rect = evaluation.get('roi_rect')
         if roi_rect and len(roi_rect) == 4:
             rx, ry, rw, rh = roi_rect
-            rx1 = max(0, int(round(rx)))
-            ry1 = max(0, int(round(ry)))
-            rx2 = max(rx1 + 1, int(round(rx + rw)))
-            ry2 = max(ry1 + 1, int(round(ry + rh)))
+            rx1 = max(0, int(round(rx + dx)))
+            ry1 = max(0, int(round(ry + dy)))
+            rx2 = max(rx1 + 1, int(round(rx + rw + dx)))
+            ry2 = max(ry1 + 1, int(round(ry + rh + dy)))
             try:
                 cv2.rectangle(image, (rx1, ry1), (rx2, ry2), (0, 255, 255), 2)
             except Exception:
                 pass
         if include_match and evaluation.get('matched') and evaluation.get('match_rect') and len(evaluation['match_rect']) == 4:
             x, y, w, h = evaluation['match_rect']
-            x1 = max(0, int(round(x)))
-            y1 = max(0, int(round(y)))
-            x2 = max(x1 + 1, int(round(x + w)))
-            y2 = max(y1 + 1, int(round(y + h)))
+            x1 = max(0, int(round(x + dx)))
+            y1 = max(0, int(round(y + dy)))
+            x2 = max(x1 + 1, int(round(x + w + dx)))
+            y2 = max(y1 + 1, int(round(y + h + dy)))
             try:
                 cv2.rectangle(image, (x1, y1), (x2, y2), (0, 0, 255), 2)
             except Exception:
                 pass
+        elif include_match and evaluation.get('best_rect') and len(evaluation.get('best_rect')) == 4:
+            bx, by, bw, bh = evaluation['best_rect']
+            bx1 = max(0, int(round(bx + dx)))
+            by1 = max(0, int(round(by + dy)))
+            bx2 = max(bx1 + 1, int(round(bx + bw + dx)))
+            by2 = max(by1 + 1, int(round(by + bh + dy)))
+            try:
+                cv2.rectangle(image, (bx1, by1), (bx2, by2), (0, 165, 255), 1)
+            except Exception:
+                pass
+
+    def _capture_maple_window_bgr(self) -> Optional[np.ndarray]:
+        """Mapleland 창을 스크린샷하여 BGR 프레임으로 반환(실패 시 None)."""
+        try:
+            import mss  # type: ignore
+            import numpy as _np  # type: ignore
+            from window_anchors import get_maple_window_geometry as _get_geo
+        except Exception:
+            return None
+        try:
+            geo = _get_geo()
+            if geo is None:
+                return None
+            region = {"left": int(geo.left), "top": int(geo.top), "width": int(geo.width), "height": int(geo.height)}
+            if region["width"] <= 0 or region["height"] <= 0:
+                return None
+            with mss.mss() as sct:
+                shot = sct.grab(region)
+            frame_bgra = _np.frombuffer(shot.raw, dtype=_np.uint8).reshape(shot.height, shot.width, 4)
+            return frame_bgra[:, :, :3].copy()
+        except Exception:
+            return None
+
+    def _resolve_forbidden_overlay_offset(self) -> tuple[int, int]:
+        """금지몬스터 오버레이를 전체 창 캡처에 맞춰 그릴 때 필요한 ROI 오프셋."""
+        try:
+            capture_region = self._resolve_manual_capture_region()
+        except Exception:
+            capture_region = None
+        if not isinstance(capture_region, dict):
+            return (0, 0)
+        try:
+            capture_left = float(capture_region.get('left', 0.0))
+            capture_top = float(capture_region.get('top', 0.0))
+        except Exception:
+            return (0, 0)
+        window_geometry = get_maple_window_geometry()
+        if window_geometry is None:
+            return (0, 0)
+        try:
+            offset_x = int(round(capture_left - float(window_geometry.left)))
+            offset_y = int(round(capture_top - float(window_geometry.top)))
+        except Exception:
+            return (0, 0)
+        return offset_x, offset_y
 
     def _trigger_forbidden_wait_flow(self, now: float) -> None:
         if self._forbidden_active:
@@ -10181,6 +10489,11 @@ class HuntTab(QWidget):
         self._forbidden_cooldown_until = 0.0
         self._latest_forbidden_detection = None
         self._forbidden_visual_overlays = []
+        if hasattr(self, '_forbidden_glyph_retry_state'):
+            try:
+                self._forbidden_glyph_retry_state.clear()
+            except Exception:
+                self._forbidden_glyph_retry_state = {}
         self._set_forbidden_glyph_status('idle')
 
     def _expire_nameplate_dead_zones(self, now: float) -> None:
@@ -10990,6 +11303,13 @@ class HuntTab(QWidget):
             except (TypeError, ValueError):
                 thr = 0.70
             self._forbidden_glyph_threshold = max(0.50, min(0.95, thr))
+            try:
+                bias = float(cfg.get('vertical_bias_ratio', 0.0))
+            except (TypeError, ValueError):
+                bias = 0.0
+            self._forbidden_glyph_vertical_bias = max(-1.0, min(1.0, bias))
+        else:
+            self._forbidden_glyph_vertical_bias = 0.0
         loaded_templates: list[dict] = []
         for entry in templates if isinstance(templates, list) else []:
             if not isinstance(entry, dict):

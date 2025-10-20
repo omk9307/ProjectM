@@ -3647,6 +3647,7 @@ class DataManager:
         return {
             'match_threshold': 0.70,
             'templates': [],
+            'vertical_bias_ratio': 0.25,
         }
 
     def _write_forbidden_glyph_config(self, config_data: dict) -> None:
@@ -3661,6 +3662,9 @@ class DataManager:
         changed = False
         if 'match_threshold' not in merged:
             merged['match_threshold'] = default_config['match_threshold']
+            changed = True
+        if 'vertical_bias_ratio' not in merged:
+            merged['vertical_bias_ratio'] = default_config['vertical_bias_ratio']
             changed = True
         if not isinstance(merged.get('templates'), list):
             merged['templates'] = []
@@ -5400,6 +5404,15 @@ class DataManager:
             if abs(config.get('match_threshold', 0.7) - value) > 1e-6:
                 config['match_threshold'] = value
                 changed = True
+        if 'vertical_bias_ratio' in updates:
+            try:
+                bias_val = float(updates['vertical_bias_ratio'])
+            except (TypeError, ValueError):
+                bias_val = config.get('vertical_bias_ratio', 0.0)
+            bias_val = max(-1.0, min(1.0, bias_val))
+            if abs(config.get('vertical_bias_ratio', 0.0) - bias_val) > 1e-6:
+                config['vertical_bias_ratio'] = bias_val
+                changed = True
         if changed:
             self._write_forbidden_glyph_config(config)
         return config
@@ -6477,6 +6490,18 @@ class LearningTab(QWidget):
         forbidden_threshold_layout.addStretch(1)
         forbidden_layout.addLayout(forbidden_threshold_layout)
 
+        forbidden_bias_layout = QHBoxLayout()
+        forbidden_bias_layout.addWidget(QLabel("세로 오프셋(+아래, 배수):"))
+        self.forbidden_glyph_bias_spin = QDoubleSpinBox()
+        self.forbidden_glyph_bias_spin.setRange(-1.0, 1.0)
+        self.forbidden_glyph_bias_spin.setSingleStep(0.05)
+        self.forbidden_glyph_bias_spin.setDecimals(2)
+        self.forbidden_glyph_bias_spin.setSuffix(" ×H")
+        self.forbidden_glyph_bias_spin.valueChanged.connect(self._on_forbidden_glyph_bias_changed)
+        forbidden_bias_layout.addWidget(self.forbidden_glyph_bias_spin)
+        forbidden_bias_layout.addStretch(1)
+        forbidden_layout.addLayout(forbidden_bias_layout)
+
         self.forbidden_glyph_list = QListWidget()
         self.forbidden_glyph_list.setViewMode(QListWidget.ViewMode.IconMode)
         self.forbidden_glyph_list.setIconSize(QSize(160, 120))
@@ -6642,6 +6667,7 @@ class LearningTab(QWidget):
         ):
             spin.setKeyboardTracking(False)
         self.forbidden_glyph_threshold_spin.setKeyboardTracking(False)
+        self.forbidden_glyph_bias_spin.setKeyboardTracking(False)
 
         self.nickname_threshold_spin.editingFinished.connect(self.on_nickname_threshold_committed)
         self.nickname_offset_x_spin.editingFinished.connect(self.on_nickname_offset_committed)
@@ -9403,6 +9429,15 @@ class LearningTab(QWidget):
                 prev = self.forbidden_glyph_threshold_spin.blockSignals(True)
                 self.forbidden_glyph_threshold_spin.setValue(value)
                 self.forbidden_glyph_threshold_spin.blockSignals(prev)
+            try:
+                bias_val = float(cfg.get('vertical_bias_ratio', 0.0))
+            except (TypeError, ValueError):
+                bias_val = 0.0
+            bias_val = max(-1.0, min(1.0, bias_val))
+            if abs(self.forbidden_glyph_bias_spin.value() - bias_val) > 1e-6:
+                prev_bias = self.forbidden_glyph_bias_spin.blockSignals(True)
+                self.forbidden_glyph_bias_spin.setValue(bias_val)
+                self.forbidden_glyph_bias_spin.blockSignals(prev_bias)
             self.populate_forbidden_glyph_templates()
         finally:
             self._forbidden_glyph_ui_updating = False
@@ -9436,6 +9471,18 @@ class LearningTab(QWidget):
             self.forbidden_glyph_threshold_spin.setValue(clamped)
             self.forbidden_glyph_threshold_spin.blockSignals(prev)
         self.forbidden_glyph_config = self.data_manager.update_forbidden_glyph_config({'match_threshold': clamped})
+
+    def _on_forbidden_glyph_bias_changed(self, value: float) -> None:
+        if self._forbidden_glyph_ui_updating:
+            return
+        if not self.data_manager:
+            return
+        clamped = max(-1.0, min(1.0, float(value)))
+        if abs(value - clamped) > 1e-6:
+            prev = self.forbidden_glyph_bias_spin.blockSignals(True)
+            self.forbidden_glyph_bias_spin.setValue(clamped)
+            self.forbidden_glyph_bias_spin.blockSignals(prev)
+        self.forbidden_glyph_config = self.data_manager.update_forbidden_glyph_config({'vertical_bias_ratio': clamped})
 
     def import_forbidden_glyph_templates(self) -> None:
         file_paths, _ = QFileDialog.getOpenFileNames(self, '금지 문양 템플릿 불러오기', '', '이미지 파일 (*.png *.jpg *.jpeg *.bmp *.webp)')
