@@ -759,30 +759,51 @@ class AutoControlTab(QWidget):
         img_layout.setContentsMargins(0,0,0,0)
         img_layout.setSpacing(6)
 
-        # 상단: 영역 지정 + 임계값
-        top_img_row = QHBoxLayout()
+        # 상단: 영역 지정
+        region_row = QHBoxLayout()
+        region_row.setContentsMargins(0, 0, 0, 0)
         self.image_region_btn = QPushButton("영역 지정")
         self.image_region_btn.setFixedWidth(90)
         self.image_region_label = QLabel("(영역 미설정)")
         self.image_region_label.setStyleSheet("color: #aaa;")
-        top_img_row.addWidget(self.image_region_btn)
-        top_img_row.addWidget(self.image_region_label, 1)
-        top_img_row.addSpacing(12)
-        top_img_row.addWidget(QLabel("임계값:"))
+        region_row.addWidget(self.image_region_btn)
+        region_row.addWidget(self.image_region_label, 1)
+        img_layout.addLayout(region_row)
+
+        # 이미지 재시도 횟수
+        retry_row = QHBoxLayout()
+        retry_row.setContentsMargins(0, 0, 0, 0)
+        retry_label = QLabel("이미지 재시도:")
+        retry_label.setFixedWidth(110)
+        self.image_retry_spin = QSpinBox()
+        self.image_retry_spin.setRange(1, 20)
+        self.image_retry_spin.setValue(5)
+        self.image_retry_spin.setSuffix(" 회")
+        self.image_retry_spin.setFixedWidth(90)
+        retry_row.addWidget(retry_label)
+        retry_row.addWidget(self.image_retry_spin)
+        retry_row.addStretch(1)
+        img_layout.addLayout(retry_row)
+
+        # 매칭 옵션 / 클릭 설정
+        options_row = QHBoxLayout()
+        options_row.setContentsMargins(0, 0, 0, 0)
+        threshold_label = QLabel("임계값:")
+        options_row.addWidget(threshold_label)
         self.image_threshold_spin = QDoubleSpinBox()
         self.image_threshold_spin.setRange(0.0, 1.0)
         self.image_threshold_spin.setSingleStep(0.01)
         self.image_threshold_spin.setDecimals(2)
         self.image_threshold_spin.setValue(0.85)
         self.image_threshold_spin.setFixedWidth(80)
-        top_img_row.addWidget(self.image_threshold_spin)
+        options_row.addWidget(self.image_threshold_spin)
         self.image_click_checkbox = QCheckBox("매칭 후 클릭")
         self.image_click_checkbox.setChecked(False)
-        top_img_row.addSpacing(12)
-        top_img_row.addWidget(self.image_click_checkbox)
+        options_row.addSpacing(12)
+        options_row.addWidget(self.image_click_checkbox)
         # 클릭 지연 범위
-        top_img_row.addSpacing(8)
-        top_img_row.addWidget(QLabel("클릭 지연:"))
+        options_row.addSpacing(8)
+        options_row.addWidget(QLabel("클릭 지연:"))
         self.image_click_delay_min_spin = QSpinBox()
         self.image_click_delay_min_spin.setRange(0, 500)
         self.image_click_delay_min_spin.setValue(10)
@@ -793,10 +814,10 @@ class AutoControlTab(QWidget):
         self.image_click_delay_max_spin.setValue(30)
         self.image_click_delay_max_spin.setSuffix(" ms")
         self.image_click_delay_max_spin.setFixedWidth(90)
-        top_img_row.addWidget(self.image_click_delay_min_spin)
-        top_img_row.addWidget(QLabel("~"))
-        top_img_row.addWidget(self.image_click_delay_max_spin)
-        img_layout.addLayout(top_img_row)
+        options_row.addWidget(self.image_click_delay_min_spin)
+        options_row.addWidget(QLabel("~"))
+        options_row.addWidget(self.image_click_delay_max_spin)
+        img_layout.addLayout(options_row)
 
         # 템플릿 리스트 + 버튼들
         self.image_template_list = QListWidget()
@@ -838,6 +859,7 @@ class AutoControlTab(QWidget):
         self.image_click_checkbox.toggled.connect(self._on_image_click_toggled)
         self.image_click_delay_min_spin.valueChanged.connect(self._on_image_click_delay_changed)
         self.image_click_delay_max_spin.valueChanged.connect(self._on_image_click_delay_changed)
+        self.image_retry_spin.valueChanged.connect(self._on_image_retry_changed)
         self.image_add_btn.clicked.connect(self._on_add_image_templates)
         self.image_del_btn.clicked.connect(self._on_delete_selected_templates)
         self.image_test_btn.clicked.connect(self._on_test_image_matching)
@@ -1079,6 +1101,20 @@ class AutoControlTab(QWidget):
         except Exception:
             pass
 
+    def _on_image_retry_changed(self, value: int):
+        """이미지 매칭 재시도 횟수 변경 시 스텝 데이터에 저장."""
+        if getattr(self, '_editor_syncing', False):
+            return
+        _, _, action = self._get_selected_action_ref()
+        if not (isinstance(action, dict) and self.action_type_combo.currentText() == 'mouse_move_abs'):
+            return
+        try:
+            retries = int(value)
+        except Exception:
+            retries = 5
+        retries = max(1, min(20, retries))
+        action['image_retry_limit'] = retries
+
     def _on_add_image_templates(self):
         cmd, row, action = self._get_selected_action_ref()
         if not action:
@@ -1223,8 +1259,9 @@ class AutoControlTab(QWidget):
             return True, (cx, cy), best_score, best_name
         return False, None, best_score, None
 
-    def _retry_image_match_and_move(self, step: dict):
-        """이미지 매칭 재시도(한 번) 후 성공 시 이동/클릭, 실패 시 시퀀스 중지.
+    def _retry_image_match_and_move(self, step: dict, attempt: int, retry_limit: int):
+        """이미지 매칭 재시도 처리.
+        attempt는 1부터 시작하며 retry_limit은 최대 시도 횟수.
         재시도는 _process_next_step 외부에서 호출된다.
         """
         try:
@@ -1238,6 +1275,16 @@ class AutoControlTab(QWidget):
                 uid1 = step.get('uid'); uid2 = current_step.get('uid')
                 if uid1 and uid2 and uid1 != uid2:
                     return
+            try:
+                retry_limit = int(retry_limit)
+            except Exception:
+                retry_limit = 5
+            retry_limit = max(1, min(20, retry_limit))
+            try:
+                attempt = int(attempt)
+            except Exception:
+                attempt = 1
+            attempt = max(1, attempt)
             ok, pos, score, name = self._perform_image_match(step)
             if ok and pos:
                 try:
@@ -1250,6 +1297,8 @@ class AutoControlTab(QWidget):
                 dy = int(ty) - int(cy)
                 sent = self._send_mouse_smooth_move(dx, dy, dur)
                 label = f"(마우스 이동[이미지-재시도성공]: {name} score={score:.2f} → Δ=({dx},{dy}), dur={dur}ms)"
+                if attempt > 1:
+                    label = f"{label} (시도 {attempt}/{retry_limit})"
                 if self.current_command_source_tag:
                     label = f"{self.current_command_source_tag} {label}"
                 self.log_generated.emit(label, "white" if sent else "red")
@@ -1262,7 +1311,12 @@ class AutoControlTab(QWidget):
                         cmin = max(0, min(500, cmin))
                         cmax = max(0, min(500, cmax))
                         extra_ms = random.randint(cmin, cmax)
-                        QTimer.singleShot(dur + extra_ms, lambda: self._send_mouse_click_cmd('left'))
+                        self._schedule_mouse_click(
+                            dur + extra_ms,
+                            'left',
+                            retry_attempts=1,
+                            source_tag=self.current_command_source_tag,
+                        )
                     except Exception:
                         pass
                 # 다음 스텝으로 진행
@@ -1275,13 +1329,19 @@ class AutoControlTab(QWidget):
                 # 이미지 이동 스텝 자체의 추가 대기는 없으므로 1ms 기본 지연
                 self.sequence_timer.start(1)
             else:
-                # 2회 실패 → 중지
-                self.sequence_watchdog.stop()
-                msg = "이미지 매칭 실패(2/2): 시퀀스를 중지합니다."
-                if self.current_command_source_tag:
-                    msg = f"{self.current_command_source_tag} {msg}"
-                self.log_generated.emit(msg, "red")
-                self._notify_sequence_completed(False)
+                if attempt >= retry_limit:
+                    self.sequence_watchdog.stop()
+                    msg = f"이미지 매칭 실패({attempt}/{retry_limit}): 시퀀스를 중지합니다."
+                    if self.current_command_source_tag:
+                        msg = f"{self.current_command_source_tag} {msg}"
+                    self.log_generated.emit(msg, "red")
+                    self._notify_sequence_completed(False)
+                else:
+                    retry_msg = f"이미지 매칭 실패({attempt}/{retry_limit}): 50ms 후 재시도"
+                    if self.current_command_source_tag:
+                        retry_msg = f"{self.current_command_source_tag} {retry_msg}"
+                    self.log_generated.emit(retry_msg, "orange")
+                    QTimer.singleShot(50, lambda s=copy.deepcopy(step), a=attempt + 1, limit=retry_limit: self._retry_image_match_and_move(s, a, limit))
         except Exception as e:
             try:
                 self.log_generated.emit(f"이미지 매칭 재시도 중 예외: {e}", "red")
@@ -2275,6 +2335,18 @@ class AutoControlTab(QWidget):
                 self.image_click_delay_max_spin.blockSignals(False)
             except Exception:
                 pass
+            # 이미지 재시도 횟수
+            try:
+                retries = int(action_data.get('image_retry_limit', 5))
+            except Exception:
+                retries = 5
+            retries = max(1, min(20, retries))
+            try:
+                self.image_retry_spin.blockSignals(True)
+                self.image_retry_spin.setValue(retries)
+                self.image_retry_spin.blockSignals(False)
+            except Exception:
+                pass
             # 라벨 표시는 절대좌표로 복원해 출력(사냥탭과 동일 철학)
             region_payload = action_data.get('region')
             abs_disp = None
@@ -2349,7 +2421,7 @@ class AutoControlTab(QWidget):
             new_action_data["dur_ms"] = int(self.mouse_dur_spin.value())
             new_action_data["mode"] = 'image' if self.mouse_mode_image.isChecked() else 'coord'
             # 부가 설정 보존
-            for k in ("threshold", "region", "image_id", "image_files", "click_after", "click_delay_min_ms", "click_delay_max_ms", "uid"):
+            for k in ("threshold", "region", "image_id", "image_files", "click_after", "click_delay_min_ms", "click_delay_max_ms", "image_retry_limit", "uid"):
                 if k in existing and k not in new_action_data:
                     new_action_data[k] = existing[k]
             # 현재 클릭 토글 UI값 반영
@@ -2367,6 +2439,11 @@ class AutoControlTab(QWidget):
                 new_action_data["click_delay_max_ms"] = max(0, min(500, cmax))
             except Exception:
                 pass
+            try:
+                retries = int(self.image_retry_spin.value())
+            except Exception:
+                retries = 5
+            new_action_data["image_retry_limit"] = max(1, min(20, retries))
         self.mappings[command_text][row] = new_action_data
         self._update_action_item_text(action_item, new_action_data)
 
@@ -2853,6 +2930,42 @@ class AutoControlTab(QWidget):
         except Exception as e:
             print(f"[AutoControl] 마우스 클릭 전송 실패: {e}")
             return False
+
+    def _schedule_mouse_click(self, delay_ms: int, button: str = 'left', retry_attempts: int = 1, source_tag: str | None = None) -> None:
+        """딜레이 후 마우스 클릭을 전송하고 실패 시 재시도한다."""
+        delay = max(0, int(delay_ms))
+        button = button or 'left'
+        retry_attempts = max(0, int(retry_attempts))
+        if source_tag is None:
+            source_tag = self.current_command_source_tag
+        QTimer.singleShot(
+            delay,
+            lambda btn=button, retries=retry_attempts, tag=source_tag: self._attempt_mouse_click(btn, retries, tag),
+        )
+
+    def _attempt_mouse_click(self, button: str, remaining_retries: int, source_tag: str | None) -> None:
+        """실제 클릭 전송을 시도하고 실패하면 재시도 스케줄."""
+        sent = self._send_mouse_click_cmd(button)
+        if sent:
+            return
+        btn_label = {'left': '좌클릭', 'right': '우클릭', 'double': '더블클릭'}.get(button, button)
+        prefix = f"{source_tag} " if source_tag else ""
+        if remaining_retries > 0:
+            msg = f"{btn_label} 전송 실패: {remaining_retries}회 재시도 예정"
+            try:
+                self.log_generated.emit(f"{prefix}{msg}", "orange")
+            except Exception:
+                pass
+            QTimer.singleShot(
+                80,
+                lambda btn=button, retries=remaining_retries - 1, tag=source_tag: self._attempt_mouse_click(btn, retries, tag),
+            )
+        else:
+            msg = f"{btn_label} 전송 실패: 재시도 포기"
+            try:
+                self.log_generated.emit(f"{prefix}{msg}", "red")
+            except Exception:
+                pass
 
     # ---------------------------
     # Cursor helpers (Windows)
@@ -3467,6 +3580,12 @@ class AutoControlTab(QWidget):
                 # 이미지/좌표 모드 분기
                 mode = str(step.get('mode', 'coord'))
                 if mode == 'image':
+                    try:
+                        retry_limit = int(step.get('image_retry_limit', 5))
+                    except Exception:
+                        retry_limit = 5
+                    retry_limit = max(1, min(20, retry_limit))
+                    attempt = 1
                     ok, pos, score, name = self._perform_image_match(step)
                     if ok and pos:
                         try:
@@ -3492,18 +3611,30 @@ class AutoControlTab(QWidget):
                                 cmin = max(0, min(500, cmin))
                                 cmax = max(0, min(500, cmax))
                                 extra_ms = random.randint(cmin, cmax)
-                                QTimer.singleShot(dur + extra_ms, lambda: self._send_mouse_click_cmd('left'))
+                                self._schedule_mouse_click(
+                                    dur + extra_ms,
+                                    'left',
+                                    retry_attempts=1,
+                                    source_tag=self.current_command_source_tag,
+                                )
                             except Exception:
                                 pass
                     else:
-                        # 1차 실패: 50ms 후 한 번 더 재시도
-                        retry_msg = "이미지 매칭 실패(1/2): 50ms 후 재시도"
+                        if retry_limit <= attempt:
+                            fail_msg = f"이미지 매칭 실패({attempt}/{retry_limit}): 시퀀스를 중지합니다."
+                            if self.current_command_source_tag:
+                                fail_msg = f"{self.current_command_source_tag} {fail_msg}"
+                            self.log_generated.emit(fail_msg, "red")
+                            self.sequence_watchdog.stop()
+                            self._notify_sequence_completed(False)
+                            return
+                        retry_msg = f"이미지 매칭 실패({attempt}/{retry_limit}): 50ms 후 재시도"
                         if self.current_command_source_tag:
                             retry_msg = f"{self.current_command_source_tag} {retry_msg}"
                         self.log_generated.emit(retry_msg, "orange")
                         # 현재 스텝 재시도 예약. 진행 중 플래그를 해제하여 재진입 허용
                         self.is_processing_step = False
-                        QTimer.singleShot(50, lambda s=copy.deepcopy(step): self._retry_image_match_and_move(s))
+                        QTimer.singleShot(50, lambda s=copy.deepcopy(step), a=attempt + 1, limit=retry_limit: self._retry_image_match_and_move(s, a, limit))
                         return
                 else:
                     # 절대좌표 목표 → 현재 좌표 → Δ 계산 후 전송. 자동 대기 없음.
