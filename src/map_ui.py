@@ -2767,6 +2767,16 @@ class MapTab(QWidget):
                     shutil.move(old_features_file, os.path.join(default_profile_path, 'map_key_features.json'))
                 self.update_general_log("구버전 설정을 'default' 프로필로 마이그레이션했습니다.", "purple")
 
+    def _get_transition_objects(self, *, include_unused: bool = False) -> list[dict]:
+        """transition_objects 목록을 요청 용도에 맞게 반환합니다."""
+        try:
+            objects = list(self.geometry_data.get("transition_objects", [])) if self.geometry_data else []
+        except Exception:
+            objects = []
+        if include_unused:
+            return objects
+        return [obj for obj in objects if not bool(obj.get('unused', False))]
+
     def load_profile_data(self, profile_name):
         self.active_profile_name = profile_name
         
@@ -5967,7 +5977,7 @@ class MapTab(QWidget):
         """
         [PATCH] v14.3.4: 주어진 위치에서 가장 가까운 사다리 객체를 찾습니다.
         """
-        ladders = self.geometry_data.get("transition_objects", [])
+        ladders = self._get_transition_objects()
         if not ladders:
             return None
 
@@ -8490,8 +8500,10 @@ class MapTab(QWidget):
         
         # 2. 지형선, 오브젝트 등의 경계도 포함
         all_points = []
-        for line in self.geometry_data.get("terrain_lines", []): all_points.extend(line.get("points", []))
-        for obj in self.geometry_data.get("transition_objects", []): all_points.extend(obj.get("points", []))
+        for line in self.geometry_data.get("terrain_lines", []):
+            all_points.extend(line.get("points", []))
+        for obj in self._get_transition_objects(include_unused=True):
+            all_points.extend(obj.get("points", []))
         
         if all_points:
             #  비정상적인 지형 좌표 필터링
@@ -8617,7 +8629,7 @@ class MapTab(QWidget):
         all_points = []
         for line in self.geometry_data.get("terrain_lines", []):
             all_points.extend(line.get("points", []))
-        for obj in self.geometry_data.get("transition_objects", []):
+        for obj in self._get_transition_objects(include_unused=True):
             all_points.extend(obj.get("points", []))
         for wp in self.geometry_data.get("waypoints", []):
             all_points.append(wp.get("pos", [0, 0]))
@@ -8797,7 +8809,13 @@ class MapTab(QWidget):
             
             else:
                 y_above_terrain = self.last_on_terrain_y - final_player_pos.y()
-                is_near_ladder, _, _ = self._check_near_ladder(final_player_pos, self.geometry_data.get("transition_objects", []), self.cfg_ladder_x_grab_threshold, return_dist=True, current_floor=self.current_player_floor)
+                is_near_ladder, _, _ = self._check_near_ladder(
+                    final_player_pos,
+                    self._get_transition_objects(include_unused=True),
+                    self.cfg_ladder_x_grab_threshold,
+                    return_dist=True,
+                    current_floor=self.current_player_floor,
+                )
 
                 # 0순위: 사다리 위에서의 상태 전이 (히스테리시스 적용)
                 if previous_state in ['climbing_up', 'climbing_down', 'on_ladder_idle']:
@@ -9995,7 +10013,7 @@ class MapTab(QWidget):
             final_player_pos is not None
             and self.player_state not in {'on_terrain', 'idle'}
         ):
-            transition_objects = self.geometry_data.get("transition_objects", [])
+            transition_objects = self._get_transition_objects()
             if transition_objects:
                 is_near_ladder, _, dist = self._check_near_ladder(
                     final_player_pos,
@@ -10178,7 +10196,7 @@ class MapTab(QWidget):
         if (now - self.airborne_warning_started_at) < wait_threshold:
             return
 
-        transition_objects = self.geometry_data.get("transition_objects", [])
+        transition_objects = self._get_transition_objects(include_unused=False)
         is_near_ladder, _, dist = self._check_near_ladder(
             final_player_pos,
             transition_objects,
@@ -10256,7 +10274,7 @@ class MapTab(QWidget):
         if now < self.ladder_float_recovery_cooldown_until:
             return False
 
-        transition_objects = self.geometry_data.get("transition_objects", [])
+        transition_objects = self._get_transition_objects()
         if not transition_objects:
             return False
 
@@ -10572,7 +10590,7 @@ class MapTab(QWidget):
 
                             # 사다리 거리 계산 (안전성 판단 및 대기 여부 결정)
                             try:
-                                transition_objects = self.geometry_data.get("transition_objects", [])
+                                transition_objects = self._get_transition_objects(include_unused=True)
                                 is_near_ladder, _, dist = self._check_near_ladder(
                                     final_player_pos,
                                     transition_objects,
@@ -10901,7 +10919,7 @@ class MapTab(QWidget):
                             dep_max_x = max(p[0] for p in dep_points)
 
                             ladder_hazard_zones = []
-                            for obj in self.geometry_data.get("transition_objects", []):
+                            for obj in self._get_transition_objects(include_unused=True):
                                 # 현재 출발 지형(departure_line)에 연결된 사다리 중 '출구(윗부분)'만 고려
                                 try:
                                     p1, p2 = obj.get('points', [None, None])
@@ -11303,7 +11321,7 @@ class MapTab(QWidget):
                         # ... (기존 출발지 안전성 검사 로직과 동일) ...
                         departure_floor = departure_line.get('floor')
                         ladder_hazard_zones = []
-                        for obj in self.geometry_data.get("transition_objects", []):
+                        for obj in self._get_transition_objects(include_unused=True):
                             # 현재 출발 지형(departure_line)에 연결된 사다리만 고려
                             is_connected = (
                                 obj.get('start_line_id') == departure_line.get('id')
@@ -11520,7 +11538,7 @@ class MapTab(QWidget):
 
             if obj_id:
                 # 해당 사다리 객체만 특정하여 검사
-                current_ladder = next((obj for obj in self.geometry_data.get("transition_objects", []) if obj.get('id') == obj_id), None)
+                current_ladder = next((obj for obj in self._get_transition_objects(include_unused=True) if obj.get('id') == obj_id), None)
                 if current_ladder:
                     now = time.time()
                     if self._climb_last_near_ladder_time == 0.0:
@@ -12905,6 +12923,7 @@ class MapTab(QWidget):
                     "start_line_id": obj.get("start_line_id"),
                     "end_line_id": obj.get("end_line_id"),
                     "points": _simp_points(obj.get("points")),
+                    "unused": bool(obj.get("unused", False)),
                 }
                 for obj in transition_objects if isinstance(obj, dict)
             ], key=lambda d: str(d.get("id")))
@@ -12993,7 +13012,8 @@ class MapTab(QWidget):
             waypoint_ids_in_route = [wp['id'] for wp in self.geometry_data.get("waypoints", [])]
 
         terrain_lines = self.geometry_data.get("terrain_lines", [])
-        transition_objects = self.geometry_data.get("transition_objects", [])
+        transition_objects_all = self._get_transition_objects(include_unused=True)
+        transition_objects = self._get_transition_objects()
 
         FLOOR_CHANGE_PENALTY = 0.0
         CLIMB_UP_COST_MULTIPLIER = 1.5
@@ -13155,7 +13175,7 @@ class MapTab(QWidget):
                     
                     is_safe_from_ladders = True
                     line_above_floor = line_above.get('floor')
-                    for obj in transition_objects:
+                    for obj in transition_objects_all:
                         start_line_id, end_line_id = obj.get('start_line_id'), obj.get('end_line_id')
                         if (start_line_id == line_above['id'] and self.line_id_to_floor_map.get(end_line_id, float('inf')) < line_above_floor) or \
                            (end_line_id == line_above['id'] and self.line_id_to_floor_map.get(start_line_id, float('inf')) < line_above_floor):
@@ -13568,7 +13588,7 @@ class MapTab(QWidget):
                         line_id_to_group_name[line['id']] = group_name
 
         # --- 2. 층 이동 오브젝트 이름 부여 ---
-        transition_objects = self.geometry_data.get("transition_objects", [])
+        transition_objects = self._get_transition_objects(include_unused=True)
         if transition_objects:
             # 먼저 모든 지형선 ID와 층/동적이름을 매핑
             line_info_map = {

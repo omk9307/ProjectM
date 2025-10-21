@@ -2598,17 +2598,29 @@ class FullMinimapEditorDialog(QDialog):
             if "leader" not in group or group["leader"] is None or group["leader"].scene() is None:
                 # 타입별 색상: 좌표=흰색, 점프링크=초록, 사다리/오브젝트=주황, 그 외=빨강
                 pen = QPen(QColor("red"), 0)
+                pen_style = Qt.PenStyle.SolidLine
                 if label_type == "coord_text":
                     pen = QPen(QColor("white"), 0)
                 elif label_type == "jump_link_name":
                     pen = QPen(QColor("green"), 0)
                 elif label_type == "transition_object_name":
-                    pen = QPen(QColor("orange"), 0)
+                    obj_id = group.get('object_id')
+                    obj_unused = False
+                    if obj_id:
+                        obj_ref = next((o for o in self.geometry_data.get('transition_objects', []) if o.get('id') == obj_id), None)
+                        if obj_ref:
+                            obj_unused = bool(obj_ref.get('unused', False))
+                    pen_color = QColor("orange") if not obj_unused else QColor("#999999")
+                    pen_style = Qt.PenStyle.SolidLine if not obj_unused else Qt.PenStyle.DashLine
+                    pen = QPen(pen_color, 0, pen_style)
                 line_item = self.scene.addLine(anchor.x(), anchor.y(), target.x(), target.y(), pen)
                 line_item.setZValue(9)
                 # 타입별로 data 설정
                 if label_type == "transition_object_name":
                     line_item.setData(0, "transition_object_name_leader")
+                    obj_id = group.get('object_id')
+                    if obj_id:
+                        line_item.setData(1, obj_id)
                     if line_item not in self.lod_text_items:
                         self.lod_text_items.append(line_item)
                 elif label_type == "jump_link_name":
@@ -2637,7 +2649,16 @@ class FullMinimapEditorDialog(QDialog):
                 elif label_type == "jump_link_name":
                     pen = QPen(QColor("green"), 0)
                 elif label_type == "transition_object_name":
-                    pen = QPen(QColor("orange"), 0)
+                    obj_id = group.get('object_id')
+                    obj_unused = False
+                    if obj_id:
+                        obj_ref = next((o for o in self.geometry_data.get('transition_objects', []) if o.get('id') == obj_id), None)
+                        if obj_ref:
+                            obj_unused = bool(obj_ref.get('unused', False))
+                    pen_color = QColor("orange") if not obj_unused else QColor("#999999")
+                    pen_style = Qt.PenStyle.SolidLine if not obj_unused else Qt.PenStyle.DashLine
+                    pen = QPen(pen_color, 0, pen_style)
+                    group["leader"].setData(1, obj_id)
                 if pen is not None:
                     group["leader"].setPen(pen)
     
@@ -2728,9 +2749,10 @@ class FullMinimapEditorDialog(QDialog):
                 for obj_data in self.geometry_data.get("transition_objects", []):
                     points = obj_data.get("points", [])
                     if len(points) == 2:
+                        is_unused = bool(obj_data.get('unused', False))
                         p1_pos = QPointF(points[0][0], points[0][1])
                         p2_pos = QPointF(points[1][0], points[1][1])
-                        line_item = self._add_object_line(p1_pos, p2_pos, obj_data['id'])
+                        line_item = self._add_object_line(p1_pos, p2_pos, obj_data['id'], unused=is_unused)
                         
                         # [v11.2.8] 층 이동 오브젝트 좌표 텍스트 (위치 계산 수정)
                         upper_point = p1_pos if p1_pos.y() < p2_pos.y() else p2_pos
@@ -2761,7 +2783,7 @@ class FullMinimapEditorDialog(QDialog):
                             font = QFont("맑은 고딕", 3, QFont.Weight.Bold)  # 웨이포인트 수준의 기본 크기
                             text_item = QGraphicsTextItem(name)
                             text_item.setFont(font)
-                            text_item.setDefaultTextColor(QColor("orange"))
+                            text_item.setDefaultTextColor(QColor("orange") if not is_unused else QColor("#999999"))
 
                             # 배경을 글자에 딱 맞게: QFontMetricsF로 타이트 바운딩 사용
                             fm = QFontMetricsF(font)
@@ -2776,11 +2798,14 @@ class FullMinimapEditorDialog(QDialog):
                             is_vertical = dx <= 3 and dy > 0
 
                             background_rect = RoundedRectItem(QRectF(0, 0, bg_rect_geom.width(), bg_rect_geom.height()), 3, 3)
-                            background_rect.setBrush(QColor(0, 0, 0, 120))
+                            bg_alpha = 120 if not is_unused else 80
+                            background_rect.setBrush(QColor(0, 0, 0, bg_alpha))
                             background_rect.setPen(QPen(Qt.GlobalColor.transparent))
                             background_rect.setData(0, "transition_object_name_bg")
+                            background_rect.setData(1, obj_data['id'])
 
                             text_item.setData(0, "transition_object_name")
+                            text_item.setData(1, obj_data['id'])
                             # 스케일 시 중앙 고정
                             background_rect.setTransformOriginPoint(bg_rect_geom.center())
                             text_item.setTransformOriginPoint(tight_rect.center())
@@ -2808,7 +2833,8 @@ class FullMinimapEditorDialog(QDialog):
                                     "bg": background_rect,
                                     "text": text_item,
                                     "preferred": "above",
-                                    "type": "transition_object_name"
+                                    "type": "transition_object_name",
+                                    "object_id": obj_data['id'],
                                 })
                 
                 for jump_data in self.geometry_data.get("jump_links", []):
@@ -3233,6 +3259,71 @@ class FullMinimapEditorDialog(QDialog):
                     pass
         self._reset_view_interaction_state()
 
+    def _edit_transition_object(self, obj_id: str) -> None:
+        """사다리(층 이동 오브젝트)의 추가 설정을 편집합니다."""
+        if not obj_id:
+            return
+        obj = next((o for o in self.geometry_data.get('transition_objects', []) if o.get('id') == obj_id), None)
+        if not obj:
+            return
+
+        dialog = QDialog(self)
+        dialog.setWindowTitle("사다리 옵션")
+        layout = QVBoxLayout(dialog)
+
+        name = obj.get('dynamic_name') or obj_id
+        name_label = QLabel(f"사다리: {name}")
+        name_label.setWordWrap(True)
+        layout.addWidget(name_label)
+
+        try:
+            connected = []
+            for key in ('start_line_id', 'end_line_id'):
+                line_id = obj.get(key)
+                if not line_id:
+                    continue
+                line = next((ln for ln in self.geometry_data.get('terrain_lines', []) if ln.get('id') == line_id), None)
+                if line and line.get('dynamic_name'):
+                    connected.append(line['dynamic_name'])
+            if connected:
+                layout.addWidget(QLabel(f"연결 지형: {', '.join(connected)}"))
+        except Exception:
+            pass
+
+        unused_checkbox = QCheckBox("미사용 사다리")
+        unused_checkbox.setToolTip("체크하면 경로 계산에서는 제외되고, 안전 판단용(아래점프 회피 등)으로만 사용됩니다.")
+        unused_checkbox.setChecked(bool(obj.get('unused', False)))
+        layout.addWidget(unused_checkbox)
+
+        button_box = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel, parent=dialog)
+        button_box.accepted.connect(dialog.accept)
+        button_box.rejected.connect(dialog.reject)
+        layout.addWidget(button_box)
+
+        result = dialog.exec()
+        if result == QDialog.DialogCode.Accepted:
+            previous_state = bool(obj.get('unused', False))
+            new_state = bool(unused_checkbox.isChecked())
+            obj['unused'] = new_state
+
+            if previous_state != new_state:
+                if self.parent_map_tab and hasattr(self.parent_map_tab, 'update_general_log'):
+                    try:
+                        state_text = "미사용" if new_state else "사용"
+                        self.parent_map_tab.update_general_log(
+                            f"[지형 편집] 사다리 '{name}'를 {state_text} 상태로 설정했습니다.", "gray"
+                        )
+                    except Exception:
+                        pass
+                if self.parent_map_tab and hasattr(self.parent_map_tab, 'save_profile_data'):
+                    try:
+                        self.parent_map_tab.save_profile_data()
+                    except Exception:
+                        pass
+
+            self.populate_scene()
+        self._reset_view_interaction_state()
+
     def on_scene_mouse_press(self, scene_pos, button):
         #  '기본' 모드에서 웨이포인트 클릭 시 이름 변경 기능 + 좌표 토글 ---
         if self.current_mode == "select" and button in (Qt.MouseButton.LeftButton, Qt.MouseButton.RightButton):
@@ -3269,6 +3360,14 @@ class FullMinimapEditorDialog(QDialog):
                     else:
                         self._delete_hunt_zone_by_id(zone_id)
                 return
+
+            if button == Qt.MouseButton.LeftButton and item_at_pos:
+                item_type = item_at_pos.data(0)
+                if item_type in {"transition_object", "transition_object_name", "transition_object_name_bg", "transition_object_name_leader"}:
+                    obj_id = item_at_pos.data(1)
+                    if obj_id:
+                        self._edit_transition_object(obj_id)
+                        return
 
             if item_at_pos and item_at_pos.data(0) in ["forbidden_wall", "forbidden_wall_indicator", "forbidden_wall_range"]:
                 wall_id = item_at_pos.data(1)
@@ -3395,7 +3494,8 @@ class FullMinimapEditorDialog(QDialog):
                         "id": obj_id,
                         "start_line_id": start_line_id,
                         "end_line_id": end_line_id,
-                        "points": [[final_start_pos.x(), final_start_pos.y()], [final_end_pos.x(), final_end_pos.y()]]
+                        "points": [[final_start_pos.x(), final_start_pos.y()], [final_end_pos.x(), final_end_pos.y()]],
+                        "unused": False,
                     }
                     self.geometry_data["transition_objects"].append(new_obj)
                     self._finish_drawing_object(cancel=False)
@@ -4325,9 +4425,11 @@ class FullMinimapEditorDialog(QDialog):
         if hasattr(self, 'current_object_floor'):
             del self.current_object_floor
         
-    def _add_object_line(self, p1, p2, obj_id):
+    def _add_object_line(self, p1, p2, obj_id, *, unused: bool = False):
         """씬에 수직 이동 오브젝트 라인을 추가합니다."""
-        line = self.scene.addLine(p1.x(), p1.y(), p2.x(), p2.y(), QPen(QColor(255, 165, 0), 3))
+        pen_color = QColor(255, 165, 0) if not unused else QColor(150, 150, 150)
+        pen_style = Qt.PenStyle.SolidLine if not unused else Qt.PenStyle.DashLine
+        line = self.scene.addLine(p1.x(), p1.y(), p2.x(), p2.y(), QPen(pen_color, 3, pen_style))
         line.setData(0, "transition_object")
         line.setData(1, obj_id)
         return line
