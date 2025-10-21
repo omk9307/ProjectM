@@ -308,13 +308,14 @@ class MainWindow(QMainWindow):
         """
         # 모니터링 탭 ↔ 다른 탭 연결
         monitoring_tab = self.loaded_tabs.get('모니터링')
+        learning_tab = self.loaded_tabs.get('학습') if '학습' in self.loaded_tabs else None
         if monitoring_tab:
             try:
                 map_tab = self.loaded_tabs.get('맵')
                 hunt_tab = self.loaded_tabs.get('사냥')
                 auto_tab = self.loaded_tabs.get('자동 제어')
                 if hasattr(monitoring_tab, 'attach_tabs'):
-                    monitoring_tab.attach_tabs(map_tab, hunt_tab, auto_tab)
+                    monitoring_tab.attach_tabs(map_tab, hunt_tab, auto_tab, learning_tab)
             except Exception:
                 pass
         if '학습' in self.loaded_tabs and '사냥' in self.loaded_tabs:

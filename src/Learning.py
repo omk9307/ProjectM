@@ -31,6 +31,7 @@ import hashlib
 import random
 import requests
 import copy
+from datetime import datetime
 from pathlib import Path
 from collections import OrderedDict
 from typing import Optional, ClassVar, List, Dict
@@ -3184,6 +3185,9 @@ class DataManager:
         self.dataset_path = os.path.join(self.workspace_root, 'datasets', 'maple_dataset')
         self.images_path = os.path.join(self.dataset_path, 'images')
         self.labels_path = os.path.join(self.dataset_path, 'labels')
+        self.pending_root = os.path.join(self.dataset_path, 'pending')
+        self.pending_images_path = os.path.join(self.pending_root, 'images')
+        self.pending_manifest_path = os.path.join(self.pending_root, 'manifest.json')
         self.manifest_path = os.path.join(self.dataset_path, 'manifest.json')
         self.yaml_path = os.path.join(self.dataset_path, 'data.yaml')
         self.models_path = os.path.join(self.workspace_root, 'models')
@@ -3412,6 +3416,8 @@ class DataManager:
         os.makedirs(self.labels_path, exist_ok=True)
         os.makedirs(self.models_path, exist_ok=True)
         os.makedirs(self.config_path, exist_ok=True)
+        os.makedirs(self.pending_root, exist_ok=True)
+        os.makedirs(self.pending_images_path, exist_ok=True)
         os.makedirs(self.nickname_dir, exist_ok=True)
         os.makedirs(self.nickname_templates_dir, exist_ok=True)
         os.makedirs(self.direction_dir, exist_ok=True)
@@ -3447,6 +3453,113 @@ class DataManager:
             with open(self.presets_path, 'w', encoding='utf-8') as f: json.dump({}, f)
         if not os.path.exists(self.settings_path):
             with open(self.settings_path, 'w', encoding='utf-8') as f: json.dump({}, f)
+        if not os.path.exists(self.pending_manifest_path):
+            with open(self.pending_manifest_path, 'w', encoding='utf-8') as f:
+                json.dump([], f, ensure_ascii=False, indent=2)
+        else:
+            try:
+                with open(self.pending_manifest_path, 'r', encoding='utf-8') as f:
+                    data = json.load(f)
+                if not isinstance(data, list):
+                    raise ValueError('pending manifest must be list')
+            except (json.JSONDecodeError, FileNotFoundError, ValueError):
+                with open(self.pending_manifest_path, 'w', encoding='utf-8') as f:
+                    json.dump([], f, ensure_ascii=False, indent=2)
+
+    def _load_pending_entries(self) -> list[dict]:
+        try:
+            with open(self.pending_manifest_path, 'r', encoding='utf-8') as f:
+                entries = json.load(f)
+            if isinstance(entries, list):
+                return entries
+        except (json.JSONDecodeError, FileNotFoundError):
+            pass
+        return []
+
+    def _save_pending_entries(self, entries: list[dict]) -> None:
+        try:
+            with open(self.pending_manifest_path, 'w', encoding='utf-8') as f:
+                json.dump(entries, f, ensure_ascii=False, indent=2)
+        except Exception as exc:
+            print(f"[DataManager] pending manifest 저장 실패: {exc}")
+
+    def list_pending_captures(self) -> list[dict]:
+        entries = self._load_pending_entries()
+        def _sort_key(item: dict) -> tuple:
+            created = item.get('created_at') or ''
+            return (created, item.get('id') or '')
+        return sorted(entries, key=_sort_key, reverse=True)
+
+    def get_pending_image_path(self, filename: str) -> str:
+        return os.path.join(self.pending_images_path, filename)
+
+    def add_pending_captures(
+        self,
+        images_bgr: list[np.ndarray],
+        *,
+        initial_class_name: str | None,
+        source: str | None = None,
+        capture_options: dict | None = None,
+    ) -> list[dict]:
+        if not images_bgr:
+            return []
+        os.makedirs(self.pending_images_path, exist_ok=True)
+        entries = self._load_pending_entries()
+        total = len(images_bgr)
+        timestamp = time.strftime('%Y%m%d_%H%M%S')
+        batch_tag = uuid.uuid4().hex[:8]
+        saved_entries: list[dict] = []
+        for idx, image in enumerate(images_bgr, start=1):
+            if image is None or not isinstance(image, np.ndarray) or image.size == 0:
+                continue
+            capture_id = f"{timestamp}_{batch_tag}_{idx:02d}"
+            filename = f"{capture_id}.png"
+            image_path = os.path.join(self.pending_images_path, filename)
+            try:
+                cv2.imwrite(image_path, image)
+            except Exception as exc:
+                print(f"[DataManager] pending 캡처 저장 실패({filename}): {exc}")
+                continue
+            entry = {
+                'id': capture_id,
+                'filename': filename,
+                'created_at': datetime.now().isoformat(timespec='seconds'),
+                'initial_class': initial_class_name,
+                'source': source or 'unknown',
+                'sequence_index': idx,
+                'sequence_total': total,
+                'capture_options': capture_options or {},
+            }
+            entries.append(entry)
+            saved_entries.append(entry)
+        if saved_entries:
+            self._save_pending_entries(entries)
+        return saved_entries
+
+    def delete_pending_captures(self, capture_ids: list[str]) -> None:
+        if not capture_ids:
+            return
+        entries = self._load_pending_entries()
+        ids_to_remove = set(capture_ids)
+        remaining: list[dict] = []
+        for entry in entries:
+            if entry.get('id') in ids_to_remove:
+                filename = entry.get('filename')
+                if isinstance(filename, str) and filename:
+                    path = os.path.join(self.pending_images_path, filename)
+                    if os.path.exists(path):
+                        try:
+                            os.remove(path)
+                        except OSError:
+                            pass
+            else:
+                remaining.append(entry)
+        self._save_pending_entries(remaining)
+
+    def mark_pending_capture_processed(self, capture_id: str) -> None:
+        if not capture_id:
+            return
+        self.delete_pending_captures([capture_id])
         # 닉네임 템플릿 설정 초기화
         default_nickname_config = self._default_nickname_config()
         if not os.path.exists(self.nickname_config_path):
@@ -5709,6 +5822,7 @@ class LearningTab(QWidget):
         self.latest_run_dir = None
         self.sam_predictor = None
         self.current_image_sort_mode = 'date'
+        self._image_list_mode = 'class'
         # v1.4: 마지막 사용 모델 로드
         settings = self.data_manager.load_settings()
         self.last_used_model = self.data_manager.get_last_used_model()
@@ -5850,6 +5964,11 @@ class LearningTab(QWidget):
         image_list_header_layout = QHBoxLayout()
         image_list_header_layout.setContentsMargins(0, 0, 0, 0)
         image_list_header_layout.setSpacing(6)
+        self.pending_toggle_btn = QPushButton("저장된 캡처")
+        self.pending_toggle_btn.setCheckable(True)
+        self.pending_toggle_btn.setToolTip('저장 공간에 모아둔 캡처를 확인합니다.')
+        self.pending_toggle_btn.toggled.connect(self._handle_pending_toggle)
+        image_list_header_layout.addWidget(self.pending_toggle_btn)
         image_list_header_layout.addWidget(QLabel("정렬:"))
         self.sort_by_name_btn = QPushButton("이름순")
         self.sort_by_date_btn = QPushButton("추가순")
@@ -9755,6 +9874,12 @@ class LearningTab(QWidget):
         self.sort_by_date_btn.setChecked(mode == 'date')
         self.populate_image_list()
 
+    def _handle_pending_toggle(self, checked: bool) -> None:
+        self._image_list_mode = 'pending' if checked else 'class'
+        if checked:
+            self.add_image_btn.setEnabled(False)
+        self.populate_image_list()
+
     def _get_selected_class_name(self):
         """클래스 트리에서 현재 선택된 클래스 이름을 반환합니다."""
         selected_item = self.class_tree_widget.currentItem() if hasattr(self, 'class_tree_widget') else None
@@ -9782,6 +9907,9 @@ class LearningTab(QWidget):
 
     def populate_image_list(self):
         self.image_list_widget.clear()
+        if getattr(self, '_image_list_mode', 'class') == 'pending':
+            self._populate_pending_capture_list()
+            return
         selected_items = self.class_tree_widget.selectedItems()
         if not selected_items:
             # v1.3: 아무것도 선택되지 않았을 때 버튼 상태 제어
@@ -9829,6 +9957,60 @@ class LearningTab(QWidget):
             item = QListWidgetItem(icon, os.path.basename(path))
             item.setData(Qt.ItemDataRole.UserRole, path)
             self.image_list_widget.addItem(item)
+
+    def _populate_pending_capture_list(self) -> None:
+        entries = self.data_manager.list_pending_captures()
+        if not entries:
+            placeholder = QListWidgetItem("저장된 캡처가 없습니다.")
+            placeholder.setFlags(Qt.ItemFlag.NoItemFlags)
+            self.image_list_widget.addItem(placeholder)
+            self.edit_image_btn.setEnabled(False)
+            self.delete_image_btn.setEnabled(False)
+            self.add_image_btn.setEnabled(False)
+            return
+
+        for entry in entries:
+            filename = entry.get('filename')
+            capture_id = entry.get('id')
+            if not isinstance(filename, str) or not filename:
+                continue
+            image_path = self.data_manager.get_pending_image_path(filename)
+            if not os.path.exists(image_path):
+                continue
+            icon = self._get_thumbnail_icon(image_path)
+            created_at = entry.get('created_at') or ''
+            created_display = created_at.replace('T', ' ') if isinstance(created_at, str) else ''
+            seq_total = entry.get('sequence_total') or 0
+            seq_index = entry.get('sequence_index') or 0
+            parts = []
+            if created_display:
+                parts.append(created_display)
+            if seq_total and isinstance(seq_total, int) and seq_total > 1:
+                parts.append(f"{seq_index}/{seq_total}")
+            initial_class = entry.get('initial_class')
+            if isinstance(initial_class, str) and initial_class.strip():
+                parts.append(initial_class.strip())
+            text = " · ".join(parts) if parts else capture_id or filename
+            item = QListWidgetItem(icon, text)
+            item.setData(Qt.ItemDataRole.UserRole, image_path)
+            item.setData(Qt.ItemDataRole.UserRole + 1, capture_id)
+            item.setData(Qt.ItemDataRole.UserRole + 2, entry)
+            tooltip_lines = [f"파일: {filename}"]
+            if created_display:
+                tooltip_lines.append(f"저장: {created_display}")
+            if seq_total and isinstance(seq_total, int) and seq_total > 1:
+                tooltip_lines.append(f"배치: {seq_index}/{seq_total}")
+            if isinstance(initial_class, str) and initial_class.strip():
+                tooltip_lines.append(f"초기 클래스: {initial_class.strip()}")
+            source = entry.get('source')
+            if isinstance(source, str) and source.strip():
+                tooltip_lines.append(f"출처: {source.strip()}")
+            item.setToolTip("\n".join(tooltip_lines))
+            self.image_list_widget.addItem(item)
+
+        self.edit_image_btn.setEnabled(True)
+        self.delete_image_btn.setEnabled(True)
+        self.add_image_btn.setEnabled(False)
 
     def _thumbnail_disk_prefix(self, image_path):
         return hashlib.sha1(image_path.encode('utf-8', 'ignore')).hexdigest()
@@ -10117,12 +10299,34 @@ class LearningTab(QWidget):
         selected_items = self.image_list_widget.selectedItems()
         if not selected_items: return
         if QMessageBox.question(self, '삭제', f"이미지 {len(selected_items)}개를 삭제하시겠습니까?") == QMessageBox.StandardButton.Yes:
-            for item in selected_items:
-                image_path = item.data(Qt.ItemDataRole.UserRole)
-                if image_path:
-                    self._invalidate_thumbnail_cache(image_path)
-                    self.data_manager.delete_image(image_path)
-            self.populate_image_list()
+            if getattr(self, '_image_list_mode', 'class') == 'pending':
+                capture_ids: set[str] = set()
+                for item in selected_items:
+                    capture_id = item.data(Qt.ItemDataRole.UserRole + 1)
+                    image_path = item.data(Qt.ItemDataRole.UserRole)
+                    if image_path:
+                        self._invalidate_thumbnail_cache(image_path)
+                    if isinstance(capture_id, str) and capture_id:
+                        capture_ids.add(capture_id)
+                if capture_ids:
+                    self.data_manager.delete_pending_captures(list(capture_ids))
+                    if hasattr(self, 'log_viewer'):
+                        self.log_viewer.append(f"저장된 캡처 {len(capture_ids)}개를 삭제했습니다.")
+                self.populate_image_list()
+            else:
+                for item in selected_items:
+                    image_path = item.data(Qt.ItemDataRole.UserRole)
+                    if image_path:
+                        self._invalidate_thumbnail_cache(image_path)
+                        self.data_manager.delete_image(image_path)
+                self.populate_image_list()
+
+    def _finalize_pending_capture(self, pending_capture_id: str | None) -> None:
+        if not pending_capture_id:
+            return
+        self.data_manager.mark_pending_capture_processed(pending_capture_id)
+        if hasattr(self, 'log_viewer'):
+            self.log_viewer.append(f"저장된 캡처(ID: {pending_capture_id})를 학습 데이터로 이동했습니다.")
 
     def capture_screen(self):
         count = self.capture_count_spinbox.value()
@@ -10185,7 +10389,64 @@ class LearningTab(QWidget):
         finally:
             self.update_status_message("준비")
 
-    def open_editor_mode_dialog(self, pixmap, image_path=None, initial_polygons=None, initial_class_name=None, *, seq_index: int | None = None, seq_total: int | None = None):
+    def save_captures_to_pending(
+        self,
+        pixmaps: list[QPixmap],
+        *,
+        initial_class_name: str | None,
+        source: str = 'manual',
+        capture_options: dict | None = None,
+    ) -> list[dict]:
+        if not pixmaps:
+            return []
+
+        images_bgr: list[np.ndarray] = []
+        for pixmap in pixmaps:
+            if not isinstance(pixmap, QPixmap) or pixmap.isNull():
+                continue
+            q_image = pixmap.toImage().convertToFormat(QImage.Format.Format_RGB888)
+            w, h = q_image.width(), q_image.height()
+            if w <= 0 or h <= 0:
+                continue
+            ptr = q_image.bits()
+            ptr.setsize(q_image.sizeInBytes())
+            arr = np.array(ptr).reshape(h, q_image.bytesPerLine())[:, :w * 3].reshape(h, w, 3)
+            images_bgr.append(cv2.cvtColor(arr, cv2.COLOR_RGB2BGR))
+
+        if not images_bgr:
+            return []
+
+        entries = self.data_manager.add_pending_captures(
+            images_bgr,
+            initial_class_name=initial_class_name,
+            source=source,
+            capture_options=capture_options or {},
+        )
+        if entries and hasattr(self, 'log_viewer'):
+            self.log_viewer.append(f"저장된 캡처 보관함에 {len(entries)}개 이미지를 추가했습니다.")
+        if entries and getattr(self, '_image_list_mode', 'class') == 'pending':
+            self.populate_image_list()
+        return entries
+
+    def get_capture_preferences(self) -> dict:
+        return {
+            'delay_seconds': float(self.capture_delay_spinbox.value()) if hasattr(self, 'capture_delay_spinbox') else 0.0,
+            'count': int(self.capture_count_spinbox.value()) if hasattr(self, 'capture_count_spinbox') else 1,
+            'interval_seconds': float(self.capture_interval_spinbox.value()) if hasattr(self, 'capture_interval_spinbox') else 1.0,
+            'initial_class': self._get_selected_class_name(),
+        }
+
+    def open_editor_mode_dialog(
+        self,
+        pixmap,
+        image_path=None,
+        initial_polygons=None,
+        initial_class_name=None,
+        *,
+        seq_index: int | None = None,
+        seq_total: int | None = None,
+        pending_capture_id: str | None = None,
+    ):
         dialog = EditModeDialog(pixmap, self.sam_predictor is not None, self)
         mode_result = dialog.exec()
         if mode_result == EditModeDialog.CANCEL:
@@ -10300,6 +10561,8 @@ class LearningTab(QWidget):
                 filename = self.data_manager.add_distractor(full_image_bgr)
                 self.log_viewer.append(f"라벨 없는 전체 이미지를 방해 요소 '{filename}'(으)로 추가했습니다.")
 
+            self._finalize_pending_capture(pending_capture_id)
+
         # 시나리오 2: 방해 요소로 저장
         elif editor_result in {PolygonAnnotationEditor.DistractorSaved, SAMAnnotationEditor.DistractorSaved}:
             polygons_data = editor_dialog.result_polygons()
@@ -10325,6 +10588,7 @@ class LearningTab(QWidget):
             filename = self.data_manager.add_distractor(cropped_bgr)
             origin_name = f"(원본: {os.path.basename(image_path)})" if image_path else "(원본: 새 캡처)"
             self.log_viewer.append(f"새로운 방해 요소 '{filename}'를 추가했습니다. {origin_name}")
+            self._finalize_pending_capture(pending_capture_id)
 
         self.populate_image_list()
 
@@ -10340,30 +10604,72 @@ class LearningTab(QWidget):
                     return
 
     def edit_selected_image(self):
-        image_paths_to_edit = [item.data(Qt.ItemDataRole.UserRole) for item in self.image_list_widget.selectedItems()]
+        selected_items = self.image_list_widget.selectedItems()
+        if not selected_items:
+            QMessageBox.warning(self, '오류', '편집할 이미지를 선택하세요.')
+            return
 
+        if getattr(self, '_image_list_mode', 'class') == 'pending':
+            pending_records: list[tuple[str, str, dict]] = []
+            for item in selected_items:
+                image_path = item.data(Qt.ItemDataRole.UserRole)
+                capture_id = item.data(Qt.ItemDataRole.UserRole + 1)
+                entry = item.data(Qt.ItemDataRole.UserRole + 2) or {}
+                if isinstance(image_path, str) and isinstance(capture_id, str):
+                    pending_records.append((image_path, capture_id, entry if isinstance(entry, dict) else {}))
+            if not pending_records:
+                QMessageBox.warning(self, '오류', '선택한 캡처 정보를 불러올 수 없습니다.')
+                return
+
+            total = len(pending_records)
+            for idx, (image_path, capture_id, entry) in enumerate(pending_records, start=1):
+                img_bgr = cv2.imread(image_path)
+                if img_bgr is None:
+                    if hasattr(self, 'log_viewer'):
+                        self.log_viewer.append(f"오류: '{os.path.basename(image_path)}' 파일을 불러올 수 없습니다.")
+                    continue
+
+                img_rgb = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
+                h, w, ch = img_rgb.shape
+                bytes_per_line = ch * w
+                q_image = QImage(img_rgb.data, w, h, bytes_per_line, QImage.Format.Format_RGB888)
+                initial_class_name = entry.get('initial_class') if isinstance(entry.get('initial_class'), str) else None
+                if not initial_class_name:
+                    initial_class_name = self._get_selected_class_name()
+                self.open_editor_mode_dialog(
+                    QPixmap.fromImage(q_image),
+                    image_path=None,
+                    initial_polygons=None,
+                    initial_class_name=initial_class_name,
+                    seq_index=idx if total > 1 else None,
+                    seq_total=total if total > 1 else None,
+                    pending_capture_id=capture_id,
+                )
+            return
+
+        image_paths_to_edit = [item.data(Qt.ItemDataRole.UserRole) for item in selected_items if item.data(Qt.ItemDataRole.UserRole)]
         if not image_paths_to_edit:
-            QMessageBox.warning(self, '오류', '편집할 이미지를 선택하세요.'); return
+            QMessageBox.warning(self, '오류', '편집할 이미지를 선택하세요.')
+            return
 
         selected_class_item = self.class_tree_widget.currentItem()
-        if not selected_class_item: return
+        if not selected_class_item:
+            return
 
-        # v1.3: 네거티브 샘플인지 확인
         is_editing_negative_sample = (selected_class_item.text(0) == NEGATIVE_SAMPLES_NAME)
-        
-        # 네거티브 샘플을 편집할 때는 초기 클래스 이름이 없음
         if is_editing_negative_sample:
             initial_class_name = None
         elif selected_class_item.parent():
-             initial_class_name = selected_class_item.text(0)
-        else: # 카테고리가 선택된 경우는 없음(버튼 비활성화)
+            initial_class_name = selected_class_item.text(0)
+        else:
             return
 
         total = len(image_paths_to_edit)
         for i, image_path in enumerate(image_paths_to_edit, start=1):
             img_bgr = cv2.imread(image_path)
             if img_bgr is None:
-                self.log_viewer.append(f"오류: '{os.path.basename(image_path)}' 파일을 열 수 없습니다.")
+                if hasattr(self, 'log_viewer'):
+                    self.log_viewer.append(f"오류: '{os.path.basename(image_path)}' 파일을 열 수 없습니다.")
                 continue
 
             h, w, _ = img_bgr.shape
@@ -10390,6 +10696,7 @@ class LearningTab(QWidget):
                 initial_class_name=initial_class_name,
                 seq_index=i if total > 1 else None,
                 seq_total=total if total > 1 else None,
+                pending_capture_id=None,
             )
 
     def start_training(self):

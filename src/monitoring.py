@@ -9,10 +9,13 @@ import re
 
 import cv2
 import numpy as np
+import mss
+import pygetwindow as gw
 from PyQt6.QtCore import Qt, QTimer, QThread, QRectF, pyqtSlot, pyqtSignal, QSettings, QSize
 from datetime import datetime
 from PyQt6.QtGui import QImage, QPixmap, QColor, QKeySequence, QPainter, QPen, QBrush
 from PyQt6.QtWidgets import (
+    QApplication,
     QWidget,
     QVBoxLayout,
     QHBoxLayout,
@@ -27,6 +30,7 @@ from PyQt6.QtWidgets import (
     QSplitter,
     QPushButton,
     QAbstractItemView,
+    QMessageBox,
 )
 
 try:
@@ -213,6 +217,7 @@ class MonitoringTab(QWidget):
         self._map_tab = None
         self._hunt_tab = None
         self._auto_tab = None
+        self._learning_tab = None
 
         self._ui_visible: bool = True
 
@@ -366,6 +371,11 @@ class MonitoringTab(QWidget):
             self.emergency_stop_btn.clicked.connect(self._on_click_emergency_full_stop)
             info_ctrl_layout.addSpacing(8)
             info_ctrl_layout.addWidget(self.emergency_stop_btn)
+            self.capture_to_pending_btn = QPushButton("캡처 저장")
+            self.capture_to_pending_btn.setToolTip("학습 탭 설정으로 Mapleland 창을 캡처하여 저장 공간에 보관합니다.")
+            self.capture_to_pending_btn.clicked.connect(self._on_click_capture_to_pending)
+            info_ctrl_layout.addSpacing(4)
+            info_ctrl_layout.addWidget(self.capture_to_pending_btn)
         except Exception:
             pass
         info_ctrl_layout.addStretch(1)
@@ -453,7 +463,7 @@ class MonitoringTab(QWidget):
         self.hunt_interval_spin.setDecimals(2)
         self.hunt_interval_spin.setRange(0.0, 5.0)
         self.hunt_interval_spin.setSingleStep(0.01)
-        self.hunt_interval_spin.setValue(1.0)
+        self.hunt_interval_spin.setValue(0.1)
         self.hunt_interval_spin.setSuffix(" s")
         self.hunt_interval_spin.setSpecialValueText("실시간")
         self.hunt_interval_spin.valueChanged.connect(self._on_hunt_interval_changed)
@@ -759,10 +769,16 @@ class MonitoringTab(QWidget):
         self._info_timer.start()
 
     # --- 탭 간 연결 ---
-    def attach_tabs(self, map_tab, hunt_tab, auto_control_tab) -> None:
+    def attach_tabs(self, map_tab, hunt_tab, auto_control_tab, learning_tab=None) -> None:
         self._map_tab = map_tab
         self._hunt_tab = hunt_tab
         self._auto_tab = auto_control_tab
+        self._learning_tab = learning_tab
+        try:
+            if hasattr(self, 'capture_to_pending_btn'):
+                self.capture_to_pending_btn.setEnabled(self._learning_tab is not None)
+        except Exception:
+            pass
         # 상태 모니터 연결(가능 시)
         try:
             monitor = None
@@ -1245,6 +1261,117 @@ class MonitoringTab(QWidget):
         # 색상은 원색 유지
         self.key_log.append_line(line, color, preserve_color=True)
         self._last_key_log_ts = now
+
+    def _append_monitor_notice(self, message: str, color: str = "#42a5f5") -> None:
+        try:
+            self.hunt_log.append_line(message, color)
+        except Exception:
+            pass
+
+    def _on_click_capture_to_pending(self) -> None:
+        if not self._learning_tab or not hasattr(self._learning_tab, 'save_captures_to_pending'):
+            QMessageBox.warning(self, "캡처 저장", "학습 탭을 찾을 수 없어 저장할 수 없습니다.")
+            return
+
+        try:
+            prefs = self._learning_tab.get_capture_preferences()
+        except Exception:
+            prefs = {}
+
+        try:
+            count = max(1, int(prefs.get('count', 1) or 1))
+        except Exception:
+            count = 1
+        try:
+            interval = float(prefs.get('interval_seconds', 1.0) or 1.0)
+        except Exception:
+            interval = 1.0
+        try:
+            delay_seconds = max(0.0, float(prefs.get('delay_seconds', 0.0) or 0.0))
+        except Exception:
+            delay_seconds = 0.0
+        initial_class = prefs.get('initial_class') if isinstance(prefs, dict) else None
+
+        try:
+            QApplication.processEvents()
+            QThread.msleep(150)
+        except Exception:
+            pass
+
+        try:
+            target_windows = gw.getWindowsWithTitle('Mapleland')
+        except Exception as exc:
+            QMessageBox.warning(self, "캡처 저장", f"게임 창 검색 실패: {exc}")
+            return
+
+        if not target_windows:
+            QMessageBox.warning(self, "캡처 저장", "메이플스토리 게임 창을 찾을 수 없습니다.")
+            return
+
+        target_window = target_windows[0]
+        try:
+            if target_window.isMinimized:
+                target_window.restore()
+                QThread.msleep(500)
+        except Exception:
+            pass
+
+        capture_region = {
+            'top': target_window.top,
+            'left': target_window.left,
+            'width': target_window.width,
+            'height': target_window.height,
+        }
+
+        if capture_region['width'] <= 0 or capture_region['height'] <= 0:
+            QMessageBox.warning(self, "캡처 저장", "게임 창의 크기가 유효하지 않습니다.")
+            return
+
+        if delay_seconds > 0:
+            self._append_monitor_notice(f"캡처 시작 전 {delay_seconds:.1f}초 대기합니다.", "#90caf9")
+            QThread.msleep(int(delay_seconds * 1000))
+
+        pixmaps: list[QPixmap] = []
+        try:
+            with mss.mss() as sct:
+                for idx in range(count):
+                    sct_img = sct.grab(capture_region)
+                    frame_rgb = cv2.cvtColor(np.array(sct_img), cv2.COLOR_BGRA2RGB)
+                    h, w, ch = frame_rgb.shape
+                    bytes_per_line = ch * w
+                    q_image = QImage(frame_rgb.data, w, h, bytes_per_line, QImage.Format.Format_RGB888)
+                    pixmaps.append(QPixmap.fromImage(q_image))
+                    if count > 1 and interval > 0 and idx < count - 1:
+                        QThread.msleep(int(interval * 1000))
+        except Exception as exc:
+            QMessageBox.critical(self, "캡처 저장", f"캡처 중 오류가 발생했습니다.\n{exc}")
+            return
+
+        if not pixmaps:
+            QMessageBox.warning(self, "캡처 저장", "저장할 수 있는 캡처 이미지가 없습니다.")
+            return
+
+        capture_options = {
+            'delay_seconds': delay_seconds,
+            'count': count,
+            'interval_seconds': interval,
+        }
+
+        try:
+            entries = self._learning_tab.save_captures_to_pending(
+                pixmaps,
+                initial_class_name=initial_class,
+                source='monitoring',
+                capture_options=capture_options,
+            )
+        except Exception as exc:
+            QMessageBox.critical(self, "캡처 저장", f"저장 공간에 추가하지 못했습니다.\n{exc}")
+            return
+
+        if entries:
+            self._append_monitor_notice(f"저장된 캡처 {len(entries)}개를 보관함에 추가했습니다.", "#4caf50")
+        else:
+            QMessageBox.warning(self, "캡처 저장", "유효한 캡처를 저장하지 못했습니다.")
 
     # --- 상태 모니터 스냅샷 수신 ---
     @pyqtSlot(dict)
