@@ -1083,6 +1083,20 @@ class MapTab(QWidget):
         if nav_arrow_side in ('left', 'right'):
             meta_dict['nav_arrow_side'] = nav_arrow_side
 
+        # 네비게이터가 안정 상태(걷기/정렬)로 전환되었고 지면에 충분히 가까우면
+        # 권한 스냅샷에서도 즉시 지상 상태로 간주해 대기 시간을 줄인다.
+        try:
+            nav_action_key = str(navigation_action).lower()
+        except Exception:
+            nav_action_key = ''
+        stable_nav_actions = {'move_to_target', 'align_for_climb', 'verify_alignment'}
+        if nav_action_key in stable_nav_actions:
+            if isinstance(height_from_last_floor_px, (int, float)):
+                if height_from_last_floor_px <= near_floor_threshold_px + 1e-6:
+                    player_state = 'on_terrain'
+            elif is_near_floor:
+                player_state = 'on_terrain'
+
         snapshot = PlayerStatusSnapshot(
             timestamp=timestamp,
             floor=getattr(self, 'current_player_floor', None),
