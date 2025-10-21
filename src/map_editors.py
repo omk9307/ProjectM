@@ -1696,6 +1696,7 @@ class FullMinimapEditorDialog(QDialog):
         self.route_profiles = route_profiles
         self.all_waypoints_in_profile = geometry_data.get("waypoints", []) # v10.0.0: 프로필의 모든 웨이포인트
         self.geometry_data = copy.deepcopy(geometry_data)
+        self._ensure_edgefall_flag()
         if "forbidden_walls" not in self.geometry_data:
             self.geometry_data["forbidden_walls"] = []
         # [신규] 사냥범위 존 기본 키 보장
@@ -1790,6 +1791,16 @@ class FullMinimapEditorDialog(QDialog):
                 waypoint['event_profile'] = ""
             if 'event_always' not in waypoint:
                 waypoint['event_always'] = False
+
+    def _ensure_edgefall_flag(self) -> None:
+        """모든 지형선에 낭떠러지 낙하 사용 여부 플래그를 기본값(True)으로 보장합니다."""
+        terrain_lines = self.geometry_data.get("terrain_lines", []) or []
+        for line in terrain_lines:
+            try:
+                edgefall_value = line.get('edgefall_enabled')
+                line['edgefall_enabled'] = True if edgefall_value is None else bool(edgefall_value)
+            except Exception:
+                line['edgefall_enabled'] = True
 
 
     def _get_floor_from_closest_terrain(self, point, terrain_lines):
@@ -3149,6 +3160,50 @@ class FullMinimapEditorDialog(QDialog):
                     pass
             self.populate_scene()
 
+    def _show_terrain_group_dialog(self, group_name: Optional[str], group_lines: list[dict]) -> None:
+        """지형 그룹 속성 팝업을 표시해 낙하 사용 여부를 수정할 수 있도록 합니다."""
+        if not group_lines:
+            return
+
+        dialog = QDialog(self)
+        dialog.setWindowTitle("지형 옵션")
+        layout = QVBoxLayout(dialog)
+
+        readable_name = group_name or "이름 없음"
+        name_label = QLabel(f"지형 그룹: {readable_name}")
+        name_label.setWordWrap(True)
+        layout.addWidget(name_label)
+
+        try:
+            current_floor = group_lines[0].get('floor', '')
+            layout.addWidget(QLabel(f"현재 층: {current_floor}"))
+        except Exception:
+            layout.addWidget(QLabel("현재 층: 알 수 없음"))
+
+        checkbox = QCheckBox("낭떠러지 낙하 사용")
+        current_flag = all(bool(line.get('edgefall_enabled', True)) for line in group_lines)
+        checkbox.setChecked(current_flag)
+        checkbox.setToolTip("체크 해제 시 이 지형에서는 아래점프만 사용합니다.")
+        layout.addWidget(checkbox)
+
+        button_box = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel, parent=dialog)
+        button_box.accepted.connect(dialog.accept)
+        button_box.rejected.connect(dialog.reject)
+        layout.addWidget(button_box)
+
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            new_value = checkbox.isChecked()
+            for line in group_lines:
+                line['edgefall_enabled'] = bool(new_value)
+            if self.parent_map_tab and hasattr(self.parent_map_tab, 'update_general_log'):
+                try:
+                    state_text = "사용" if new_value else "비활성"
+                    self.parent_map_tab.update_general_log(
+                        f"[지형 편집] '{readable_name}' 낭떠러지 낙하 {state_text} 설정.", "gray"
+                    )
+                except Exception:
+                    pass
+
     def on_scene_mouse_press(self, scene_pos, button):
         #  '기본' 모드에서 웨이포인트 클릭 시 이름 변경 기능 + 좌표 토글 ---
         if self.current_mode == "select" and button in (Qt.MouseButton.LeftButton, Qt.MouseButton.RightButton):
@@ -3601,6 +3656,13 @@ class FullMinimapEditorDialog(QDialog):
                     # 3. 이름 재계산 및 UI 갱신
                     self._assign_dynamic_names()
                     self._update_all_floor_texts()
+                    group_name_for_dialog = clicked_line.get('dynamic_name') if clicked_line else None
+                    if group_name_for_dialog:
+                        lines_in_group = [
+                            line_data for line_data in self.geometry_data["terrain_lines"]
+                            if line_data.get('dynamic_name') == group_name_for_dialog
+                        ]
+                        self._show_terrain_group_dialog(group_name_for_dialog, lines_in_group)
                     
             elif button == Qt.MouseButton.RightButton:
                 deleted = False
@@ -3909,7 +3971,8 @@ class FullMinimapEditorDialog(QDialog):
             self.geometry_data["terrain_lines"].append({
                 "id": self.current_line_id,
                 "points": points_data,
-                "floor": self.floor_spinbox.value()
+                "floor": self.floor_spinbox.value(),
+                "edgefall_enabled": True,
             })
             
             # 1. 모든 동적 이름을 다시 계산

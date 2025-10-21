@@ -3189,6 +3189,7 @@ class MapTab(QWidget):
 
             config_updated, features_updated, geometry_updated = self.migrate_data_structures(config, self.key_features, self.geometry_data)
             self._ensure_waypoint_event_fields()
+            self._ensure_terrain_edgefall_flag()
             self._refresh_event_waypoint_states()
             self._refresh_forbidden_wall_states()
 
@@ -3904,6 +3905,7 @@ class MapTab(QWidget):
 
         self.global_positions = self._calculate_global_positions()
         self._assign_dynamic_names()
+        self._ensure_terrain_edgefall_flag()
         
         self.editor_dialog = FullMinimapEditorDialog(
             profile_name=self.active_profile_name,
@@ -3948,6 +3950,7 @@ class MapTab(QWidget):
         try:
             self.geometry_data = self.editor_dialog.get_updated_geometry_data()
             self._ensure_waypoint_event_fields()
+            self._ensure_terrain_edgefall_flag()
             self._refresh_event_waypoint_states()
             self._refresh_forbidden_wall_states()
             self.render_options = self.editor_dialog.get_current_view_options()
@@ -3986,6 +3989,24 @@ class MapTab(QWidget):
                 waypoint['is_event'] = False
             if 'event_profile' not in waypoint or waypoint['event_profile'] is None:
                 waypoint['event_profile'] = ""
+
+    def _ensure_terrain_edgefall_flag(self):
+        """모든 지형선에 낙하 사용 플래그를 기본값(True)으로 설정합니다."""
+        terrain_lines = self.geometry_data.get("terrain_lines", []) if isinstance(self.geometry_data, dict) else []
+        for line in terrain_lines:
+            try:
+                value = line.get('edgefall_enabled')
+                line['edgefall_enabled'] = True if value is None else bool(value)
+            except Exception:
+                line['edgefall_enabled'] = True
+
+    def _is_edgefall_enabled_for_line(self, line: Optional[dict]) -> bool:
+        if not isinstance(line, dict):
+            return True
+        try:
+            return bool(line.get('edgefall_enabled', True))
+        except Exception:
+            return True
 
     def _refresh_event_waypoint_states(self):
         """이벤트 웨이포인트 무장 상태를 초기화합니다."""
@@ -11210,7 +11231,18 @@ class MapTab(QWidget):
         try:
             if self.edgefall_mode_active:
                 ps = getattr(self, 'player_state', None)
-                if ps in ['falling', 'jumping']:
+                try:
+                    current_departure_line = self._get_contact_terrain(final_player_pos)
+                except Exception:
+                    current_departure_line = None
+
+                if not self._is_edgefall_enabled_for_line(current_departure_line):
+                    self.edgefall_mode_active = False
+                    try:
+                        self.set_forbidden_wall_suppressed(False, reason='edgefall')
+                    except Exception:
+                        pass
+                elif ps in ['falling', 'jumping']:
                     # 낙하/점프 시작되면 결과 로그 남기고 모드 종료
                     try:
                         curr_x = float(final_player_pos.x()) if final_player_pos is not None else float('nan')
@@ -11389,7 +11421,7 @@ class MapTab(QWidget):
                             except Exception:
                                 trigger_dx = 2.0
                             if abs(edge_x - best_x) <= trigger_dx:
-                                if not getattr(self, 'edgefall_mode_active', False):
+                                if self._is_edgefall_enabled_for_line(departure_line) and not getattr(self, 'edgefall_mode_active', False):
                                     self.edgefall_mode_active = True
                                     try:
                                         self.set_forbidden_wall_suppressed(True, reason='edgefall')
