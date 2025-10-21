@@ -1260,7 +1260,16 @@ class CustomGraphicsView(QGraphicsView):
                 self.mousePressed.emit(self.mapToScene(event.pos()), event.button())
                 event.accept()
                 return
-            if current_mode == "select" and item and item.data(0) in ["hunt_zone", "terrain_line", "waypoint_v10", "waypoint_lod_text"]:
+            if current_mode == "select" and item and item.data(0) in [
+                "hunt_zone",
+                "terrain_line",
+                "waypoint_v10",
+                "waypoint_lod_text",
+                "transition_object",
+                "transition_object_name",
+                "transition_object_name_bg",
+                "transition_object_name_leader",
+            ]:
                 # 웨이포인트가 클릭되었으므로, 이름 변경을 위해 시그널만 방출하고
                 # QGraphicsView의 기본 드래그 로직이 시작되지 않도록 이벤트를 여기서 종료한다.
                 self.mousePressed.emit(self.mapToScene(event.pos()), event.button())
@@ -1292,7 +1301,7 @@ class CustomGraphicsView(QGraphicsView):
             # 현재 모드에 맞는 커서로 복원
             current_mode = self.parent_dialog.current_mode if self.parent_dialog else "select"
             if current_mode == "select":
-                self.setCursor(Qt.CursorShape.ArrowCursor)
+                self.setCursor(Qt.CursorShape.OpenHandCursor)
             else:
                 self.setCursor(Qt.CursorShape.CrossCursor)
             event.accept()
