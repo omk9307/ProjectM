@@ -3215,6 +3215,9 @@ class AutoControlTab(QWidget):
         # 2) 메인 시퀀스 중단 및 강제 해제
         try:
             if getattr(self, 'is_sequence_running', False):
+                current_name = self.current_command_name
+                current_reason = self.current_command_reason
+                current_source = self.current_command_source_tag
                 try:
                     self.sequence_timer.stop()
                 except Exception:
@@ -3227,11 +3230,11 @@ class AutoControlTab(QWidget):
                     self._release_all_keys(force=True)
                 except Exception:
                     pass
-                self.is_sequence_running = False
-                self.is_processing_step = False
-                self.current_sequence = []
-                self.current_sequence_index = 0
-                self.is_first_key_event_in_sequence = True
+                # 시퀀스를 강제 중단한 사실을 상단 탭에 알린다.
+                self.current_command_name = current_name
+                self.current_command_reason = current_reason
+                self.current_command_source_tag = current_source
+                self._notify_sequence_completed(False)
         except Exception:
             pass
 
