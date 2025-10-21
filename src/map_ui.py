@@ -5191,6 +5191,10 @@ class MapTab(QWidget):
                 self.update_general_log("ESC 단축키로 탐지를 강제 중단했습니다.", "orange")
             self._clear_authority_resume_state()
             self._suppress_authority_resume = True
+            try:
+                self.set_forbidden_wall_suppressed(False, reason='detection_stop')
+            except Exception:
+                pass
         else:
             if self._forced_detection_stop_reason == reason:
                 self._forced_detection_stop_reason = None
@@ -10637,7 +10641,6 @@ class MapTab(QWidget):
                                                 self.last_safe_move_command_time = now_time
                                                 # 방향 기억(토글 방지 보조)
                                                 self.last_printed_direction = "→" if target_dx > 0 else "←"
-                        self.last_printed_direction = None
 
                     elif action_changed:
                         # <<< [수정] 점프 명령 분기 처리
@@ -11225,12 +11228,20 @@ class MapTab(QWidget):
                         "green",
                     )
                     self.edgefall_mode_active = False
+                    try:
+                        self.set_forbidden_wall_suppressed(False, reason='edgefall')
+                    except Exception:
+                        pass
                 else:
                     # 설정값 우선 적용 (없으면 기본값 사용)
                     timeout_sec = float(self.cfg_edgefall_timeout_sec) if getattr(self, 'cfg_edgefall_timeout_sec', None) is not None else float(self.edgefall_timeout_sec)
                     if (time.time() - float(self.edgefall_started_at)) > timeout_sec:
                         # 설정 시간 내 낙하가 시작되지 않았다면 모드 종료하고 정상 로직으로 복귀
                         self.edgefall_mode_active = False
+                        try:
+                            self.set_forbidden_wall_suppressed(False, reason='edgefall')
+                        except Exception:
+                            pass
                         self.update_general_log(f"[낭떠러지 낙하] 대기 {timeout_sec:.1f}초 초과 — 아래점프로 복귀합니다.", "orange")
         except Exception:
             pass
@@ -11380,6 +11391,10 @@ class MapTab(QWidget):
                             if abs(edge_x - best_x) <= trigger_dx:
                                 if not getattr(self, 'edgefall_mode_active', False):
                                     self.edgefall_mode_active = True
+                                    try:
+                                        self.set_forbidden_wall_suppressed(True, reason='edgefall')
+                                    except Exception:
+                                        pass
                                     self.edgefall_direction = direction
                                     self.edgefall_started_at = time.time()
                                     # 로그/통계용 시작/목표 좌표 저장
