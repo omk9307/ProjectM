@@ -1260,8 +1260,7 @@ class CustomGraphicsView(QGraphicsView):
                 self.mousePressed.emit(self.mapToScene(event.pos()), event.button())
                 event.accept()
                 return
-
-            if current_mode == "select" and item and item.data(0) in ["waypoint_v10", "waypoint_lod_text"]:
+            if current_mode == "select" and item and item.data(0) in ["hunt_zone", "terrain_line", "waypoint_v10", "waypoint_lod_text"]:
                 # 웨이포인트가 클릭되었으므로, 이름 변경을 위해 시그널만 방출하고
                 # QGraphicsView의 기본 드래그 로직이 시작되지 않도록 이벤트를 여기서 종료한다.
                 self.mousePressed.emit(self.mapToScene(event.pos()), event.button())
@@ -2930,7 +2929,7 @@ class FullMinimapEditorDialog(QDialog):
                     pen = QPen(QColor(255, 165, 0, 200), 2, Qt.PenStyle.DashLine)
                     brush = QBrush(QColor(255, 165, 0, 60))
                     item = self.scene.addRect(x, y, w, h, pen, brush)
-                    item.setZValue(180)
+                    item.setZValue(-50)
                     item.setData(0, "hunt_zone")
                     item.setData(1, zone.get('id'))
                     # 툴팁 간략 정보
