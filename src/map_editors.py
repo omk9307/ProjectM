@@ -2682,7 +2682,7 @@ class FullMinimapEditorDialog(QDialog):
                         for i in range(len(points) - 1):
                             p1 = QPointF(points[i][0], points[i][1])
                             p2 = QPointF(points[i+1][0], points[i+1][1])
-                            self._add_terrain_line_segment(p1, p2, line_data['id'])
+                            self._add_terrain_line_segment(p1, p2, line_data['id'], i)
                         for p in points:
                             q = QPointF(p[0], p[1])
                             self._add_vertex_indicator(q, line_data['id'])
@@ -3289,7 +3289,8 @@ class FullMinimapEditorDialog(QDialog):
                     self._add_vertex_indicator(final_pos, self.current_line_id)
                 else:
                     last_point = self.current_line_points[-1]
-                    self._add_terrain_line_segment(last_point, final_pos, self.current_line_id)
+                    segment_index = len(self.current_line_points) - 1
+                    self._add_terrain_line_segment(last_point, final_pos, self.current_line_id, segment_index)
                     self.current_line_points.append(final_pos)
                     self._add_vertex_indicator(final_pos, self.current_line_id)
                     if self.is_y_locked and self.is_x_locked:
@@ -3995,11 +3996,13 @@ class FullMinimapEditorDialog(QDialog):
             self.scene.removeItem(self.preview_line_item)
         self.preview_line_item = None
 
-    def _add_terrain_line_segment(self, p1, p2, line_id):
+    def _add_terrain_line_segment(self, p1, p2, line_id, segment_index=None):
         """씬에 지형선 세그먼트를 추가합니다."""
         line_item = self.scene.addLine(p1.x(), p1.y(), p2.x(), p2.y(), QPen(Qt.GlobalColor.magenta, 2))
         line_item.setData(0, "terrain_line")
         line_item.setData(1, line_id)
+        if segment_index is not None:
+            line_item.setData(2, int(segment_index))
         return line_item
 
     def _add_vertex_indicator(self, pos, line_id):
@@ -4038,71 +4041,180 @@ class FullMinimapEditorDialog(QDialog):
                 self.snap_indicator.setVisible(False)
                      
     def _delete_terrain_at(self, scene_pos):
-        """주어진 위치의 지형 그룹 전체와, 종속된 오브젝트 및 점프 링크를 삭제합니다."""
+        """주어진 위치에서 선택된 지형의 특정 세그먼트만 제거합니다."""
         items_at_pos = self.view.items(self.view.mapFromScene(scene_pos))
-        line_id_to_delete = None
+        target_line_id = None
+        segment_index = None
         for item in items_at_pos:
             if item.data(0) == "terrain_line":
-                line_id_to_delete = item.data(1)
+                target_line_id = item.data(1)
+                try:
+                    segment_index = item.data(2)
+                except Exception:
+                    segment_index = None
                 break
-        
-        if line_id_to_delete:
-            # --- 단계 1: 삭제할 지형 그룹과 모든 꼭짓점 식별 ---
-            line_to_delete_data = next((line for line in self.geometry_data.get("terrain_lines", []) if line.get("id") == line_id_to_delete), None)
-            if not line_to_delete_data: return
-            
-            if 'dynamic_name' not in line_to_delete_data:
-                self._assign_dynamic_names()
-            target_group_name = line_to_delete_data.get('dynamic_name')
 
-            ids_in_group = set()
-            vertices_in_group = set()
-            for line in self.geometry_data.get("terrain_lines", []):
-                if line.get('dynamic_name') == target_group_name:
-                    ids_in_group.add(line['id'])
-                    for p in line.get("points", []):
-                        vertices_in_group.add(tuple(p))
+        if not target_line_id:
+            return
 
-            # --- 단계 2: 데이터에서 모든 종속 항목 연쇄 삭제 ---
+        line_data = next((
+            line for line in self.geometry_data.get("terrain_lines", [])
+            if line.get("id") == target_line_id
+        ), None)
+        if not line_data:
+            return
 
-            # 2a. 연결된 점프 링크 삭제
-            self.geometry_data["jump_links"] = [
-                jump for jump in self.geometry_data.get("jump_links", [])
-                if tuple(jump.get("start_vertex_pos")) not in vertices_in_group and \
-                   tuple(jump.get("end_vertex_pos")) not in vertices_in_group
-            ]
+        points = line_data.get("points", [])
+        if not points or len(points) < 2:
+            return
 
-            # ==================== v10.6.0 수정 시작 ====================
-            # 2b. 종속된 층 이동 오브젝트 삭제 (start_line_id 또는 end_line_id 기준)
-            self.geometry_data["transition_objects"] = [
-                obj for obj in self.geometry_data.get("transition_objects", [])
-                if obj.get("start_line_id") not in ids_in_group and obj.get("end_line_id") not in ids_in_group
-            ]
-            # ==================== v10.6.0 수정 끝 ======================
-            
-            # 2c. 지형 그룹 자체 삭제
+        # 세그먼트 정보를 Scene 아이템에 저장하지 못한 경우를 대비해 근접 세그먼트 추정
+        if segment_index is None:
+            def _segment_distance_sq(px: float, py: float, ax: float, ay: float, bx: float, by: float) -> float:
+                vx, vy = bx - ax, by - ay
+                wx, wy = px - ax, py - ay
+                seg_len_sq = vx * vx + vy * vy
+                if seg_len_sq <= 1e-9:
+                    return (px - ax) ** 2 + (py - ay) ** 2
+                t = max(0.0, min(1.0, (wx * vx + wy * vy) / seg_len_sq))
+                proj_x = ax + t * vx
+                proj_y = ay + t * vy
+                return (px - proj_x) ** 2 + (py - proj_y) ** 2
+
+            px, py = scene_pos.x(), scene_pos.y()
+            best_idx = None
+            best_dist = float("inf")
+            for idx in range(len(points) - 1):
+                ax, ay = float(points[idx][0]), float(points[idx][1])
+                bx, by = float(points[idx + 1][0]), float(points[idx + 1][1])
+                dist_sq = _segment_distance_sq(px, py, ax, ay, bx, by)
+                if dist_sq < best_dist:
+                    best_dist = dist_sq
+                    best_idx = idx
+            segment_index = best_idx
+
+        if segment_index is None:
+            return
+
+        segment_index = max(0, min(int(segment_index), len(points) - 2))
+
+        def _point_tuple(p):
+            try:
+                return (float(p[0]), float(p[1]))
+            except Exception:
+                return None
+
+        removed_vertices: set[tuple[float, float]] = set()
+        removed_line_ids: set[str] = set()
+
+        total_segments = len(points) - 1
+        if total_segments == 1:
+            tpl_a = _point_tuple(points[0])
+            tpl_b = _point_tuple(points[1])
+            if tpl_a:
+                removed_vertices.add(tpl_a)
+            if tpl_b:
+                removed_vertices.add(tpl_b)
+            removed_line_ids.add(target_line_id)
             self.geometry_data["terrain_lines"] = [
                 line for line in self.geometry_data.get("terrain_lines", [])
-                if line.get("id") not in ids_in_group
+                if line.get("id") != target_line_id
             ]
+        elif segment_index == 0:
+            tpl = _point_tuple(points[0])
+            if tpl:
+                removed_vertices.add(tpl)
+            remaining = [list(p) for p in points[1:]]
+            if len(remaining) >= 2:
+                line_data["points"] = remaining
+            else:
+                removed_line_ids.add(target_line_id)
+                self.geometry_data["terrain_lines"] = [
+                    line for line in self.geometry_data.get("terrain_lines", [])
+                    if line.get("id") != target_line_id
+                ]
+        elif segment_index == total_segments - 1:
+            tpl = _point_tuple(points[-1])
+            if tpl:
+                removed_vertices.add(tpl)
+            remaining = [list(p) for p in points[:-1]]
+            if len(remaining) >= 2:
+                line_data["points"] = remaining
+            else:
+                removed_line_ids.add(target_line_id)
+                self.geometry_data["terrain_lines"] = [
+                    line for line in self.geometry_data.get("terrain_lines", [])
+                    if line.get("id") != target_line_id
+                ]
+        else:
+            left_points = [list(p) for p in points[:segment_index + 1]]
+            right_points = [list(p) for p in points[segment_index + 1:]]
 
-            # 2d. 금지벽 삭제
+            if len(left_points) >= 2:
+                line_data["points"] = left_points
+            else:
+                tpl = _point_tuple(left_points[0])
+                if tpl:
+                    removed_vertices.add(tpl)
+                removed_line_ids.add(target_line_id)
+                self.geometry_data["terrain_lines"] = [
+                    line for line in self.geometry_data.get("terrain_lines", [])
+                    if line.get("id") != target_line_id
+                ]
+
+            if len(right_points) >= 2:
+                new_line = {}
+                for key, value in line_data.items():
+                    if key in ("points", "id"):
+                        continue
+                    new_line[key] = copy.deepcopy(value)
+                new_line["points"] = right_points
+                new_line["id"] = f"line-{uuid.uuid4()}"
+                self.geometry_data.setdefault("terrain_lines", []).append(new_line)
+
+        if removed_vertices:
+            removed_vertices = {pt for pt in removed_vertices if pt is not None}
+            if removed_vertices:
+                self.geometry_data["jump_links"] = [
+                    jump for jump in self.geometry_data.get("jump_links", [])
+                    if _point_tuple(jump.get("start_vertex_pos")) not in removed_vertices
+                    and _point_tuple(jump.get("end_vertex_pos")) not in removed_vertices
+                ]
+
+        if removed_line_ids:
+            transition_objs = []
+            for obj in self.geometry_data.get("transition_objects", []):
+                if (
+                    obj.get("start_line_id") in removed_line_ids
+                    or obj.get("end_line_id") in removed_line_ids
+                    or obj.get("parent_line_id") in removed_line_ids
+                ):
+                    continue
+                transition_objs.append(obj)
+            self.geometry_data["transition_objects"] = transition_objs
+
             if "forbidden_walls" in self.geometry_data:
                 self.geometry_data["forbidden_walls"] = [
                     wall for wall in self.geometry_data.get("forbidden_walls", [])
-                    if wall.get("line_id") not in ids_in_group
+                    if wall.get("line_id") not in removed_line_ids
                 ]
 
-            # 2e. 사다리 링크 삭제 (원본 지형 기반)
             if "ladder_links" in self.geometry_data:
                 self.geometry_data["ladder_links"] = [
                     lnk for lnk in (self.geometry_data.get("ladder_links", []) or [])
-                    if lnk.get("source_line_id") not in ids_in_group
+                    if lnk.get("source_line_id") not in removed_line_ids
                 ]
 
-            # --- 단계 3: UI 전체 갱신 ---
-            self.populate_scene()
-            self.view.viewport().update()
+        self._assign_dynamic_names()
+        self._update_all_floor_texts()
+        self.populate_scene()
+        self.view.viewport().update()
+
+        if self.parent_map_tab:
+            try:
+                self.parent_map_tab.save_profile_data()
+            except Exception:
+                pass
     def _get_closest_point_on_terrain(self, scene_pos):
         """
         씬의 특정 위치에서 가장 적합한 지형선 위의 점과 ID를 찾습니다. (x좌표 우선 탐색)
