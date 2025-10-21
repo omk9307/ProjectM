@@ -2183,6 +2183,21 @@ class FullMinimapEditorDialog(QDialog):
             
     def on_x_lock_toggled(self, checked):
         self.is_x_locked = checked
+
+    def _reset_view_interaction_state(self) -> None:
+        """팝업 닫힘 후 드래그/커서 상태를 현재 모드에 맞춰 복원합니다."""
+        try:
+            if hasattr(self.view, "_is_panning"):
+                self.view._is_panning = False
+        except Exception:
+            pass
+
+        if self.current_mode == "select":
+            self.view.setDragMode(QGraphicsView.DragMode.ScrollHandDrag)
+            self.view.setCursor(Qt.CursorShape.ArrowCursor)
+        else:
+            self.view.setDragMode(QGraphicsView.DragMode.NoDrag)
+            self.view.setCursor(Qt.CursorShape.CrossCursor)
         
     def on_y_lock_toggled(self, checked):
         self.is_y_locked = checked
@@ -3149,7 +3164,8 @@ class FullMinimapEditorDialog(QDialog):
         if 'ranges' not in zone or not isinstance(zone['ranges'], dict):
             zone['ranges'] = self._get_default_hunt_ranges()
         dlg = HuntZoneConfigDialog(zone, parent=self)
-        if dlg.exec() == QDialog.DialogCode.Accepted:
+        result = dlg.exec()
+        if result == QDialog.DialogCode.Accepted:
             values = dlg.get_values()
             zone['enabled'] = bool(values.get('enabled', False))
             zone['ranges'] = dict(values.get('ranges') or {})
@@ -3159,6 +3175,7 @@ class FullMinimapEditorDialog(QDialog):
                 except Exception:
                     pass
             self.populate_scene()
+        self._reset_view_interaction_state()
 
     def _show_terrain_group_dialog(self, group_name: Optional[str], group_lines: list[dict]) -> None:
         """지형 그룹 속성 팝업을 표시해 낙하 사용 여부를 수정할 수 있도록 합니다."""
@@ -3191,7 +3208,8 @@ class FullMinimapEditorDialog(QDialog):
         button_box.rejected.connect(dialog.reject)
         layout.addWidget(button_box)
 
-        if dialog.exec() == QDialog.DialogCode.Accepted:
+        result = dialog.exec()
+        if result == QDialog.DialogCode.Accepted:
             new_value = checkbox.isChecked()
             for line in group_lines:
                 line['edgefall_enabled'] = bool(new_value)
@@ -3203,6 +3221,7 @@ class FullMinimapEditorDialog(QDialog):
                     )
                 except Exception:
                     pass
+        self._reset_view_interaction_state()
 
     def on_scene_mouse_press(self, scene_pos, button):
         #  '기본' 모드에서 웨이포인트 클릭 시 이름 변경 기능 + 좌표 토글 ---
@@ -3256,7 +3275,8 @@ class FullMinimapEditorDialog(QDialog):
 
                 if waypoint_data:
                     dialog = WaypointEditDialog(waypoint_data, load_event_profiles(), self)
-                    if dialog.exec() == QDialog.DialogCode.Accepted:
+                    result = dialog.exec()
+                    if result == QDialog.DialogCode.Accepted:
                         new_name, is_event, event_profile, event_always = dialog.get_values()
                         old_name = waypoint_data.get("name", "")
                         if new_name != old_name and any(wp.get('name') == new_name for wp in self.geometry_data.get("waypoints", [])):
@@ -3267,6 +3287,7 @@ class FullMinimapEditorDialog(QDialog):
                             waypoint_data["event_profile"] = event_profile if is_event else ""
                             waypoint_data["event_always"] = event_always if is_event else False
                             self.populate_scene() # UI 즉시 갱신
+                    self._reset_view_interaction_state()
                     return # 이름 변경 로직 후 드래그 패닝 방지
                 
         if self.current_mode == "terrain":
@@ -3905,9 +3926,11 @@ class FullMinimapEditorDialog(QDialog):
             wall['floor'] = parent_line.get('floor')
 
         dialog = ForbiddenWallDialog(wall, load_skill_profiles(), self)
-        if dialog.exec() == QDialog.DialogCode.Accepted:
+        result = dialog.exec()
+        if result == QDialog.DialogCode.Accepted:
             wall.update(dialog.get_values())
             self.populate_scene()
+        self._reset_view_interaction_state()
 
     def _delete_forbidden_wall_by_id(self, wall_id: str) -> None:
         if not wall_id:
