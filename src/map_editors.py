@@ -2189,15 +2189,26 @@ class FullMinimapEditorDialog(QDialog):
         try:
             if hasattr(self.view, "_is_panning"):
                 self.view._is_panning = False
+            if hasattr(self.view, "_last_pan_pos"):
+                self.view._last_pan_pos = QPoint()
         except Exception:
             pass
 
-        if self.current_mode == "select":
-            self.view.setDragMode(QGraphicsView.DragMode.ScrollHandDrag)
-            self.view.setCursor(Qt.CursorShape.ArrowCursor)
-        else:
-            self.view.setDragMode(QGraphicsView.DragMode.NoDrag)
-            self.view.setCursor(Qt.CursorShape.CrossCursor)
+        try:
+            self.view.set_drawing_mode(self.current_mode != "select")
+        except Exception:
+            if self.current_mode == "select":
+                self.view.setDragMode(QGraphicsView.DragMode.ScrollHandDrag)
+                try:
+                    self.view.viewport().setCursor(Qt.CursorShape.OpenHandCursor)
+                except Exception:
+                    self.view.setCursor(Qt.CursorShape.OpenHandCursor)
+            else:
+                self.view.setDragMode(QGraphicsView.DragMode.NoDrag)
+                try:
+                    self.view.viewport().setCursor(Qt.CursorShape.CrossCursor)
+                except Exception:
+                    self.view.setCursor(Qt.CursorShape.CrossCursor)
         
     def on_y_lock_toggled(self, checked):
         self.is_y_locked = checked
