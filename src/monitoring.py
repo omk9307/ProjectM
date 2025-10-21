@@ -450,10 +450,12 @@ class MonitoringTab(QWidget):
         # [NEW] 캐릭터박스 오버레이 토글(모니터링 전용)
         self.chk_character_box = QCheckBox("캐릭터박스")
         self.hunt_interval_spin = QDoubleSpinBox()
-        self.hunt_interval_spin.setRange(0.5, 5.0)
-        self.hunt_interval_spin.setSingleStep(0.5)
+        self.hunt_interval_spin.setDecimals(2)
+        self.hunt_interval_spin.setRange(0.0, 5.0)
+        self.hunt_interval_spin.setSingleStep(0.01)
         self.hunt_interval_spin.setValue(1.0)
         self.hunt_interval_spin.setSuffix(" s")
+        self.hunt_interval_spin.setSpecialValueText("실시간")
         self.hunt_interval_spin.valueChanged.connect(self._on_hunt_interval_changed)
         hunt_ctrl.addWidget(self.hunt_start_btn)
         hunt_ctrl.addWidget(self.hunt_stop_btn)
@@ -1011,7 +1013,11 @@ class MonitoringTab(QWidget):
         if not self._hunt_tab:
             return
         enabled = bool(self.hunt_preview_checkbox.isChecked() and self._ui_visible)
-        interval = float(self.hunt_interval_spin.value() or 1.0)
+        raw_value = float(self.hunt_interval_spin.value())
+        if raw_value <= 0.0:
+            interval = 0.0
+        else:
+            interval = max(0.01, raw_value)
         try:
             self._hunt_tab.api_set_preview_enabled(enabled, interval)
         except Exception:

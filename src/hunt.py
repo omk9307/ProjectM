@@ -196,6 +196,9 @@ FORBIDDEN_GLYPH_MAX_ATTEMPTS = 3
 FORBIDDEN_GLYPH_SCALES = (1.0, 0.9, 1.1)  # 간단 다중 스케일 매칭(조기종료)
 FORBIDDEN_GLYPH_ROI_EDGE = QPen(QColor(255, 0, 0, 200), 2, Qt.PenStyle.DashLine)
 FORBIDDEN_GLYPH_MATCH_EDGE = QPen(QColor(255, 0, 0, 255), 2, Qt.PenStyle.SolidLine)
+FORBIDDEN_FRAME_STALE_SEC = 0.25
+FORBIDDEN_FRAME_REQUEST_COOLDOWN = 0.2
+FORBIDDEN_FRAME_FORCE_DURATION = 0.35
 
 try:
     COMPOSITION_MODE_DEST_OVER = QPainter.CompositionMode.CompositionMode_DestinationOver
@@ -947,6 +950,7 @@ class HuntTab(QWidget):
         self._latest_frame_size: tuple[int, int] = (0, 0)
         self._forbidden_glyph_status: str = 'idle'
         self._forbidden_glyph_status_ts: float = 0.0
+        self._forbidden_last_frame_request_ts: float = 0.0
 
         self.attack_interval_sec = 0.35
         self.last_attack_ts = 0.0
@@ -6934,7 +6938,14 @@ class HuntTab(QWidget):
                 if self._monitor_preview_enabled:
                     # 프리뷰 ON: 화면출력 강제 활성 + 저주기 배출
                     self.detection_thread.set_screen_output_enabled(True)
-                    self.detection_thread.set_frame_emit_min_interval(max(0.1, float(self._monitor_preview_interval_sec)))
+                    try:
+                        interval_sec = float(self._monitor_preview_interval_sec)
+                    except (TypeError, ValueError):
+                        interval_sec = 0.0
+                    if interval_sec <= 0.0:
+                        self.detection_thread.set_frame_emit_min_interval(0.0)
+                    else:
+                        self.detection_thread.set_frame_emit_min_interval(max(0.01, interval_sec))
                 else:
                     # 프리뷰 OFF: 체크박스 상태로 복원 + 제한 해제
                     checkbox = getattr(self, 'screen_output_checkbox', None)
@@ -9708,6 +9719,29 @@ class HuntTab(QWidget):
         return []
 
     # ----- [NEW] 금지몬스터 감지 플로우 -----
+    def _request_forbidden_detection_frame(self, now: float, *, force: bool = False) -> None:
+        if self._is_screen_output_enabled():
+            return
+        thread = getattr(self, 'detection_thread', None)
+        if thread is None or not hasattr(thread, 'request_forced_frame_emit'):
+            return
+        try:
+            is_running = thread.isRunning()
+        except Exception:
+            is_running = True
+        if not is_running:
+            return
+        if not force:
+            last_req = float(getattr(self, '_forbidden_last_frame_request_ts', 0.0) or 0.0)
+            if (now - last_req) < FORBIDDEN_FRAME_REQUEST_COOLDOWN:
+                return
+        duration = FORBIDDEN_FRAME_FORCE_DURATION
+        try:
+            thread.request_forced_frame_emit(duration)
+            self._forbidden_last_frame_request_ts = now
+        except Exception:
+            pass
+
     def _maybe_trigger_forbidden_flow(self, monsters: List[dict], now: float) -> None:
         if not bool(getattr(self, 'auto_hunt_enabled', True)):
             return
@@ -9731,6 +9765,14 @@ class HuntTab(QWidget):
         perform_match = False
         if now <= watch_until or now < cooldown_until or bool(getattr(self, '_forbidden_active', False)):
             perform_match = True
+        if perform_match and not self._is_screen_output_enabled():
+            stale = True
+            qimg = self._latest_detection_qimage
+            last_ts = float(getattr(self, '_latest_detection_frame_ts', 0.0) or 0.0)
+            if qimg is not None and not qimg.isNull() and last_ts > 0.0 and (now - last_ts) <= FORBIDDEN_FRAME_STALE_SEC:
+                stale = False
+            if stale:
+                self._request_forbidden_detection_frame(now, force=True)
         evaluation = self._evaluate_forbidden_glyph(candidate, now, perform_match=perform_match)
         if perform_match and evaluation.get('roi_rect'):
             highlight_rect = evaluation.get('match_rect') or evaluation.get('best_rect')
@@ -9866,6 +9908,7 @@ class HuntTab(QWidget):
                 frame_width = qimg.width()
                 frame_height = qimg.height()
         if frame_width <= 0 or frame_height <= 0:
+            self._request_forbidden_detection_frame(now, force=False)
             result['reason'] = 'no_frame_size'
             return result
         margin = FORBIDDEN_GLYPH_MARGIN_PX
@@ -10005,6 +10048,7 @@ class HuntTab(QWidget):
             return schedule_retry('no_templates')
         roi_image_bgr = self._get_latest_detection_bgr()
         if roi_image_bgr is None:
+            self._request_forbidden_detection_frame(now, force=False)
             return schedule_retry('no_frame')
         if roi_bottom > roi_image_bgr.shape[0] or roi_right > roi_image_bgr.shape[1]:
             return schedule_retry('roi_out_of_bounds')

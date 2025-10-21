@@ -280,6 +280,8 @@ class DetectionThread(QThread):
         # [NEW] 모니터링 프리뷰를 위한 프레임 배출 최소 간격(초)
         self._emit_min_interval: float = 0.0
         self._last_emit_ts: float = 0.0
+        # [NEW] 화면출력 비활성화 상태에서도 일시적으로 프레임을 강제 배출하기 위한 타이머
+        self._force_frame_emit_until: float = 0.0
         try:
             self.max_det = max(1, int(max_det))
         except (TypeError, ValueError):
@@ -454,6 +456,20 @@ class DetectionThread(QThread):
         except (TypeError, ValueError):
             value = 0.0
         self._emit_min_interval = max(0.0, value)
+
+    def request_forced_frame_emit(self, duration: float = 0.3) -> None:
+        """
+        화면출력이 비활성화되어도 잠시 프레임을 배출하도록 요청한다.
+        duration: 요청 유지 시간(초), [0.05, 1.0] 범위를 사용.
+        """
+        try:
+            span = float(duration)
+        except (TypeError, ValueError):
+            span = 0.3
+        span = max(0.05, min(1.0, span))
+        target_until = time.time() + span
+        if target_until > self._force_frame_emit_until:
+            self._force_frame_emit_until = target_until
 
     def run(self) -> None:  # noqa: D401
         consumer_name = f"detection:{id(self)}"
@@ -682,13 +698,15 @@ class DetectionThread(QThread):
                 payload["direction"] = direction_info
 
                 annotated_frame: Optional[np.ndarray] = None
-                allow_render = bool(self.screen_output_enabled)
-                if allow_render and self._emit_min_interval > 0.0:
+                now_for_emit_check = time.time()
+                force_mode_active = now_for_emit_check < self._force_frame_emit_until
+                allow_render = bool(self.screen_output_enabled or force_mode_active)
+                if allow_render and self._emit_min_interval > 0.0 and not force_mode_active:
                     now_for_emit = time.time()
                     if (now_for_emit - self._last_emit_ts) < self._emit_min_interval:
                         allow_render = False
 
-                if allow_render:
+                if allow_render and self.screen_output_enabled:
                     annotated_frame = frame
                     if not annotated_frame.flags.writeable:
                         annotated_frame = annotated_frame.copy()
@@ -997,6 +1015,15 @@ class DetectionThread(QThread):
                 emit_start = time.perf_counter()
                 self.detections_ready.emit(payload)
 
+                # 강제 프레임 배출 상태에서 화면출력이 꺼져 있으면 생프레임으로 대체 전송
+                if qt_image is None and allow_render and force_mode_active and frame is not None:
+                    render_start = time.perf_counter()
+                    rgb_image = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                    h, w, ch = rgb_image.shape
+                    bytes_per_line = ch * w
+                    qt_image = QImage(rgb_image.data, w, h, bytes_per_line, QImage.Format.Format_RGB888)
+                    render_end = time.perf_counter()
+                    self.perf_stats["render_ms"] = (render_end - render_start) * 1000
                 if qt_image is not None:
                     self._last_emit_ts = time.time()
                     self.frame_ready.emit(qt_image.copy())
