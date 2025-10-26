@@ -6981,6 +6981,7 @@ class MapTab(QWidget):
         source: str,
     ) -> bool:
         try:
+            normalized_source = str(source or '').strip().lower()
             context = {
                 'active': True,
                 'phase': 'init',
@@ -7007,6 +7008,8 @@ class MapTab(QWidget):
                 'arrival_ack_deadline_ts': 0.0,
                 'arrival_retry_count': 0,
                 'arrival_retry_max': 2,
+                # [금지 플로우 전용] ACK 감시 활성화 여부
+                'requires_ack': normalized_source == 'hunt.forbidden',
             }
         except Exception:
             return False
@@ -7445,14 +7448,20 @@ class MapTab(QWidget):
                 hunt_tab.on_other_player_wait_arrived(source=source, waypoint_name=waypoint_name)
                 context['arrival_notified'] = True
                 context['last_arrival_notify_ts'] = now_ts
-                # ACK 대기 타이머 설정(2.0s)
-                context['arrival_ack_received'] = False
-                context['arrival_ack_deadline_ts'] = now_ts + 2.0
+                requires_ack = bool(context.get('requires_ack', False))
+                if requires_ack:
+                    # ACK 대기 타이머 설정(2.0s)
+                    context['arrival_ack_received'] = False
+                    context['arrival_ack_deadline_ts'] = now_ts + 2.0
+                else:
+                    context['arrival_ack_received'] = False
+                    context['arrival_ack_deadline_ts'] = 0.0
                 self.other_player_wait_context = context
-                try:
-                    QTimer.singleShot(2100, self._check_other_player_wait_arrival_ack)
-                except Exception:
-                    pass
+                if requires_ack:
+                    try:
+                        QTimer.singleShot(2100, self._check_other_player_wait_arrival_ack)
+                    except Exception:
+                        pass
         except Exception:
             pass
 
@@ -7818,6 +7827,8 @@ class MapTab(QWidget):
         if not self._is_other_player_wait_active():
             return
         context = dict(getattr(self, 'other_player_wait_context', {}) or {})
+        if not bool(context.get('requires_ack', False)):
+            return
         if context.get('phase') != 'wait_hold':
             return
         if not bool(context.get('holding', False)):
@@ -7883,6 +7894,8 @@ class MapTab(QWidget):
             if not self._is_other_player_wait_active():
                 return
             context = dict(getattr(self, 'other_player_wait_context', {}) or {})
+            if not bool(context.get('requires_ack', False)):
+                return
             context['arrival_ack_received'] = True
             self.other_player_wait_context = context
             self.update_general_log("[대기 모드] 도착 명령 시작 ACK 수신.", "gray")
