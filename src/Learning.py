@@ -3179,6 +3179,15 @@ class WindowAnchorLoadDialog(QDialog):
 
 # --- 5. 핵심 로직 클래스 (백엔드) ---
 class DataManager:
+    _NICKNAME_TEMPLATE_OVERRIDE_KEYS: ClassVar[Dict[str, tuple[float, float, str]]] = {
+        'match_threshold': (0.1, 0.99, 'float'),
+        'char_offset_x': (-999.0, 999.0, 'int'),
+        'char_offset_y': (-999.0, 999.0, 'int'),
+        'search_margin_x': (0.0, 999.0, 'int'),
+        'search_margin_top': (0.0, 999.0, 'int'),
+        'search_margin_bottom': (0.0, 999.0, 'int'),
+    }
+
     def __init__(self, workspace_root):
         # (v1.2) 모든 경로는 workspace_root를 기준으로 설정됩니다.
         self.workspace_root = workspace_root
@@ -5237,6 +5246,23 @@ class DataManager:
                 if legacy in config:
                     config.pop(legacy, None)
                     changed = True
+            sanitized_templates = []
+            for entry in config.get('templates', []):
+                if not isinstance(entry, dict):
+                    changed = True
+                    continue
+                sanitized_entry = dict(entry)
+                overrides = sanitized_entry.get('overrides')
+                sanitized_overrides = self._sanitize_nickname_template_overrides(overrides)
+                if sanitized_overrides:
+                    sanitized_entry['overrides'] = sanitized_overrides
+                elif 'overrides' in sanitized_entry:
+                    sanitized_entry.pop('overrides', None)
+                    changed = True
+                sanitized_templates.append(sanitized_entry)
+            if len(sanitized_templates) != len(config.get('templates', [])):
+                changed = True
+            config['templates'] = sanitized_templates
             if changed:
                 self._write_nickname_config(config)
         return config
@@ -5275,7 +5301,7 @@ class DataManager:
             path = os.path.join(self.nickname_templates_dir, filename)
             if not os.path.exists(path):
                 continue
-            resolved_entry = dict(entry)
+            resolved_entry = copy.deepcopy(entry)
             resolved_entry['path'] = path
             resolved_templates.append(resolved_entry)
         return resolved_templates
@@ -5348,6 +5374,57 @@ class DataManager:
         config['templates'] = remaining
         self._write_nickname_config(config)
         return removed_count
+
+    def get_nickname_template_entry(self, template_id: str) -> Optional[dict]:
+        if not template_id:
+            return None
+        templates = self.list_nickname_templates()
+        for entry in templates:
+            if entry.get('id') == template_id:
+                return entry
+        return None
+
+    def update_nickname_template_overrides(self, template_id: str, overrides: Optional[dict]) -> Optional[dict]:
+        if not template_id:
+            return None
+        config = self.get_nickname_config()
+        modified = False
+        templates = config.get('templates', [])
+        sanitized_overrides = self._sanitize_nickname_template_overrides(overrides)
+        for entry in templates:
+            if entry.get('id') == template_id:
+                if sanitized_overrides:
+                    if entry.get('overrides') != sanitized_overrides:
+                        entry['overrides'] = sanitized_overrides
+                        modified = True
+                else:
+                    if 'overrides' in entry:
+                        entry.pop('overrides', None)
+                        modified = True
+                break
+        if modified:
+            self._write_nickname_config(config)
+        return self.get_nickname_template_entry(template_id)
+
+    def _sanitize_nickname_template_overrides(self, overrides: Optional[dict]) -> Dict[str, float | int]:
+        if not isinstance(overrides, dict):
+            return {}
+        sanitized: Dict[str, float | int] = {}
+        for key, (min_value, max_value, value_type) in self._NICKNAME_TEMPLATE_OVERRIDE_KEYS.items():
+            if key not in overrides:
+                continue
+            raw_value = overrides.get(key)
+            try:
+                if value_type == 'float':
+                    value = float(raw_value)
+                else:
+                    value = int(round(float(raw_value)))
+            except (TypeError, ValueError):
+                continue
+            clamped = max(min_value, min(max_value, value))
+            sanitized[key] = float(clamped) if value_type == 'float' else int(clamped)
+        return sanitized
+
 
     # --- 방향 템플릿 관리 ---
     def get_direction_config(self):
@@ -5808,6 +5885,112 @@ class ExportThread(QThread):
             model.export(format='engine', half=False, device=0)
             self.finished.emit(True, "모델 최적화 성공!")
         except Exception as e: self.finished.emit(False, f"모델 최적화 오류: {e}")
+
+
+class NicknameTemplateSettingsDialog(QDialog):
+    def __init__(self, parent: QWidget, template_entry: dict, base_config: dict):
+        super().__init__(parent)
+        self.setWindowTitle("닉네임 템플릿 개별 설정")
+        self.template_entry = template_entry or {}
+        self.base_config = base_config or {}
+        overrides = self.template_entry.get('overrides') if isinstance(self.template_entry, dict) else {}
+
+        layout = QVBoxLayout()
+        name = self.template_entry.get('original_name') or self.template_entry.get('id', '템플릿')
+        layout.addWidget(QLabel(f"대상: {name}"))
+
+        self.override_checkbox = QCheckBox("개별 설정 사용")
+        self.override_checkbox.setChecked(bool(overrides))
+        layout.addWidget(self.override_checkbox)
+
+        form_layout = QFormLayout()
+
+        self.threshold_spin = QDoubleSpinBox()
+        self.threshold_spin.setRange(0.10, 0.99)
+        self.threshold_spin.setSingleStep(0.01)
+        self.threshold_spin.setDecimals(2)
+        self.threshold_spin.setValue(self._resolve_initial_value('match_threshold', 0.72, overrides, float))
+        form_layout.addRow("임계값", self.threshold_spin)
+
+        self.offset_x_spin = QSpinBox()
+        self.offset_x_spin.setRange(-999, 999)
+        self.offset_x_spin.setSingleStep(1)
+        self.offset_x_spin.setValue(self._resolve_initial_value('char_offset_x', 0, overrides, int))
+        form_layout.addRow("X 오프셋", self.offset_x_spin)
+
+        self.offset_y_spin = QSpinBox()
+        self.offset_y_spin.setRange(-999, 999)
+        self.offset_y_spin.setSingleStep(1)
+        self.offset_y_spin.setValue(self._resolve_initial_value('char_offset_y', 0, overrides, int))
+        form_layout.addRow("Y 오프셋", self.offset_y_spin)
+
+        self.margin_x_spin = QSpinBox()
+        self.margin_x_spin.setRange(0, 999)
+        self.margin_x_spin.setSingleStep(5)
+        self.margin_x_spin.setValue(self._resolve_initial_value('search_margin_x', 210, overrides, int))
+        form_layout.addRow("좌우 여백", self.margin_x_spin)
+
+        self.margin_top_spin = QSpinBox()
+        self.margin_top_spin.setRange(0, 999)
+        self.margin_top_spin.setSingleStep(5)
+        self.margin_top_spin.setValue(self._resolve_initial_value('search_margin_top', 100, overrides, int))
+        form_layout.addRow("위 여백", self.margin_top_spin)
+
+        self.margin_bottom_spin = QSpinBox()
+        self.margin_bottom_spin.setRange(0, 999)
+        self.margin_bottom_spin.setSingleStep(5)
+        self.margin_bottom_spin.setValue(self._resolve_initial_value('search_margin_bottom', 100, overrides, int))
+        form_layout.addRow("아래 여백", self.margin_bottom_spin)
+
+        layout.addLayout(form_layout)
+
+        self._override_widgets = [
+            self.threshold_spin,
+            self.offset_x_spin,
+            self.offset_y_spin,
+            self.margin_x_spin,
+            self.margin_top_spin,
+            self.margin_bottom_spin,
+        ]
+        self.override_checkbox.toggled.connect(self._update_override_widget_state)
+        self._update_override_widget_state(self.override_checkbox.isChecked())
+
+        button_box = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        button_box.accepted.connect(self.accept)
+        button_box.rejected.connect(self.reject)
+        layout.addWidget(button_box)
+
+        self.setLayout(layout)
+
+    def _resolve_initial_value(self, key: str, fallback, overrides: Optional[dict], caster):
+        if isinstance(overrides, dict) and key in overrides:
+            try:
+                return caster(overrides[key])
+            except (TypeError, ValueError):
+                pass
+        if key in self.base_config:
+            try:
+                return caster(self.base_config.get(key, fallback))
+            except (TypeError, ValueError):
+                return fallback
+        return fallback
+
+    def _update_override_widget_state(self, enabled: bool):
+        for widget in self._override_widgets:
+            widget.setEnabled(bool(enabled))
+
+    def get_overrides(self) -> dict:
+        if not self.override_checkbox.isChecked():
+            return {}
+        return {
+            'match_threshold': float(self.threshold_spin.value()),
+            'char_offset_x': int(self.offset_x_spin.value()),
+            'char_offset_y': int(self.offset_y_spin.value()),
+            'search_margin_x': int(self.margin_x_spin.value()),
+            'search_margin_top': int(self.margin_top_spin.value()),
+            'search_margin_bottom': int(self.margin_bottom_spin.value()),
+        }
+
 
 # --- 7. GUI 클래스 (프론트엔드) ---
 class LearningTab(QWidget):
@@ -6469,29 +6652,29 @@ class LearningTab(QWidget):
         nickname_threshold_layout.addSpacing(8)
         nickname_threshold_layout.addWidget(QLabel("X 오프셋:"))
         self.nickname_offset_x_spin = QSpinBox()
-        self.nickname_offset_x_spin.setRange(-400, 400)
+        self.nickname_offset_x_spin.setRange(-999, 999)
         nickname_threshold_layout.addWidget(self.nickname_offset_x_spin)
         nickname_threshold_layout.addSpacing(8)
         nickname_threshold_layout.addWidget(QLabel("Y 오프셋:"))
         self.nickname_offset_y_spin = QSpinBox()
-        self.nickname_offset_y_spin.setRange(-400, 400)
+        self.nickname_offset_y_spin.setRange(-999, 999)
         nickname_threshold_layout.addWidget(self.nickname_offset_y_spin)
         nickname_threshold_layout.addSpacing(8)
         nickname_threshold_layout.addWidget(QLabel("좌우 여백(px):"))
         self.nickname_margin_x_spin = QSpinBox()
-        self.nickname_margin_x_spin.setRange(0, 600)
+        self.nickname_margin_x_spin.setRange(0, 999)
         self.nickname_margin_x_spin.setSingleStep(10)
         nickname_threshold_layout.addWidget(self.nickname_margin_x_spin)
         nickname_threshold_layout.addSpacing(8)
         nickname_threshold_layout.addWidget(QLabel("위 여백(px):"))
         self.nickname_margin_top_spin = QSpinBox()
-        self.nickname_margin_top_spin.setRange(0, 400)
+        self.nickname_margin_top_spin.setRange(0, 999)
         self.nickname_margin_top_spin.setSingleStep(5)
         nickname_threshold_layout.addWidget(self.nickname_margin_top_spin)
         nickname_threshold_layout.addSpacing(8)
         nickname_threshold_layout.addWidget(QLabel("아래 여백(px):"))
         self.nickname_margin_bottom_spin = QSpinBox()
-        self.nickname_margin_bottom_spin.setRange(0, 400)
+        self.nickname_margin_bottom_spin.setRange(0, 999)
         self.nickname_margin_bottom_spin.setSingleStep(5)
         nickname_threshold_layout.addWidget(self.nickname_margin_bottom_spin)
         nickname_layout.addLayout(nickname_threshold_layout)
@@ -6502,6 +6685,7 @@ class LearningTab(QWidget):
         self.nickname_template_list.setResizeMode(QListWidget.ResizeMode.Adjust)
         self.nickname_template_list.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
         self.nickname_template_list.setFixedHeight(100)
+        self.nickname_template_list.itemDoubleClicked.connect(self._open_nickname_template_settings_dialog)
         nickname_layout.addWidget(self.nickname_template_list, 1)
 
         nickname_buttons_layout = QHBoxLayout()
@@ -7361,6 +7545,7 @@ class LearningTab(QWidget):
             label = entry.get('original_name') or entry.get('id', '템플릿')
             item = QListWidgetItem(icon, label)
             item.setData(Qt.ItemDataRole.UserRole, entry.get('id'))
+            item.setData(Qt.ItemDataRole.UserRole + 1, entry)
             tooltip_lines = [f"ID: {entry.get('id')}"]
             if entry.get('original_name'):
                 tooltip_lines.append(f"원본: {entry.get('original_name')}")
@@ -7369,8 +7554,54 @@ class LearningTab(QWidget):
             score = entry.get('created_at')
             if score:
                 tooltip_lines.append(time.strftime('등록 시각: %Y-%m-%d %H:%M:%S', time.localtime(score)))
+            overrides = entry.get('overrides')
+            if isinstance(overrides, dict) and overrides:
+                tooltip_lines.append("개별 설정 사용 중")
+                display_map = [
+                    ("임계값", 'match_threshold'),
+                    ("X 오프셋", 'char_offset_x'),
+                    ("Y 오프셋", 'char_offset_y'),
+                    ("좌우 여백", 'search_margin_x'),
+                    ("위 여백", 'search_margin_top'),
+                    ("아래 여백", 'search_margin_bottom'),
+                ]
+                for label_text, key in display_map:
+                    if key in overrides:
+                        tooltip_lines.append(f" - {label_text}: {overrides[key]}")
             item.setToolTip('\n'.join(tooltip_lines))
             self.nickname_template_list.addItem(item)
+
+    def _open_nickname_template_settings_dialog(self, item: QListWidgetItem):
+        if item is None or item.flags() == Qt.ItemFlag.NoItemFlags:
+            return
+        template_id = item.data(Qt.ItemDataRole.UserRole)
+        if not template_id:
+            return
+        entry = item.data(Qt.ItemDataRole.UserRole + 1)
+        if not isinstance(entry, dict):
+            entry = self.data_manager.get_nickname_template_entry(template_id)
+        if not entry:
+            QMessageBox.warning(self, "개별 설정", "템플릿 정보를 불러오지 못했습니다.")
+            return
+        base_config = self.data_manager.get_nickname_config()
+        self.nickname_config = base_config
+        dialog = NicknameTemplateSettingsDialog(self, entry, base_config or {})
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        overrides = dialog.get_overrides()
+        updated_entry = self.data_manager.update_nickname_template_overrides(template_id, overrides)
+        if overrides:
+            self.log_viewer.append(f"닉네임 템플릿 '{template_id}' 개별 설정을 저장했습니다.")
+        else:
+            self.log_viewer.append(f"닉네임 템플릿 '{template_id}' 개별 설정을 해제했습니다.")
+        if updated_entry is not None:
+            item.setData(Qt.ItemDataRole.UserRole + 1, updated_entry)
+        self.populate_nickname_template_list()
+        self._handle_nickname_template_overrides_changed()
+
+    def _handle_nickname_template_overrides_changed(self):
+        """닉네임 템플릿 개별 설정이 변경된 뒤 내부 캐시를 최신 상태로 유지합니다."""
+        self._refresh_nickname_config_cache()
 
     def _refresh_direction_config_cache(self):
         self.direction_config = self.data_manager.get_direction_config()

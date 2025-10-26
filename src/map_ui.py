@@ -7455,6 +7455,8 @@ class MapTab(QWidget):
         if not context.get('allow_navigation') or context.get('phase') != 'wait_travel':
             return
 
+        has_map_authority = getattr(self, 'current_authority_owner', 'map') == 'map'
+
         # [권한 우선 잠금 갱신] OTHER_PLAYER_WAIT 락을 주기적으로 연장하여 사냥 권한 선점 방지
         try:
             now_ts = time.time()

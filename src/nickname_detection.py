@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Iterable, Optional
+from typing import ClassVar, Iterable, Optional
 
 import cv2
 import numpy as np
@@ -16,6 +16,7 @@ class NicknameTemplate:
     image: np.ndarray  # grayscale image
     width: int
     height: int
+    overrides: dict[str, float | int] | None = None
 
 
 class NicknameDetector:
@@ -27,6 +28,15 @@ class NicknameDetector:
     DEFAULT_MARGIN_X = 210.0
     DEFAULT_MARGIN_TOP = 100.0
     DEFAULT_MARGIN_BOTTOM = 100.0
+
+    _OVERRIDE_BOUNDS: ClassVar[dict[str, tuple[float, float]]] = {
+        'match_threshold': (0.1, 0.99),
+        'char_offset_x': (-999.0, 999.0),
+        'char_offset_y': (-999.0, 999.0),
+        'search_margin_x': (0.0, 999.0),
+        'search_margin_top': (0.0, 999.0),
+        'search_margin_bottom': (0.0, 999.0),
+    }
 
     def __init__(
         self,
@@ -102,11 +112,13 @@ class NicknameDetector:
             image = cv2.imread(path, cv2.IMREAD_GRAYSCALE)
             if image is None:
                 continue
+            overrides = self._sanitize_template_overrides(entry.get('overrides'))
             template = NicknameTemplate(
                 template_id=template_id,
                 image=image,
                 width=int(image.shape[1]),
                 height=int(image.shape[0]),
+                overrides=overrides or None,
             )
             self.templates.append(template)
         self._last_result = None
@@ -143,9 +155,10 @@ class NicknameDetector:
             if prev_box:
                 box_x, box_y = float(prev_box.get('x', 0.0)), float(prev_box.get('y', 0.0))
                 box_w, box_h = float(prev_box.get('width', 0.0)), float(prev_box.get('height', 0.0))
-                margin_x = self.search_margin_x
-                margin_top = self.search_margin_top
-                margin_bottom = self.search_margin_bottom
+                last_template = self._last_successful_template
+                margin_x = self._get_effective_value(last_template, 'search_margin_x', self.search_margin_x)
+                margin_top = self._get_effective_value(last_template, 'search_margin_top', self.search_margin_top)
+                margin_bottom = self._get_effective_value(last_template, 'search_margin_bottom', self.search_margin_bottom)
                 x1 = int(np.clip(box_x - margin_x, 0.0, frame_w))
                 y1 = int(np.clip(box_y - margin_top, 0.0, frame_h))
                 x2 = int(np.clip(box_x + box_w + margin_x, 0.0, frame_w))
@@ -177,7 +190,8 @@ class NicknameDetector:
             if roi_w >= template.width and roi_h >= template.height:
                 result = cv2.matchTemplate(roi_gray, template.image, cv2.TM_CCOEFF_NORMED)
                 _, max_val, _, max_loc = cv2.minMaxLoc(result)
-                if max_val >= self.match_threshold:
+                threshold = self._get_effective_value(template, 'match_threshold', self.match_threshold)
+                if max_val >= threshold:
                     best_score, best_template, best_location = float(max_val), template, max_loc
 
         # 2. 느린 경로: 빠른 경로에서 못 찾았거나, 전체 스캔 모드일 때
@@ -205,7 +219,8 @@ class NicknameDetector:
                     if roi_w >= template.width and roi_h >= template.height:
                         result = cv2.matchTemplate(roi_gray, template.image, cv2.TM_CCOEFF_NORMED)
                         _, max_val, _, max_loc = cv2.minMaxLoc(result)
-                        if max_val >= self.match_threshold and max_val > best_score:
+                        threshold = self._get_effective_value(template, 'match_threshold', self.match_threshold)
+                        if max_val >= threshold and max_val > best_score:
                             best_score, best_template, best_location = float(max_val), template, max_loc
                 # 다음 프레임을 위해 인덱스 증가 (순환)
                 self._full_scan_template_index = (self._full_scan_template_index + 1) % len(self.templates) if self.templates else 0
@@ -217,7 +232,8 @@ class NicknameDetector:
                     if roi_w < template.width or roi_h < template.height: continue
                     result = cv2.matchTemplate(roi_gray, template.image, cv2.TM_CCOEFF_NORMED)
                     _, max_val, _, max_loc = cv2.minMaxLoc(result)
-                    if max_val >= self.match_threshold and max_val > best_score:
+                    threshold = self._get_effective_value(template, 'match_threshold', self.match_threshold)
+                    if max_val >= threshold and max_val > best_score:
                         best_score, best_template, best_location = float(max_val), template, max_loc
 
         if not best_template:
@@ -230,15 +246,17 @@ class NicknameDetector:
 
         nick_x, nick_y = origin_x + best_location[0], origin_y + best_location[1]
         nick_w, nick_h = best_template.width, best_template.height
-        center_x = nick_x + nick_w / 2.0 + self.offset_x
-        center_y = nick_y + nick_h + self.offset_y
+        offset_x = self._get_effective_value(best_template, 'char_offset_x', self.offset_x)
+        offset_y = self._get_effective_value(best_template, 'char_offset_y', self.offset_y)
+        center_x = nick_x + nick_w / 2.0 + offset_x
+        center_y = nick_y + nick_h + offset_y
         center_x, center_y = float(np.clip(center_x, 0.0, frame_w - 1.0)), float(np.clip(center_y, 0.0, frame_h - 1.0))
         char_width = max(nick_w * self.WIDTH_SCALE, nick_w + 12.0)
-        char_height = max(nick_h * self.HEIGHT_SCALE, nick_h + abs(self.offset_y) + 20.0)
+        char_height = max(nick_h * self.HEIGHT_SCALE, nick_h + abs(offset_y) + 20.0)
         char_width, char_height = float(min(char_width, frame_w)), float(min(char_height, frame_h))
         char_x = float(np.clip(center_x - char_width / 2.0, 0.0, frame_w - char_width))
         char_y = float(np.clip(center_y - char_height / 2.0, 0.0, frame_h - char_height))
-        
+
         detection = {
             'template_id': best_template.template_id, 'score': best_score,
             'nickname_box': {'x': float(nick_x), 'y': float(nick_y), 'width': float(nick_w), 'height': float(nick_h)},
@@ -279,3 +297,35 @@ class NicknameDetector:
         except (TypeError, ValueError):
             margin = default
         return max(0.0, margin)
+
+    @classmethod
+    def _sanitize_template_overrides(cls, overrides: Optional[dict]) -> dict[str, float | int]:
+        if not isinstance(overrides, dict):
+            return {}
+        sanitized: dict[str, float | int] = {}
+        for key, bounds in cls._OVERRIDE_BOUNDS.items():
+            if key not in overrides:
+                continue
+            raw_value = overrides.get(key)
+            try:
+                numeric = float(raw_value)
+            except (TypeError, ValueError):
+                continue
+            min_v, max_v = bounds
+            clamped = max(min_v, min(max_v, numeric))
+            if key == 'match_threshold':
+                sanitized[key] = float(clamped)
+            else:
+                sanitized[key] = clamped
+        return sanitized
+
+    def _get_effective_value(self, template: Optional[NicknameTemplate], key: str, fallback: float) -> float:
+        min_v, max_v = self._OVERRIDE_BOUNDS.get(key, (-float('inf'), float('inf')))
+        value = fallback
+        if template and template.overrides and key in template.overrides:
+            value = template.overrides[key]
+        try:
+            numeric = float(value)
+        except (TypeError, ValueError):
+            numeric = float(fallback)
+        return max(min_v, min(max_v, numeric))
