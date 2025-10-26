@@ -6480,6 +6480,7 @@ class MapTab(QWidget):
                     except Exception:
                         pass
                 self._active_hunt_zone_id = None
+            self._restore_hunt_zone_map_overrides()
             return
         # enabled=True인 존 중 포함되는 것 찾기(겹침 금지 가정)
         px, py = float(final_player_pos.x()), float(final_player_pos.y())
@@ -6487,7 +6488,12 @@ class MapTab(QWidget):
         current_zone_data = None
         for z in zones:
             try:
-                if not bool(z.get('enabled', False)):
+                range_enabled = bool(z.get('enabled', False))
+                conditions_cfg = z.get('conditions_override') or {}
+                teleport_cfg = z.get('teleport_override') or {}
+                conditions_enabled = bool(conditions_cfg.get('enabled', False))
+                teleport_enabled = bool(teleport_cfg.get('enabled', False))
+                if not (range_enabled or conditions_enabled or teleport_enabled):
                     continue
                 r = z.get('rect') or [0, 0, 0, 0]
                 if not (isinstance(r, list) and len(r) == 4):
@@ -6516,12 +6522,54 @@ class MapTab(QWidget):
             # 적용
             if hunt_tab and hasattr(hunt_tab, 'api_apply_zone_override'):
                 try:
-                    override_payload = {
-                        'ranges': dict((current_zone_data or {}).get('ranges') or {}),
-                        'conditions_override': dict((current_zone_data or {}).get('conditions_override') or {}),
-                        'teleport_override': dict((current_zone_data or {}).get('teleport_override') or {}),
+                    zone_dict = current_zone_data or {}
+                    ranges_dict = dict(zone_dict.get('ranges') or {})
+                    def _ival(d, key, default):
+                        try:
+                            return int(d.get(key, default))
+                        except Exception:
+                            return int(default)
+                    sanitized_ranges = {
+                        'enemy_front': _ival(ranges_dict, 'enemy_front', 400),
+                        'enemy_back': _ival(ranges_dict, 'enemy_back', 400),
+                        'primary_front': _ival(ranges_dict, 'primary_front', 200),
+                        'primary_back': _ival(ranges_dict, 'primary_back', 200),
+                        'y_band_height': _ival(ranges_dict, 'y_band_height', 40),
+                        'y_band_offset': _ival(ranges_dict, 'y_band_offset', 0),
                     }
-                    ok, _msg = hunt_tab.api_apply_zone_override(current_zone_id, override_payload)
+                    cond_cfg = dict(zone_dict.get('conditions_override') or {})
+                    cond_enabled = bool(cond_cfg.get('enabled', False))
+                    conditions_payload = {
+                        'enabled': cond_enabled,
+                        'hunt_monster_threshold': _ival(cond_cfg, 'hunt_monster_threshold', 3),
+                        'primary_monster_threshold': _ival(cond_cfg, 'primary_monster_threshold', 1),
+                    }
+                    tele_cfg = dict(zone_dict.get('teleport_override') or {})
+                    tele_enabled = bool(tele_cfg.get('enabled', False))
+                    try:
+                        tele_probability = float(tele_cfg.get('probability', 0.0))
+                    except Exception:
+                        tele_probability = 0.0
+                    tele_probability = max(0.0, min(100.0, tele_probability))
+                    teleport_payload = {
+                        'enabled': tele_enabled,
+                        'probability': tele_probability,
+                    }
+                    override_payload = {
+                        'range_enabled': bool(zone_dict.get('enabled', False)),
+                        'ranges': sanitized_ranges,
+                        'conditions_override': conditions_payload,
+                        'teleport_override': teleport_payload,
+                    }
+                    if not (
+                        override_payload['range_enabled']
+                        or override_payload['conditions_override']['enabled']
+                        or override_payload['teleport_override']['enabled']
+                    ):
+                        ok = False
+                        _msg = '활성화된 오버라이드가 없습니다.'
+                    else:
+                        ok, _msg = hunt_tab.api_apply_zone_override(current_zone_id, override_payload)
                     if ok:
                         self._active_hunt_zone_id = current_zone_id
                 except Exception:
@@ -6570,6 +6618,7 @@ class MapTab(QWidget):
     def _restore_hunt_zone_map_overrides(self) -> None:
         """존을 벗어났을 때 맵 탭 텔레포트 설정을 원래 값으로 복원."""
         if self._hunt_zone_teleport_backup is None:
+            self._hunt_zone_override_probability = None
             return
         self.cfg_walk_teleport_probability = float(self._hunt_zone_teleport_backup)
         self._hunt_zone_teleport_backup = None

@@ -1644,7 +1644,8 @@ class HuntZoneConfigDialog(QDialog):
         form = QFormLayout()
 
         # 활성화
-        self.enabled_checkbox = QCheckBox("활성화")
+        self.enabled_checkbox = QCheckBox("사냥범위 활성화")
+        self.enabled_checkbox.setToolTip("체크 시 이 존에서 사냥범위 전/후 설정을 적용합니다.")
         self.enabled_checkbox.setChecked(bool(self.zone.get('enabled', False)))
         form.addRow(self.enabled_checkbox)
 
@@ -1680,6 +1681,7 @@ class HuntZoneConfigDialog(QDialog):
 
         self.conditions_checkbox = QCheckBox("사냥조건 오버라이드")
         self.conditions_checkbox.setChecked(conditions_enabled)
+        self.conditions_checkbox.setToolTip("체크 시 해당 존에서 사냥/주스킬 몬스터 임계치를 별도로 사용합니다.")
         layout.addWidget(self.conditions_checkbox)
 
         self.hunt_threshold_spin = QSpinBox()
@@ -1705,6 +1707,7 @@ class HuntZoneConfigDialog(QDialog):
 
         self.teleport_checkbox = QCheckBox("텔레포트 확률 오버라이드")
         self.teleport_checkbox.setChecked(teleport_enabled)
+        self.teleport_checkbox.setToolTip("체크 시 해당 존에서 사냥/걷기 텔레포트 기본 확률을 덮어씁니다.")
         layout.addWidget(self.teleport_checkbox)
 
         self.teleport_probability_spin = QDoubleSpinBox()
@@ -1713,6 +1716,7 @@ class HuntZoneConfigDialog(QDialog):
         self.teleport_probability_spin.setSingleStep(0.5)
         self.teleport_probability_spin.setSuffix(" %")
         self.teleport_probability_spin.setValue(teleport_probability)
+        self.teleport_probability_spin.setToolTip("0~100 범위의 확률(%)")
 
         teleport_form = QFormLayout()
         teleport_form.addRow("기본 확률(사냥/걷기/맵)", self.teleport_probability_spin)
@@ -3042,7 +3046,32 @@ class FullMinimapEditorDialog(QDialog):
                     pb = int(ranges.get('primary_back', 0))
                     yh = int(ranges.get('y_band_height', 0))
                     yo = int(ranges.get('y_band_offset', 0))
-                    tip = f"활성화: {'예' if enabled else '아니오'}\n사냥 전/후: {ef}/{eb}\n주스킬 전/후: {pf}/{pb}\nY 높이/오프셋: {yh}/{yo}"
+                    cond_cfg = zone.get('conditions_override') or {}
+                    cond_enabled = bool(cond_cfg.get('enabled', False))
+                    cond_h = int(cond_cfg.get('hunt_monster_threshold', 3))
+                    cond_p = int(cond_cfg.get('primary_monster_threshold', 1))
+                    tele_cfg = zone.get('teleport_override') or {}
+                    tele_enabled = bool(tele_cfg.get('enabled', False))
+                    try:
+                        tele_prob = float(tele_cfg.get('probability', 0.0))
+                    except Exception:
+                        tele_prob = 0.0
+                    tele_prob = max(0.0, min(100.0, tele_prob))
+                    tip_lines = [
+                        f"사냥범위 활성화: {'예' if enabled else '아니오'}",
+                        f"사냥 전/후: {ef}/{eb}",
+                        f"주스킬 전/후: {pf}/{pb}",
+                        f"Y 높이/오프셋: {yh}/{yo}",
+                    ]
+                    if cond_enabled:
+                        tip_lines.append(f"사냥조건 오버라이드: 예 (사냥 {cond_h} / 주스킬 {cond_p})")
+                    else:
+                        tip_lines.append("사냥조건 오버라이드: 아니오")
+                    if tele_enabled:
+                        tip_lines.append(f"텔레포트 확률 오버라이드: 예 ({tele_prob:.1f}%)")
+                    else:
+                        tip_lines.append("텔레포트 확률 오버라이드: 아니오")
+                    tip = "\n".join(tip_lines)
                     item.setToolTip(tip)
                     
                 # 5. 모든 층 번호 텍스트를 마지막에 그림

@@ -2245,6 +2245,17 @@ class HuntTab(QWidget):
             conditions_override = {}
             teleport_override = {}
 
+        range_flag = payload.get('range_enabled')
+        range_enabled = bool(range_flag) if range_flag is not None else True
+        if not isinstance(conditions_override, dict):
+            conditions_override = {}
+        if not isinstance(teleport_override, dict):
+            teleport_override = {}
+        conditions_enabled = bool(conditions_override.get('enabled', False))
+        teleport_enabled = bool(teleport_override.get('enabled', False))
+        if not (range_enabled or conditions_enabled or teleport_enabled):
+            return False, '활성화된 오버라이드가 없습니다.'
+
         # 전/후 값만 사용(대칭은 숨김)
         def _ival(d, k, default):
             try:
@@ -2252,30 +2263,31 @@ class HuntTab(QWidget):
             except Exception:
                 return int(default)
 
-        enemy_front = _ival(ranges, 'enemy_front', self.enemy_front_spinbox.value())
-        enemy_back = _ival(ranges, 'enemy_back', self.enemy_back_spinbox.value())
-        primary_front = _ival(ranges, 'primary_front', self.primary_front_spinbox.value())
-        primary_back = _ival(ranges, 'primary_back', self.primary_back_spinbox.value())
-        y_band_height = _ival(ranges, 'y_band_height', self.y_band_height_spinbox.value())
-        y_band_offset = _ival(ranges, 'y_band_offset', self.y_band_offset_spinbox.value())
+        if range_enabled:
+            enemy_front = _ival(ranges, 'enemy_front', self.enemy_front_spinbox.value())
+            enemy_back = _ival(ranges, 'enemy_back', self.enemy_back_spinbox.value())
+            primary_front = _ival(ranges, 'primary_front', self.primary_front_spinbox.value())
+            primary_back = _ival(ranges, 'primary_back', self.primary_back_spinbox.value())
+            y_band_height = _ival(ranges, 'y_band_height', self.y_band_height_spinbox.value())
+            y_band_offset = _ival(ranges, 'y_band_offset', self.y_band_offset_spinbox.value())
 
-        # 모드 강제: 전/후 비대칭 ON
-        try:
-            self.facing_range_checkbox.setChecked(True)
-            self._update_range_inputs_enabled(True)
-        except Exception:
-            pass
+            # 모드 강제: 전/후 비대칭 ON
+            try:
+                self.facing_range_checkbox.setChecked(True)
+                self._update_range_inputs_enabled(True)
+            except Exception:
+                pass
 
-        # 값 적용(보이든 숨기든 상관없이 설정 가능)
-        try:
-            self.enemy_front_spinbox.setValue(enemy_front)
-            self.enemy_back_spinbox.setValue(enemy_back)
-            self.primary_front_spinbox.setValue(primary_front)
-            self.primary_back_spinbox.setValue(primary_back)
-            self.y_band_height_spinbox.setValue(y_band_height)
-            self.y_band_offset_spinbox.setValue(y_band_offset)
-        except Exception:
-            pass
+            # 값 적용(보이든 숨기든 상관없이 설정 가능)
+            try:
+                self.enemy_front_spinbox.setValue(enemy_front)
+                self.enemy_back_spinbox.setValue(enemy_back)
+                self.primary_front_spinbox.setValue(primary_front)
+                self.primary_back_spinbox.setValue(primary_back)
+                self.y_band_height_spinbox.setValue(y_band_height)
+                self.y_band_offset_spinbox.setValue(y_band_offset)
+            except Exception:
+                pass
 
         # 사냥조건 임계치 오버라이드
         def _threshold_val(key, default):
@@ -2283,7 +2295,7 @@ class HuntTab(QWidget):
                 return int(conditions_override.get(key, default))
             except Exception:
                 return int(default)
-        if isinstance(conditions_override, dict) and bool(conditions_override.get('enabled', False)):
+        if conditions_enabled:
             try:
                 self.hunt_monster_threshold_spinbox.setValue(
                     _threshold_val('hunt_monster_threshold', self.hunt_monster_threshold_spinbox.value())
@@ -2298,7 +2310,7 @@ class HuntTab(QWidget):
                 pass
 
         # 텔레포트 확률 오버라이드(사냥/걷기 공통)
-        if isinstance(teleport_override, dict) and bool(teleport_override.get('enabled', False)):
+        if teleport_enabled:
             try:
                 probability = float(teleport_override.get('probability', self.teleport_probability_spinbox.value()))
             except Exception:
