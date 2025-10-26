@@ -246,7 +246,7 @@ class TelegramBridge(QObject):
                                 "- /화면출력 | /display: 사냥탭 화면출력 토글\n"
                                 "- /대기모드 | /wait: 즉시 대기모드(무기한) 진입\n"
                                 "- /대기종료 | /wait_end: 대기모드 해제\n"
-                                "- /종료 | /exit: 5초 뒤 대기모드에서 '게임종료' 명령 실행\n"
+                                "- /종료 | /exit: 즉시 대기모드로 전환해 '게임종료' 명령 실행\n"
                                 "- /종료예약 n분 | /exit_in n: n분 뒤 위 플로우 실행 예약\n"
                                 "- /종료예약 취소 | /cancel_exit: 예약된 게임 종료 취소\n"
                                 "- /ping: 연결 확인"
@@ -318,9 +318,9 @@ class TelegramBridge(QObject):
                         await context.bot.send_message(chat_id=chat_id, text=msg)
                         return
 
-                    # 종료(5초 뒤 대기 모드 → 명령 실행)
+                    # 종료(즉시 대기 모드 → 명령 실행)
                     if lower in ("/종료", "/exit"):
-                        ok, msg = self._schedule_exit_wait(seconds=5)
+                        ok, msg = self._schedule_exit_wait(seconds=0)
                         await context.bot.send_message(chat_id=chat_id, text=msg)
                         return
 
@@ -498,7 +498,7 @@ class TelegramBridge(QObject):
         def _call() -> tuple[bool, str]:
             api = getattr(self._hunt_tab, "api_schedule_exit_wait_in", None)
             if callable(api):
-                return api(minutes, countdown_seconds=5)
+                return api(minutes, countdown_seconds=0)
             return False, "게임 종료 대기 예약 API를 찾을 수 없습니다."
 
         try:

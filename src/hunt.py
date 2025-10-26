@@ -1983,18 +1983,27 @@ class HuntTab(QWidget):
             return False, "다른 대기 모드가 진행 중입니다."
         if self.exit_wait_in_progress:
             return False, "이미 게임 종료 대기 플로우가 진행 중입니다."
-        countdown = max(1, int(countdown_seconds))
+        countdown = max(0, int(countdown_seconds))
         now = time.time()
-        self.exit_wait_countdown_duration = countdown
+
+        # 상태 초기화
         self.exit_wait_last_request_source = "telegram"
         self.exit_wait_in_progress = False
         self._exit_wait_command_sent = False
         self._exit_wait_finalize_pending = False
+
         if schedule_delay <= 0.0:
             self.exit_wait_schedule_ts = None
-            self.exit_wait_countdown_started_at = now
-            self.exit_wait_countdown_due_ts = now + countdown
-            time_text = f"{countdown}초 후"
+            self.exit_wait_countdown_started_at = None
+            self.exit_wait_countdown_due_ts = None
+            # 즉시 대기 모드 진입
+            self._start_exit_wait_flow()
+            self._ensure_shutdown_timer_running()
+            self._update_shutdown_labels()
+            if not self.exit_wait_in_progress:
+                return False, "[종료] 게임 종료 대기 모드 시작에 실패했습니다."
+            return True, "게임 종료 대기 모드를 즉시 시작합니다."
+
         else:
             self.exit_wait_schedule_ts = now + schedule_delay
             self.exit_wait_countdown_started_at = None
@@ -2004,12 +2013,12 @@ class HuntTab(QWidget):
                 time_text = f"{minutes}분 후"
             else:
                 time_text = f"{int(schedule_delay)}초 후"
-        message = f"[종료] 게임 종료를 {time_text} 대기 모드에서 실행합니다."
-        self.append_log(message, "info")
-        self._log_map_shutdown(message, "orange")
-        self._ensure_shutdown_timer_running()
-        self._update_shutdown_labels()
-        return True, message
+            message = f"[종료] 게임 종료를 {time_text} 대기 모드에서 실행합니다."
+            self.append_log(message, "info")
+            self._log_map_shutdown(message, "orange")
+            self._ensure_shutdown_timer_running()
+            self._update_shutdown_labels()
+            return True, message
 
     def _is_exit_wait_active(self) -> bool:
         return any([
@@ -2106,7 +2115,23 @@ class HuntTab(QWidget):
         except Exception:
             pass
         if success and self.shutdown_sleep_enabled:
-            self._attempt_system_sleep()
+            sleep_message = "[종료] 5초 뒤 절전 모드를 시도합니다."
+            try:
+                self.append_log(sleep_message, "info")
+                self._log_map_shutdown(sleep_message, "orange")
+            except Exception:
+                pass
+
+            def _do_sleep():
+                try:
+                    self._attempt_system_sleep()
+                except Exception:
+                    pass
+
+            try:
+                QTimer.singleShot(5000, _do_sleep)
+            except Exception:
+                _do_sleep()
         self._reset_exit_wait_state()
 
     # ---------------------- 대기 모드(무기한) 제어 ----------------------
@@ -4450,29 +4475,22 @@ class HuntTab(QWidget):
         now = time.time()
         triggered = False
 
+        exit_status_text: Optional[str] = None
+
         if self.exit_wait_schedule_ts is not None:
             remaining_to_schedule = self.exit_wait_schedule_ts - now
             if remaining_to_schedule <= 0:
                 self.exit_wait_schedule_ts = None
-                self.exit_wait_countdown_started_at = now
-                duration = max(1, int(self.exit_wait_countdown_duration or 5))
-                self.exit_wait_countdown_due_ts = now + duration
-                message = f"[종료] 게임 종료 카운트다운을 시작합니다. (남은 시간 {duration}초)"
-                self.append_log(message, "info")
-                self._log_map_shutdown(message, "orange")
-            else:
-                self.exit_wait_countdown_duration = max(1, int(self.exit_wait_countdown_duration or 5))
-
-        if self.exit_wait_countdown_due_ts is not None:
-            remaining_countdown = self.exit_wait_countdown_due_ts - now
-            if remaining_countdown <= 0:
-                self.exit_wait_countdown_due_ts = None
-                self.exit_wait_countdown_started_at = None
                 self._start_exit_wait_flow()
+                if self.exit_wait_in_progress:
+                    exit_status_text = "게임 종료 대기 진행 중"
             else:
-                # 실시간 카운트다운 표시
-                seconds_left = max(0, int(round(remaining_countdown)))
-                self.shutdown_reservation_status.setText(f"카운트다운: {seconds_left}초")
+                exit_status_text = f"게임 종료 예약: {self._format_remaining_text(remaining_to_schedule)}"
+        elif self.exit_wait_in_progress:
+            exit_status_text = "게임 종료 대기 진행 중"
+
+        if exit_status_text:
+            self.shutdown_reservation_status.setText(exit_status_text)
 
         if self.shutdown_reservation_enabled and self.shutdown_datetime_target is not None:
             remaining = self.shutdown_datetime_target - now
@@ -4519,10 +4537,6 @@ class HuntTab(QWidget):
             remaining = self.exit_wait_schedule_ts - now
             parts.append("게임 종료 예약")
             reservation_text = f"게임 종료 예약: {self._format_remaining_text(remaining)}" if remaining > 0 else "게임 종료 예약 준비 중"
-        elif self.exit_wait_countdown_due_ts is not None:
-            remaining = self.exit_wait_countdown_due_ts - now
-            parts.append("게임 종료 카운트다운")
-            reservation_text = f"카운트다운: {max(0, int(round(remaining)))}초"
         elif self.exit_wait_in_progress:
             parts.append("게임 종료 대기 중")
             reservation_text = "대기 모드 진행 중"
