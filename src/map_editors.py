@@ -1671,6 +1671,56 @@ class HuntZoneConfigDialog(QDialog):
         form.addRow("Y 오프셋(px)", self.y_offset_spin)
 
         layout.addLayout(form)
+
+        # 사냥조건 오버라이드
+        conditions = self.zone.get('conditions_override') or {}
+        hunt_threshold = int(conditions.get('hunt_monster_threshold', 3))
+        primary_threshold = int(conditions.get('primary_monster_threshold', 1))
+        conditions_enabled = bool(conditions.get('enabled', False))
+
+        self.conditions_checkbox = QCheckBox("사냥조건 오버라이드")
+        self.conditions_checkbox.setChecked(conditions_enabled)
+        layout.addWidget(self.conditions_checkbox)
+
+        self.hunt_threshold_spin = QSpinBox()
+        self.hunt_threshold_spin.setRange(1, 50)
+        self.hunt_threshold_spin.setValue(hunt_threshold)
+
+        self.primary_threshold_spin = QSpinBox()
+        self.primary_threshold_spin.setRange(1, 50)
+        self.primary_threshold_spin.setValue(primary_threshold)
+
+        conditions_form = QFormLayout()
+        conditions_form.addRow("사냥범위 몬스터", self.hunt_threshold_spin)
+        conditions_form.addRow("주 스킬 범위 몬스터", self.primary_threshold_spin)
+        layout.addLayout(conditions_form)
+
+        self.conditions_checkbox.toggled.connect(self._update_condition_inputs_enabled)
+        self._update_condition_inputs_enabled(self.conditions_checkbox.isChecked())
+
+        # 텔레포트 확률 오버라이드
+        teleport = self.zone.get('teleport_override') or {}
+        teleport_enabled = bool(teleport.get('enabled', False))
+        teleport_probability = float(teleport.get('probability', 0.0))
+
+        self.teleport_checkbox = QCheckBox("텔레포트 확률 오버라이드")
+        self.teleport_checkbox.setChecked(teleport_enabled)
+        layout.addWidget(self.teleport_checkbox)
+
+        self.teleport_probability_spin = QDoubleSpinBox()
+        self.teleport_probability_spin.setRange(0.0, 100.0)
+        self.teleport_probability_spin.setDecimals(1)
+        self.teleport_probability_spin.setSingleStep(0.5)
+        self.teleport_probability_spin.setSuffix(" %")
+        self.teleport_probability_spin.setValue(teleport_probability)
+
+        teleport_form = QFormLayout()
+        teleport_form.addRow("기본 확률(사냥/걷기/맵)", self.teleport_probability_spin)
+        layout.addLayout(teleport_form)
+
+        self.teleport_checkbox.toggled.connect(self._update_teleport_inputs_enabled)
+        self._update_teleport_inputs_enabled(self.teleport_checkbox.isChecked())
+
         buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
@@ -1686,8 +1736,24 @@ class HuntZoneConfigDialog(QDialog):
                 'primary_back': int(self.primary_back_spin.value()),
                 'y_band_height': int(self.y_height_spin.value()),
                 'y_band_offset': int(self.y_offset_spin.value()),
-            }
+            },
+            'conditions_override': {
+                'enabled': bool(self.conditions_checkbox.isChecked()),
+                'hunt_monster_threshold': int(self.hunt_threshold_spin.value()),
+                'primary_monster_threshold': int(self.primary_threshold_spin.value()),
+            },
+            'teleport_override': {
+                'enabled': bool(self.teleport_checkbox.isChecked()),
+                'probability': float(self.teleport_probability_spin.value()),
+            },
         }
+
+    def _update_condition_inputs_enabled(self, checked: bool) -> None:
+        self.hunt_threshold_spin.setEnabled(bool(checked))
+        self.primary_threshold_spin.setEnabled(bool(checked))
+
+    def _update_teleport_inputs_enabled(self, checked: bool) -> None:
+        self.teleport_probability_spin.setEnabled(bool(checked))
 
 class FullMinimapEditorDialog(QDialog):
     """
@@ -3173,6 +3239,42 @@ class FullMinimapEditorDialog(QDialog):
     def _rects_intersect(self, a: QRectF, b: QRectF) -> bool:
         return a.intersects(b)
 
+    def _get_default_condition_thresholds(self) -> dict:
+        """사냥탭의 현재 조건 임계치를 가져오거나 기본값을 반환."""
+        try:
+            hunt_tab = getattr(self.parent_map_tab, '_hunt_tab', None)
+            if hunt_tab and hasattr(hunt_tab, 'api_get_zone_override_defaults'):
+                defaults = hunt_tab.api_get_zone_override_defaults() or {}
+                cond = defaults.get('conditions_override') or {}
+                return {
+                    'hunt_monster_threshold': int(cond.get('hunt_monster_threshold', 3)),
+                    'primary_monster_threshold': int(cond.get('primary_monster_threshold', 1)),
+                }
+        except Exception:
+            pass
+        return {
+            'hunt_monster_threshold': 3,
+            'primary_monster_threshold': 1,
+        }
+
+    def _get_default_teleport_probability(self) -> float:
+        """현재 텔레포트 확률 기본값을 가져오거나 0.0을 반환."""
+        try:
+            hunt_tab = getattr(self.parent_map_tab, '_hunt_tab', None)
+            if hunt_tab and hasattr(hunt_tab, 'api_get_zone_override_defaults'):
+                defaults = hunt_tab.api_get_zone_override_defaults() or {}
+                tele = defaults.get('teleport_override') or {}
+                if 'probability' in tele:
+                    return float(tele.get('probability', 0.0))
+        except Exception:
+            pass
+        try:
+            if self.parent_map_tab and hasattr(self.parent_map_tab, 'cfg_walk_teleport_probability'):
+                return float(self.parent_map_tab.cfg_walk_teleport_probability or 0.0)
+        except Exception:
+            pass
+        return 0.0
+
     def _any_hunt_zone_overlaps(self, rect: QRectF, exclude_id: Optional[str] = None) -> bool:
         for zone in self.geometry_data.get('hunt_range_zones', []):
             if exclude_id and zone.get('id') == exclude_id:
@@ -3208,6 +3310,27 @@ class FullMinimapEditorDialog(QDialog):
             return
         if 'ranges' not in zone or not isinstance(zone['ranges'], dict):
             zone['ranges'] = self._get_default_hunt_ranges()
+        defaults_cond = self._get_default_condition_thresholds()
+        conditions = zone.get('conditions_override')
+        if not isinstance(conditions, dict):
+            conditions = {}
+        zone['conditions_override'] = {
+            'enabled': bool(conditions.get('enabled', False)),
+            'hunt_monster_threshold': int(conditions.get('hunt_monster_threshold', defaults_cond['hunt_monster_threshold'])),
+            'primary_monster_threshold': int(conditions.get('primary_monster_threshold', defaults_cond['primary_monster_threshold'])),
+        }
+        default_teleport = float(self._get_default_teleport_probability())
+        teleport = zone.get('teleport_override')
+        if not isinstance(teleport, dict):
+            teleport = {}
+        try:
+            probability_val = float(teleport.get('probability', default_teleport))
+        except Exception:
+            probability_val = default_teleport
+        zone['teleport_override'] = {
+            'enabled': bool(teleport.get('enabled', False)),
+            'probability': float(probability_val),
+        }
         dlg = HuntZoneConfigDialog(zone, parent=self)
         result = dlg.exec()
         if result == QDialog.DialogCode.Accepted:
@@ -3729,6 +3852,14 @@ class FullMinimapEditorDialog(QDialog):
                         'rect': [float(rect.x()), float(rect.y()), float(rect.width()), float(rect.height())],
                         'enabled': False,
                         'ranges': ranges,
+                        'conditions_override': {
+                            'enabled': False,
+                            **self._get_default_condition_thresholds(),
+                        },
+                        'teleport_override': {
+                            'enabled': False,
+                            'probability': float(self._get_default_teleport_probability()),
+                        },
                     }
                     self.geometry_data.setdefault('hunt_range_zones', []).append(new_zone)
                     # 프리뷰 정리 및 저장/갱신
