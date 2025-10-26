@@ -68,7 +68,12 @@ from PyQt6.QtGui import (
     QFontMetricsF,
     QGuiApplication,
 )
-from PyQt6.QtCore import Qt, QThread, pyqtSignal, pyqtSlot, QRect, QPoint, QRectF, QPointF, QSize, QSizeF, QTimer, QSignalBlocker
+from PyQt6.QtCore import Qt, QThread, pyqtSignal, pyqtSlot, QRect, QPoint, QRectF, QPointF, QSize, QSizeF, QTimer, QSignalBlocker, QUrl
+try:
+    from PyQt6.QtMultimedia import QAudioOutput, QMediaPlayer
+except Exception:
+    QAudioOutput = None  # type: ignore[assignment]
+    QMediaPlayer = None  # type: ignore[assignment]
 
 try:
     from sklearn.ensemble import RandomForestClassifier
@@ -94,8 +99,8 @@ except ImportError:
             return QRect(0, 0, 100, 100)
 
 try:
-    from .map import (
-        CONFIG_PATH,
+from .map import (
+    CONFIG_PATH,
         GLOBAL_ACTION_MODEL_DIR,
         GLOBAL_MAP_SETTINGS_FILE,
         load_baseline_state_machine_config,
@@ -614,6 +619,7 @@ class MapTab(QWidget):
             self.initial_delay_ms = 500
             # [신규] 사냥범위 존 오버라이드 추적
             self._active_hunt_zone_id: Optional[str] = None
+            self._active_qt_sound_players: list = []
 
             # 이벤트 웨이포인트 실행 상태
             self.event_in_progress = False
@@ -8093,34 +8099,143 @@ class MapTab(QWidget):
         except Exception:
             pass
 
-    def _play_sound_async(self, sound_path: str) -> None:
-        """지정된 사운드 파일을 비동기로 재생합니다."""
+    def _resolve_sound_path(self, name: str) -> str | None:
+        """워크스페이스 기준 사운드 파일 경로를 반환합니다."""
+        if not name:
+            return None
+
+        candidate_path = Path(name)
         try:
-            import winsound
+            if candidate_path.is_absolute() and candidate_path.exists():
+                return str(candidate_path)
         except Exception:
-            QApplication.beep()
+            pass
+
+        candidates: list[Path] = []
+        try:
+            workspace_root_path = Path(WORKSPACE_ROOT)
+            candidates.append(workspace_root_path / "sounds" / name)
+        except Exception:
+            pass
+
+        raw_workspace = str(WORKSPACE_ROOT)
+        if ":" in raw_workspace:
+            drive, remainder = raw_workspace.split(":", 1)
+            remainder = remainder.replace("\\", "/").lstrip("/\\")
+            wsl_base = Path("/mnt") / drive.lower()
+            if remainder:
+                wsl_base = wsl_base / Path(remainder)
+            candidates.append(wsl_base / "sounds" / name)
+
+        candidates.append(Path.cwd() / "workspace" / "sounds" / name)
+
+        fallback: str | None = None
+        for candidate in candidates:
+            try:
+                resolved = candidate.resolve()
+            except Exception:
+                resolved = candidate
+            if fallback is None:
+                fallback = str(resolved)
+            if resolved.exists():
+                return str(resolved)
+        return fallback
+
+    def _play_sound_async(self, name: str, *, volume: float = 1.0) -> None:
+        """지정된 사운드 파일을 비동기로 재생합니다."""
+        sound_path = self._resolve_sound_path(name)
+        if not sound_path:
+            try:
+                QApplication.beep()
+            except Exception:
+                pass
             return
 
-        def _play_sound() -> None:
+        player = None
+        if QMediaPlayer is not None and QAudioOutput is not None:
             try:
-                winsound.PlaySound(sound_path, winsound.SND_FILENAME | winsound.SND_ASYNC)
+                player = QMediaPlayer(self)
+                audio_output = QAudioOutput(player)
+                clamped_volume = max(0.0, min(volume, 1.0))
+                audio_output.setVolume(clamped_volume)
+                player.setAudioOutput(audio_output)
+                player.setSource(QUrl.fromLocalFile(sound_path))
+                self._active_qt_sound_players.append(player)
+
+                def _cleanup() -> None:
+                    try:
+                        player.stop()
+                    except Exception:
+                        pass
+                    try:
+                        self._active_qt_sound_players.remove(player)
+                    except ValueError:
+                        pass
+                    except Exception:
+                        pass
+                    try:
+                        player.deleteLater()
+                    except Exception:
+                        pass
+
+                def _handle_status(status: QMediaPlayer.MediaStatus) -> None:
+                    if status == QMediaPlayer.MediaStatus.EndOfMedia:
+                        _cleanup()
+
+                def _handle_error(*_: object) -> None:
+                    _cleanup()
+
+                try:
+                    player.mediaStatusChanged.connect(_handle_status)
+                except Exception:
+                    pass
+                try:
+                    player.errorOccurred.connect(_handle_error)
+                except Exception:
+                    pass
+
+                try:
+                    QTimer.singleShot(20000, _cleanup)
+                except Exception:
+                    pass
+
+                player.play()
+                return
             except Exception:
                 try:
-                    winsound.PlaySound("SystemExclamation", winsound.SND_ALIAS | winsound.SND_ASYNC)
+                    if player is not None:
+                        self._active_qt_sound_players.remove(player)
                 except Exception:
-                    QApplication.beep()
+                    pass
 
-        threading.Thread(target=_play_sound, daemon=True).start()
+        def _play_sound_fallback() -> None:
+            try:
+                import playsound  # type: ignore
+
+                playsound.playsound(sound_path, block=False)
+                return
+            except Exception:
+                try:
+                    import winsound  # type: ignore
+
+                    winsound.PlaySound(sound_path, winsound.SND_FILENAME | winsound.SND_ASYNC)
+                    return
+                except Exception:
+                    pass
+            try:
+                QApplication.beep()
+            except Exception:
+                pass
+
+        threading.Thread(target=_play_sound_fallback, daemon=True).start()
 
     def _play_other_player_alert_sound(self) -> None:
         """다른 유저 감지 시 알람 소리를 재생합니다."""
-        sound_path = r"G:\Coding\Project_Maple\workspace\sounds\other_user_in.mp3"
-        self._play_sound_async(sound_path)
+        self._play_sound_async("other_user_in.mp3", volume=0.7)
 
     def _play_other_player_clear_sound(self) -> None:
         """다른 유저 미감지 전환 시 효과음을 재생합니다."""
-        sound_path = r"G:\Coding\Project_Maple\workspace\sounds\other_user_out.mp3"
-        self._play_sound_async(sound_path)
+        self._play_sound_async("other_user_out.mp3", volume=0.7)
 
     def _handle_other_player_detection_alert(self, other_players: list[QRectF]) -> None:
         # [CHG] 알림/텔레그램에도 임계값 적용. 유저 테스트 시 임계값 무시.
