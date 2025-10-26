@@ -3337,6 +3337,8 @@ class FullMinimapEditorDialog(QDialog):
             values = dlg.get_values()
             zone['enabled'] = bool(values.get('enabled', False))
             zone['ranges'] = dict(values.get('ranges') or {})
+            zone['conditions_override'] = dict(values.get('conditions_override') or {})
+            zone['teleport_override'] = dict(values.get('teleport_override') or {})
             if self.parent_map_tab:
                 try:
                     self.parent_map_tab.save_profile_data()
