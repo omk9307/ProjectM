@@ -1086,16 +1086,25 @@ class MapTab(QWidget):
         # 네비게이터가 안정 상태(걷기/정렬)로 전환되었고 지면에 충분히 가까우면
         # 권한 스냅샷에서도 즉시 지상 상태로 간주해 대기 시간을 줄인다.
         try:
-            nav_action_key = str(navigation_action).lower()
+            nav_action_key = str(navigation_action).strip().lower()
         except Exception:
             nav_action_key = ''
-        stable_nav_actions = {'move_to_target', 'align_for_climb', 'verify_alignment'}
-        if nav_action_key in stable_nav_actions:
-            if isinstance(height_from_last_floor_px, (int, float)):
-                if height_from_last_floor_px <= near_floor_threshold_px + 1e-6:
-                    player_state = 'on_terrain'
-            elif is_near_floor:
-                player_state = 'on_terrain'
+
+        navigator_state_overrides = {
+            'move_to_target': 'on_terrain',
+            'align_for_climb': 'on_terrain',
+            'verify_alignment': 'on_terrain',
+            'prepare_to_climb': 'climbing_up',
+            'climb_in_progress': 'climbing_up',
+            'prepare_to_jump': 'jumping',
+            'prepare_to_fall': 'falling',
+            'prepare_to_down_jump': 'on_terrain',
+            'down_jump_in_progress': 'falling',
+            'fall_in_progress': 'falling',
+        }
+        override_state = navigator_state_overrides.get(nav_action_key)
+        if override_state:
+            player_state = override_state
 
         snapshot = PlayerStatusSnapshot(
             timestamp=timestamp,
@@ -8084,23 +8093,34 @@ class MapTab(QWidget):
         except Exception:
             pass
 
-    def _play_other_player_alert_sound(self) -> None:
-        """다른 유저 감지 시 알람 소리를 재생합니다."""
+    def _play_sound_async(self, sound_path: str) -> None:
+        """지정된 사운드 파일을 비동기로 재생합니다."""
         try:
             import winsound
         except Exception:
             QApplication.beep()
             return
 
-        def _beep_sequence() -> None:
+        def _play_sound() -> None:
             try:
-                winsound.Beep(1900, 350)
-                winsound.Beep(1500, 350)
-                winsound.Beep(2200, 450)
+                winsound.PlaySound(sound_path, winsound.SND_FILENAME | winsound.SND_ASYNC)
             except Exception:
-                winsound.PlaySound("SystemExclamation", winsound.SND_ALIAS | winsound.SND_ASYNC)
+                try:
+                    winsound.PlaySound("SystemExclamation", winsound.SND_ALIAS | winsound.SND_ASYNC)
+                except Exception:
+                    QApplication.beep()
 
-        threading.Thread(target=_beep_sequence, daemon=True).start()
+        threading.Thread(target=_play_sound, daemon=True).start()
+
+    def _play_other_player_alert_sound(self) -> None:
+        """다른 유저 감지 시 알람 소리를 재생합니다."""
+        sound_path = r"G:\Coding\Project_Maple\workspace\sounds\other_user_in.mp3"
+        self._play_sound_async(sound_path)
+
+    def _play_other_player_clear_sound(self) -> None:
+        """다른 유저 미감지 전환 시 효과음을 재생합니다."""
+        sound_path = r"G:\Coding\Project_Maple\workspace\sounds\other_user_out.mp3"
+        self._play_sound_async(sound_path)
 
     def _handle_other_player_detection_alert(self, other_players: list[QRectF]) -> None:
         # [CHG] 알림/텔레그램에도 임계값 적용. 유저 테스트 시 임계값 무시.
@@ -8109,6 +8129,7 @@ class MapTab(QWidget):
             return
 
         now = time.time()
+        was_active = bool(self._other_player_alert_active)
         effective_count = self._get_effective_other_player_count(len(other_players))
         try:
             threshold = int(getattr(self, 'other_player_min_count', 1) or 1)
@@ -8125,6 +8146,8 @@ class MapTab(QWidget):
             first_detection = not self._other_player_alert_active
             if first_detection:
                 self._play_other_player_alert_sound()
+                self._other_player_alert_active = True
+            else:
                 self._other_player_alert_active = True
 
             interval = max(self.telegram_send_interval, 1.0)
@@ -8168,6 +8191,8 @@ class MapTab(QWidget):
                 if mode == "custom" and self._other_player_alert_custom_remaining > 0:
                     self._other_player_alert_custom_remaining -= 1
         else:
+            if was_active:
+                self._play_other_player_clear_sound()
             self._other_player_alert_active = False
             self._other_player_alert_custom_remaining = 0
 
