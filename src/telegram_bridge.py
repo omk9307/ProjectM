@@ -246,9 +246,9 @@ class TelegramBridge(QObject):
                                 "- /화면출력 | /display: 사냥탭 화면출력 토글\n"
                                 "- /대기모드 | /wait: 즉시 대기모드(무기한) 진입\n"
                                 "- /대기종료 | /wait_end: 대기모드 해제\n"
-                                "- /종료 | /exit: 10초 뒤 종료 예약\n"
-                                "- /종료예약 n분 | /exit_in n: n분 뒤 종료 예약\n"
-                                "- /종료예약 취소 | /cancel_exit: 종료 예약 취소\n"
+                                "- /종료 | /exit: 5초 뒤 대기모드에서 '게임종료' 명령 실행\n"
+                                "- /종료예약 n분 | /exit_in n: n분 뒤 위 플로우 실행 예약\n"
+                                "- /종료예약 취소 | /cancel_exit: 예약된 게임 종료 취소\n"
                                 "- /ping: 연결 확인"
                             ),
                         )
@@ -318,15 +318,15 @@ class TelegramBridge(QObject):
                         await context.bot.send_message(chat_id=chat_id, text=msg)
                         return
 
-                    # 종료(10초 뒤)
+                    # 종료(5초 뒤 대기 모드 → 명령 실행)
                     if lower in ("/종료", "/exit"):
-                        ok, msg = self._schedule_shutdown(seconds=10)
+                        ok, msg = self._schedule_exit_wait(seconds=5)
                         await context.bot.send_message(chat_id=chat_id, text=msg)
                         return
 
                     # 종료예약 취소
                     if lower in ("/종료예약 취소", "/cancel_exit"):
-                        ok, msg = self._cancel_shutdown()
+                        ok, msg = self._cancel_exit_wait()
                         await context.bot.send_message(chat_id=chat_id, text=msg)
                         return
 
@@ -336,7 +336,7 @@ class TelegramBridge(QObject):
                         if minutes is None:
                             await context.bot.send_message(chat_id=chat_id, text="형식: /종료예약 n분 (예: /종료예약 10분)")
                             return
-                        ok, msg = self._schedule_shutdown(minutes=minutes)
+                        ok, msg = self._schedule_exit_wait_in(minutes=minutes)
                         await context.bot.send_message(chat_id=chat_id, text=msg)
                         return
 
@@ -345,7 +345,7 @@ class TelegramBridge(QObject):
                         if minutes is None:
                             await context.bot.send_message(chat_id=chat_id, text="Usage: /exit_in <minutes> (e.g. /exit_in 10)")
                             return
-                        ok, msg = self._schedule_shutdown(minutes=minutes)
+                        ok, msg = self._schedule_exit_wait_in(minutes=minutes)
                         await context.bot.send_message(chat_id=chat_id, text=msg)
                         return
 
@@ -475,6 +475,51 @@ class TelegramBridge(QObject):
             return _run_in_main_thread(_call)  # type: ignore[return-value]
         except Exception as exc:
             return False, f"사냥 시작 실패: {exc}"
+
+    def _schedule_exit_wait(self, *, seconds: int = 5) -> tuple[bool, str]:
+        if self._hunt_tab is None:
+            return False, "사냥탭을 찾을 수 없습니다."
+
+        def _call() -> tuple[bool, str]:
+            api = getattr(self._hunt_tab, "api_schedule_exit_wait", None)
+            if callable(api):
+                return api(countdown_seconds=seconds)
+            return False, "게임 종료 대기 API를 찾을 수 없습니다."
+
+        try:
+            return _run_in_main_thread(_call)  # type: ignore[return-value]
+        except Exception as exc:
+            return False, f"게임 종료 예약 실패: {exc}"
+
+    def _schedule_exit_wait_in(self, *, minutes: int) -> tuple[bool, str]:
+        if self._hunt_tab is None:
+            return False, "사냥탭을 찾을 수 없습니다."
+
+        def _call() -> tuple[bool, str]:
+            api = getattr(self._hunt_tab, "api_schedule_exit_wait_in", None)
+            if callable(api):
+                return api(minutes, countdown_seconds=5)
+            return False, "게임 종료 대기 예약 API를 찾을 수 없습니다."
+
+        try:
+            return _run_in_main_thread(_call)  # type: ignore[return-value]
+        except Exception as exc:
+            return False, f"게임 종료 예약 실패: {exc}"
+
+    def _cancel_exit_wait(self) -> tuple[bool, str]:
+        if self._hunt_tab is None:
+            return False, "사냥탭을 찾을 수 없습니다."
+
+        def _call() -> tuple[bool, str]:
+            api = getattr(self._hunt_tab, "api_cancel_exit_wait", None)
+            if callable(api):
+                return api()
+            return False, "게임 종료 대기 취소 API를 찾을 수 없습니다."
+
+        try:
+            return _run_in_main_thread(_call)  # type: ignore[return-value]
+        except Exception as exc:
+            return False, f"게임 종료 예약 취소 실패: {exc}"
 
     def _schedule_shutdown(self, *, seconds: Optional[int] = None, minutes: Optional[int] = None) -> tuple[bool, str]:
         if self._hunt_tab is None:

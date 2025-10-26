@@ -1184,6 +1184,16 @@ class HuntTab(QWidget):
         self._manual_indefinite_wait_active: bool = False
         self._shutdown_last_reason: Optional[str] = None
         self.shutdown_sleep_enabled = False
+        # 게임 종료 대기(텔레그램) 상태
+        self.exit_wait_schedule_ts: Optional[float] = None
+        self.exit_wait_countdown_due_ts: Optional[float] = None
+        self.exit_wait_countdown_started_at: Optional[float] = None
+        self.exit_wait_countdown_duration: int = 5
+        self.exit_wait_in_progress: bool = False
+        self.exit_wait_command_profile: str = '게임종료'
+        self._exit_wait_command_sent: bool = False
+        self._exit_wait_finalize_pending: bool = False
+        self.exit_wait_last_request_source: str = ''
         self.shutdown_timer = QTimer(self)
         self.shutdown_timer.setInterval(1000)
         self.shutdown_timer.setSingleShot(False)
@@ -1937,6 +1947,167 @@ class HuntTab(QWidget):
         except Exception as exc:
             return False, f"종료 예약 취소 실패: {exc}"
         return True, ("종료 예약을 취소했습니다." if had else "취소할 종료 예약이 없습니다.")
+
+    def api_schedule_exit_wait(self, countdown_seconds: int = 5) -> tuple[bool, str]:
+        """지정된 초 뒤 게임 종료 대기 모드를 시작한다."""
+        return self._schedule_exit_wait(countdown_seconds=countdown_seconds, schedule_delay=0.0)
+
+    def api_schedule_exit_wait_in(self, minutes: int, *, countdown_seconds: int = 5) -> tuple[bool, str]:
+        """n분 뒤 게임 종료 대기 모드를 시작하도록 예약한다."""
+        try:
+            mins = max(1, int(minutes))
+        except Exception:
+            mins = 1
+        delay = mins * 60
+        return self._schedule_exit_wait(countdown_seconds=countdown_seconds, schedule_delay=delay)
+
+    def api_cancel_exit_wait(self) -> tuple[bool, str]:
+        """예약된 게임 종료 대기 플로우를 취소한다."""
+        if not self._is_exit_wait_active():
+            return True, "예약된 게임 종료가 없습니다."
+        try:
+            if self.exit_wait_in_progress and bool(getattr(self, 'shutdown_other_player_wait_active', False)):
+                self._finish_other_player_wait_mode(reason="exit_wait_cancelled")
+        except Exception as exc:
+            return False, f"게임 종료 대기 해제 실패: {exc}"
+        self._reset_exit_wait_state()
+        message = "[종료] 게임 종료 예약을 취소했습니다."
+        self.append_log(message, "info")
+        self._log_map_shutdown(message, "green")
+        return True, "게임 종료 예약을 취소했습니다."
+
+    def _schedule_exit_wait(self, *, countdown_seconds: int, schedule_delay: float) -> tuple[bool, str]:
+        if not self._has_wait_waypoint_configured():
+            return False, "대기 모드를 실행하려면 먼저 웨이포인트를 설정해주세요."
+        if bool(getattr(self, 'shutdown_other_player_wait_active', False)) and not self.exit_wait_in_progress:
+            return False, "다른 대기 모드가 진행 중입니다."
+        if self.exit_wait_in_progress:
+            return False, "이미 게임 종료 대기 플로우가 진행 중입니다."
+        countdown = max(1, int(countdown_seconds))
+        now = time.time()
+        self.exit_wait_countdown_duration = countdown
+        self.exit_wait_last_request_source = "telegram"
+        self.exit_wait_in_progress = False
+        self._exit_wait_command_sent = False
+        self._exit_wait_finalize_pending = False
+        if schedule_delay <= 0.0:
+            self.exit_wait_schedule_ts = None
+            self.exit_wait_countdown_started_at = now
+            self.exit_wait_countdown_due_ts = now + countdown
+            time_text = f"{countdown}초 후"
+        else:
+            self.exit_wait_schedule_ts = now + schedule_delay
+            self.exit_wait_countdown_started_at = None
+            self.exit_wait_countdown_due_ts = None
+            minutes = int(schedule_delay // 60)
+            if minutes > 0 and schedule_delay % 60 == 0:
+                time_text = f"{minutes}분 후"
+            else:
+                time_text = f"{int(schedule_delay)}초 후"
+        message = f"[종료] 게임 종료를 {time_text} 대기 모드에서 실행합니다."
+        self.append_log(message, "info")
+        self._log_map_shutdown(message, "orange")
+        self._ensure_shutdown_timer_running()
+        self._update_shutdown_labels()
+        return True, message
+
+    def _is_exit_wait_active(self) -> bool:
+        return any([
+            self.exit_wait_schedule_ts is not None,
+            self.exit_wait_countdown_due_ts is not None,
+            self.exit_wait_in_progress,
+            self._exit_wait_finalize_pending,
+        ])
+
+    def _reset_exit_wait_state(self) -> None:
+        self.exit_wait_schedule_ts = None
+        self.exit_wait_countdown_due_ts = None
+        self.exit_wait_countdown_started_at = None
+        self.exit_wait_countdown_duration = 5
+        self.exit_wait_in_progress = False
+        self._exit_wait_command_sent = False
+        self._exit_wait_finalize_pending = False
+        self.exit_wait_last_request_source = ""
+        self._ensure_shutdown_timer_running()
+        self._update_shutdown_labels()
+
+    def _start_exit_wait_flow(self) -> None:
+        if self.exit_wait_in_progress:
+            return
+        now = time.time()
+        self.exit_wait_countdown_started_at = None
+        self.exit_wait_countdown_due_ts = None
+        self.append_log("[종료] 게임 종료 대기 모드를 시작합니다.", "info")
+        self._log_map_shutdown("[종료] 게임 종료 대기 모드를 시작합니다.", "orange")
+        ok = False
+        try:
+            ok = bool(self._start_other_player_wait_mode(now, flow='exit'))
+        except Exception as exc:
+            self.append_log(f"[종료] 대기 모드 시작 실패: {exc}", "warn")
+            self._log_map_shutdown(f"[종료] 대기 모드 시작 실패: {exc}", "red")
+            ok = False
+        if not ok:
+            self._reset_exit_wait_state()
+            return
+        # 게임 종료 플로우에서는 탐지를 재시작하지 않도록 강제
+        self.shutdown_other_player_wait_restart_required = False
+        self.exit_wait_in_progress = True
+        self._exit_wait_command_sent = False
+        self._exit_wait_finalize_pending = False
+        self._ensure_shutdown_timer_running()
+        self._update_shutdown_labels()
+
+    def _handle_exit_wait_arrival(self, waypoint_name: str) -> None:
+        if not self.exit_wait_in_progress:
+            self.append_log("[종료] 대기 도착 알림이 도착했지만 종료 플로우가 활성화되어 있지 않습니다.", "debug")
+            return
+        if self._exit_wait_command_sent:
+            return
+        cmd = (getattr(self, 'exit_wait_command_profile', '') or '').strip()
+        if not cmd:
+            self.append_log("[종료] 실행할 '게임종료' 명령 프로필이 설정되어 있지 않아 플로우를 종료합니다.", "warn")
+            self._log_map_shutdown("[종료] '게임종료' 명령 프로필이 없어 종료를 수행하지 못했습니다.", "red")
+            self._finalize_exit_wait_after_command(success=False)
+            return
+        self._exit_wait_command_sent = True
+        self._emit_control_command(cmd, reason='exit_wait')
+        self.append_log(f"[종료] 대기 웨이포인트 도착 → 명령 실행: '{cmd}'", "info")
+        self._log_map_shutdown(f"[종료] 대기 웨이포인트 도착 → 명령 실행: '{cmd}'", "orange")
+        self._schedule_exit_wait_finalize()
+
+    def _schedule_exit_wait_finalize(self) -> None:
+        if self._exit_wait_finalize_pending:
+            return
+        self._exit_wait_finalize_pending = True
+
+        def _finalize():
+            self._exit_wait_finalize_pending = False
+            self._finalize_exit_wait_after_command()
+
+        try:
+            QTimer.singleShot(3500, _finalize)
+        except Exception:
+            # 문제가 발생해도 즉시 시도
+            self._finalize_exit_wait_after_command()
+
+    def _finalize_exit_wait_after_command(self, *, success: bool = True) -> None:
+        if not self.exit_wait_in_progress:
+            self._reset_exit_wait_state()
+            return
+        if success:
+            self.append_log("[종료] 게임 종료 명령 실행 이후 대기 모드를 종료합니다.", "info")
+            self._log_map_shutdown("[종료] 게임 종료 명령 실행 이후 대기 모드를 종료합니다.", "orange")
+        else:
+            self.append_log("[종료] 게임 종료 플로우를 중단합니다.", "warn")
+            self._log_map_shutdown("[종료] 게임 종료 플로우를 중단합니다.", "red")
+        try:
+            if bool(getattr(self, 'shutdown_other_player_wait_active', False)):
+                self._finish_other_player_wait_mode(reason="exit_wait_complete")
+        except Exception:
+            pass
+        if success and self.shutdown_sleep_enabled:
+            self._attempt_system_sleep()
+        self._reset_exit_wait_state()
 
     # ---------------------- 대기 모드(무기한) 제어 ----------------------
     def api_enter_indefinite_wait_mode(self) -> tuple[bool, str]:
@@ -4260,6 +4431,7 @@ class HuntTab(QWidget):
         needs_timer = (
             (self.shutdown_reservation_enabled and self.shutdown_datetime_target is not None)
             or self.shutdown_other_player_enabled
+            or self._is_exit_wait_active()
         )
         if needs_timer and not self.shutdown_timer.isActive():
             self.shutdown_timer.start()
@@ -4270,12 +4442,37 @@ class HuntTab(QWidget):
         if not (
             (self.shutdown_reservation_enabled and self.shutdown_datetime_target is not None)
             or self.shutdown_other_player_enabled
+            or self._is_exit_wait_active()
         ):
             self.shutdown_timer.stop()
 
     def _handle_shutdown_timer_tick(self) -> None:
         now = time.time()
         triggered = False
+
+        if self.exit_wait_schedule_ts is not None:
+            remaining_to_schedule = self.exit_wait_schedule_ts - now
+            if remaining_to_schedule <= 0:
+                self.exit_wait_schedule_ts = None
+                self.exit_wait_countdown_started_at = now
+                duration = max(1, int(self.exit_wait_countdown_duration or 5))
+                self.exit_wait_countdown_due_ts = now + duration
+                message = f"[종료] 게임 종료 카운트다운을 시작합니다. (남은 시간 {duration}초)"
+                self.append_log(message, "info")
+                self._log_map_shutdown(message, "orange")
+            else:
+                self.exit_wait_countdown_duration = max(1, int(self.exit_wait_countdown_duration or 5))
+
+        if self.exit_wait_countdown_due_ts is not None:
+            remaining_countdown = self.exit_wait_countdown_due_ts - now
+            if remaining_countdown <= 0:
+                self.exit_wait_countdown_due_ts = None
+                self.exit_wait_countdown_started_at = None
+                self._start_exit_wait_flow()
+            else:
+                # 실시간 카운트다운 표시
+                seconds_left = max(0, int(round(remaining_countdown)))
+                self.shutdown_reservation_status.setText(f"카운트다운: {seconds_left}초")
 
         if self.shutdown_reservation_enabled and self.shutdown_datetime_target is not None:
             remaining = self.shutdown_datetime_target - now
@@ -4304,19 +4501,36 @@ class HuntTab(QWidget):
     def _update_shutdown_labels(self) -> None:
         parts: list[str] = []
         now = time.time()
+        reservation_text = "--"
+        exit_wait_active = self._is_exit_wait_active()
 
         if self.shutdown_reservation_enabled:
             parts.append("종료 예약")
             if self.shutdown_datetime_target is not None:
                 remaining = self.shutdown_datetime_target - now
                 if remaining > 0:
-                    self.shutdown_reservation_status.setText(self._format_remaining_text(remaining))
+                    reservation_text = self._format_remaining_text(remaining)
                 else:
-                    self.shutdown_reservation_status.setText("--")
+                    reservation_text = "--"
             else:
-                self.shutdown_reservation_status.setText("--")
-        else:
+                reservation_text = "--"
+
+        if self.exit_wait_schedule_ts is not None:
+            remaining = self.exit_wait_schedule_ts - now
+            parts.append("게임 종료 예약")
+            reservation_text = f"게임 종료 예약: {self._format_remaining_text(remaining)}" if remaining > 0 else "게임 종료 예약 준비 중"
+        elif self.exit_wait_countdown_due_ts is not None:
+            remaining = self.exit_wait_countdown_due_ts - now
+            parts.append("게임 종료 카운트다운")
+            reservation_text = f"카운트다운: {max(0, int(round(remaining)))}초"
+        elif self.exit_wait_in_progress:
+            parts.append("게임 종료 대기 중")
+            reservation_text = "대기 모드 진행 중"
+
+        if reservation_text == "--" and not self.shutdown_reservation_enabled:
             self.shutdown_reservation_status.setText("--")
+        else:
+            self.shutdown_reservation_status.setText(reservation_text)
 
         if self.shutdown_other_player_enabled:
             parts.append("다른 캐릭터 감시")
@@ -4328,6 +4542,7 @@ class HuntTab(QWidget):
         if self.shutdown_sleep_enabled and (
             (self.shutdown_reservation_enabled and self.shutdown_datetime_target is not None)
             or self.shutdown_other_player_enabled
+            or exit_wait_active
         ):
             parts.append("절전 모드")
 
@@ -4640,6 +4855,12 @@ class HuntTab(QWidget):
         self.shutdown_other_player_elapsed.setText("감지 대기")
         reason_text = reason or "finished"
         self.append_log(f"대기 모드를 종료합니다. (사유: {reason_text})", "info")
+
+        if getattr(self, 'exit_wait_in_progress', False):
+            if reason != 'exit_wait_complete':
+                self._reset_exit_wait_state()
+            else:
+                self.exit_wait_in_progress = False
 
         if restart_required:
             QTimer.singleShot(500, self._restart_hunt_detection_after_wait)
@@ -10532,14 +10753,16 @@ class HuntTab(QWidget):
             pass
 
     def on_other_player_wait_arrived(self, source: str = '', waypoint_name: str = '') -> None:
-        """맵탭이 대기 웨이포인트 도착을 알릴 때 호출.
-        - 금지 플로우일 경우 자동제어 명령 1회 실행(reason='forbidden_monster')
-        """
+        """맵탭이 대기 웨이포인트 도착을 알릴 때 호출."""
+        normalized_source = str(source or '').strip().lower()
+        if normalized_source == 'hunt.exit':
+            self._handle_exit_wait_arrival(waypoint_name)
+            return
         try:
             # [완화] 소스 문자열이 일치하지 않더라도 금지 플로우 활성 상태이면 처리
             if not self._forbidden_active:
                 return
-            if str(source or '').lower() != 'hunt.forbidden':
+            if normalized_source != 'hunt.forbidden':
                 # 디버그 로깅만 수행(과도한 스팸 방지 위해 info 이하)
                 try:
                     self.append_log(f"[금지] 도착 알림 source='{source}'(예상 'hunt.forbidden')이지만 금지 플로우 활성 상태이므로 실행 처리.", 'debug')
