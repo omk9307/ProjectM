@@ -99,8 +99,8 @@ except ImportError:
             return QRect(0, 0, 100, 100)
 
 try:
-from .map import (
-    CONFIG_PATH,
+    from .map import (
+        CONFIG_PATH,
         GLOBAL_ACTION_MODEL_DIR,
         GLOBAL_MAP_SETTINGS_FILE,
         load_baseline_state_machine_config,
@@ -8178,7 +8178,9 @@ class MapTab(QWidget):
                     except Exception:
                         pass
 
-                def _handle_status(status: QMediaPlayer.MediaStatus) -> None:
+                def _handle_status(status) -> None:
+                    if QMediaPlayer is None:
+                        return
                     if status == QMediaPlayer.MediaStatus.EndOfMedia:
                         _cleanup()
 
