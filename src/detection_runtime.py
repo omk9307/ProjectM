@@ -421,6 +421,9 @@ class DetectionThread(QThread):
         self._frame_version: int = 0
         self._capture_thread_obj: Optional[threading.Thread] = None
         self._capture_stop_event = threading.Event()
+        self._nickname_config_lock = threading.Lock()
+        self._pending_nickname_config: Optional[dict] = None
+        self._pending_nickname_templates: Optional[List[dict]] = None
         try:
             raw_factor = float(scale_factor)
         except (TypeError, ValueError):
@@ -471,6 +474,21 @@ class DetectionThread(QThread):
         if target_until > self._force_frame_emit_until:
             self._force_frame_emit_until = target_until
 
+    def update_nickname_config(self, config: dict) -> None:
+        if not isinstance(config, dict):
+            return
+        with self._nickname_config_lock:
+            self._pending_nickname_config = dict(config)
+
+    def reload_nickname_templates(self, templates: Iterable[dict]) -> None:
+        payload: List[dict] = []
+        if templates:
+            for entry in templates:
+                if isinstance(entry, dict):
+                    payload.append(dict(entry))
+        with self._nickname_config_lock:
+            self._pending_nickname_templates = payload
+
     def run(self) -> None:  # noqa: D401
         consumer_name = f"detection:{id(self)}"
         manager = get_capture_manager()
@@ -519,6 +537,37 @@ class DetectionThread(QThread):
                     if frame is None:
                         continue
                     capture_ms = (fallback_end - fallback_start) * 1000
+
+                pending_config: Optional[dict] = None
+                pending_templates: Optional[List[dict]] = None
+                with self._nickname_config_lock:
+                    if self._pending_nickname_config is not None:
+                        pending_config = self._pending_nickname_config
+                        self._pending_nickname_config = None
+                    if self._pending_nickname_templates is not None:
+                        pending_templates = self._pending_nickname_templates
+                        self._pending_nickname_templates = None
+
+                if self.nickname_detector is not None:
+                    if pending_templates is not None:
+                        try:
+                            self.nickname_detector.load_templates(pending_templates)
+                        except Exception:
+                            pass
+                    if pending_config:
+                        try:
+                            self.nickname_detector.configure(
+                                target_text=pending_config.get('target_text'),
+                                match_threshold=pending_config.get('match_threshold'),
+                                offset_x=pending_config.get('char_offset_x'),
+                                offset_y=pending_config.get('char_offset_y'),
+                                search_margin_x=pending_config.get('search_margin_x'),
+                                search_margin_top=pending_config.get('search_margin_top'),
+                                search_margin_bottom=pending_config.get('search_margin_bottom'),
+                                full_scan_delay_sec=pending_config.get('full_scan_delay_sec'),
+                            )
+                        except Exception:
+                            pass
 
                 preprocess_start = time.perf_counter()
                 frame_height: float = 0.0

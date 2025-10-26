@@ -619,6 +619,8 @@ class MapTab(QWidget):
             self.initial_delay_ms = 500
             # [신규] 사냥범위 존 오버라이드 추적
             self._active_hunt_zone_id: Optional[str] = None
+            self._hunt_zone_teleport_backup: Optional[float] = None
+            self._hunt_zone_override_probability: Optional[float] = None
             self._active_qt_sound_players: list = []
 
             # 이벤트 웨이포인트 실행 상태
@@ -2851,6 +2853,9 @@ class MapTab(QWidget):
         self.current_backward_slot = "1"
         self.current_direction_slot_label = "-"
         self._reset_other_player_alert_state()
+        self._active_hunt_zone_id = None
+        self._hunt_zone_teleport_backup = None
+        self._hunt_zone_override_probability = None
 
         # 로그 초기화
         self.general_log_viewer.clear()
@@ -3574,6 +3579,30 @@ class MapTab(QWidget):
                         'primary_back': _ival('primary_back', ranges, 200),
                         'y_band_height': _ival('y_band_height', ranges, 40),
                         'y_band_offset': _ival('y_band_offset', ranges, 0),
+                    }
+                    conditions = z.get('conditions_override') or {}
+                    if not isinstance(conditions, dict):
+                        conditions = {}
+                    def _cval(k, default):
+                        try:
+                            return int(conditions.get(k, default))
+                        except Exception:
+                            return int(default)
+                    z['conditions_override'] = {
+                        'enabled': bool(conditions.get('enabled', False)),
+                        'hunt_monster_threshold': _cval('hunt_monster_threshold', 3),
+                        'primary_monster_threshold': _cval('primary_monster_threshold', 1),
+                    }
+                    teleport_override = z.get('teleport_override') or {}
+                    if not isinstance(teleport_override, dict):
+                        teleport_override = {}
+                    try:
+                        probability_val = float(teleport_override.get('probability', 0.0))
+                    except Exception:
+                        probability_val = 0.0
+                    z['teleport_override'] = {
+                        'enabled': bool(teleport_override.get('enabled', False)),
+                        'probability': max(0.0, min(100.0, probability_val)),
                     }
                     fixed_zones.append(z)
                 self.geometry_data['hunt_range_zones'] = fixed_zones
@@ -6455,7 +6484,7 @@ class MapTab(QWidget):
         # enabled=True인 존 중 포함되는 것 찾기(겹침 금지 가정)
         px, py = float(final_player_pos.x()), float(final_player_pos.y())
         current_zone_id = None
-        current_zone_ranges = None
+        current_zone_data = None
         for z in zones:
             try:
                 if not bool(z.get('enabled', False)):
@@ -6468,7 +6497,7 @@ class MapTab(QWidget):
                     continue
                 if (x <= px <= x + w) and (y <= py <= y + h):
                     current_zone_id = str(z.get('id'))
-                    current_zone_ranges = z.get('ranges') or {}
+                    current_zone_data = z
                     break
             except Exception:
                 continue
@@ -6477,6 +6506,7 @@ class MapTab(QWidget):
         if current_zone_id:
             # 다른 존으로 전환
             if self._active_hunt_zone_id and self._active_hunt_zone_id != current_zone_id:
+                self._restore_hunt_zone_map_overrides()
                 if hunt_tab and hasattr(hunt_tab, 'api_clear_zone_override'):
                     try:
                         hunt_tab.api_clear_zone_override(self._active_hunt_zone_id)
@@ -6486,11 +6516,17 @@ class MapTab(QWidget):
             # 적용
             if hunt_tab and hasattr(hunt_tab, 'api_apply_zone_override'):
                 try:
-                    ok, _msg = hunt_tab.api_apply_zone_override(current_zone_id, current_zone_ranges or {})
+                    override_payload = {
+                        'ranges': dict((current_zone_data or {}).get('ranges') or {}),
+                        'conditions_override': dict((current_zone_data or {}).get('conditions_override') or {}),
+                        'teleport_override': dict((current_zone_data or {}).get('teleport_override') or {}),
+                    }
+                    ok, _msg = hunt_tab.api_apply_zone_override(current_zone_id, override_payload)
                     if ok:
                         self._active_hunt_zone_id = current_zone_id
                 except Exception:
                     pass
+            self._apply_hunt_zone_map_overrides(current_zone_data or {})
         else:
             # 존 밖: 해제
             if self._active_hunt_zone_id and hunt_tab and hasattr(hunt_tab, 'api_clear_zone_override'):
@@ -6499,9 +6535,53 @@ class MapTab(QWidget):
                 except Exception:
                     pass
             self._active_hunt_zone_id = None
+            self._restore_hunt_zone_map_overrides()
 
     def _get_other_player_test_duration(self) -> int:
         return max(0, int(self.other_player_test_duration_seconds or 0))
+
+    def _apply_hunt_zone_map_overrides(self, zone: dict) -> None:
+        """맵 탭 자체 설정(걷기 텔레포트 확률)을 존 설정에 맞게 덮어쓴다."""
+        override = zone.get('teleport_override') if isinstance(zone, dict) else None
+        if not isinstance(override, dict) or not bool(override.get('enabled', False)):
+            self._restore_hunt_zone_map_overrides()
+            return
+        try:
+            probability = float(override.get('probability', 0.0))
+        except Exception:
+            probability = 0.0
+        probability = max(0.0, min(100.0, probability))
+        if self._hunt_zone_teleport_backup is None:
+            try:
+                self._hunt_zone_teleport_backup = float(self.cfg_walk_teleport_probability or 0.0)
+            except Exception:
+                self._hunt_zone_teleport_backup = 0.0
+        self.cfg_walk_teleport_probability = probability
+        self._hunt_zone_override_probability = probability
+        try:
+            self._reset_walk_teleport_state()
+        except Exception:
+            pass
+        try:
+            self._update_walk_teleport_probability_display(probability)
+        except Exception:
+            pass
+
+    def _restore_hunt_zone_map_overrides(self) -> None:
+        """존을 벗어났을 때 맵 탭 텔레포트 설정을 원래 값으로 복원."""
+        if self._hunt_zone_teleport_backup is None:
+            return
+        self.cfg_walk_teleport_probability = float(self._hunt_zone_teleport_backup)
+        self._hunt_zone_teleport_backup = None
+        self._hunt_zone_override_probability = None
+        try:
+            self._reset_walk_teleport_state()
+        except Exception:
+            pass
+        try:
+            self._update_walk_teleport_probability_display(float(self.cfg_walk_teleport_probability or 0.0))
+        except Exception:
+            pass
 
     def _format_seconds_for_display(self, seconds: int) -> str:
         seconds = max(0, int(seconds))
@@ -12689,7 +12769,15 @@ class MapTab(QWidget):
             self._emit_control_command(command, reason)
 
     def _update_walk_teleport_probability_display(self, percent: float) -> None:
-        self._walk_teleport_probability_text = f"텔레포트 확률: {max(percent, 0.0):.1f}%"
+        effective = max(percent, 0.0)
+        if getattr(self, '_hunt_zone_override_probability', None) is not None:
+            try:
+                override = float(self._hunt_zone_override_probability)
+            except Exception:
+                override = effective
+            else:
+                effective = max(effective, override)
+        self._walk_teleport_probability_text = f"텔레포트 확률: {effective:.1f}%"
         if hasattr(self, '_last_detection_log_body'):
             self._render_detection_log(self._last_detection_log_body)
 

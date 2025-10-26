@@ -3220,6 +3220,7 @@ class DataManager:
         self.status_config_path = os.path.join(self.config_path, 'status_monitor.json')
         self._overlay_listeners: list = []
         self._model_listeners: list[callable] = []
+        self._nickname_config_listeners: list[callable] = []
         self._last_used_model: Optional[str] = None
         self.status_config_notifier = StatusConfigNotifier()
         self.key_mappings_path = self._resolve_key_mappings_path()
@@ -4491,6 +4492,14 @@ class DataManager:
         if callback in self._model_listeners:
             self._model_listeners.remove(callback)
 
+    def register_nickname_config_listener(self, callback):
+        if callable(callback) and callback not in self._nickname_config_listeners:
+            self._nickname_config_listeners.append(callback)
+
+    def unregister_nickname_config_listener(self, callback):
+        if callback in self._nickname_config_listeners:
+            self._nickname_config_listeners.remove(callback)
+
     def _notify_model_listeners(self, model_name: Optional[str]) -> None:
         for callback in list(self._model_listeners):
             try:
@@ -4500,6 +4509,14 @@ class DataManager:
 
     def _notify_overlay_listeners(self, payload: dict) -> None:
         for callback in list(self._overlay_listeners):
+            try:
+                callback(payload)
+            except Exception:
+                continue
+
+    def _notify_nickname_config_listeners(self, config_data: dict) -> None:
+        payload = copy.deepcopy(config_data) if isinstance(config_data, dict) else {}
+        for callback in list(self._nickname_config_listeners):
             try:
                 callback(payload)
             except Exception:
@@ -5288,6 +5305,7 @@ class DataManager:
             'target': 'nickname',
             'show_overlay': bool(config.get('show_overlay', True)),
         })
+        self._notify_nickname_config_listeners(config)
         return config
 
     def list_nickname_templates(self):
@@ -5336,6 +5354,7 @@ class DataManager:
         templates.append(template_entry)
         config['templates'] = templates
         self._write_nickname_config(config)
+        self._notify_nickname_config_listeners(config)
         return template_entry
 
     def import_nickname_template(self, file_path: str):
@@ -5373,6 +5392,7 @@ class DataManager:
 
         config['templates'] = remaining
         self._write_nickname_config(config)
+        self._notify_nickname_config_listeners(config)
         return removed_count
 
     def get_nickname_template_entry(self, template_id: str) -> Optional[dict]:
@@ -5404,6 +5424,7 @@ class DataManager:
                 break
         if modified:
             self._write_nickname_config(config)
+        self._notify_nickname_config_listeners(config)
         return self.get_nickname_template_entry(template_id)
 
     def _sanitize_nickname_template_overrides(self, overrides: Optional[dict]) -> Dict[str, float | int]:

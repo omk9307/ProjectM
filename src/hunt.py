@@ -2104,6 +2104,35 @@ class HuntTab(QWidget):
             'y_band_offset': int(self.y_band_offset_spinbox.value()),
         }
 
+    def api_get_zone_override_defaults(self) -> dict:
+        """사냥범위 존 생성 시 사용할 기본 오버라이드 값을 반환."""
+        try:
+            hunt_threshold = int(self.hunt_monster_threshold_spinbox.value())
+        except Exception:
+            hunt_threshold = 3
+        try:
+            primary_threshold = int(self.primary_monster_threshold_spinbox.value())
+        except Exception:
+            primary_threshold = 1
+        try:
+            base_teleport = float(self.teleport_probability_spinbox.value())
+        except Exception:
+            base_teleport = 0.0
+        try:
+            walk_teleport = float(self.walk_teleport_probability_spinbox.value())
+        except Exception:
+            walk_teleport = base_teleport
+        return {
+            'conditions_override': {
+                'hunt_monster_threshold': hunt_threshold,
+                'primary_monster_threshold': primary_threshold,
+            },
+            'teleport_override': {
+                'probability': base_teleport,
+                'walk_probability': walk_teleport,
+            },
+        }
+
     def _snapshot_current_ranges(self) -> dict:
         """현재 UI의 사냥 범위 관련 값 전체를 스냅샷으로 저장(복원용)."""
         try:
@@ -2121,6 +2150,10 @@ class HuntTab(QWidget):
             'primary_back': int(self.primary_back_spinbox.value()),
             'y_band_height': int(self.y_band_height_spinbox.value()),
             'y_band_offset': int(self.y_band_offset_spinbox.value()),
+            'hunt_monster_threshold': int(self.hunt_monster_threshold_spinbox.value()) if hasattr(self, 'hunt_monster_threshold_spinbox') else 3,
+            'primary_monster_threshold': int(self.primary_monster_threshold_spinbox.value()) if hasattr(self, 'primary_monster_threshold_spinbox') else 1,
+            'teleport_probability': int(self.teleport_probability_spinbox.value()) if hasattr(self, 'teleport_probability_spinbox') else 0,
+            'walk_teleport_probability': float(self.walk_teleport_probability_spinbox.value()) if hasattr(self, 'walk_teleport_probability_spinbox') else 0.0,
         }
         return snapshot
 
@@ -2158,6 +2191,14 @@ class HuntTab(QWidget):
                 self.y_band_height_spinbox.setValue(int(snapshot['y_band_height']))
             if 'y_band_offset' in snapshot:
                 self.y_band_offset_spinbox.setValue(int(snapshot['y_band_offset']))
+            if 'hunt_monster_threshold' in snapshot and hasattr(self, 'hunt_monster_threshold_spinbox'):
+                self.hunt_monster_threshold_spinbox.setValue(int(snapshot['hunt_monster_threshold']))
+            if 'primary_monster_threshold' in snapshot and hasattr(self, 'primary_monster_threshold_spinbox'):
+                self.primary_monster_threshold_spinbox.setValue(int(snapshot['primary_monster_threshold']))
+            if 'teleport_probability' in snapshot and hasattr(self, 'teleport_probability_spinbox'):
+                self.teleport_probability_spinbox.setValue(int(snapshot['teleport_probability']))
+            if 'walk_teleport_probability' in snapshot and hasattr(self, 'walk_teleport_probability_spinbox'):
+                self.walk_teleport_probability_spinbox.setValue(float(snapshot['walk_teleport_probability']))
         except Exception:
             pass
 
@@ -2168,7 +2209,7 @@ class HuntTab(QWidget):
         except Exception:
             pass
 
-    def api_apply_zone_override(self, zone_id: str, ranges: dict) -> tuple[bool, str]:
+    def api_apply_zone_override(self, zone_id: str, overrides: dict) -> tuple[bool, str]:
         """맵 탭에서 전달된 영역(사각형) 설정으로 사냥 범위를 일시 변경.
 
         - 최초 적용 시 현재 스핀박스 값을 백업
@@ -2193,6 +2234,16 @@ class HuntTab(QWidget):
                 self._zone_override_backup = self._snapshot_current_ranges()
             except Exception:
                 self._zone_override_backup = None
+
+        payload = overrides if isinstance(overrides, dict) else {}
+        if any(k in payload for k in ('ranges', 'conditions_override', 'teleport_override', 'conditions', 'teleport')):
+            ranges = payload.get('ranges') or {}
+            conditions_override = payload.get('conditions_override') or payload.get('conditions') or {}
+            teleport_override = payload.get('teleport_override') or payload.get('teleport') or {}
+        else:
+            ranges = payload
+            conditions_override = {}
+            teleport_override = {}
 
         # 전/후 값만 사용(대칭은 숨김)
         def _ival(d, k, default):
@@ -2225,6 +2276,42 @@ class HuntTab(QWidget):
             self.y_band_offset_spinbox.setValue(y_band_offset)
         except Exception:
             pass
+
+        # 사냥조건 임계치 오버라이드
+        def _threshold_val(key, default):
+            try:
+                return int(conditions_override.get(key, default))
+            except Exception:
+                return int(default)
+        if isinstance(conditions_override, dict) and bool(conditions_override.get('enabled', False)):
+            try:
+                self.hunt_monster_threshold_spinbox.setValue(
+                    _threshold_val('hunt_monster_threshold', self.hunt_monster_threshold_spinbox.value())
+                )
+            except Exception:
+                pass
+            try:
+                self.primary_monster_threshold_spinbox.setValue(
+                    _threshold_val('primary_monster_threshold', self.primary_monster_threshold_spinbox.value())
+                )
+            except Exception:
+                pass
+
+        # 텔레포트 확률 오버라이드(사냥/걷기 공통)
+        if isinstance(teleport_override, dict) and bool(teleport_override.get('enabled', False)):
+            try:
+                probability = float(teleport_override.get('probability', self.teleport_probability_spinbox.value()))
+            except Exception:
+                probability = float(self.teleport_probability_spinbox.value())
+            probability = max(0.0, min(100.0, probability))
+            try:
+                self.teleport_probability_spinbox.setValue(int(round(probability)))
+            except Exception:
+                pass
+            try:
+                self.walk_teleport_probability_spinbox.setValue(float(probability))
+            except Exception:
+                pass
 
         # 내부 상태/표시 갱신(저장은 백업값 기준으로 수행되도록 _save_settings에서 처리)
         try:
@@ -11578,6 +11665,31 @@ class HuntTab(QWidget):
         self._update_detection_summary()
         self._emit_area_overlays()
 
+    def _handle_nickname_config_updated(self, config: dict) -> None:
+        if not isinstance(config, dict):
+            return
+        self._nickname_config = config
+        templates: list[dict] = []
+        try:
+            templates = self.data_manager.list_nickname_templates() if self.data_manager else []
+        except Exception:
+            templates = self._nickname_templates
+        else:
+            self._nickname_templates = templates if isinstance(templates, list) else []
+
+        if self.detection_thread and self.detection_thread.isRunning():
+            try:
+                if hasattr(self.detection_thread, 'update_nickname_config'):
+                    self.detection_thread.update_nickname_config(self._nickname_config or {})
+            except Exception:
+                pass
+            try:
+                if hasattr(self.detection_thread, 'reload_nickname_templates'):
+                    payload = self._nickname_templates if isinstance(self._nickname_templates, list) else []
+                    self.detection_thread.reload_nickname_templates(payload)
+            except Exception:
+                pass
+
     def _build_thread_nickname_detector(self) -> Optional[NicknameDetector]:
         if not self._nickname_templates:
             return None
@@ -11623,6 +11735,11 @@ class HuntTab(QWidget):
         if hasattr(self.data_manager, 'register_overlay_listener'):
             try:
                 self.data_manager.register_overlay_listener(self._handle_overlay_config_update)
+            except Exception:
+                pass
+        if hasattr(self.data_manager, 'register_nickname_config_listener'):
+            try:
+                self.data_manager.register_nickname_config_listener(self._handle_nickname_config_updated)
             except Exception:
                 pass
         if hasattr(self.data_manager, 'register_model_listener') and not self._model_listener_registered:
@@ -12551,6 +12668,19 @@ class HuntTab(QWidget):
                 'primary_back': int(self.primary_back_spinbox.value()) if hasattr(self, 'primary_back_spinbox') else int(self.primary_skill_range_spinbox.value()),
             }
 
+        if isinstance(snap, dict):
+            hunt_threshold_save = int(snap.get('hunt_monster_threshold', self.hunt_monster_threshold_spinbox.value()))
+            primary_threshold_save = int(snap.get('primary_monster_threshold', self.primary_monster_threshold_spinbox.value()))
+            teleport_prob_save = int(snap.get('teleport_probability', self.teleport_settings.probability))
+            walk_teleport_prob_save = float(snap.get('walk_teleport_probability', self.teleport_settings.walk_probability))
+        else:
+            hunt_threshold_save = int(self.hunt_monster_threshold_spinbox.value())
+            primary_threshold_save = int(self.primary_monster_threshold_spinbox.value())
+            teleport_prob_save = int(self.teleport_settings.probability)
+            walk_teleport_prob_save = float(self.teleport_settings.walk_probability)
+        teleport_prob_save = max(0, min(100, int(teleport_prob_save)))
+        walk_teleport_prob_save = max(0.0, min(100.0, float(walk_teleport_prob_save)))
+
         settings_data = {
             'ranges': ranges_data,
             'confidence': {
@@ -12558,9 +12688,9 @@ class HuntTab(QWidget):
                 'monster': self.conf_monster_spinbox.value(),
             },
             'conditions': {
-                'hunt_monster_threshold': self.hunt_monster_threshold_spinbox.value(),
-                'primary_monster_threshold': self.primary_monster_threshold_spinbox.value(),
-                'monster_threshold': self.hunt_monster_threshold_spinbox.value(),
+                'hunt_monster_threshold': hunt_threshold_save,
+                'primary_monster_threshold': primary_threshold_save,
+                'monster_threshold': hunt_threshold_save,
                 'cleanup_grace_ms': int(self.cleanup_grace_spinbox.value()) if hasattr(self, 'cleanup_grace_spinbox') else 0,
                 'auto_request': self.auto_request_checkbox.isChecked(),
                 'idle_release_sec': self.idle_release_spinbox.value(),
@@ -12634,9 +12764,9 @@ class HuntTab(QWidget):
             'teleport': {
                 'enabled': self.teleport_settings.enabled,
                 'distance_px': self.teleport_settings.distance_px,
-                'probability': self.teleport_settings.probability,
+                'probability': teleport_prob_save,
                 'walk_enabled': self.teleport_settings.walk_enabled,
-                'walk_probability': self.teleport_settings.walk_probability,
+                'walk_probability': walk_teleport_prob_save,
                 'walk_interval': self.teleport_settings.walk_interval,
                 'walk_bonus_interval': self.teleport_settings.walk_bonus_interval,
                 'walk_bonus_step': self.teleport_settings.walk_bonus_step,
