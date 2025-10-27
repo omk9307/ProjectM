@@ -914,6 +914,8 @@ class MapTab(QWidget):
             self.cfg_walk_teleport_interval = WALK_TELEPORT_INTERVAL_DEFAULT
             self._last_walk_teleport_check_time = 0.0
             self._walk_teleport_active = False
+            self._walk_teleport_pending_direction: Optional[str] = None
+            self._walk_teleport_last_ensure_time: float = 0.0
             
             # [NEW] 아래점프 전 '안전 지점' 이동 목표를 프레임 간에 고정하기 위한 앵커
             # - 시간 지연(히스테리시스) 없이, 동일 노드/출발선 맥락에서만 고정 유지
@@ -9654,13 +9656,28 @@ class MapTab(QWidget):
 
         self._last_walk_teleport_check_time = now
 
+        if (
+            self._walk_teleport_pending_direction
+            and self._is_walk_direction_active(self._walk_teleport_pending_direction)
+        ):
+            self._walk_teleport_pending_direction = None
+
+        if self._is_walk_teleport_pending(direction):
+            return
+
         if not self._is_walk_direction_active(direction):
             walk_command = "걷기(우)" if direction == "→" else "걷기(좌)"
             if self.debug_auto_control_checkbox.isChecked():
                 print(f"[자동 제어 테스트] WALK-TELEPORT: 누락된 걷기 -> {walk_command}")
             if self.auto_control_checkbox.isChecked():
-                self._emit_control_command(walk_command, "walk_teleport:ensure_walk")
+                sent = self._emit_control_command(walk_command, "walk_teleport:ensure_walk")
+                if sent:
+                    self._walk_teleport_pending_direction = direction
+                    self._walk_teleport_last_ensure_time = now
             return
+
+        if self._walk_teleport_pending_direction == direction:
+            self._walk_teleport_pending_direction = None
 
         if random.random() >= probability:
             return
@@ -9676,6 +9693,18 @@ class MapTab(QWidget):
 
         if executed:
             self.last_command_sent_time = now
+
+    def _is_walk_teleport_pending(self, direction: Optional[str] = None) -> bool:
+        if not self._walk_teleport_pending_direction:
+            return False
+        if direction and direction != self._walk_teleport_pending_direction:
+            return False
+        try:
+            interval = max(self.cfg_walk_teleport_interval, 0.1)
+        except Exception:
+            interval = 0.1
+        elapsed = time.time() - self._walk_teleport_last_ensure_time
+        return elapsed < interval
 
     def _get_arrival_threshold(self, node_type, node_key=None, node_data=None):
         """노드 타입에 맞는 도착 판정 임계값을 반환합니다."""
@@ -10553,6 +10582,8 @@ class MapTab(QWidget):
         self._walk_teleport_walk_started_at = 0.0
         self._walk_teleport_bonus_percent = 0.0
         self._last_walk_teleport_check_time = 0.0
+        self._walk_teleport_pending_direction = None
+        self._walk_teleport_last_ensure_time = 0.0
         if hasattr(self, '_update_walk_teleport_probability_display'):
             self._update_walk_teleport_probability_display(0.0)
 
@@ -10939,7 +10970,8 @@ class MapTab(QWidget):
                 nav_action_text = f"{nav_action_text} (이벤트 실행 중)"
         
         if final_intermediate_type != 'walk' or self.event_in_progress:
-            self._reset_walk_teleport_state()
+            if not self._is_walk_teleport_pending():
+                self._reset_walk_teleport_state()
         else:
             self._maybe_trigger_walk_teleport(direction, distance)
 
