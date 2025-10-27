@@ -9562,8 +9562,6 @@ class MapTab(QWidget):
         if (now - self._last_walk_teleport_check_time) < interval:
             return
 
-        self._last_walk_teleport_check_time = now
-
         if not self._is_walk_direction_active(effective_direction):
             walk_command = "걷기(우)" if effective_direction == "→" else "걷기(좌)"
             if self.debug_auto_control_checkbox.isChecked():
@@ -9571,6 +9569,8 @@ class MapTab(QWidget):
             if self.auto_control_checkbox.isChecked():
                 self._emit_control_command(walk_command, "walk_teleport:ensure_walk")
             return
+
+        self._last_walk_teleport_check_time = now
 
         if random.random() >= probability:
             return
@@ -9581,8 +9581,36 @@ class MapTab(QWidget):
         if self.debug_auto_control_checkbox.isChecked():
             print(f"[자동 제어 테스트] WALK-TELEPORT: {teleport_command}")
         elif self.auto_control_checkbox.isChecked():
-            self._emit_control_command(teleport_command, None)
-            executed = True
+            result = self._emit_control_command(
+                teleport_command,
+                "walk_teleport:trigger",
+                return_reason=True,
+            )
+            if isinstance(result, tuple):
+                success, reason_code, detail = result
+                if success:
+                    executed = True
+                else:
+                    if self.debug_auto_control_checkbox.isChecked():
+                        print(
+                            f"[자동 제어 테스트] WALK-TELEPORT 차단: {teleport_command} "
+                            f"(reason={reason_code}, detail={detail})"
+                        )
+                    else:
+                        reason_text = reason_code or "unknown"
+                        try:
+                            detail_text = detail or {}
+                            if isinstance(detail_text, dict) and detail_text:
+                                detail_suffix = ", ".join(f"{k}={v}" for k, v in detail_text.items())
+                                reason_text = f"{reason_text} ({detail_suffix})"
+                        except Exception:
+                            pass
+                        self.update_general_log(
+                            f"[걷기 텔레포트] 명령이 차단되었습니다. (사유: {reason_text})",
+                            "gray",
+                        )
+            else:
+                executed = bool(result)
 
         if executed:
             self.last_command_sent_time = now
