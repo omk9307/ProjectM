@@ -2350,6 +2350,8 @@ class HuntTab(QWidget):
             'primary_monster_threshold': int(self.primary_monster_threshold_spinbox.value()) if hasattr(self, 'primary_monster_threshold_spinbox') else 1,
             'teleport_probability': int(self.teleport_probability_spinbox.value()) if hasattr(self, 'teleport_probability_spinbox') else 0,
             'walk_teleport_probability': float(self.walk_teleport_probability_spinbox.value()) if hasattr(self, 'walk_teleport_probability_spinbox') else 0.0,
+            'teleport_enabled': bool(self.teleport_enabled_checkbox.isChecked()) if hasattr(self, 'teleport_enabled_checkbox') else False,
+            'walk_teleport_enabled': bool(self.walk_teleport_checkbox.isChecked()) if hasattr(self, 'walk_teleport_checkbox') else False,
         }
         return snapshot
 
@@ -2395,6 +2397,10 @@ class HuntTab(QWidget):
                 self.teleport_probability_spinbox.setValue(int(snapshot['teleport_probability']))
             if 'walk_teleport_probability' in snapshot and hasattr(self, 'walk_teleport_probability_spinbox'):
                 self.walk_teleport_probability_spinbox.setValue(float(snapshot['walk_teleport_probability']))
+            if 'teleport_enabled' in snapshot and hasattr(self, 'teleport_enabled_checkbox'):
+                self.teleport_enabled_checkbox.setChecked(bool(snapshot['teleport_enabled']))
+            if 'walk_teleport_enabled' in snapshot and hasattr(self, 'walk_teleport_checkbox'):
+                self.walk_teleport_checkbox.setChecked(bool(snapshot['walk_teleport_enabled']))
         except Exception:
             pass
 
@@ -2507,6 +2513,16 @@ class HuntTab(QWidget):
 
         # 텔레포트 확률 오버라이드(사냥/걷기 공통)
         if teleport_enabled:
+            try:
+                if hasattr(self, 'teleport_enabled_checkbox'):
+                    self.teleport_enabled_checkbox.setChecked(True)
+            except Exception:
+                pass
+            try:
+                if hasattr(self, 'walk_teleport_checkbox'):
+                    self.walk_teleport_checkbox.setChecked(True)
+            except Exception:
+                pass
             try:
                 probability = float(teleport_override.get('probability', self.teleport_probability_spinbox.value()))
             except Exception:
@@ -12922,11 +12938,15 @@ class HuntTab(QWidget):
             primary_threshold_save = int(snap.get('primary_monster_threshold', self.primary_monster_threshold_spinbox.value()))
             teleport_prob_save = int(snap.get('teleport_probability', self.teleport_settings.probability))
             walk_teleport_prob_save = float(snap.get('walk_teleport_probability', self.teleport_settings.walk_probability))
+            teleport_enabled_save = bool(snap.get('teleport_enabled', self.teleport_enabled_checkbox.isChecked()))
+            walk_teleport_enabled_save = bool(snap.get('walk_teleport_enabled', self.walk_teleport_checkbox.isChecked()))
         else:
             hunt_threshold_save = int(self.hunt_monster_threshold_spinbox.value())
             primary_threshold_save = int(self.primary_monster_threshold_spinbox.value())
             teleport_prob_save = int(self.teleport_settings.probability)
             walk_teleport_prob_save = float(self.teleport_settings.walk_probability)
+            teleport_enabled_save = bool(self.teleport_enabled_checkbox.isChecked())
+            walk_teleport_enabled_save = bool(self.walk_teleport_checkbox.isChecked())
         teleport_prob_save = max(0, min(100, int(teleport_prob_save)))
         walk_teleport_prob_save = max(0.0, min(100.0, float(walk_teleport_prob_save)))
 
@@ -13011,10 +13031,10 @@ class HuntTab(QWidget):
                 },
             },
             'teleport': {
-                'enabled': self.teleport_settings.enabled,
+                'enabled': teleport_enabled_save,
                 'distance_px': self.teleport_settings.distance_px,
                 'probability': teleport_prob_save,
-                'walk_enabled': self.teleport_settings.walk_enabled,
+                'walk_enabled': walk_teleport_enabled_save,
                 'walk_probability': walk_teleport_prob_save,
                 'walk_interval': self.teleport_settings.walk_interval,
                 'walk_bonus_interval': self.teleport_settings.walk_bonus_interval,
