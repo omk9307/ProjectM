@@ -1348,6 +1348,12 @@ class MapTab(QWidget):
 
         if command_to_resume:
             def _resend_last_command() -> None:
+                if getattr(self, '_suppress_authority_resume', False):
+                    return
+                if not getattr(self, 'is_detection_running', False):
+                    return
+                if getattr(self, 'current_authority_owner', 'map') != 'map':
+                    return
                 # [추가] 권한 재실행은 최근 0.5초간 움직임이 없을 때만 수행
                 try:
                     import time as _time
