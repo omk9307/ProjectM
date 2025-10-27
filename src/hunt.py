@@ -4,6 +4,7 @@ import csv
 import json
 import os
 import random
+import re
 import time
 import math
 import ctypes
@@ -1241,6 +1242,7 @@ class HuntTab(QWidget):
         self._map_return_last_detected: str = ""
         self._map_return_context: dict[str, Any] = {}
         self._map_return_detection_was_active: bool = False
+        self.map_return_exclude_keywords: str = ""
 
         self._nickname_config: dict = {}
         self._nickname_templates: list[dict] = []
@@ -1474,6 +1476,10 @@ class HuntTab(QWidget):
         self.map_return_recovery_timer = QTimer(self)
         self.map_return_recovery_timer.setSingleShot(False)
         self.map_return_recovery_timer.timeout.connect(self._handle_map_return_recovery_check)
+        self.map_return_confirm_timer = QTimer(self)
+        self.map_return_confirm_timer.setSingleShot(True)
+        self.map_return_confirm_timer.timeout.connect(self._handle_map_return_confirm_tick)
+        self._map_return_pending: Optional[dict] = None
         # 화면출력(팝업) 상태 추적용 로깅 컨텍스트
         self._closing_popup_programmatically = False
         self._popup_close_reason: Optional[str] = None
@@ -1897,6 +1903,7 @@ class HuntTab(QWidget):
         if stopped:
             if not preserve_forbidden:
                 self._reset_forbidden_status(reason=str(reason or 'force_stop'))
+            self._clear_map_return_pending(restart_timer=False)
             if reason == 'esc_shortcut':
                 self.append_log("ESC 단축키로 탐지를 강제 중단했습니다.", "warn")
             else:
@@ -3783,6 +3790,17 @@ class HuntTab(QWidget):
         base_row.addWidget(self.map_return_base_keywords_line)
         layout.addLayout(base_row)
 
+        exclude_row = QHBoxLayout()
+        exclude_row.setSpacing(6)
+        exclude_row.addWidget(QLabel("제외 키워드:"))
+        self.map_return_exclude_line = QLineEdit()
+        self.map_return_exclude_line.setPlaceholderText("예: 길드,광고")
+        self.map_return_exclude_line.textChanged.connect(self._on_map_return_exclude_keywords_changed)
+        self.map_return_exclude_line.setMaximumWidth(250)
+        exclude_row.addWidget(self.map_return_exclude_line)
+        exclude_row.addStretch(1)
+        layout.addLayout(exclude_row)
+
         group.setLayout(layout)
         self._refresh_map_return_profile_options()
         if hasattr(self, 'map_return_base_keywords_line'):
@@ -3791,6 +3809,12 @@ class HuntTab(QWidget):
                 self.map_return_base_keywords_line.setText(self.map_return_base_keywords)
             finally:
                 del blocker_kw
+        if hasattr(self, 'map_return_exclude_line'):
+            blocker_ex = QSignalBlocker(self.map_return_exclude_line)
+            try:
+                self.map_return_exclude_line.setText(self.map_return_exclude_keywords)
+            finally:
+                del blocker_ex
         blocker = QSignalBlocker(self.map_return_enable_checkbox)
         try:
             self.map_return_enable_checkbox.setChecked(self.map_return_enabled)
@@ -3828,6 +3852,7 @@ class HuntTab(QWidget):
             getattr(self, 'map_return_max_width_spin', None),
             getattr(self, 'map_return_base_profile_combo', None),
             getattr(self, 'map_return_base_keywords_line', None),
+            getattr(self, 'map_return_exclude_line', None),
             getattr(self, 'map_return_manage_button', None),
         ]
         for widget in widgets:
@@ -3882,6 +3907,8 @@ class HuntTab(QWidget):
         self.map_return_enabled = bool(checked)
         if not self.map_return_enabled and self._map_return_recovering:
             self._abort_map_return("맵 복귀 모드를 해제하여 복구를 중단합니다.", frame_bgr=None, notify=False)
+        if not self.map_return_enabled:
+            self._clear_map_return_pending(restart_timer=False)
         self._update_map_return_controls()
         self._update_map_return_timer_state()
         self._handle_map_return_settings_changed()
@@ -3940,6 +3967,10 @@ class HuntTab(QWidget):
         self.map_return_base_keywords = (text or '').strip()
         self._handle_map_return_settings_changed()
 
+    def _on_map_return_exclude_keywords_changed(self, text: str) -> None:
+        self.map_return_exclude_keywords = (text or '').strip()
+        self._handle_map_return_settings_changed()
+
     def _handle_map_return_roi_select(self) -> None:
         try:
             snipper = ScreenSnipper(self)
@@ -3991,6 +4022,10 @@ class HuntTab(QWidget):
         qimage = QImage(annotated_rgb.data, width, height, bytes_per_line, QImage.Format.Format_RGB888).copy()
         pixmap = QPixmap.fromImage(qimage)
 
+        joined_text = self._combine_map_return_words(words)
+        sanitized_text, excluded_hits = self._map_return_sanitize_text(joined_text)
+        normalized_text = self._map_return_normalize(sanitized_text)
+
         lines: list[str] = []
         roi_summary = self._resolve_map_return_roi_absolute()
         if roi_summary:
@@ -4000,6 +4035,25 @@ class HuntTab(QWidget):
             )
         else:
             lines.append("ROI: (변환 실패) - 저장된 좌표를 다시 확인해주세요.")
+
+        lines.append(f"원본 텍스트: {joined_text or '(없음)'}")
+        if sanitized_text != joined_text:
+            lines.append(f"제외 적용 후: {sanitized_text or '(없음)'}")
+        if excluded_hits:
+            lines.append(f"제외된 키워드: {', '.join(dict.fromkeys(excluded_hits))}")
+
+        base_raw_keywords = self._map_return_extract_raw_keywords(self.map_return_base_keywords)
+        base_hits = [kw for kw in base_raw_keywords if self._map_return_normalize(kw) in normalized_text]
+        if base_hits:
+            lines.append(f"기준 키워드 감지: {', '.join(dict.fromkeys(base_hits))}")
+
+        for name, cfg in self.map_return_registered_maps.items():
+            if not isinstance(cfg, dict):
+                continue
+            raw_keywords = self._map_return_extract_raw_keywords(cfg.get('keywords'))
+            hits = [kw for kw in raw_keywords if self._map_return_normalize(kw) in normalized_text]
+            if hits:
+                lines.append(f"맵 '{name}' 키워드 감지: {', '.join(dict.fromkeys(hits))}")
 
         if self.map_return_conf_threshold > 0:
             lines.append(f"신뢰도 필터 ≥ {self.map_return_conf_threshold:.1f}%")
@@ -4059,6 +4113,10 @@ class HuntTab(QWidget):
     def _update_map_return_timer_state(self) -> None:
         if self.map_return_timer is None:
             return
+        if getattr(self, '_map_return_pending', None):
+            if self.map_return_timer.isActive():
+                self.map_return_timer.stop()
+            return
         if self.map_return_enabled and self.map_return_roi and not self._map_return_recovering:
             interval_ms = max(500, int(self.map_return_interval_sec * 1000))
             if self.map_return_timer.interval() != interval_ms:
@@ -4077,6 +4135,8 @@ class HuntTab(QWidget):
         """맵 복귀 모드 OCR 주기 콜백 (구현 예정)."""
         if not self.map_return_enabled or self._map_return_recovering:
             return
+        if self._map_return_pending:
+            return
         roi_frame = self._capture_map_return_frame()
         if roi_frame is None:
             self._map_return_last_detected = ""
@@ -4087,7 +4147,8 @@ class HuntTab(QWidget):
                 self._map_return_last_detected = ""
             return
         detected_text = self._combine_map_return_words(words)
-        normalized_text = self._map_return_normalize(detected_text)
+        sanitized_text, excluded_hits = self._map_return_sanitize_text(detected_text)
+        normalized_text = self._map_return_normalize(sanitized_text)
         if not normalized_text:
             if self._map_return_last_detected:
                 self._map_return_last_detected = ""
@@ -4096,19 +4157,34 @@ class HuntTab(QWidget):
         base_keywords = self._map_return_extract_keywords(self.map_return_base_keywords)
         if base_keywords and any(keyword in normalized_text for keyword in base_keywords):
             if self._map_return_last_detected != normalized_text:
-                self.append_log(f"[맵 복귀] 기준 맵 키워드 감지: '{detected_text}'", "debug")
+                self.append_log(f"[맵 복귀] 기준 맵 키워드 감지: '{sanitized_text}'", "debug")
             self._map_return_last_detected = normalized_text
             self._reset_map_return_alerts()
+            self._clear_map_return_pending()
             return
 
         matched = self._match_map_return_keyword(normalized_text)
+        self._map_return_last_detected = normalized_text
         if matched:
             map_name, map_cfg = matched
-            self._begin_map_return_recovery(map_name, map_cfg, roi_frame, detected_text, words)
+            self._map_return_start_confirmation(
+                candidate_type='map',
+                sanitized_text=sanitized_text,
+                frame_bgr=roi_frame,
+                words=words,
+                map_name=map_name,
+                map_cfg=map_cfg,
+                excluded_hits=excluded_hits,
+            )
             return
 
-        self._map_return_last_detected = normalized_text
-        self._map_return_maybe_notify(detected_text, roi_frame)
+        self._map_return_start_confirmation(
+            candidate_type='alert',
+            sanitized_text=sanitized_text,
+            frame_bgr=roi_frame,
+            words=words,
+            excluded_hits=excluded_hits,
+        )
 
     def _map_return_normalize(self, text: str) -> str:
         if text is None:
@@ -4128,6 +4204,164 @@ class HuntTab(QWidget):
             if normalized:
                 keywords.append(normalized)
         return keywords
+
+    def _map_return_extract_raw_keywords(self, raw: Optional[str]) -> list[str]:
+        if not raw:
+            return []
+        return [token.strip() for token in str(raw).split(',') if token and token.strip()]
+
+    def _map_return_sanitize_text(self, text: str) -> tuple[str, list[str]]:
+        if not text:
+            return "", []
+        raw_excludes = self._map_return_extract_raw_keywords(self.map_return_exclude_keywords)
+        if not raw_excludes:
+            return text, []
+        sanitized = text
+        matched: list[str] = []
+        for raw_token in raw_excludes:
+            if not raw_token:
+                continue
+            pattern = re.compile(re.escape(raw_token), re.IGNORECASE)
+            if pattern.search(sanitized):
+                matched.append(raw_token)
+                sanitized = pattern.sub("", sanitized)
+        sanitized = " ".join(sanitized.split())
+        return sanitized, matched
+
+    def _clear_map_return_pending(self, *, restart_timer: bool = True) -> None:
+        try:
+            if self.map_return_confirm_timer.isActive():
+                self.map_return_confirm_timer.stop()
+        except Exception:
+            pass
+        self._map_return_pending = None
+        if restart_timer:
+            self._update_map_return_timer_state()
+
+    def _map_return_start_confirmation(
+        self,
+        *,
+        candidate_type: str,
+        sanitized_text: str,
+        frame_bgr: Optional[np.ndarray],
+        words: list,
+        map_name: Optional[str] = None,
+        map_cfg: Optional[dict] = None,
+        excluded_hits: Optional[list[str]] = None,
+        initial_attempts: int = 0,
+    ) -> None:
+        try:
+            self.map_return_confirm_timer.stop()
+        except Exception:
+            pass
+        payload = {
+            'type': candidate_type,
+            'text': sanitized_text,
+            'frame': frame_bgr,
+            'words': list(words or []),
+            'map_name': map_name,
+            'map_cfg': map_cfg,
+            'excluded_hits': list(excluded_hits or []),
+            'confirm_attempts': int(max(0, initial_attempts)),
+        }
+        self._map_return_pending = payload
+        if self.map_return_timer.isActive():
+            self.map_return_timer.stop()
+        self.map_return_confirm_timer.start(1000)
+        if sanitized_text:
+            self.append_log(f"[맵 복귀] 다른 맵 추정 '{sanitized_text}' → 확인 진행", "debug")
+
+    def _handle_map_return_confirm_tick(self) -> None:
+        pending = getattr(self, '_map_return_pending', None)
+        if not pending:
+            self._update_map_return_timer_state()
+            return
+
+        frame = self._capture_map_return_frame()
+        if frame is None or frame.size == 0:
+            words: list = []
+            sanitized_text = ""
+            excluded_hits: list[str] = []
+            self.append_log("[맵 복귀] 확인 중 캡처 실패 → 대기 유지", "debug")
+        else:
+            words = self._perform_map_return_ocr(frame)
+            sanitized_text, excluded_hits = self._map_return_sanitize_text(self._combine_map_return_words(words))
+
+        normalized = self._map_return_normalize(sanitized_text)
+        base_keywords = self._map_return_extract_keywords(self.map_return_base_keywords)
+        if normalized and base_keywords and any(keyword in normalized for keyword in base_keywords):
+            self.append_log("[맵 복귀] 확인 중 기준 맵 복구 감지 → 초기화", "debug")
+            self._clear_map_return_pending()
+            return
+
+        if not sanitized_text:
+            self.append_log("[맵 복귀] 확인 중 유효 텍스트 없음 → 초기화", "debug")
+            self._clear_map_return_pending()
+            return
+
+        match = self._match_map_return_keyword(normalized)
+        if match:
+            candidate_type = 'map'
+            map_name, map_cfg = match
+        else:
+            candidate_type = 'alert'
+            map_name = None
+            map_cfg = None
+
+        if candidate_type == 'map':
+            if pending.get('type') != 'map' or pending.get('map_name') != map_name:
+                self._map_return_start_confirmation(
+                    candidate_type='map',
+                    sanitized_text=sanitized_text,
+                    frame_bgr=frame,
+                    words=words,
+                    map_name=map_name,
+                    map_cfg=map_cfg,
+                    excluded_hits=excluded_hits,
+                    initial_attempts=1,
+                )
+                return
+        else:
+            if pending.get('type') != 'alert':
+                self._map_return_start_confirmation(
+                    candidate_type='alert',
+                    sanitized_text=sanitized_text,
+                    frame_bgr=frame,
+                    words=words,
+                    excluded_hits=excluded_hits,
+                    initial_attempts=1,
+                )
+                return
+
+        attempts = int(pending.get('confirm_attempts', 0)) + 1
+        pending['confirm_attempts'] = attempts
+        pending['text'] = sanitized_text
+        pending['frame'] = frame
+        pending['words'] = list(words or [])
+        pending['excluded_hits'] = list(excluded_hits or [])
+        if candidate_type == 'map':
+            pending['map_name'] = map_name
+            pending['map_cfg'] = map_cfg
+
+        if attempts >= 3:
+            self._map_return_pending = None
+            self.map_return_confirm_timer.stop()
+            if candidate_type == 'map' and map_name and map_cfg:
+                self._begin_map_return_recovery(
+                    map_name,
+                    map_cfg,
+                    frame,
+                    sanitized_text,
+                    words,
+                    excluded_hits=excluded_hits,
+                )
+            else:
+                self._map_return_maybe_notify(sanitized_text, frame, excluded_hits=excluded_hits)
+                self._update_map_return_timer_state()
+            return
+
+        self.map_return_confirm_timer.start(1000)
+        self.append_log(f"[맵 복귀] 확인 진행 중 ({attempts}/3): '{sanitized_text}'", "debug")
 
     def _reset_map_return_alerts(self, key: Optional[str] = None) -> None:
         if key:
@@ -4220,7 +4454,13 @@ class HuntTab(QWidget):
                 return name, payload
         return None
 
-    def _map_return_maybe_notify(self, detected_text: str, frame: Optional[np.ndarray]) -> None:
+    def _map_return_maybe_notify(
+        self,
+        detected_text: str,
+        frame: Optional[np.ndarray],
+        *,
+        excluded_hits: Optional[list[str]] = None,
+    ) -> None:
         key = self._map_return_normalize(detected_text) or "(empty)"
         count = int(self._map_return_alert_count.get(key, 0))
         if count >= int(self.map_return_telegram_limit):
@@ -4235,6 +4475,8 @@ class HuntTab(QWidget):
         base_kw_text = str(self.map_return_base_keywords or '').strip()
         if base_kw_text:
             message += f" (기준 키워드='{base_kw_text}')"
+        if excluded_hits:
+            message += f" / 제외된 키워드: {', '.join(dict.fromkeys(excluded_hits))}"
         if self._notify_telegram(message):
             self.append_log(message, "warn")
         self._map_return_alert_count[key] = count + 1
@@ -4248,8 +4490,10 @@ class HuntTab(QWidget):
         detected_text: str,
         words: list,
         existing_state: Optional[dict] = None,
+        excluded_hits: Optional[list[str]] = None,
     ) -> None:
         """맵 복귀 플로우를 시작한다."""
+        self._clear_map_return_pending(restart_timer=False)
         map_tab = getattr(self, 'map_tab', None)
         if not map_tab:
             message = "[맵 복귀] 맵 탭과 연동되지 않아 복구를 실행할 수 없습니다."
@@ -4381,6 +4625,7 @@ class HuntTab(QWidget):
             'stage': 'travel',
             'check_attempt': 0,
             'last_detected_text': detected_text,
+            'excluded_hits': list(excluded_hits or []),
         }
 
         self.append_log(f"[맵 복귀] '{map_name}' 복구를 시작합니다. 웨이포인트: {waypoint_name}", "info")
@@ -4432,8 +4677,11 @@ class HuntTab(QWidget):
             words = self._perform_map_return_ocr(frame)
             detected_text = self._combine_map_return_words(words)
 
-        normalized = self._map_return_normalize(detected_text)
-        context['last_detected_text'] = detected_text
+        sanitized_text, excluded_hits = self._map_return_sanitize_text(detected_text)
+        normalized = self._map_return_normalize(sanitized_text)
+        context['last_detected_text'] = sanitized_text
+        if excluded_hits:
+            context['excluded_hits'] = excluded_hits
         self._map_return_context = context
 
         base_keywords = self._map_return_extract_keywords(self.map_return_base_keywords)
@@ -4447,11 +4695,11 @@ class HuntTab(QWidget):
             )
             self.append_log(success_msg, "info")
             self._map_return_send_telegram(success_msg, frame)
-            self._finalize_map_return(True, detected_text=detected_text, frame_bgr=frame, reason='success')
+            self._finalize_map_return(True, detected_text=sanitized_text, frame_bgr=frame, reason='success')
             return
 
         if attempt < 3:
-            self.append_log(f"[맵 복귀] 복귀 확인 중 ({attempt}/3) - 감지: '{detected_text or '(없음)'}'", "debug")
+            self.append_log(f"[맵 복귀] 복귀 확인 중 ({attempt}/3) - 감지: '{sanitized_text or '(없음)'}'", "debug")
             return
 
         self.map_return_recovery_timer.stop()
@@ -4459,10 +4707,10 @@ class HuntTab(QWidget):
         if matched:
             retry_msg = f"[맵 복귀] '{matched[0]}' 감지 → 복구 재시도"
             self.append_log(retry_msg, "warn")
-            self._restart_map_return_flow(matched[0], matched[1], frame, detected_text, words)
+            self._restart_map_return_flow(matched[0], matched[1], frame, sanitized_text, words, excluded_hits=excluded_hits)
             return
 
-        failure_msg = f"[맵 복귀] 등록되지 않은 맵 감지: {detected_text or '(없음)'} → 전체 중지"
+        failure_msg = f"[맵 복귀] 등록되지 않은 맵 감지: {sanitized_text or '(없음)'} → 전체 중지"
         self._abort_map_return(failure_msg, frame_bgr=frame, notify=True)
 
     def _lookup_map_return_waypoint_name(self, profile: str, waypoint_id: str) -> str:
@@ -4528,6 +4776,7 @@ class HuntTab(QWidget):
         frame_bgr: Optional[np.ndarray],
         detected_text: str,
         words: list,
+        excluded_hits: Optional[list[str]] = None,
     ) -> None:
         base_state = (self._map_return_context or {}).get('base_state')
         self._map_return_finish_wait_operation(reason='retry', resume_map_detection=False)
@@ -4540,6 +4789,7 @@ class HuntTab(QWidget):
             detected_text,
             words,
             existing_state=base_state if isinstance(base_state, dict) else None,
+            excluded_hits=excluded_hits,
         )
 
     def _restore_map_profile(self, profile_name: str) -> None:
@@ -4605,6 +4855,7 @@ class HuntTab(QWidget):
             self._map_return_send_telegram(message, frame_bgr)
         base_state = (self._map_return_context or {}).get('base_state', {}) or {}
         self.map_return_recovery_timer.stop()
+        self._clear_map_return_pending(restart_timer=False)
         self._map_return_finish_wait_operation(reason='abort', resume_map_detection=False)
         previous_profile = str(base_state.get('previous_profile', '') or '')
         self._restore_map_profile(previous_profile)
@@ -14074,14 +14325,18 @@ class HuntTab(QWidget):
                 self.map_return_max_width = 0
             base_profile_val = map_return_cfg.get('base_profile', self.map_return_base_profile)
             base_keywords_val = map_return_cfg.get('base_keywords', self.map_return_base_keywords)
+            exclude_keywords_val = map_return_cfg.get('exclude_keywords', self.map_return_exclude_keywords)
             if base_keywords_val in (None, ''):
                 base_keywords_val = map_return_cfg.get('base_keyword', '')
             if base_profile_val in (None, ''):
                 legacy_profile = map_return_cfg.get('base_keyword', '')
                 if legacy_profile:
                     base_profile_val = legacy_profile
+            if exclude_keywords_val in (None, ''):
+                exclude_keywords_val = map_return_cfg.get('exclude_keyword', '')
             self.map_return_base_profile = str(base_profile_val or '')
             self.map_return_base_keywords = str(base_keywords_val or '')
+            self.map_return_exclude_keywords = str(exclude_keywords_val or '')
             try:
                 self.map_return_telegram_limit = max(1, int(map_return_cfg.get('telegram_limit', self.map_return_telegram_limit)))
             except (TypeError, ValueError):
@@ -14827,6 +15082,7 @@ class HuntTab(QWidget):
                 'max_width': int(self.map_return_max_width),
                 'base_profile': self.map_return_base_profile,
                 'base_keywords': self.map_return_base_keywords,
+                'exclude_keywords': self.map_return_exclude_keywords,
                 'roi': copy.deepcopy(self.map_return_roi) if isinstance(self.map_return_roi, dict) else None,
                 'telegram_limit': int(self.map_return_telegram_limit),
                 'maps': {
