@@ -153,6 +153,7 @@ else:
 
 
 CHARACTER_CLASS_NAME = "캐릭터"
+LICH_RETURN_CLASS_NAME = "리치 귀환이펙트"
 
 SRC_ROOT = os.path.dirname(os.path.abspath(__file__))
 WORKSPACE_ROOT = os.path.abspath(os.path.join(SRC_ROOT, '..', 'workspace'))
@@ -1211,6 +1212,13 @@ class HuntTab(QWidget):
         self._last_character_details: List[dict] = []
         self._last_character_seen_ts: float = 0.0
         self._using_character_fallback: bool = False
+
+        # ----- 리치 귀환 이펙트 복구 상태 -----
+        self.lich_return_enabled: bool = False
+        self.lich_return_command_profile: str = ""
+        self._lich_return_cooldown_sec: float = 5.0
+        self._lich_return_next_ready_ts: float = 0.0
+        self._lich_return_recent_ids: dict[int, float] = {}
 
         # ----- 맵 복귀 모드 상태 -----
         self.map_return_enabled: bool = False
@@ -3353,8 +3361,10 @@ class HuntTab(QWidget):
         direction_switch_group = self._create_direction_switch_group()
         direction_group = self._create_direction_settings_group()
         ladder_group = self._create_ladder_settings_group()
+        lich_recovery_group = self._create_lich_recovery_group()
 
         left_column.addWidget(detection_group)
+        left_column.addWidget(lich_recovery_group)
         left_column.addStretch(1)
 
         right_column = QVBoxLayout()
@@ -3410,6 +3420,247 @@ class HuntTab(QWidget):
         self._update_monster_count_label()
         self._update_detection_summary()
         self._update_authority_ui()
+
+    def _create_lich_recovery_group(self) -> QGroupBox:
+        group = QGroupBox("리치 복구")
+        group.setSizePolicy(QSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed))
+        layout = QVBoxLayout()
+        layout.setContentsMargins(8, 6, 8, 6)
+        layout.setSpacing(6)
+
+        header_row = QHBoxLayout()
+        header_row.setContentsMargins(0, 0, 0, 0)
+        header_row.setSpacing(6)
+        self.lich_return_checkbox = QCheckBox("사용")
+        self.lich_return_checkbox.setChecked(bool(self.lich_return_enabled))
+        self.lich_return_checkbox.toggled.connect(self._on_lich_return_toggled)
+        header_row.addWidget(self.lich_return_checkbox)
+        header_row.addStretch(1)
+        layout.addLayout(header_row)
+
+        profile_row = QHBoxLayout()
+        profile_row.setContentsMargins(0, 0, 0, 0)
+        profile_row.setSpacing(6)
+        profile_label = QLabel("명령 프로필:")
+        self.lich_return_profile_combo = QComboBox()
+        self.lich_return_profile_combo.setEditable(False)
+        self.lich_return_profile_combo.currentIndexChanged.connect(self._on_lich_return_profile_changed)
+        profile_row.addWidget(profile_label)
+        profile_row.addWidget(self.lich_return_profile_combo, 1)
+        layout.addLayout(profile_row)
+
+        group.setLayout(layout)
+        self._refresh_lich_return_profile_options(keep_selection=False)
+        self._update_lich_controls_enabled()
+        return group
+
+    def _collect_lich_command_candidates(self) -> List[str]:
+        auto_tab = getattr(self, '_auto_control_tab', None)
+        if not auto_tab:
+            return []
+        mappings = getattr(auto_tab, 'mappings', {}) or {}
+        if not isinstance(mappings, dict):
+            return []
+        categories = getattr(auto_tab, 'profile_categories', {}) or {}
+        try:
+            skill_names = [
+                name for name in mappings.keys()
+                if isinstance(name, str) and categories.get(name) == "스킬"
+            ]
+        except Exception:
+            skill_names = []
+        if not skill_names:
+            skill_names = [name for name in mappings.keys() if isinstance(name, str)]
+        ordered_unique = dict.fromkeys(sorted(skill_names, key=lambda item: item.lower()))
+        return list(ordered_unique.keys())
+
+    def _refresh_lich_return_profile_options(self, *, keep_selection: bool = True) -> None:
+        combo = getattr(self, 'lich_return_profile_combo', None)
+        if combo is None:
+            return
+        previous_value = combo.currentData()
+        if not keep_selection:
+            previous_value = self.lich_return_command_profile or previous_value
+
+        candidates = self._collect_lich_command_candidates()
+
+        blocker = QSignalBlocker(combo)
+        combo.clear()
+        if not candidates:
+            combo.addItem("자동제어 연결 필요", "")
+            del blocker
+            self.lich_return_command_profile = ""
+            self._update_lich_controls_enabled()
+            return
+
+        for name in candidates:
+            combo.addItem(name, name)
+
+        target = self.lich_return_command_profile.strip() if isinstance(self.lich_return_command_profile, str) else ""
+        if not target:
+            if previous_value and previous_value in candidates:
+                target = previous_value
+            elif "미스틱도어" in candidates:
+                target = "미스틱도어"
+            else:
+                target = candidates[0]
+
+        index = combo.findData(target)
+        if index < 0 and target:
+            combo.addItem(target, target)
+            index = combo.findData(target)
+        if index >= 0:
+            combo.setCurrentIndex(index)
+        elif combo.count() > 0:
+            combo.setCurrentIndex(0)
+
+        self.lich_return_command_profile = combo.currentData() or ""
+        del blocker
+        self._update_lich_controls_enabled()
+
+    def _update_lich_controls_enabled(self) -> None:
+        combo = getattr(self, 'lich_return_profile_combo', None)
+        enabled = bool(self.lich_return_enabled and combo and combo.currentData())
+        if combo:
+            combo.setEnabled(enabled)
+
+    def _on_lich_return_toggled(self, checked: bool) -> None:
+        self.lich_return_enabled = bool(checked)
+        if not checked:
+            self._lich_return_next_ready_ts = 0.0
+            self._lich_return_recent_ids.clear()
+        self._update_lich_controls_enabled()
+        self._save_settings()
+
+    def _on_lich_return_profile_changed(self, index: int) -> None:
+        combo = getattr(self, 'lich_return_profile_combo', None)
+        if not combo:
+            return
+        value = combo.itemData(index)
+        if not value:
+            self.lich_return_command_profile = ""
+            self._update_lich_controls_enabled()
+            self._save_settings()
+            return
+        self.lich_return_command_profile = str(value)
+        self._update_lich_controls_enabled()
+        self._save_settings()
+
+    def _resolve_lich_return_profile(self) -> Optional[str]:
+        desired = str(self.lich_return_command_profile or "").strip()
+        auto_tab = getattr(self, '_auto_control_tab', None)
+        if not auto_tab:
+            return desired or None
+        mappings = getattr(auto_tab, 'mappings', {}) or {}
+        if not isinstance(mappings, dict) or not mappings:
+            return desired or None
+        if desired and desired in mappings:
+            return desired
+        if "미스틱도어" in mappings:
+            return "미스틱도어"
+        candidates = self._collect_lich_command_candidates()
+        for name in candidates:
+            if name in mappings:
+                return name
+        for name in mappings.keys():
+            if isinstance(name, str):
+                return name
+        return None
+
+    def _handle_lich_return_effect(self, entries: List[dict], _payload_ts: float) -> None:
+        if not self.lich_return_enabled:
+            return
+        now = time.time()
+        if now < self._lich_return_next_ready_ts:
+            return
+
+        expiry = self._lich_return_cooldown_sec
+        for key, ts in list(self._lich_return_recent_ids.items()):
+            if now - ts > expiry:
+                self._lich_return_recent_ids.pop(key, None)
+        has_new_detection = False
+        for entry in entries:
+            try:
+                uid = int(entry.get('box_uid', -1))
+            except (TypeError, ValueError):
+                uid = -1
+            if uid >= 0 and uid not in self._lich_return_recent_ids:
+                has_new_detection = True
+            if uid >= 0:
+                self._lich_return_recent_ids[uid] = now
+        if not has_new_detection and now < self._lich_return_next_ready_ts:
+            return
+
+        self._refresh_lich_return_profile_options(keep_selection=True)
+
+        auto_tab = getattr(self, '_auto_control_tab', None)
+        if not auto_tab:
+            self.append_log("리치 복구 명령 실행 실패: 자동 제어 탭과 연결되지 않았습니다.", "warn")
+            self._lich_return_next_ready_ts = now + 1.0
+            return
+
+        profile = self._resolve_lich_return_profile()
+        if not profile:
+            self.append_log("리치 복구 명령 실행 실패: 사용할 명령 프로필이 없습니다.", "warn")
+            self._lich_return_next_ready_ts = now + 1.0
+            return
+
+        self._lich_return_next_ready_ts = now + self._lich_return_cooldown_sec
+
+        caption = f"[리치 복구] '{LICH_RETURN_CLASS_NAME}' 감지 → '{profile}' 실행"
+        self.append_log(caption, "red")
+
+        image_bgr = self._get_latest_detection_bgr()
+        self._send_lich_return_telegram(caption, image_bgr=image_bgr)
+
+        try:
+            if hasattr(auto_tab, 'api_emergency_stop_all'):
+                auto_tab.api_emergency_stop_all(reason="lich_return_effect")
+        except Exception:
+            pass
+
+        self.control_command_issued.emit(profile, "urgent:lich_return_effect")
+
+    def _send_lich_return_telegram(self, text: str, *, image_bgr: Optional[np.ndarray] = None) -> None:
+        if not text:
+            return
+        sent = False
+        if image_bgr is not None and _tg_send_photo:
+            try:
+                success, buffer = cv2.imencode(".png", image_bgr)
+                if success:
+                    sent = bool(_tg_send_photo(buffer.tobytes(), caption=text))
+            except Exception:
+                sent = False
+        if not sent and image_bgr is not None:
+            try:
+                from ocr_watch import send_telegram_text_and_screenshot as _tg_text_and_shot  # 지연 임포트
+                _tg_text_and_shot(text, image_bgr=image_bgr)
+                sent = True
+            except Exception:
+                sent = False
+        if not sent:
+            self._notify_telegram(text)
+
+    def _on_auto_control_profile_renamed(self, old_name: str, new_name: str) -> None:
+        if not isinstance(old_name, str) or not isinstance(new_name, str):
+            return
+        combo = getattr(self, 'lich_return_profile_combo', None)
+        if not combo:
+            if self.lich_return_command_profile == old_name:
+                self.lich_return_command_profile = new_name
+                self._save_settings()
+            return
+        self._refresh_lich_return_profile_options(keep_selection=True)
+        if self.lich_return_command_profile == old_name:
+            blocker = QSignalBlocker(combo)
+            idx = combo.findData(new_name)
+            if idx >= 0:
+                combo.setCurrentIndex(idx)
+            self.lich_return_command_profile = new_name
+            del blocker
+            self._save_settings()
+        self._update_lich_controls_enabled()
 
     def _create_map_return_group(self) -> QGroupBox:
         group = QGroupBox("맵 복귀 모드")
@@ -9561,6 +9812,16 @@ class HuntTab(QWidget):
     def attach_auto_control_tab(self, auto_control_tab) -> None:
         """자동 제어 탭 참조를 보관해 긴급 정지 경로에 사용한다."""
         self._auto_control_tab = auto_control_tab
+        if auto_control_tab and hasattr(auto_control_tab, 'command_profile_renamed'):
+            try:
+                auto_control_tab.command_profile_renamed.connect(self._on_auto_control_profile_renamed)
+            except Exception:
+                pass
+        try:
+            self._refresh_lich_return_profile_options(keep_selection=True)
+        except Exception:
+            pass
+        self._update_lich_controls_enabled()
 
     def _set_command_cooldown(self, delay_sec: float) -> None:
         delay_sec = max(0.0, float(delay_sec))
@@ -10472,6 +10733,24 @@ class HuntTab(QWidget):
                 frame_width = frame_height = 0
         if frame_width > 0 and frame_height > 0:
             self._latest_frame_size = (frame_width, frame_height)
+
+        lich_effect_entries: List[dict] = []
+        if monsters_data:
+            filtered_monster_payload: List[dict] = []
+            for raw_entry in monsters_data:
+                if (
+                    isinstance(raw_entry, dict)
+                    and str(raw_entry.get('class_name') or '') == LICH_RETURN_CLASS_NAME
+                ):
+                    lich_effect_entries.append(raw_entry)
+                else:
+                    filtered_monster_payload.append(raw_entry)
+            monsters_data = filtered_monster_payload
+        if lich_effect_entries:
+            try:
+                self._handle_lich_return_effect(lich_effect_entries, payload_ts)
+            except Exception:
+                pass
 
         self._expire_nameplate_dead_zones(received_ts)
         self._expire_forbidden_visuals(received_ts)
@@ -13450,6 +13729,24 @@ class HuntTab(QWidget):
             self.append_log(f"사냥 설정 파일 파싱 실패: {exc}", "warn")
             data = {}
 
+        lich_cfg = data.get('lich_recovery', {}) if isinstance(data, dict) else {}
+        try:
+            lich_enabled = bool(lich_cfg.get('enabled', False))
+        except Exception:
+            lich_enabled = False
+        lich_profile = str(lich_cfg.get('command_profile', '') or '')
+        self.lich_return_enabled = lich_enabled
+        self.lich_return_command_profile = lich_profile
+        if hasattr(self, 'lich_return_checkbox'):
+            blocker = QSignalBlocker(self.lich_return_checkbox)
+            self.lich_return_checkbox.setChecked(lich_enabled)
+            del blocker
+        try:
+            self._refresh_lich_return_profile_options(keep_selection=False)
+        except Exception:
+            pass
+        self._update_lich_controls_enabled()
+
         ranges = data.get('ranges', {})
         if ranges:
             self.enemy_range_spinbox.setValue(int(ranges.get('enemy_range', self.enemy_range_spinbox.value())))
@@ -14515,6 +14812,10 @@ class HuntTab(QWidget):
                     'include_ladder': bool(self.ladder_escape_include_ladder_checkbox.isChecked()) if hasattr(self, 'ladder_escape_include_ladder_checkbox') else True,
                     'include_fall': bool(self.ladder_escape_include_fall_checkbox.isChecked()) if hasattr(self, 'ladder_escape_include_fall_checkbox') else True,
                 },
+            },
+            'lich_recovery': {
+                'enabled': bool(self.lich_return_enabled),
+                'command_profile': str(self.lich_return_command_profile or ''),
             },
             'map_return': {
                 'enabled': bool(self.map_return_enabled),
