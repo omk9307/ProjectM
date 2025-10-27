@@ -551,6 +551,8 @@ class MapTab(QWidget):
             self._low_hp_alert_active: bool = False
             # [NEW] 초긴급 명령 1회 트리거 상태
             self._low_hp_urgent_active: bool = False
+            # [NEW] 사다리 상태 회복 차단 안내 중복 방지용 타임스탬프
+            self._hp_ladder_skip_notified_at: float = 0.0
 
             self.latest_perf_stats: dict[str, object] = {}
             self._latest_thread_perf: dict[str, object] = {}
@@ -7050,6 +7052,37 @@ class MapTab(QWidget):
     # ------------------------------------------------------------------
     # 다른 캐릭터 대기 모드 연동
 
+    def _is_actively_on_ladder(self) -> bool:
+        """실제 사다리 등반/매달림 상태인지 판단한다."""
+        try:
+            state = str(getattr(self, 'player_state', '') or '').strip().lower()
+            if state not in {'climbing_up', 'climbing_down', 'on_ladder_idle'}:
+                return False
+            nav_action = str(getattr(self, 'navigation_action', '') or '').strip().lower()
+            if state == 'climbing_up' and nav_action == 'prepare_to_climb':
+                return False
+            return True
+        except Exception:
+            return False
+
+    def _notify_hp_ladder_skip(self, message: str) -> None:
+        """사다리 상태로 HP 회복이 건너뛰어졌음을 과도한 중복 없이 알린다."""
+        now = time.time()
+        try:
+            last = float(getattr(self, '_hp_ladder_skip_notified_at', 0.0) or 0.0)
+        except Exception:
+            last = 0.0
+        if (now - last) < 1.0:
+            return
+        try:
+            self.update_general_log(message, "gray")
+        except Exception:
+            pass
+        try:
+            self._hp_ladder_skip_notified_at = now
+        except Exception:
+            pass
+
     def _is_other_player_wait_active(self) -> bool:
         context = getattr(self, 'other_player_wait_context', None)
         return bool(context and context.get('active'))
@@ -12662,13 +12695,12 @@ class MapTab(QWidget):
                                         and not self._hp_emergency_active
                                         and self._hp_recovery_fail_streak >= int(getattr(hp_cfg, 'emergency_trigger_failures', 3) or 3)
                                     ):
-                                        # 사다리 상태에서는 긴급모드 진입 금지
-                                        if str(getattr(self, 'player_state', '')) not in {'climbing_up', 'climbing_down', 'on_ladder_idle'}:
+                                        if not self._is_actively_on_ladder():
                                             # [정책] 대기모드에서는 일반 긴급모드 진입 금지(대기 전용 HP만 허용)
                                             if not self._is_other_player_wait_active():
                                                 self._enter_hp_emergency_mode()
                                         else:
-                                            self.update_general_log("[HP] 긴급모드 조건 충족이나 사다리 상태로 진입 보류", "gray")
+                                            self._notify_hp_ladder_skip("[HP] 긴급모드 조건 충족이나 사다리 상태로 진입 보류")
                         # 긴급모드 시간 초과 검사
                         # [NEW] 긴급모드 HP 임계값(%)에 의한 즉시 진입 (OR 조건)
                         try:
@@ -12679,8 +12711,7 @@ class MapTab(QWidget):
                                 and isinstance(em_thr, int)
                                 and float(current) <= float(em_thr)
                             ):
-                                # 사다리 상태에서는 긴급모드 진입 금지
-                                if str(getattr(self, 'player_state', '')) not in {'climbing_up', 'climbing_down', 'on_ladder_idle'}:
+                                if not self._is_actively_on_ladder():
                                     self.update_general_log(
                                         f"[HP] 긴급모드 진입: HP 임계값({int(em_thr)}%) 이하 감지 (현재 {int(round(current))}%)",
                                         "orange",
@@ -12689,9 +12720,8 @@ class MapTab(QWidget):
                                     if not self._is_other_player_wait_active():
                                         self._enter_hp_emergency_mode()
                                 else:
-                                    self.update_general_log(
-                                        f"[HP] 긴급모드 조건 충족(HP {int(round(current))}%)이나 사다리 상태로 진입 보류",
-                                        "gray",
+                                    self._notify_hp_ladder_skip(
+                                        f"[HP] 긴급모드 조건 충족(HP {int(round(current))}%)이나 사다리 상태로 진입 보류"
                                     )
                         except Exception:
                             pass
@@ -12780,6 +12810,9 @@ class MapTab(QWidget):
         if resource == 'hp' and getattr(self, 'map_link_enabled', False):
             if str(getattr(self, 'current_authority_owner', 'map')) != 'map':
                 return
+        if resource == 'hp' and self._is_actively_on_ladder():
+            self._notify_hp_ladder_skip("[HP] 사다리 등반 중에는 회복 명령을 보류합니다.")
+            return
         threshold = getattr(cfg, 'recovery_threshold', None)
         if threshold is None:
             return

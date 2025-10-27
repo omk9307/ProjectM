@@ -10494,8 +10494,15 @@ class HuntTab(QWidget):
             map_tab = getattr(self, 'map_tab', None)
             if not map_tab:
                 return False
-            state = getattr(map_tab, 'player_state', None)
-            return str(state) in {'climbing_up', 'climbing_down', 'on_ladder_idle'}
+            state = str(getattr(map_tab, 'player_state', None) or '').strip().lower()
+            if state not in {'climbing_up', 'climbing_down', 'on_ladder_idle'}:
+                return False
+            # 사다리 등반 준비 단계에서는 회복 명령을 허용한다.
+            nav_action_raw = getattr(map_tab, 'navigation_action', None)
+            nav_action = str(nav_action_raw).strip().lower() if nav_action_raw is not None else ''
+            if state == 'climbing_up' and nav_action == 'prepare_to_climb':
+                return False
+            return True
         except Exception:
             return False
 
