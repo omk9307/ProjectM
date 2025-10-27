@@ -1456,7 +1456,12 @@ class MapTab(QWidget):
                 )
 
             # 대기 모드(wait)에서는 권한 재실행을 스케줄하지 않음
-            if not self._is_other_player_wait_active():
+            if (
+                not self._is_other_player_wait_active()
+                and getattr(self, 'current_authority_owner', 'map') == 'map'
+                and getattr(self, 'is_detection_running', False)
+                and not getattr(self, '_suppress_authority_resume', False)
+            ):
                 QTimer.singleShot(120, _resend_last_command)
 
         self._authority_resume_candidate = None
@@ -5595,17 +5600,6 @@ class MapTab(QWidget):
                 self._handle_detection_stopped_for_test()
                 self._clear_authority_resume_state()
                 self._cancel_other_player_wait_due_to_detection_stop()
-                try:
-                    hunt_tab = getattr(self, '_hunt_tab', None)
-                    if self._active_hunt_zone_id and hunt_tab and hasattr(hunt_tab, 'api_clear_zone_override'):
-                        hunt_tab.api_clear_zone_override(self._active_hunt_zone_id)
-                except Exception:
-                    pass
-                self._active_hunt_zone_id = None
-                try:
-                    self._restore_hunt_zone_map_overrides()
-                except Exception:
-                    pass
                 self.detection_status_changed.emit(False)
                 if self.status_monitor:
                     self.status_monitor.set_tab_active(map_tab=False)
@@ -9436,13 +9430,7 @@ class MapTab(QWidget):
         self._active_waypoint_threshold_value = chosen
         return chosen
 
-    def _maybe_trigger_walk_teleport(
-        self,
-        direction: str,
-        distance_to_target: float | None,
-        *,
-        force_without_walk: bool = False,
-    ) -> None:
+    def _maybe_trigger_walk_teleport(self, direction: str, distance_to_target: float | None) -> None:
         """걷기 중 일정 거리 이상일 때 텔레포트 명령을 확률적으로 실행합니다.
 
         [대기 모드 특수 규칙]
@@ -9487,27 +9475,17 @@ class MapTab(QWidget):
             return
 
         # 대기 모드(원거리)에서는 distance_to_target 검사를 우회하고, 방향만 확인
-        if (
-            not wait_mode_far
-            and not force_without_walk
-            and (direction not in ("→", "←") or distance_to_target is None)
-        ):
+        if not wait_mode_far and (direction not in ("→", "←") or distance_to_target is None):
             self._update_walk_teleport_probability_display(0.0)
             self._reset_walk_teleport_state()
             return
 
         # 대기 모드(원거리)일 땐 20px 근접 제한을 우회
-        if (
-            not wait_mode_far
-            and not force_without_walk
-            and distance_to_target is not None
-            and distance_to_target < 20.0
-        ):
+        if not wait_mode_far and distance_to_target is not None and distance_to_target < 20.0:
             self._update_walk_teleport_probability_display(0.0)
             return
 
         now = time.time()
-        force_cooldown_until = float(getattr(self, '_walk_teleport_force_until', 0.0))
 
         bonus_delay = max(self.cfg_walk_teleport_bonus_delay, 0.1)
         bonus_step = max(self.cfg_walk_teleport_bonus_step, 0.0)
@@ -9544,25 +9522,18 @@ class MapTab(QWidget):
             return
 
         interval = max(self.cfg_walk_teleport_interval, 0.1)
-        if self._last_walk_teleport_check_time > 0.0 and (now - self._last_walk_teleport_check_time) < interval:
+        if (now - self._last_walk_teleport_check_time) < interval:
             return
-        recent_walk_window = 0.25
-        recent_walk_active = (
-            not force_without_walk
-            and self.last_movement_command in ("걷기(우)", "걷기(좌)")
-            and (now - float(getattr(self, 'last_command_sent_time', 0.0))) <= recent_walk_window
-        )
-        if not force_without_walk and now < force_cooldown_until:
-            return
-        if not force_without_walk and not recent_walk_active and not self._is_walk_direction_active(direction):
+
+        self._last_walk_teleport_check_time = now
+
+        if not self._is_walk_direction_active(direction):
             walk_command = "걷기(우)" if direction == "→" else "걷기(좌)"
             if self.debug_auto_control_checkbox.isChecked():
                 print(f"[자동 제어 테스트] WALK-TELEPORT: 누락된 걷기 -> {walk_command}")
             if self.auto_control_checkbox.isChecked():
                 self._emit_control_command(walk_command, "walk_teleport:ensure_walk")
             return
-
-        self._last_walk_teleport_check_time = now
 
         if random.random() >= probability:
             return
@@ -9578,7 +9549,6 @@ class MapTab(QWidget):
 
         if executed:
             self.last_command_sent_time = now
-            setattr(self, '_walk_teleport_force_until', 0.0)
 
     def _get_arrival_threshold(self, node_type, node_key=None, node_data=None):
         """노드 타입에 맞는 도착 판정 임계값을 반환합니다."""
@@ -10341,111 +10311,6 @@ class MapTab(QWidget):
             if command == "아래점프":
                 self.down_jump_send_latch = True
                 self.down_jump_sent_at = self.last_command_sent_time
-            if command in ("걷기(우)", "걷기(좌)"):
-                self._schedule_walk_teleport_after_resend(command)
-
-    def _resolve_walk_dx_to_target(self) -> Optional[float]:
-        """현재 플레이어와 목표 사이의 X축 차이를 반환한다."""
-        pos = getattr(self, 'smoothed_player_pos', None) or getattr(self, 'last_player_pos', None)
-        if pos is None or not hasattr(pos, 'x'):
-            return None
-        try:
-            pos_x = float(pos.x())
-        except Exception:
-            return None
-
-        def _point_x(value) -> Optional[float]:
-            try:
-                return float(value.x())
-            except Exception:
-                return None
-
-        target_x: Optional[float] = None
-        try:
-            segment_path = getattr(self, 'current_segment_path', None)
-            segment_index = getattr(self, 'current_segment_index', 0)
-            if (
-                segment_path
-                and 0 <= segment_index < len(segment_path)
-            ):
-                node_key = segment_path[segment_index]
-                nav_nodes = getattr(self, 'nav_nodes', {})
-                node = nav_nodes.get(node_key, {}) or {}
-                node_pos = node.get('pos')
-                candidate = _point_x(node_pos)
-                if candidate is not None:
-                    target_x = candidate
-            target_waypoint_id = getattr(self, 'target_waypoint_id', None)
-            if target_x is None and target_waypoint_id is not None:
-                nav_nodes = getattr(self, 'nav_nodes', {})
-                wp_node = nav_nodes.get(f"wp_{str(target_waypoint_id)}", {}) or {}
-                wp_pos = wp_node.get('pos')
-                candidate = _point_x(wp_pos)
-                if candidate is not None:
-                    target_x = candidate
-            intermediate_target = getattr(self, 'intermediate_target_pos', None)
-            if target_x is None and isinstance(intermediate_target, (QPointF, QPoint)):
-                target_x = _point_x(intermediate_target)
-            if target_x is None:
-                anchor = getattr(self, 'safe_move_anchor', None) or {}
-                anchor_x = anchor.get('x')
-                if anchor_x is not None:
-                    target_x = float(anchor_x)
-            alignment_target_x = getattr(self, 'alignment_target_x', None)
-            if target_x is None and alignment_target_x is not None:
-                target_x = float(alignment_target_x)
-        except Exception:
-            return None
-
-        if target_x is None:
-            return None
-        return target_x - pos_x
-
-    def _schedule_walk_teleport_after_resend(self, command: str) -> None:
-        """걷기 재전송 직후 텔레포트 판정을 한 번 더 시도한다."""
-        if command not in ("걷기(우)", "걷기(좌)"):
-            return
-        if not getattr(self, 'is_detection_running', False):
-            return
-        auto_checkbox = getattr(self, 'auto_control_checkbox', None)
-        debug_checkbox = getattr(self, 'debug_auto_control_checkbox', None)
-        if not (
-            (auto_checkbox and auto_checkbox.isChecked())
-            or (debug_checkbox and debug_checkbox.isChecked())
-        ):
-            return
-
-        direction_symbol = "→" if command == "걷기(우)" else "←"
-        self._invoke_walk_teleport_after_resend(direction_symbol, reset_check_time=True)
-
-        def _delayed_invoke() -> None:
-            self._invoke_walk_teleport_after_resend(direction_symbol, reset_check_time=True)
-
-        QTimer.singleShot(150, _delayed_invoke)
-
-    def _invoke_walk_teleport_after_resend(self, direction_symbol: str, *, reset_check_time: bool) -> None:
-        """복구 걷기 재전송 직후 텔레포트를 강제로 한 번 더 시도."""
-        if not getattr(self, 'is_detection_running', False):
-            return
-        auto_chk = getattr(self, 'auto_control_checkbox', None)
-        debug_chk = getattr(self, 'debug_auto_control_checkbox', None)
-        if not (
-            (auto_chk and auto_chk.isChecked())
-            or (debug_chk and debug_chk.isChecked())
-        ):
-            return
-
-        dx = self._resolve_walk_dx_to_target()
-        distance = abs(dx) if dx is not None else None
-        try:
-            if not getattr(self, '_walk_teleport_active', False):
-                self._start_walk_teleport_tracking()
-            if reset_check_time:
-                self._last_walk_teleport_check_time = 0.0
-            setattr(self, '_walk_teleport_force_until', time.time() + 0.25)
-            self._maybe_trigger_walk_teleport(direction_symbol, distance, force_without_walk=True)
-        except Exception:
-            pass
 
     def _trigger_stuck_recovery(self, final_player_pos, log_message):
         """공통 멈춤 복구 절차를 실행합니다."""
