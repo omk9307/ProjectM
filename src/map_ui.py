@@ -2017,13 +2017,19 @@ class MapTab(QWidget):
 
     @pyqtSlot(str, bool)
     def _handle_auto_control_key_state(self, key_str: str, pressed: bool) -> None:
-        if key_str not in {"Key.left", "Key.right"}:
+        arrow_to_key = {
+            "→": "Key.right",
+            "←": "Key.left",
+        }
+        normalized_key = arrow_to_key.get(key_str, key_str)
+
+        if normalized_key not in {"Key.left", "Key.right"}:
             return
 
         if pressed:
-            self._held_direction_keys.add(key_str)
+            self._held_direction_keys.add(normalized_key)
         else:
-            self._held_direction_keys.discard(key_str)
+            self._held_direction_keys.discard(normalized_key)
 
     def _handle_hunt_map_link_toggled(self, checked: bool) -> None:
         if getattr(self, '_syncing_with_hunt', False):
@@ -2068,8 +2074,8 @@ class MapTab(QWidget):
         if not self._auto_control_tab or not self._held_direction_keys:
             return None
 
-        right_active = any(key in self._held_direction_keys for key in {"Key.right"})
-        left_active = any(key in self._held_direction_keys for key in {"Key.left"})
+        right_active = "Key.right" in self._held_direction_keys
+        left_active = "Key.left" in self._held_direction_keys
 
         if right_active and left_active:
             return None
