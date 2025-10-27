@@ -2819,6 +2819,100 @@ class MapTab(QWidget):
             return objects
         return [obj for obj in objects if not bool(obj.get('unused', False))]
 
+    def _get_ladder_override(self, obj_id: Optional[str]) -> Optional[dict]:
+        if not obj_id:
+            return None
+        transition_objects = self._get_transition_objects(include_unused=True)
+        ladder = next((obj for obj in transition_objects if obj.get('id') == obj_id), None)
+        if not ladder:
+            return None
+        override = ladder.get('ladder_override')
+        if not isinstance(override, dict):
+            return None
+        if not bool(override.get('enabled')):
+            return None
+        return override
+
+    def _resolve_ladder_arrival_threshold(self, obj_id: Optional[str], *, short: bool = False) -> float:
+        override = self._get_ladder_override(obj_id)
+        if override:
+            value = override.get('arrival_threshold')
+            if isinstance(value, (int, float)):
+                return float(value)
+            # legacy 데이터 호환: 과거 필드명이 남아있을 수도 있음
+            legacy_key = 'arrival_short_threshold' if short else 'arrival_threshold'
+            value = override.get(legacy_key)
+            if isinstance(value, (int, float)):
+                return float(value)
+        return self.cfg_ladder_arrival_short_threshold if short else self.cfg_ladder_arrival_x_threshold
+
+    def _resolve_ladder_profile_command(self, override: dict, direction_symbol: str, distance: float) -> Optional[str]:
+        if not isinstance(override, dict):
+            return None
+        profiles = override.get('distance_profiles')
+        if not isinstance(profiles, list):
+            return None
+        if direction_symbol not in ("→", "←"):
+            return None
+
+        entries = []
+        for entry in profiles:
+            if not isinstance(entry, dict):
+                continue
+            try:
+                entries.append({
+                    'min': float(entry.get('min_distance', 0.0)),
+                    'max': float(entry.get('max_distance', 0.0)),
+                    'left_profile': entry.get('left_profile') or '',
+                    'right_profile': entry.get('right_profile') or '',
+                })
+            except Exception:
+                continue
+
+        entries.sort(key=lambda item: item['min'])
+        chosen: Optional[dict] = None
+        for idx, entry in enumerate(entries):
+            max_val = entry['max']
+            if max_val <= 0.0 and idx == len(entries) - 1:
+                chosen = entry
+                break
+            if distance < entry['min']:
+                continue
+            if distance <= max_val:
+                chosen = entry
+                break
+
+        if chosen is None and entries:
+            chosen = entries[-1]
+            if distance < chosen['min']:
+                chosen = None
+
+        if not chosen:
+            return None
+
+        if direction_symbol == "→":
+            return chosen['left_profile'] or None
+        return chosen['right_profile'] or None
+
+    def _get_active_ladder_object_id(self) -> Optional[str]:
+        try:
+            path = self.current_segment_path
+            idx = self.current_segment_index
+            if not path or idx < 0 or idx >= len(path):
+                return None
+            node = self.nav_nodes.get(path[idx], {}) if isinstance(self.nav_nodes, dict) else {}
+            obj_id = node.get('obj_id')
+            if obj_id:
+                return obj_id
+            if idx + 1 < len(path):
+                next_node = self.nav_nodes.get(path[idx + 1], {}) if isinstance(self.nav_nodes, dict) else {}
+                next_obj_id = next_node.get('obj_id')
+                if next_obj_id:
+                    return next_obj_id
+        except Exception:
+            return None
+        return None
+
     def load_profile_data(self, profile_name):
         self.active_profile_name = profile_name
         
@@ -9553,7 +9647,10 @@ class MapTab(QWidget):
     def _get_arrival_threshold(self, node_type, node_key=None, node_data=None):
         """노드 타입에 맞는 도착 판정 임계값을 반환합니다."""
         if node_type == 'ladder_entry':
-            return self.cfg_ladder_arrival_x_threshold
+            obj_id = None
+            if isinstance(node_data, dict):
+                obj_id = node_data.get('obj_id')
+            return self._resolve_ladder_arrival_threshold(obj_id, short=False)
         if node_type in ['jump_vertex', 'fall_start', 'djump_area']:
             return self.cfg_jump_link_arrival_x_threshold
         if node_type == 'waypoint':
@@ -9601,15 +9698,21 @@ class MapTab(QWidget):
             return None
 
     def _select_ladder_climb_command(self, direction_symbol: str, entry_distance: Optional[float]) -> str:
+        obj_id = self._get_active_ladder_object_id()
         base_command = "사다리타기(우)" if direction_symbol == "→" else "사다리타기(좌)"
 
         if direction_symbol not in ("→", "←") or entry_distance is None:
             return base_command
 
-        short_threshold = self.cfg_ladder_arrival_short_threshold
+        short_threshold = self._resolve_ladder_arrival_threshold(obj_id, short=True)
+        override = self._get_ladder_override(obj_id)
+        if override:
+            custom_command = self._resolve_ladder_profile_command(override, direction_symbol, float(entry_distance))
+            if custom_command:
+                return custom_command
+
         if short_threshold is None:
             short_threshold = LADDER_ARRIVAL_SHORT_THRESHOLD
-
         if short_threshold is not None and entry_distance <= short_threshold:
             return "사다리타기(우_짧게)" if direction_symbol == "→" else "사다리타기(좌_짧게)"
 
@@ -11888,10 +11991,11 @@ class MapTab(QWidget):
                         return
 
                     ladder_states = {'climbing_up', 'climbing_down', 'on_ladder_idle'}
+                    ladder_threshold = self._resolve_ladder_arrival_threshold(current_ladder.get('id')) if isinstance(current_ladder, dict) else self.cfg_ladder_arrival_x_threshold
                     is_on_ladder, _, dist_x = self._check_near_ladder(
                         final_player_pos,
                         [current_ladder],
-                        self.cfg_ladder_arrival_x_threshold,
+                        ladder_threshold,
                         return_dist=True,
                         current_floor=self.current_player_floor,
                     )

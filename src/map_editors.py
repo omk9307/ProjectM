@@ -10,6 +10,7 @@ import math
 import os
 import traceback
 import uuid
+from pathlib import Path
 from collections import defaultdict, deque
 from ctypes import wintypes
 from typing import Dict, List, Optional, Tuple
@@ -66,6 +67,7 @@ from PyQt6.QtWidgets import (
     QGraphicsView,
     QGroupBox,
     QHBoxLayout,
+    QGridLayout,
     QInputDialog,
     QLabel,
     QLineEdit,
@@ -2287,6 +2289,55 @@ class FullMinimapEditorDialog(QDialog):
                     self.view.viewport().setCursor(Qt.CursorShape.CrossCursor)
                 except Exception:
                     self.view.setCursor(Qt.CursorShape.CrossCursor)
+
+    def _get_move_command_profile_names(self) -> list[str]:
+        """
+        자동제어 탭 혹은 설정 파일에서 '이동' 카테고리 명령 프로필 이름 목록을 반환합니다.
+        """
+        names: set[str] = set()
+
+        auto_control_tab = getattr(self.parent_map_tab, '_auto_control_tab', None) if self.parent_map_tab else None
+        if auto_control_tab:
+            try:
+                mappings = getattr(auto_control_tab, 'mappings', {}) or {}
+                categories = getattr(auto_control_tab, 'profile_categories', {}) or {}
+                if isinstance(mappings, dict):
+                    for key in mappings.keys():
+                        category_name = categories.get(key)
+                        if category_name == "이동":
+                            names.add(str(key))
+            except Exception:
+                names.clear()
+
+        if not names:
+            try:
+                candidates = [
+                    Path(os.path.join('Project_Maple', 'workspace', 'config', 'key_mappings.json')),
+                    Path.cwd() / 'Project_Maple' / 'workspace' / 'config' / 'key_mappings.json',
+                    Path(__file__).resolve().parents[1] / 'workspace' / 'config' / 'key_mappings.json',
+                    Path('workspace') / 'config' / 'key_mappings.json',
+                    Path.cwd() / 'workspace' / 'config' / 'key_mappings.json',
+                ]
+                resolved_path = None
+                for candidate in candidates:
+                    try:
+                        path = candidate if candidate.is_absolute() else (Path.cwd() / candidate)
+                        if path.is_file():
+                            resolved_path = path
+                            break
+                    except OSError:
+                        continue
+                if resolved_path:
+                    with resolved_path.open('r', encoding='utf-8') as f:
+                        data = json.load(f)
+                    categories = data.get('_categories', {}) if isinstance(data, dict) else {}
+                    for key, value in categories.items():
+                        if value == '이동':
+                            names.add(str(key))
+            except Exception:
+                pass
+
+        return sorted(names)
         
     def on_y_lock_toggled(self, checked):
         self.is_y_locked = checked
@@ -3458,10 +3509,128 @@ class FullMinimapEditorDialog(QDialog):
         unused_checkbox.setChecked(bool(obj.get('unused', False)))
         layout.addWidget(unused_checkbox)
 
+        override_group = QGroupBox("개별 설정")
+        override_layout = QVBoxLayout(override_group)
+
+        use_override_checkbox = QCheckBox("전역 설정과 별개로 개별 설정 적용")
+        override_data = obj.get('ladder_override') if isinstance(obj.get('ladder_override'), dict) else {}
+        use_override_checkbox.setChecked(bool(override_data.get('enabled', False)))
+        override_layout.addWidget(use_override_checkbox)
+
+        override_form = QFormLayout()
+        arrival_spin = QDoubleSpinBox()
+        arrival_spin.setDecimals(2)
+        arrival_spin.setRange(0.0, 60.0)
+        arrival_spin.setSingleStep(0.1)
+        arrival_spin.setValue(float(override_data.get(
+            'arrival_threshold',
+            self.parent_map_tab.cfg_ladder_arrival_x_threshold if self.parent_map_tab else LADDER_ARRIVAL_X_THRESHOLD,
+        )))
+        override_form.addRow("도착 X오차(px)", arrival_spin)
+        override_layout.addLayout(override_form)
+
+        range_box = QGroupBox("거리별 명령 프로필")
+        range_layout = QGridLayout(range_box)
+        range_layout.addWidget(QLabel("구간"), 0, 0)
+        range_layout.addWidget(QLabel("상한(px)"), 0, 1)
+        range_layout.addWidget(QLabel("좌측 프로필"), 0, 2)
+        range_layout.addWidget(QLabel("우측 프로필"), 0, 3)
+
+        existing_profiles = override_data.get('distance_profiles', []) if isinstance(override_data, dict) else []
+
+        def _existing(idx: int) -> dict:
+            if idx < len(existing_profiles) and isinstance(existing_profiles[idx], dict):
+                return existing_profiles[idx]
+            return {}
+
+        move_profiles = self._get_move_command_profile_names()
+
+        if not move_profiles:
+            warning_label = QLabel("이동 명령 프로필을 찾을 수 없습니다. 자동제어 탭에서 프로필을 등록한 뒤 다시 시도하세요.")
+            warning_label.setWordWrap(True)
+            warning_label.setStyleSheet("color: #b22222;")
+            override_layout.addWidget(warning_label)
+            use_override_checkbox.setChecked(False)
+            use_override_checkbox.setEnabled(False)
+
+        def _create_profile_combo(selected: str) -> QComboBox:
+            combo = QComboBox()
+            combo.addItem("선택하세요", "")
+            for profile_name in move_profiles:
+                combo.addItem(profile_name, profile_name)
+            if selected:
+                index = combo.findData(selected)
+                if index >= 0:
+                    combo.setCurrentIndex(index)
+            return combo
+
+        range_defaults = [
+            ("0 ~ n", _existing(0), 4.0),
+            ("n ~ x", _existing(1), 8.0),
+            ("x ~ y", _existing(2), 12.0),
+        ]
+
+        range_spinboxes: list[QDoubleSpinBox] = []
+        left_combos: list[QComboBox] = []
+        right_combos: list[QComboBox] = []
+
+        for row_idx, (label_text, profile_def, default_max) in enumerate(range_defaults, start=1):
+            range_layout.addWidget(QLabel(label_text), row_idx, 0)
+
+            spin = QDoubleSpinBox()
+            spin.setDecimals(2)
+            spin.setRange(0.0, 120.0)
+            spin.setSingleStep(0.5)
+            spin.setValue(float(profile_def.get('max_distance', default_max)))
+            range_spinboxes.append(spin)
+            range_layout.addWidget(spin, row_idx, 1)
+
+            left_combo = _create_profile_combo(profile_def.get('left_profile', ''))
+            right_combo = _create_profile_combo(profile_def.get('right_profile', ''))
+            left_combos.append(left_combo)
+            right_combos.append(right_combo)
+
+            range_layout.addWidget(left_combo, row_idx, 2)
+            range_layout.addWidget(right_combo, row_idx, 3)
+
+        override_layout.addWidget(range_box)
+        layout.addWidget(override_group)
+
         button_box = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel, parent=dialog)
-        button_box.accepted.connect(dialog.accept)
+
+        def _update_override_enabled() -> None:
+            enabled = bool(use_override_checkbox.isChecked()) and not bool(unused_checkbox.isChecked())
+            for widget in (arrival_spin, range_box):
+                widget.setEnabled(enabled)
+
+        def _on_accept():
+            if use_override_checkbox.isChecked() and not unused_checkbox.isChecked():
+                try:
+                    n_val = float(range_spinboxes[0].value())
+                    x_val = float(range_spinboxes[1].value())
+                    y_val = float(range_spinboxes[2].value())
+                except Exception:
+                    QMessageBox.warning(dialog, "오류", "거리 구간 값을 확인할 수 없습니다.")
+                    return
+
+                if not (n_val > 0.0 and x_val > n_val and y_val > x_val):
+                    QMessageBox.warning(dialog, "오류", "거리 구간은 0 < n < x < y 관계를 만족해야 합니다.")
+                    return
+
+                for idx, (left_combo, right_combo) in enumerate(zip(left_combos, right_combos), start=1):
+                    if not left_combo.currentData() or not right_combo.currentData():
+                        QMessageBox.warning(dialog, "오류", f"{idx}번째 구간의 좌/우 프로필을 모두 선택해주세요.")
+                        return
+
+            dialog.accept()
+
+        button_box.accepted.connect(_on_accept)
         button_box.rejected.connect(dialog.reject)
         layout.addWidget(button_box)
+
+        unused_checkbox.toggled.connect(_update_override_enabled)
+        use_override_checkbox.toggled.connect(_update_override_enabled)
+        _update_override_enabled()
 
         result = dialog.exec()
         if result == QDialog.DialogCode.Accepted:
@@ -3469,6 +3638,63 @@ class FullMinimapEditorDialog(QDialog):
             new_state = bool(unused_checkbox.isChecked())
             obj['unused'] = new_state
 
+            old_override = copy.deepcopy(obj.get('ladder_override')) if isinstance(obj.get('ladder_override'), dict) else {}
+
+            if use_override_checkbox.isChecked() and not new_state:
+                obj['ladder_override'] = {
+                    'enabled': True,
+                    'arrival_threshold': float(arrival_spin.value()),
+                    'distance_profiles': [
+                        {
+                            'min_distance': 0.0,
+                            'max_distance': float(range_spinboxes[0].value()),
+                            'left_profile': left_combos[0].currentData(),
+                            'right_profile': right_combos[0].currentData(),
+                        },
+                        {
+                            'min_distance': float(range_spinboxes[0].value()),
+                            'max_distance': float(range_spinboxes[1].value()),
+                            'left_profile': left_combos[1].currentData(),
+                            'right_profile': right_combos[1].currentData(),
+                        },
+                        {
+                            'min_distance': float(range_spinboxes[1].value()),
+                            'max_distance': float(range_spinboxes[2].value()),
+                            'left_profile': left_combos[2].currentData(),
+                            'right_profile': right_combos[2].currentData(),
+                        },
+                    ],
+                }
+            else:
+                if isinstance(old_override, dict):
+                    old_override['enabled'] = False
+                    obj['ladder_override'] = old_override
+                else:
+                    obj.pop('ladder_override', None)
+
+            def _normalize_override(data: object) -> dict:
+                if not isinstance(data, dict):
+                    return {}
+                normalized = {
+                    'enabled': bool(data.get('enabled', False)),
+                    'arrival_threshold': float(data.get('arrival_threshold', 0.0)),
+                }
+                profiles = []
+                for entry in data.get('distance_profiles', []) if isinstance(data.get('distance_profiles'), list) else []:
+                    if not isinstance(entry, dict):
+                        continue
+                    profiles.append({
+                        'min_distance': float(entry.get('min_distance', 0.0)),
+                        'max_distance': float(entry.get('max_distance', 0.0)),
+                        'left_profile': entry.get('left_profile') or '',
+                        'right_profile': entry.get('right_profile') or '',
+                    })
+                normalized['distance_profiles'] = profiles
+                return normalized
+
+            override_changed = _normalize_override(old_override) != _normalize_override(obj.get('ladder_override'))
+
+            needs_save = False
             if previous_state != new_state:
                 if self.parent_map_tab and hasattr(self.parent_map_tab, 'update_general_log'):
                     try:
@@ -3478,11 +3704,24 @@ class FullMinimapEditorDialog(QDialog):
                         )
                     except Exception:
                         pass
-                if self.parent_map_tab and hasattr(self.parent_map_tab, 'save_profile_data'):
+                needs_save = True
+
+            if override_changed:
+                if self.parent_map_tab and hasattr(self.parent_map_tab, 'update_general_log'):
                     try:
-                        self.parent_map_tab.save_profile_data()
+                        status_text = "활성화" if obj.get('ladder_override', {}).get('enabled') else "비활성화"
+                        self.parent_map_tab.update_general_log(
+                            f"[지형 편집] 사다리 '{name}' 개별 설정을 {status_text}했습니다.", "gray"
+                        )
                     except Exception:
                         pass
+                needs_save = True
+
+            if needs_save and self.parent_map_tab and hasattr(self.parent_map_tab, 'save_profile_data'):
+                try:
+                    self.parent_map_tab.save_profile_data()
+                except Exception:
+                    pass
 
             self.populate_scene()
         self._reset_view_interaction_state()
