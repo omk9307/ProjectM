@@ -9507,6 +9507,7 @@ class MapTab(QWidget):
             return
 
         now = time.time()
+        force_cooldown_until = float(getattr(self, '_walk_teleport_force_until', 0.0))
 
         bonus_delay = max(self.cfg_walk_teleport_bonus_delay, 0.1)
         bonus_step = max(self.cfg_walk_teleport_bonus_step, 0.0)
@@ -9545,8 +9546,15 @@ class MapTab(QWidget):
         interval = max(self.cfg_walk_teleport_interval, 0.1)
         if self._last_walk_teleport_check_time > 0.0 and (now - self._last_walk_teleport_check_time) < interval:
             return
-
-        if not force_without_walk and not self._is_walk_direction_active(direction):
+        recent_walk_window = 0.25
+        recent_walk_active = (
+            not force_without_walk
+            and self.last_movement_command in ("걷기(우)", "걷기(좌)")
+            and (now - float(getattr(self, 'last_command_sent_time', 0.0))) <= recent_walk_window
+        )
+        if not force_without_walk and now < force_cooldown_until:
+            return
+        if not force_without_walk and not recent_walk_active and not self._is_walk_direction_active(direction):
             walk_command = "걷기(우)" if direction == "→" else "걷기(좌)"
             if self.debug_auto_control_checkbox.isChecked():
                 print(f"[자동 제어 테스트] WALK-TELEPORT: 누락된 걷기 -> {walk_command}")
@@ -9570,6 +9578,7 @@ class MapTab(QWidget):
 
         if executed:
             self.last_command_sent_time = now
+            setattr(self, '_walk_teleport_force_until', 0.0)
 
     def _get_arrival_threshold(self, node_type, node_key=None, node_data=None):
         """노드 타입에 맞는 도착 판정 임계값을 반환합니다."""
@@ -10433,6 +10442,7 @@ class MapTab(QWidget):
                 self._start_walk_teleport_tracking()
             if reset_check_time:
                 self._last_walk_teleport_check_time = 0.0
+            setattr(self, '_walk_teleport_force_until', time.time() + 0.25)
             self._maybe_trigger_walk_teleport(direction_symbol, distance, force_without_walk=True)
         except Exception:
             pass
