@@ -966,7 +966,7 @@ class MapTab(QWidget):
             self._ui_runtime_visible: bool = True
 
             # [NEW] 앵커 미탐지(0개) 지속 감지 → ESC 효과 트리거
-            self.NO_ANCHOR_STOP_SECONDS: float = 5.0
+            self.NO_ANCHOR_STOP_SECONDS: float = 15.0
             self._no_anchor_start_ts: float = 0.0
             self._no_anchor_triggered: bool = False
 
@@ -5315,21 +5315,21 @@ class MapTab(QWidget):
 
     def _trigger_no_anchor_global_stop(self) -> None:
         """
-        [NEW] 앵커(핵심 지형 템플릿) 미탐지 상태가 5초 지속되었을 때
+        [NEW] 앵커(핵심 지형 템플릿) 미탐지 상태가 15초 지속되었을 때
         ESC 효과와 동일하게 모든 동작을 즉시 중지한다.
         - 맵탭 탐지 중단
         - 사냥탭 탐지 중단(+권한 보유 시 반납)
         - 자동제어 탭에 '모든 키 떼기' 즉시 전송
         """
         try:
-            self.update_general_log("[안전정지] 5초 동안 앵커가 감지되지 않아 모든 동작을 중지합니다.", "orange")
+            self.update_general_log("[안전정지] 15초 동안 앵커가 감지되지 않아 모든 동작을 중지합니다.", "orange")
         except Exception:
             pass
 
         # 맵탭 정지
         try:
-            self.set_detection_stop_reason('no_anchor_5s')
-            self.force_stop_detection(reason='no_anchor_5s')
+            self.set_detection_stop_reason('no_anchor_15s')
+            self.force_stop_detection(reason='no_anchor_15s')
         except Exception:
             pass
 
@@ -5337,9 +5337,9 @@ class MapTab(QWidget):
         try:
             hunt_tab = getattr(self, '_hunt_tab', None)
             if hunt_tab and hasattr(hunt_tab, 'force_stop_detection'):
-                hunt_tab.force_stop_detection(reason='no_anchor_5s')
+                hunt_tab.force_stop_detection(reason='no_anchor_15s')
                 if getattr(hunt_tab, 'current_authority', None) == 'hunt' and hasattr(hunt_tab, 'release_control'):
-                    hunt_tab.release_control(reason='no_anchor_5s')
+                    hunt_tab.release_control(reason='no_anchor_15s')
         except Exception:
             pass
 
@@ -5348,11 +5348,11 @@ class MapTab(QWidget):
             ac = getattr(self, '_auto_control_tab', None)
             if ac is not None:
                 if hasattr(ac, 'api_emergency_stop_all'):
-                    ac.api_emergency_stop_all(reason='no_anchor_5s')
+                    ac.api_emergency_stop_all(reason='no_anchor_15s')
                 elif hasattr(ac, 'api_release_all_keys_global'):
                     ac.api_release_all_keys_global()
                 else:
-                    ac.receive_control_command("모든 키 떼기", reason='no_anchor_5s')
+                    ac.receive_control_command("모든 키 떼기", reason='no_anchor_15s')
         except Exception:
             pass
         try:
@@ -5373,7 +5373,7 @@ class MapTab(QWidget):
         message = (
             "[Project Maple] 핵심지형 미검출로 자동 중지\n"
             f"프로필: {profile_name}\n"
-            "사유: 핵심 지형 미검출 5초 지속\n"
+            "사유: 핵심 지형 미검출 15초 지속\n"
             f"시각: {timestamp_text}"
         )
         try:
@@ -5386,7 +5386,7 @@ class MapTab(QWidget):
             # 전송 실패는 조용히 무시(내부에서 대부분 처리됨)
             pass
         try:
-            QTimer.singleShot(1000, lambda: self._apply_followup_stop('no_anchor_5s_followup'))
+            QTimer.singleShot(1000, lambda: self._apply_followup_stop('no_anchor_15s_followup'))
         except Exception:
             pass
 
@@ -5575,7 +5575,7 @@ class MapTab(QWidget):
                 self.detection_thread.perf_sampled.connect(self._handle_detection_perf_sample)
                 self.detection_thread.start()
 
-                # [NEW] 앵커 미탐지 5초 감지 상태 초기화
+                # [NEW] 앵커 미탐지 15초 감지 상태 초기화
                 self._no_anchor_start_ts = 0.0
                 self._no_anchor_triggered = False
 
@@ -5660,7 +5660,7 @@ class MapTab(QWidget):
                 self._map_perf_queue.clear()
                 self.latest_perf_stats = {}
 
-                # [NEW] 앵커 미탐지 5초 감지 상태 초기화
+                # [NEW] 앵커 미탐지 15초 감지 상태 초기화
                 self._no_anchor_start_ts = 0.0
                 self._no_anchor_triggered = False
                 self._last_walk_teleport_check_time = 0.0
@@ -7997,10 +7997,10 @@ class MapTab(QWidget):
             if not self._no_anchor_start_ts:
                 self._no_anchor_start_ts = now_ts
             elif (not self._no_anchor_triggered) and (now_ts - self._no_anchor_start_ts >= self.NO_ANCHOR_STOP_SECONDS):
-                # 5초 연속 앵커 미탐지 → ESC 효과와 동일하게 전체 정지
+                # 15초 연속 앵커 미탐지 → ESC 효과와 동일하게 전체 정지
                 self._no_anchor_triggered = True
-                map_perf['map_status'] = 'no_anchor_5s'
-                map_perf['map_warning'] = 'anchor_missing_5s'
+                map_perf['map_status'] = 'no_anchor_15s'
+                map_perf['map_warning'] = 'anchor_missing_15s'
                 map_perf['processing_end_monotonic'] = time.perf_counter()
                 self._finalize_map_perf_sample(map_perf)
                 try:
