@@ -2057,14 +2057,27 @@ class MapTab(QWidget):
         if not self._auto_control_tab:
             return True
 
-        if not self._held_direction_keys:
+        if direction not in ("→", "←"):
             return False
 
-        if direction == "→":
-            return any(key in self._held_direction_keys for key in {"Key.right", "d", "D"})
-        if direction == "←":
-            return any(key in self._held_direction_keys for key in {"Key.left", "a", "A"})
-        return False
+        active_direction = self._get_active_walk_direction()
+        return active_direction == direction
+
+    def _get_active_walk_direction(self) -> str | None:
+        """실시간으로 눌린 방향키(←/→)를 반환한다."""
+        if not self._auto_control_tab or not self._held_direction_keys:
+            return None
+
+        right_active = any(key in self._held_direction_keys for key in {"Key.right"})
+        left_active = any(key in self._held_direction_keys for key in {"Key.left"})
+
+        if right_active and left_active:
+            return None
+        if right_active:
+            return "→"
+        if left_active:
+            return "←"
+        return None
 
     def _handle_hunt_detection_status_changed(self, running: bool) -> None:
         if not getattr(self, '_hunt_tab', None):
@@ -9439,6 +9452,9 @@ class MapTab(QWidget):
         - 반드시 걷기 입력이 활성화된 상태에서만 텔레포트 시도(걷기 보장 후 텔레포트).
         """
         WAIT_TELEPORT_DISTANCE_PX = 20.0
+        realtime_direction = self._get_active_walk_direction()
+        effective_direction = direction if direction in ("→", "←") else None
+
         wait_mode_active = self._is_other_player_wait_active()
         wait_mode_far = False
         if wait_mode_active:
@@ -9455,8 +9471,8 @@ class MapTab(QWidget):
                     distance_x = abs(dx)
                     wait_mode_far = distance_x >= WAIT_TELEPORT_DISTANCE_PX
                     # 방향 정보가 없으면 대기 웨이포인트 기준으로 보정
-                    if direction not in ("→", "←"):
-                        direction = "→" if dx < 0 else "←"
+                    if effective_direction is None:
+                        effective_direction = "→" if dx < 0 else "←"
                 else:
                     # 거리 계산 불가 시 안전하게 비활성 처리
                     wait_mode_far = False
@@ -9474,15 +9490,30 @@ class MapTab(QWidget):
             self._reset_walk_teleport_state()
             return
 
-        # 대기 모드(원거리)에서는 distance_to_target 검사를 우회하고, 방향만 확인
-        if not wait_mode_far and (direction not in ("→", "←") or distance_to_target is None):
+        if realtime_direction:
+            effective_direction = realtime_direction
+
+        allow_missing_distance = wait_mode_far or realtime_direction is not None
+
+        if not wait_mode_far and effective_direction is None:
             self._update_walk_teleport_probability_display(0.0)
             self._reset_walk_teleport_state()
             return
 
         # 대기 모드(원거리)일 땐 20px 근접 제한을 우회
-        if not wait_mode_far and distance_to_target is not None and distance_to_target < 20.0:
+        if not wait_mode_far:
+            if distance_to_target is None and not allow_missing_distance:
+                self._update_walk_teleport_probability_display(0.0)
+                self._reset_walk_teleport_state()
+                return
+            if distance_to_target is not None and distance_to_target < 20.0:
+                self._update_walk_teleport_probability_display(0.0)
+                return
+
+        if effective_direction is None:
+            # 실시간 방향키가 없으면 더 진행하지 않는다.
             self._update_walk_teleport_probability_display(0.0)
+            self._reset_walk_teleport_state()
             return
 
         now = time.time()
@@ -9527,8 +9558,8 @@ class MapTab(QWidget):
 
         self._last_walk_teleport_check_time = now
 
-        if not self._is_walk_direction_active(direction):
-            walk_command = "걷기(우)" if direction == "→" else "걷기(좌)"
+        if not self._is_walk_direction_active(effective_direction):
+            walk_command = "걷기(우)" if effective_direction == "→" else "걷기(좌)"
             if self.debug_auto_control_checkbox.isChecked():
                 print(f"[자동 제어 테스트] WALK-TELEPORT: 누락된 걷기 -> {walk_command}")
             if self.auto_control_checkbox.isChecked():
@@ -10797,10 +10828,15 @@ class MapTab(QWidget):
             else:
                 nav_action_text = f"{nav_action_text} (이벤트 실행 중)"
         
-        if final_intermediate_type != 'walk' or self.event_in_progress:
+        active_walk_direction = self._get_active_walk_direction()
+        if self.event_in_progress:
             self._reset_walk_teleport_state()
-        else:
+        elif final_intermediate_type == 'walk':
             self._maybe_trigger_walk_teleport(direction, distance)
+        elif active_walk_direction:
+            self._maybe_trigger_walk_teleport(active_walk_direction, None)
+        else:
+            self._reset_walk_teleport_state()
 
         if self.start_waypoint_found and self.journey_plan:
             if self.current_journey_index > 0:
