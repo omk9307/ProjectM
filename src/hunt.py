@@ -41,6 +41,7 @@ from PyQt6.QtWidgets import (
     QSpinBox,
     QTextEdit,
     QListWidget,
+    QListWidgetItem,
     QTreeWidget,
     QTreeWidgetItem,
     QVBoxLayout,
@@ -64,6 +65,7 @@ from control_authority_manager import (
     DEFAULT_MAX_TOTAL_HOLD_SEC,
     DEFAULT_HUNT_PROTECT_SEC,
 )
+from ocr_watch import ocr_korean_words
 
 from window_anchors import (
     ensure_relative_roi,
@@ -72,6 +74,11 @@ from window_anchors import (
     make_relative_roi,
     resolve_roi_to_absolute,
 )
+
+try:
+    from map import MAPS_DIR  # type: ignore
+except ImportError:
+    from .map import MAPS_DIR  # type: ignore
 
 # 텔레그램 알림(선택적): 브리지가 활성일 때만 전송
 try:
@@ -323,6 +330,258 @@ class TeleportSettings:
     walk_bonus_interval: float = 0.5
     walk_bonus_step: float = 20.0
     walk_bonus_max: float = 70.0
+
+
+class MapReturnManagerDialog(QDialog):
+    """맵 복귀 모드에서 사용할 맵별 복구 설정을 관리하는 대화상자."""
+
+    def __init__(self, hunt_tab: "HuntTab") -> None:
+        super().__init__(hunt_tab)
+        self.setWindowTitle("맵 복구 로직 설정")
+        self.setModal(True)
+        self._hunt_tab = hunt_tab
+
+        main_layout = QVBoxLayout()
+        main_layout.setContentsMargins(8, 8, 8, 8)
+        main_layout.setSpacing(8)
+
+        self.map_list = QListWidget()
+        self.map_list.setSelectionMode(QListWidget.SelectionMode.SingleSelection)
+        self.map_list.currentItemChanged.connect(self._on_map_selection_changed)
+        main_layout.addWidget(self.map_list, 1)
+
+        button_row = QHBoxLayout()
+        button_row.setSpacing(6)
+        self.add_button = QPushButton("추가")
+        self.add_button.clicked.connect(self._add_map_entry)
+        self.remove_button = QPushButton("삭제")
+        self.remove_button.clicked.connect(self._remove_selected_entry)
+        button_row.addWidget(self.add_button)
+        button_row.addWidget(self.remove_button)
+        button_row.addStretch(1)
+        main_layout.addLayout(button_row)
+
+        form = QFormLayout()
+        form.setHorizontalSpacing(12)
+        form.setVerticalSpacing(6)
+
+        self.profile_combo = QComboBox()
+        self.profile_combo.currentIndexChanged.connect(self._on_profile_changed)
+        form.addRow("맵 프로필", self.profile_combo)
+
+        self.waypoint_combo = QComboBox()
+        self.waypoint_combo.currentIndexChanged.connect(self._on_waypoint_changed)
+        form.addRow("복구 웨이포인트", self.waypoint_combo)
+
+        self.command_combo = QComboBox()
+        self.command_combo.currentIndexChanged.connect(self._on_command_changed)
+        form.addRow("복구 명령프로필", self.command_combo)
+
+        self.telegram_limit_spin = QSpinBox()
+        self.telegram_limit_spin.setRange(1, 20)
+        self.telegram_limit_spin.setValue(self._hunt_tab.map_return_telegram_limit)
+        self.telegram_limit_spin.valueChanged.connect(self._on_telegram_limit_changed)
+        form.addRow("텔레그램 최대 전송", self.telegram_limit_spin)
+
+        main_layout.addLayout(form)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
+        buttons.rejected.connect(self.reject)
+        buttons.accepted.connect(self.accept)
+        main_layout.addWidget(buttons)
+
+        self.setLayout(main_layout)
+        self._refresh_profile_options()
+        self._refresh_command_profiles()
+        self._reload_map_entries()
+
+    # ---- 내부 유틸리티 (구현은 후속 단계에서 완성) ----
+    def _reload_map_entries(self) -> None:
+        self.map_list.clear()
+        for name in sorted(self._hunt_tab.map_return_registered_maps.keys()):
+            item = QListWidgetItem(name)
+            self.map_list.addItem(item)
+        if self.map_list.count() > 0:
+            self.map_list.setCurrentRow(0)
+
+    def _refresh_profile_options(self) -> None:
+        self.profile_combo.blockSignals(True)
+        self.profile_combo.clear()
+        map_tab = getattr(self._hunt_tab, 'map_tab', None)
+        profiles: list[str] = []
+        if map_tab and hasattr(map_tab, 'profile_selector'):
+            try:
+                profiles = [map_tab.profile_selector.itemText(i) for i in range(map_tab.profile_selector.count())]
+            except Exception:
+                profiles = []
+        for name in sorted({p for p in profiles if p}):
+            self.profile_combo.addItem(name, name)
+        self.profile_combo.blockSignals(False)
+
+    def _refresh_command_profiles(self) -> None:
+        self.command_combo.blockSignals(True)
+        self.command_combo.clear()
+        try:
+            options = self._hunt_tab._get_misc_command_profiles()
+        except Exception:
+            options = []
+        self.command_combo.addItem("선택 없음", "")
+        for name in options:
+            self.command_combo.addItem(name, name)
+        self.command_combo.blockSignals(False)
+
+    def _refresh_waypoint_options(self, profile_name: str) -> None:
+        self.waypoint_combo.blockSignals(True)
+        self.waypoint_combo.clear()
+        map_tab = getattr(self._hunt_tab, 'map_tab', None)
+        options: list[tuple[str, str]] = []
+        if map_tab and hasattr(map_tab, 'geometry_data'):
+            options = self._hunt_tab._collect_waypoint_options_for_profile(profile_name)
+        for display, value in options:
+            self.waypoint_combo.addItem(display, value)
+        self.waypoint_combo.blockSignals(False)
+
+    def _current_entry(self) -> Optional[dict]:
+        item = self.map_list.currentItem()
+        if not item:
+            return None
+        name = item.text()
+        return self._hunt_tab.map_return_registered_maps.get(name, {})
+
+    def _save_entry(self, map_name: str, payload: dict) -> None:
+        self._hunt_tab.map_return_registered_maps[map_name] = payload
+        self._hunt_tab._handle_map_return_settings_changed()
+
+    # ---- 슬롯 ----
+    def _on_map_selection_changed(self, current: Optional[QListWidgetItem], previous: Optional[QListWidgetItem]) -> None:
+        entry = self._current_entry() or {}
+        profile = str(entry.get('profile', ''))
+        command = str(entry.get('command_profile', ''))
+        waypoint_name = str(entry.get('waypoint_name', ''))
+        waypoint_id = str(entry.get('waypoint_id', ''))
+
+        idx = self.profile_combo.findData(profile)
+        if idx < 0:
+            idx = 0
+        self.profile_combo.blockSignals(True)
+        if self.profile_combo.count() == 0:
+            self.profile_combo.addItem("(미설정)", "")
+        self.profile_combo.setCurrentIndex(idx)
+        self.profile_combo.blockSignals(False)
+
+        self._refresh_waypoint_options(profile)
+        wp_index = self.waypoint_combo.findData(waypoint_id) if waypoint_id else -1
+        if wp_index < 0 and self.waypoint_combo.count() > 0:
+            wp_index = 0
+        self.waypoint_combo.blockSignals(True)
+        self.waypoint_combo.setCurrentIndex(wp_index)
+        self.waypoint_combo.blockSignals(False)
+
+        cmd_index = self.command_combo.findData(command)
+        if cmd_index < 0 and command:
+            self.command_combo.addItem(command, command)
+            cmd_index = self.command_combo.count() - 1
+        if cmd_index < 0:
+            cmd_index = 0
+        self.command_combo.blockSignals(True)
+        self.command_combo.setCurrentIndex(cmd_index)
+        self.command_combo.blockSignals(False)
+
+    def _add_map_entry(self) -> None:
+        map_tab = getattr(self._hunt_tab, 'map_tab', None)
+        profile_names: list[str] = []
+        if map_tab and hasattr(map_tab, 'profile_selector'):
+            profile_names = [map_tab.profile_selector.itemText(i) for i in range(map_tab.profile_selector.count())]
+        if not profile_names:
+            QMessageBox.warning(self, "프로필 없음", "맵 탭에서 사용할 프로필이 없습니다.")
+            return
+        name, ok = QInputDialog.getText(self, "맵 이름 추가", "복귀 대상 맵 이름:")
+        if not ok:
+            return
+        name = (name or "").strip()
+        if not name:
+            QMessageBox.warning(self, "입력 오류", "맵 이름을 입력해주세요.")
+            return
+        if name in self._hunt_tab.map_return_registered_maps:
+            QMessageBox.information(self, "중복", "이미 등록된 맵입니다.")
+            return
+        profile, ok = QInputDialog.getItem(
+            self,
+            "맵 프로필 선택",
+            "복귀에 사용할 맵 프로필:",
+            profile_names,
+            0,
+            False,
+        )
+        if not ok:
+            return
+        profile = (profile or "").strip()
+        if not profile:
+            QMessageBox.warning(self, "입력 오류", "맵 프로필을 선택해주세요.")
+            return
+        self._hunt_tab.map_return_registered_maps[name] = {
+            'profile': profile,
+            'waypoint_id': '',
+            'waypoint_name': '',
+            'command_profile': '',
+        }
+        self._hunt_tab._handle_map_return_settings_changed()
+        self._reload_map_entries()
+        items = self.map_list.findItems(name, Qt.MatchFlag.MatchExactly)
+        if items:
+            self.map_list.setCurrentItem(items[0])
+
+    def _remove_selected_entry(self) -> None:
+        item = self.map_list.currentItem()
+        if not item:
+            return
+        name = item.text()
+        if name not in self._hunt_tab.map_return_registered_maps:
+            return
+        reply = QMessageBox.question(self, "삭제 확인", f"'{name}' 항목을 삭제할까요?",
+                                     QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                                     QMessageBox.StandardButton.No)
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+        self._hunt_tab.map_return_registered_maps.pop(name, None)
+        self._hunt_tab._handle_map_return_settings_changed()
+        self._reload_map_entries()
+
+    def _on_profile_changed(self, index: int) -> None:
+        item = self.map_list.currentItem()
+        if not item:
+            return
+        profile = str(self.profile_combo.currentData() or '')
+        self._refresh_waypoint_options(profile)
+        entry = self._current_entry() or {}
+        entry['profile'] = profile
+        entry['waypoint_id'] = ''
+        entry['waypoint_name'] = ''
+        self._save_entry(item.text(), entry)
+
+    def _on_waypoint_changed(self, index: int) -> None:
+        item = self.map_list.currentItem()
+        if not item:
+            return
+        waypoint_id = str(self.waypoint_combo.currentData() or '')
+        waypoint_name = self.waypoint_combo.currentText()
+        entry = self._current_entry() or {}
+        entry['waypoint_id'] = waypoint_id
+        entry['waypoint_name'] = waypoint_name
+        self._save_entry(item.text(), entry)
+
+    def _on_command_changed(self, index: int) -> None:
+        item = self.map_list.currentItem()
+        if not item:
+            return
+        command = str(self.command_combo.currentData() or '')
+        entry = self._current_entry() or {}
+        entry['command_profile'] = command
+        self._save_entry(item.text(), entry)
+
+    def _on_telegram_limit_changed(self, value: int) -> None:
+        self._hunt_tab.map_return_telegram_limit = int(value)
+        self._hunt_tab._handle_map_return_settings_changed()
 
 
 class AttackSkillDialog(QDialog):
@@ -908,6 +1167,28 @@ class HuntTab(QWidget):
         self._last_character_details: List[dict] = []
         self._last_character_seen_ts: float = 0.0
         self._using_character_fallback: bool = False
+
+        # ----- 맵 복귀 모드 상태 -----
+        self.map_return_enabled: bool = False
+        self.map_return_roi: Optional[dict] = None
+        self.map_return_interval_sec: float = 3.0
+        self.map_return_conf_threshold: float = 0.0
+        self.map_return_min_height: int = 0
+        self.map_return_max_height: int = 0
+        self.map_return_min_width: int = 0
+        self.map_return_max_width: int = 0
+        self.map_return_base_keyword: str = ""
+        self.map_return_registered_maps: dict[str, dict] = {}
+        self.map_return_telegram_limit: int = 5
+        self._map_return_last_alert_ts: dict[str, float] = {}
+        self._map_return_alert_count: dict[str, int] = {}
+        self._map_return_active_map: Optional[str] = None
+        self._map_return_recovering: bool = False
+        self._map_return_geometry_cache: dict[str, dict] = {}
+        self._map_return_last_detected: str = ""
+        self._map_return_context: dict[str, Any] = {}
+        self._map_return_detection_was_active: bool = False
+
         self._nickname_config: dict = {}
         self._nickname_templates: list[dict] = []
         self._latest_nickname_box: Optional[dict] = None
@@ -1134,6 +1415,12 @@ class HuntTab(QWidget):
         self._perf_log_handle: Optional[TextIO] = None
         self._perf_log_writer: Optional[csv.writer] = None
         self._perf_logging_enabled = False
+        self.map_return_timer = QTimer(self)
+        self.map_return_timer.setSingleShot(False)
+        self.map_return_timer.timeout.connect(self._handle_map_return_tick)
+        self.map_return_recovery_timer = QTimer(self)
+        self.map_return_recovery_timer.setSingleShot(False)
+        self.map_return_recovery_timer.timeout.connect(self._handle_map_return_recovery_check)
         # 화면출력(팝업) 상태 추적용 로깅 컨텍스트
         self._closing_popup_programmatically = False
         self._popup_close_reason: Optional[str] = None
@@ -3015,6 +3302,7 @@ class HuntTab(QWidget):
         left_column = QVBoxLayout()
         left_column.setSpacing(10)
 
+        map_return_group = self._create_map_return_group()
         detection_group = self._create_detection_group()
         range_group = self._create_range_group()
         condition_group = self._create_condition_group()
@@ -3022,6 +3310,7 @@ class HuntTab(QWidget):
         direction_group = self._create_direction_settings_group()
         ladder_group = self._create_ladder_settings_group()
 
+        left_column.addWidget(map_return_group)
         left_column.addWidget(detection_group)
         left_column.addStretch(1)
 
@@ -3077,6 +3366,807 @@ class HuntTab(QWidget):
         self._update_monster_count_label()
         self._update_detection_summary()
         self._update_authority_ui()
+
+    def _create_map_return_group(self) -> QGroupBox:
+        group = QGroupBox("맵 복귀 모드")
+        group.setSizePolicy(
+            QSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+        )
+        layout = QVBoxLayout()
+        layout.setContentsMargins(8, 8, 8, 8)
+        layout.setSpacing(8)
+
+        header_row = QHBoxLayout()
+        header_row.setSpacing(6)
+        self.map_return_enable_checkbox = QCheckBox("사용")
+        self.map_return_enable_checkbox.setChecked(False)
+        self.map_return_enable_checkbox.toggled.connect(self._on_map_return_enabled_toggled)
+        header_row.addWidget(self.map_return_enable_checkbox)
+        header_row.addStretch(1)
+        layout.addLayout(header_row)
+
+        roi_row = QHBoxLayout()
+        roi_row.setSpacing(6)
+        self.map_return_roi_button = QPushButton("OCR 범위 설정")
+        self.map_return_roi_button.clicked.connect(self._handle_map_return_roi_select)
+        roi_row.addWidget(self.map_return_roi_button)
+        self.map_return_interval_spin = QDoubleSpinBox()
+        self.map_return_interval_spin.setRange(1.0, 600.0)
+        self.map_return_interval_spin.setDecimals(1)
+        self.map_return_interval_spin.setSingleStep(0.5)
+        self.map_return_interval_spin.setSuffix(" s")
+        self.map_return_interval_spin.setToolTip("탐지 주기(초)")
+        self.map_return_interval_spin.valueChanged.connect(self._on_map_return_interval_changed)
+        self.map_return_interval_spin.setValue(self.map_return_interval_sec)
+        roi_row.addWidget(self.map_return_interval_spin)
+        self.map_return_roi_summary = QLabel("범위 미설정")
+        self.map_return_roi_summary.setStyleSheet("color: #666666;")
+        roi_row.addWidget(self.map_return_roi_summary, 1)
+        layout.addLayout(roi_row)
+
+        filter_grid = QGridLayout()
+        filter_grid.setHorizontalSpacing(10)
+        filter_grid.setVerticalSpacing(6)
+
+        self.map_return_conf_spin = QDoubleSpinBox()
+        self.map_return_conf_spin.setRange(0.0, 100.0)
+        self.map_return_conf_spin.setDecimals(1)
+        self.map_return_conf_spin.setSingleStep(1.0)
+        self.map_return_conf_spin.valueChanged.connect(self._on_map_return_conf_changed)
+        self.map_return_conf_spin.setValue(self.map_return_conf_threshold)
+        filter_grid.addWidget(QLabel("신뢰도(%)"), 0, 0)
+        filter_grid.addWidget(self.map_return_conf_spin, 0, 1)
+
+        self.map_return_min_height_spin = QSpinBox()
+        self.map_return_min_height_spin.setRange(0, 5000)
+        self.map_return_min_height_spin.setSingleStep(5)
+        self.map_return_min_height_spin.valueChanged.connect(self._on_map_return_min_height_changed)
+        self.map_return_min_height_spin.setValue(self.map_return_min_height)
+        filter_grid.addWidget(QLabel("최소 높이(px)"), 0, 2)
+        filter_grid.addWidget(self.map_return_min_height_spin, 0, 3)
+
+        self.map_return_max_height_spin = QSpinBox()
+        self.map_return_max_height_spin.setRange(0, 5000)
+        self.map_return_max_height_spin.setSingleStep(5)
+        self.map_return_max_height_spin.valueChanged.connect(self._on_map_return_max_height_changed)
+        self.map_return_max_height_spin.setValue(self.map_return_max_height)
+        filter_grid.addWidget(QLabel("최대 높이(px)"), 1, 0)
+        filter_grid.addWidget(self.map_return_max_height_spin, 1, 1)
+
+        self.map_return_min_width_spin = QSpinBox()
+        self.map_return_min_width_spin.setRange(0, 5000)
+        self.map_return_min_width_spin.setSingleStep(5)
+        self.map_return_min_width_spin.valueChanged.connect(self._on_map_return_min_width_changed)
+        self.map_return_min_width_spin.setValue(self.map_return_min_width)
+        filter_grid.addWidget(QLabel("최소 너비(px)"), 1, 2)
+        filter_grid.addWidget(self.map_return_min_width_spin, 1, 3)
+
+        self.map_return_max_width_spin = QSpinBox()
+        self.map_return_max_width_spin.setRange(0, 5000)
+        self.map_return_max_width_spin.setSingleStep(5)
+        self.map_return_max_width_spin.valueChanged.connect(self._on_map_return_max_width_changed)
+        self.map_return_max_width_spin.setValue(self.map_return_max_width)
+        filter_grid.addWidget(QLabel("최대 너비(px)"), 2, 0)
+        filter_grid.addWidget(self.map_return_max_width_spin, 2, 1)
+
+        layout.addLayout(filter_grid)
+
+        base_row = QHBoxLayout()
+        base_row.setSpacing(6)
+        base_row.addWidget(QLabel("기준 맵 이름:"))
+        self.map_return_base_line = QLineEdit()
+        self.map_return_base_line.setPlaceholderText("예: 아르카나 동굴")
+        self.map_return_base_line.textChanged.connect(self._on_map_return_base_changed)
+        self.map_return_base_line.setText(self.map_return_base_keyword)
+        base_row.addWidget(self.map_return_base_line, 1)
+        layout.addLayout(base_row)
+
+        manage_row = QHBoxLayout()
+        manage_row.setSpacing(6)
+        self.map_return_manage_button = QPushButton("맵 복구 로직 관리")
+        self.map_return_manage_button.clicked.connect(self._open_map_return_config_dialog)
+        manage_row.addWidget(self.map_return_manage_button)
+        manage_row.addStretch(1)
+        layout.addLayout(manage_row)
+
+        group.setLayout(layout)
+        blocker = QSignalBlocker(self.map_return_enable_checkbox)
+        try:
+            self.map_return_enable_checkbox.setChecked(self.map_return_enabled)
+        finally:
+            del blocker
+        self._update_map_return_controls()
+        self._update_map_return_roi_summary()
+        return group
+
+    def _update_map_return_roi_summary(self) -> None:
+        roi = self.map_return_roi
+        if not isinstance(roi, dict):
+            self.map_return_roi_summary.setText("범위 미설정")
+            return
+        try:
+            left = int(round(float(roi.get('left', 0))))
+            top = int(round(float(roi.get('top', 0))))
+            width = int(round(float(roi.get('width', 0))))
+            height = int(round(float(roi.get('height', 0))))
+        except Exception:
+            self.map_return_roi_summary.setText("범위 미설정")
+            return
+        self.map_return_roi_summary.setText(f"({left}, {top}) {width}x{height}")
+
+    def _update_map_return_controls(self) -> None:
+        enabled = bool(self.map_return_enable_checkbox.isChecked())
+        widgets = [
+            getattr(self, 'map_return_roi_button', None),
+            getattr(self, 'map_return_interval_spin', None),
+            getattr(self, 'map_return_conf_spin', None),
+            getattr(self, 'map_return_min_height_spin', None),
+            getattr(self, 'map_return_max_height_spin', None),
+            getattr(self, 'map_return_min_width_spin', None),
+            getattr(self, 'map_return_max_width_spin', None),
+            getattr(self, 'map_return_base_line', None),
+            getattr(self, 'map_return_manage_button', None),
+        ]
+        for widget in widgets:
+            if widget is not None:
+                widget.setEnabled(enabled)
+
+    def _on_map_return_enabled_toggled(self, checked: bool) -> None:
+        self.map_return_enabled = bool(checked)
+        if not self.map_return_enabled and self._map_return_recovering:
+            self._abort_map_return("맵 복귀 모드를 해제하여 복구를 중단합니다.", frame_bgr=None, notify=False)
+        self._update_map_return_controls()
+        self._update_map_return_timer_state()
+        self._handle_map_return_settings_changed()
+
+    def _on_map_return_interval_changed(self, value: float) -> None:
+        try:
+            self.map_return_interval_sec = max(0.5, float(value))
+        except (TypeError, ValueError):
+            self.map_return_interval_sec = 3.0
+        self._update_map_return_timer_state()
+        self._handle_map_return_settings_changed()
+
+    def _on_map_return_conf_changed(self, value: float) -> None:
+        try:
+            self.map_return_conf_threshold = max(0.0, min(100.0, float(value)))
+        except (TypeError, ValueError):
+            self.map_return_conf_threshold = 0.0
+        self._handle_map_return_settings_changed()
+
+    def _on_map_return_min_height_changed(self, value: int) -> None:
+        try:
+            self.map_return_min_height = max(0, int(value))
+        except (TypeError, ValueError):
+            self.map_return_min_height = 0
+        self._handle_map_return_settings_changed()
+
+    def _on_map_return_max_height_changed(self, value: int) -> None:
+        try:
+            self.map_return_max_height = max(0, int(value))
+        except (TypeError, ValueError):
+            self.map_return_max_height = 0
+        self._handle_map_return_settings_changed()
+
+    def _on_map_return_min_width_changed(self, value: int) -> None:
+        try:
+            self.map_return_min_width = max(0, int(value))
+        except (TypeError, ValueError):
+            self.map_return_min_width = 0
+        self._handle_map_return_settings_changed()
+
+    def _on_map_return_max_width_changed(self, value: int) -> None:
+        try:
+            self.map_return_max_width = max(0, int(value))
+        except (TypeError, ValueError):
+            self.map_return_max_width = 0
+        self._handle_map_return_settings_changed()
+
+    def _on_map_return_base_changed(self, text: str) -> None:
+        self.map_return_base_keyword = (text or "").strip()
+        self._handle_map_return_settings_changed()
+
+    def _handle_map_return_roi_select(self) -> None:
+        try:
+            snipper = ScreenSnipper(self)
+        except Exception as exc:
+            QMessageBox.warning(self, "오류", f"화면 캡처 도구를 열 수 없습니다: {exc}")
+            return
+        if not snipper.exec():
+            self.append_log("맵 복귀 모드 OCR 범위 지정이 취소되었습니다.", "info")
+            return
+        roi = snipper.get_roi()
+        new_region = {
+            'top': roi.top(),
+            'left': roi.left(),
+            'width': roi.width(),
+            'height': roi.height(),
+        }
+        if new_region['width'] <= 0 or new_region['height'] <= 0:
+            QMessageBox.warning(self, "영역 오류", "지정한 영역의 크기가 유효하지 않습니다.")
+            return
+        window_geometry = get_maple_window_geometry()
+        relative_region = None
+        if window_geometry:
+            relative_region = ensure_relative_roi(new_region, window_geometry, anchor_name=last_used_anchor_name())
+        if not relative_region:
+            relative_region = dict(new_region)
+        self.map_return_roi = copy.deepcopy(relative_region)
+        self._update_map_return_roi_summary()
+        self._handle_map_return_settings_changed()
+        self._update_map_return_timer_state()
+
+    def _open_map_return_config_dialog(self) -> None:
+        dlg = MapReturnManagerDialog(self)
+        dlg.exec()
+
+    def _update_map_return_timer_state(self) -> None:
+        if self.map_return_timer is None:
+            return
+        if self.map_return_enabled and self.map_return_roi and not self._map_return_recovering:
+            interval_ms = max(500, int(self.map_return_interval_sec * 1000))
+            if self.map_return_timer.interval() != interval_ms:
+                self.map_return_timer.setInterval(interval_ms)
+            if not self.map_return_timer.isActive():
+                self.map_return_timer.start()
+        else:
+            if self.map_return_timer.isActive():
+                self.map_return_timer.stop()
+
+    def _handle_map_return_settings_changed(self) -> None:
+        # 후속 단계에서 설정 저장/상태 반영을 확장
+        self._save_settings()
+
+    def _handle_map_return_tick(self) -> None:
+        """맵 복귀 모드 OCR 주기 콜백 (구현 예정)."""
+        if not self.map_return_enabled or self._map_return_recovering:
+            return
+        roi_frame = self._capture_map_return_frame()
+        if roi_frame is None:
+            self._map_return_last_detected = ""
+            return
+        words = self._perform_map_return_ocr(roi_frame)
+        if not words:
+            if self._map_return_last_detected:
+                self._map_return_last_detected = ""
+            return
+        detected_text = self._combine_map_return_words(words)
+        normalized_text = self._map_return_normalize(detected_text)
+        if not normalized_text:
+            if self._map_return_last_detected:
+                self._map_return_last_detected = ""
+            return
+
+        base_keyword = self._map_return_normalize(self.map_return_base_keyword)
+        if base_keyword and base_keyword in normalized_text:
+            if self._map_return_last_detected != normalized_text:
+                self.append_log(f"[맵 복귀] 기준 맵 키워드 감지: '{detected_text}'", "debug")
+            self._map_return_last_detected = normalized_text
+            self._reset_map_return_alerts()
+            return
+
+        matched = self._match_map_return_keyword(normalized_text)
+        if matched:
+            map_name, map_cfg = matched
+            self._begin_map_return_recovery(map_name, map_cfg, roi_frame, detected_text, words)
+            return
+
+        self._map_return_last_detected = normalized_text
+        self._map_return_maybe_notify(detected_text, roi_frame)
+
+    def _map_return_normalize(self, text: str) -> str:
+        if text is None:
+            return ""
+        try:
+            s = str(text)
+        except Exception:
+            return ""
+        return "".join(s.split()).lower()
+
+    def _reset_map_return_alerts(self, key: Optional[str] = None) -> None:
+        if key:
+            self._map_return_alert_count.pop(key, None)
+            self._map_return_last_alert_ts.pop(key, None)
+            return
+        self._map_return_alert_count.clear()
+        self._map_return_last_alert_ts.clear()
+
+    def _resolve_map_return_roi_absolute(self) -> Optional[dict]:
+        if not isinstance(self.map_return_roi, dict):
+            return None
+        window_geometry = get_maple_window_geometry()
+        resolved = resolve_roi_to_absolute(self.map_return_roi, window=window_geometry)
+        if resolved is None:
+            resolved = resolve_roi_to_absolute(self.map_return_roi)
+        if resolved is None:
+            resolved = dict(self.map_return_roi)
+        try:
+            left = int(round(float(resolved.get('left', 0))))
+            top = int(round(float(resolved.get('top', 0))))
+            width = int(round(float(resolved.get('width', 0))))
+            height = int(round(float(resolved.get('height', 0))))
+        except Exception:
+            return None
+        if width <= 0 or height <= 0:
+            return None
+        return {'left': left, 'top': top, 'width': width, 'height': height}
+
+    def _capture_map_return_frame(self) -> Optional[np.ndarray]:
+        roi = self._resolve_map_return_roi_absolute()
+        if not roi:
+            return None
+        try:
+            import mss  # type: ignore
+            import numpy as _np  # type: ignore
+        except Exception:
+            return None
+        try:
+            with mss.mss() as sct:
+                shot = sct.grab({'left': roi['left'], 'top': roi['top'], 'width': roi['width'], 'height': roi['height']})
+            frame_bgra = _np.frombuffer(shot.raw, dtype=_np.uint8).reshape(shot.height, shot.width, 4)
+            return frame_bgra[:, :, :3].copy()
+        except Exception:
+            return None
+
+    def _perform_map_return_ocr(self, frame_bgr: Optional[np.ndarray]) -> list:
+        if frame_bgr is None or frame_bgr.size == 0:
+            return []
+        conf = self.map_return_conf_threshold if self.map_return_conf_threshold > 0 else None
+        min_h = self.map_return_min_height if self.map_return_min_height > 0 else None
+        max_h = self.map_return_max_height if self.map_return_max_height > 0 else None
+        min_w = self.map_return_min_width if self.map_return_min_width > 0 else None
+        max_w = self.map_return_max_width if self.map_return_max_width > 0 else None
+        try:
+            words = ocr_korean_words(
+                frame_bgr,
+                conf_threshold=conf,
+                min_height_px=min_h,
+                max_height_px=max_h,
+                min_width_px=min_w,
+                max_width_px=max_w,
+            )
+        except Exception as exc:
+            self.append_log(f"[맵 복귀] OCR 실패: {exc}", "warn")
+            return []
+        return words or []
+
+    def _combine_map_return_words(self, words: list) -> str:
+        texts: list[str] = []
+        for word in words:
+            text = getattr(word, 'text', '')
+            if not text:
+                continue
+            texts.append(str(text))
+        joined = " ".join(texts)
+        return joined.strip()
+
+    def _match_map_return_keyword(self, normalized_text: str) -> Optional[tuple[str, dict]]:
+        if not normalized_text:
+            return None
+        for name, payload in self.map_return_registered_maps.items():
+            normalized_name = self._map_return_normalize(name)
+            if not normalized_name:
+                continue
+            if normalized_name in normalized_text:
+                return name, payload
+        return None
+
+    def _map_return_maybe_notify(self, detected_text: str, frame: Optional[np.ndarray]) -> None:
+        key = self._map_return_normalize(detected_text) or "(empty)"
+        count = int(self._map_return_alert_count.get(key, 0))
+        if count >= int(self.map_return_telegram_limit):
+            return
+        now = time.time()
+        last_ts = float(self._map_return_last_alert_ts.get(key, 0.0) or 0.0)
+        if now - last_ts < max(1.0, self.map_return_interval_sec * 0.5):
+            return
+        message = "[맵 복귀] 기준 맵과 다른 텍스트 감지"
+        if detected_text:
+            message += f": {detected_text}"
+        base_keyword = self.map_return_base_keyword or ''
+        if base_keyword:
+            message += f" (기준='{base_keyword}')"
+        if self._notify_telegram(message):
+            self.append_log(message, "warn")
+        self._map_return_alert_count[key] = count + 1
+        self._map_return_last_alert_ts[key] = now
+
+    def _begin_map_return_recovery(
+        self,
+        map_name: str,
+        map_cfg: dict,
+        frame_bgr: Optional[np.ndarray],
+        detected_text: str,
+        words: list,
+        existing_state: Optional[dict] = None,
+    ) -> None:
+        """맵 복귀 플로우를 시작한다."""
+        map_tab = getattr(self, 'map_tab', None)
+        if not map_tab:
+            message = "[맵 복귀] 맵 탭과 연동되지 않아 복구를 실행할 수 없습니다."
+            self.append_log(message, "warn")
+            self._map_return_send_telegram(message, frame_bgr)
+            self._map_return_recovering = False
+            self._update_map_return_timer_state()
+            return
+
+        profile = str(map_cfg.get('profile', '') or '')
+        waypoint_id = str(map_cfg.get('waypoint_id', '') or '')
+        command_profile = str(map_cfg.get('command_profile', '') or '')
+        waypoint_name = str(map_cfg.get('waypoint_name', '') or '')
+
+        if not profile or not waypoint_id:
+            message = f"[맵 복귀] '{map_name}' 설정이 부족하여 복구를 실행할 수 없습니다."
+            self.append_log(message, "warn")
+            self._map_return_send_telegram(message, frame_bgr)
+            self._map_return_recovering = False
+            self._update_map_return_timer_state()
+            return
+
+        base_state = dict(existing_state) if isinstance(existing_state, dict) else None
+        if not base_state:
+            base_state = {
+                'hunt_detection_was_active': self._is_detection_active(),
+                'previous_profile': str(getattr(map_tab, 'active_profile_name', '') or ''),
+                'map_detection_was_running': bool(getattr(map_tab, 'is_detection_running', False)),
+                'retry_depth': 0,
+            }
+        else:
+            base_state['retry_depth'] = int(base_state.get('retry_depth', 0) or 0) + 1
+
+        self._map_return_detection_was_active = bool(base_state.get('hunt_detection_was_active', False))
+
+        # 맵 프로필 전환
+        try:
+            current_profile = str(getattr(map_tab, 'active_profile_name', '') or '')
+        except Exception:
+            current_profile = ''
+        if profile != current_profile:
+            selector = getattr(map_tab, 'profile_selector', None)
+            if selector is None:
+                message = f"[맵 복귀] 맵 탭 프로필 선택 위젯을 찾지 못했습니다. (요청 프로필: {profile})"
+                self.append_log(message, "warn")
+                self._map_return_send_telegram(message, frame_bgr)
+                self._map_return_recovering = False
+                self._update_map_return_timer_state()
+                return
+            idx = selector.findText(profile)
+            if idx < 0:
+                message = f"[맵 복귀] 맵 프로필 '{profile}'을 찾을 수 없습니다."
+                self.append_log(message, "warn")
+                self._map_return_send_telegram(message, frame_bgr)
+                self._map_return_recovering = False
+                self._update_map_return_timer_state()
+                return
+            blocker = QSignalBlocker(selector)
+            selector.setCurrentIndex(idx)
+            del blocker
+            try:
+                map_tab.load_profile_data(profile)
+            except Exception as exc:
+                self.append_log(f"[맵 복귀] 프로필 '{profile}' 로드 중 오류: {exc}", "warn")
+
+        if not waypoint_name:
+            waypoint_name = self._lookup_map_return_waypoint_name(profile, waypoint_id)
+
+        if not bool(getattr(map_tab, 'is_detection_running', False)):
+            message = "[맵 복귀] 맵 탐지가 중지되어 있어 복구를 실행할 수 없습니다."
+            self.append_log(message, "warn")
+            self._map_return_send_telegram(message, frame_bgr)
+            self._map_return_recovering = False
+            self._update_map_return_timer_state()
+            return
+
+        try:
+            started = map_tab.start_other_player_wait_operation(
+                waypoint_id=waypoint_id,
+                waypoint_name=waypoint_name or waypoint_id,
+                source='hunt.map_return',
+                wait_hp_config=None,
+            )
+        except Exception as exc:
+            message = f"[맵 복귀] 맵 탭 이동을 시작하지 못했습니다: {exc}"
+            self.append_log(message, "warn")
+            self._map_return_send_telegram(message, frame_bgr)
+            self._map_return_recovering = False
+            self._update_map_return_timer_state()
+            return
+
+        if not started:
+            message = "[맵 복귀] 맵 탭이 복구 이동 요청을 거부했습니다."
+            self.append_log(message, "warn")
+            self._map_return_send_telegram(message, frame_bgr)
+            self._map_return_recovering = False
+            self._update_map_return_timer_state()
+            return
+
+        self._map_return_recovering = True
+        self._map_return_active_map = map_name
+        self._map_return_last_detected = self._map_return_normalize(detected_text)
+        self._reset_map_return_alerts()
+        self._update_map_return_timer_state()
+
+        # 사냥 탐지 중이었다면 중지 처리
+        if base_state.get('hunt_detection_was_active', False):
+            previous_sync = bool(getattr(self, '_syncing_with_map', False))
+            self._syncing_with_map = True
+            try:
+                self.force_stop_detection(reason='map_return_start', preserve_forbidden=True)
+            finally:
+                self._syncing_with_map = previous_sync
+
+        try:
+            if self.current_authority == 'hunt':
+                self.release_control(reason='MAP_RETURN_START')
+        except Exception:
+            pass
+
+        self._map_return_context = {
+            'base_state': base_state,
+            'target_map': map_name,
+            'profile': profile,
+            'waypoint_id': waypoint_id,
+            'waypoint_name': waypoint_name or waypoint_id,
+            'command_profile': command_profile,
+            'detected_text': detected_text,
+            'stage': 'travel',
+            'check_attempt': 0,
+            'last_detected_text': detected_text,
+        }
+
+        self.append_log(f"[맵 복귀] '{map_name}' 복구를 시작합니다. 웨이포인트: {waypoint_name}", "info")
+        try:
+            if hasattr(map_tab, 'update_general_log'):
+                map_tab.update_general_log(f"[맵 복귀] '{map_name}' 복구를 시작합니다.", "orange")
+        except Exception:
+            pass
+
+    def _handle_map_return_arrival(self, waypoint_name: str) -> None:
+        if not self._map_return_recovering:
+            return
+        context = self._map_return_context or {}
+        context['stage'] = 'arrived'
+        context['arrival_waypoint'] = waypoint_name
+        command = str(context.get('command_profile', '') or '')
+        if command:
+            self._emit_control_command(command, reason='map_return')
+            try:
+                map_tab = getattr(self, 'map_tab', None)
+                if map_tab and hasattr(map_tab, 'on_other_player_wait_command_started'):
+                    map_tab.on_other_player_wait_command_started(source='hunt.map_return')
+            except Exception:
+                pass
+            self.append_log(f"[맵 복귀] '{context.get('target_map', '')}' 웨이포인트 도착 → 명령 '{command}' 실행", "info")
+        else:
+            self.append_log(f"[맵 복귀] '{context.get('target_map', '')}' 웨이포인트 도착 (명령 미지정)", "info")
+        context['check_attempt'] = 0
+        self._map_return_context = context
+        self.map_return_recovery_timer.stop()
+        self.map_return_recovery_timer.setInterval(1000)
+        self.map_return_recovery_timer.start()
+
+    def _handle_map_return_recovery_check(self) -> None:
+        if not self._map_return_recovering:
+            self.map_return_recovery_timer.stop()
+            return
+
+        context = self._map_return_context or {}
+        attempt = int(context.get('check_attempt', 0)) + 1
+        context['check_attempt'] = attempt
+
+        frame = self._capture_map_return_frame()
+        if frame is None:
+            detected_text = ""
+            words: list = []
+            self.append_log(f"[맵 복귀] OCR 캡처 실패 ({attempt}/3)", "warn")
+        else:
+            words = self._perform_map_return_ocr(frame)
+            detected_text = self._combine_map_return_words(words)
+
+        normalized = self._map_return_normalize(detected_text)
+        context['last_detected_text'] = detected_text
+        self._map_return_context = context
+
+        base_keyword = self._map_return_normalize(self.map_return_base_keyword)
+        if normalized and base_keyword and base_keyword in normalized:
+            self.map_return_recovery_timer.stop()
+            success_msg = f"[맵 복귀] 기준 맵 '{self.map_return_base_keyword}' 복귀 확인 (시도 {attempt}회)"
+            self.append_log(success_msg, "info")
+            self._map_return_send_telegram(success_msg, frame)
+            self._finalize_map_return(True, detected_text=detected_text, frame_bgr=frame, reason='success')
+            return
+
+        if attempt < 3:
+            self.append_log(f"[맵 복귀] 복귀 확인 중 ({attempt}/3) - 감지: '{detected_text or '(없음)'}'", "debug")
+            return
+
+        self.map_return_recovery_timer.stop()
+        matched = self._match_map_return_keyword(normalized)
+        if matched:
+            retry_msg = f"[맵 복귀] '{matched[0]}' 감지 → 복구 재시도"
+            self.append_log(retry_msg, "warn")
+            self._restart_map_return_flow(matched[0], matched[1], frame, detected_text, words)
+            return
+
+        failure_msg = f"[맵 복귀] 등록되지 않은 맵 감지: {detected_text or '(없음)'} → 전체 중지"
+        self._abort_map_return(failure_msg, frame_bgr=frame, notify=True)
+
+    def _lookup_map_return_waypoint_name(self, profile: str, waypoint_id: str) -> str:
+        options = self._collect_waypoint_options_for_profile(profile)
+        for display, value in options:
+            if str(value) == str(waypoint_id):
+                return display
+        return str(waypoint_id)
+
+    def _map_return_finish_wait_operation(self, *, reason: str, resume_map_detection: bool) -> None:
+        map_tab = getattr(self, 'map_tab', None)
+        if not map_tab or not hasattr(map_tab, 'finish_other_player_wait_operation'):
+            return
+        is_active = False
+        try:
+            if hasattr(map_tab, '_is_other_player_wait_active'):
+                is_active = bool(map_tab._is_other_player_wait_active())
+            else:
+                context = getattr(map_tab, 'other_player_wait_context', {})
+                is_active = bool(context)
+        except Exception:
+            is_active = False
+        if not is_active:
+            return
+        try:
+            context = getattr(map_tab, 'other_player_wait_context', {}) or {}
+            if isinstance(context, dict):
+                context = dict(context)
+                context['resume_map_detection'] = bool(resume_map_detection)
+                map_tab.other_player_wait_context = context
+        except Exception:
+            pass
+        try:
+            map_tab.finish_other_player_wait_operation(reason=reason)
+        except Exception as exc:
+            self.append_log(f"[맵 복귀] 맵 탭 대기 종료 실패: {exc}", "warn")
+
+    def _map_return_send_telegram(self, text: str, frame_bgr: Optional[np.ndarray] = None) -> None:
+        if not text:
+            return
+        sent = False
+        if frame_bgr is not None and _tg_send_photo:
+            try:
+                success, buffer = cv2.imencode(".png", frame_bgr)
+                if success:
+                    sent = bool(_tg_send_photo(buffer.tobytes(), caption=text))
+            except Exception:
+                sent = False
+        if not sent and frame_bgr is not None:
+            try:
+                from ocr_watch import send_telegram_text_and_screenshot as _tg_text_and_shot  # 지연 임포트
+                _tg_text_and_shot(text, image_bgr=frame_bgr)
+                sent = True
+            except Exception:
+                sent = False
+        if not sent:
+            self._notify_telegram(text)
+
+    def _restart_map_return_flow(
+        self,
+        map_name: str,
+        map_cfg: dict,
+        frame_bgr: Optional[np.ndarray],
+        detected_text: str,
+        words: list,
+    ) -> None:
+        base_state = (self._map_return_context or {}).get('base_state')
+        self._map_return_finish_wait_operation(reason='retry', resume_map_detection=False)
+        self._map_return_recovering = False
+        self._update_map_return_timer_state()
+        self._begin_map_return_recovery(
+            map_name,
+            map_cfg,
+            frame_bgr,
+            detected_text,
+            words,
+            existing_state=base_state if isinstance(base_state, dict) else None,
+        )
+
+    def _restore_map_profile(self, profile_name: str) -> None:
+        if not profile_name:
+            return
+        map_tab = getattr(self, 'map_tab', None)
+        if not map_tab or not hasattr(map_tab, 'profile_selector'):
+            return
+        try:
+            current_profile = str(getattr(map_tab, 'active_profile_name', '') or '')
+        except Exception:
+            current_profile = ''
+        if profile_name == current_profile:
+            return
+        selector = map_tab.profile_selector
+        idx = selector.findText(profile_name)
+        if idx < 0:
+            return
+        blocker = QSignalBlocker(selector)
+        selector.setCurrentIndex(idx)
+        del blocker
+        try:
+            map_tab.load_profile_data(profile_name)
+        except Exception as exc:
+            self.append_log(f"[맵 복귀] 프로필 '{profile_name}' 복원 실패: {exc}", "warn")
+
+    def _finalize_map_return(
+        self,
+        success: bool,
+        *,
+        detected_text: str,
+        frame_bgr: Optional[np.ndarray],
+        reason: str,
+    ) -> None:
+        context = self._map_return_context or {}
+        base_state = context.get('base_state', {}) or {}
+        self.map_return_recovery_timer.stop()
+        resume_map_detection = bool(base_state.get('map_detection_was_running', False))
+        finish_reason = 'success' if success else (reason or 'abort')
+        self._map_return_finish_wait_operation(reason=finish_reason, resume_map_detection=resume_map_detection)
+        previous_profile = str(base_state.get('previous_profile', '') or '')
+        self._restore_map_profile(previous_profile)
+        self._map_return_context = {}
+        self._map_return_active_map = None
+        self._map_return_recovering = False
+        self._reset_map_return_alerts()
+        self._update_map_return_timer_state()
+        if success:
+            self.append_log("[맵 복귀] 복구 완료. 사냥을 재개합니다.", "info")
+            if bool(base_state.get('hunt_detection_was_active', False)):
+                self._restart_hunt_detection_after_map_return()
+        else:
+            self.append_log(reason or "[맵 복귀] 복구 실패", "warn")
+        self._map_return_detection_was_active = False
+
+    def _abort_map_return(self, message: str, *, frame_bgr: Optional[np.ndarray], notify: bool) -> None:
+        if notify and message:
+            self._map_return_send_telegram(message, frame_bgr)
+        base_state = (self._map_return_context or {}).get('base_state', {}) or {}
+        self.map_return_recovery_timer.stop()
+        self._map_return_finish_wait_operation(reason='abort', resume_map_detection=False)
+        previous_profile = str(base_state.get('previous_profile', '') or '')
+        self._restore_map_profile(previous_profile)
+        self._map_return_context = {}
+        self._map_return_active_map = None
+        self._map_return_recovering = False
+        self._map_return_detection_was_active = False
+        self._reset_map_return_alerts()
+        self._update_map_return_timer_state()
+        try:
+            self.force_stop_detection(reason='map_return_abort', preserve_forbidden=True)
+        except Exception:
+            pass
+        try:
+            self._emit_control_command("모든 키 떼기", "map_return_abort")
+            self._emit_control_command("ESC", "map_return_abort")
+        except Exception:
+            pass
+        self.append_log(message, "warn")
+
+    def _restart_hunt_detection_after_map_return(self) -> None:
+        try:
+            if self._is_detection_active():
+                return
+        except Exception:
+            return
+        try:
+            setattr(self, '_auto_restart_after_wait', True)
+        except Exception:
+            pass
+        try:
+            if hasattr(self, 'detect_btn'):
+                self.detect_btn.setChecked(True)
+            self._toggle_detection(True)
+        except Exception as exc:
+            self.append_log(f"[맵 복귀] 사냥 탐지 재시작 실패: {exc}", "warn")
+        finally:
+            try:
+                delattr(self, '_auto_restart_after_wait')
+            except Exception:
+                pass
 
     def _create_range_group(self) -> QGroupBox:
         group = QGroupBox("사냥 범위 설정")
@@ -4247,6 +5337,54 @@ class HuntTab(QWidget):
                 waypoints.append((str(name), str(wp_id)))
         waypoints.sort(key=lambda x: x[0].lower())
         return waypoints
+
+    def _collect_waypoint_options_for_profile(self, profile_name: str) -> list[tuple[str, str]]:
+        if not profile_name:
+            return []
+        map_tab = getattr(self, 'map_tab', None)
+        active_profile = getattr(map_tab, 'active_profile_name', None)
+        if map_tab and profile_name == active_profile:
+            return self._collect_waypoint_options()
+        geometry = self._load_map_geometry_for_profile(profile_name)
+        if not isinstance(geometry, dict):
+            return []
+        waypoints = []
+        for item in geometry.get('waypoints', []) or []:
+            try:
+                name = str(item.get('name') or '')
+                wp_id = item.get('id')
+            except Exception:
+                continue
+            if not name or wp_id in (None, ''):
+                continue
+            waypoints.append((name, str(wp_id)))
+        waypoints.sort(key=lambda x: x[0].lower())
+        return waypoints
+
+    def _load_map_geometry_for_profile(self, profile_name: str) -> dict:
+        if not profile_name:
+            return {}
+        cached = self._map_return_geometry_cache.get(profile_name)
+        if isinstance(cached, dict) and cached:
+            return cached
+        map_tab = getattr(self, 'map_tab', None)
+        if map_tab and getattr(map_tab, 'active_profile_name', None) == profile_name:
+            geometry = getattr(map_tab, 'geometry_data', None)
+            if isinstance(geometry, dict):
+                self._map_return_geometry_cache[profile_name] = geometry
+                return geometry
+        path = os.path.join(MAPS_DIR, profile_name, "map_geometry.json")
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                geometry = json.load(f)
+        except FileNotFoundError:
+            geometry = {}
+        except Exception as exc:
+            geometry = {}
+            self.append_log(f"맵 프로필 '{profile_name}' 지형 데이터를 불러오지 못했습니다: {exc}", "warn")
+        if isinstance(geometry, dict):
+            self._map_return_geometry_cache[profile_name] = geometry
+        return geometry
 
     # ---------------------- 대기 모드(무기한) 보조 유틸 ----------------------
     def _current_map_profile_name(self) -> str:
@@ -10788,6 +11926,9 @@ class HuntTab(QWidget):
         if normalized_source == 'hunt.exit':
             self._handle_exit_wait_arrival(waypoint_name)
             return
+        if normalized_source == 'hunt.map_return':
+            self._handle_map_return_arrival(waypoint_name)
+            return
         try:
             # [완화] 소스 문자열이 일치하지 않더라도 금지 플로우 활성 상태이면 처리
             if not self._forbidden_active:
@@ -12375,6 +13516,107 @@ class HuntTab(QWidget):
 
         self._sync_frame_detail_checkbox_state()
 
+        map_return_cfg = data.get('map_return', {})
+        if isinstance(map_return_cfg, dict):
+            self.map_return_enabled = bool(map_return_cfg.get('enabled', False))
+            try:
+                self.map_return_interval_sec = max(0.5, float(map_return_cfg.get('interval_sec', self.map_return_interval_sec)))
+            except (TypeError, ValueError):
+                self.map_return_interval_sec = 3.0
+            try:
+                self.map_return_conf_threshold = float(map_return_cfg.get('conf_threshold', self.map_return_conf_threshold))
+            except (TypeError, ValueError):
+                self.map_return_conf_threshold = 0.0
+            try:
+                self.map_return_min_height = max(0, int(map_return_cfg.get('min_height', self.map_return_min_height)))
+            except (TypeError, ValueError):
+                self.map_return_min_height = 0
+            try:
+                self.map_return_max_height = max(0, int(map_return_cfg.get('max_height', self.map_return_max_height)))
+            except (TypeError, ValueError):
+                self.map_return_max_height = 0
+            try:
+                self.map_return_min_width = max(0, int(map_return_cfg.get('min_width', self.map_return_min_width)))
+            except (TypeError, ValueError):
+                self.map_return_min_width = 0
+            try:
+                self.map_return_max_width = max(0, int(map_return_cfg.get('max_width', self.map_return_max_width)))
+            except (TypeError, ValueError):
+                self.map_return_max_width = 0
+            self.map_return_base_keyword = str(map_return_cfg.get('base_keyword', self.map_return_base_keyword) or '')
+            try:
+                self.map_return_telegram_limit = max(1, int(map_return_cfg.get('telegram_limit', self.map_return_telegram_limit)))
+            except (TypeError, ValueError):
+                self.map_return_telegram_limit = 5
+            roi_payload = map_return_cfg.get('roi')
+            self.map_return_roi = copy.deepcopy(roi_payload) if isinstance(roi_payload, dict) else None
+            maps_cfg = map_return_cfg.get('maps', {})
+            if isinstance(maps_cfg, dict):
+                resolved: dict[str, dict] = {}
+                for key, val in maps_cfg.items():
+                    if not isinstance(key, str) or not key:
+                        continue
+                    if not isinstance(val, dict):
+                        continue
+                    resolved[key] = {
+                        'profile': str(val.get('profile', '') or ''),
+                        'waypoint_id': str(val.get('waypoint_id', '') or ''),
+                        'waypoint_name': str(val.get('waypoint_name', '') or ''),
+                        'command_profile': str(val.get('command_profile', '') or ''),
+                    }
+                self.map_return_registered_maps = resolved
+            else:
+                self.map_return_registered_maps = {}
+        else:
+            self.map_return_enabled = False
+            self.map_return_registered_maps = {}
+            self.map_return_roi = None
+            self.map_return_interval_sec = 3.0
+            self.map_return_conf_threshold = 0.0
+            self.map_return_min_height = 0
+            self.map_return_max_height = 0
+            self.map_return_min_width = 0
+            self.map_return_max_width = 0
+            self.map_return_base_keyword = ''
+            self.map_return_telegram_limit = 5
+
+        if hasattr(self, 'map_return_enable_checkbox'):
+            blocker = QSignalBlocker(self.map_return_enable_checkbox)
+            self.map_return_enable_checkbox.setChecked(self.map_return_enabled)
+            del blocker
+        if hasattr(self, 'map_return_interval_spin'):
+            blocker = QSignalBlocker(self.map_return_interval_spin)
+            self.map_return_interval_spin.setValue(self.map_return_interval_sec)
+            del blocker
+        if hasattr(self, 'map_return_conf_spin'):
+            blocker = QSignalBlocker(self.map_return_conf_spin)
+            self.map_return_conf_spin.setValue(self.map_return_conf_threshold)
+            del blocker
+        if hasattr(self, 'map_return_min_height_spin'):
+            blocker = QSignalBlocker(self.map_return_min_height_spin)
+            self.map_return_min_height_spin.setValue(self.map_return_min_height)
+            del blocker
+        if hasattr(self, 'map_return_max_height_spin'):
+            blocker = QSignalBlocker(self.map_return_max_height_spin)
+            self.map_return_max_height_spin.setValue(self.map_return_max_height)
+            del blocker
+        if hasattr(self, 'map_return_min_width_spin'):
+            blocker = QSignalBlocker(self.map_return_min_width_spin)
+            self.map_return_min_width_spin.setValue(self.map_return_min_width)
+            del blocker
+        if hasattr(self, 'map_return_max_width_spin'):
+            blocker = QSignalBlocker(self.map_return_max_width_spin)
+            self.map_return_max_width_spin.setValue(self.map_return_max_width)
+            del blocker
+        if hasattr(self, 'map_return_base_line'):
+            blocker = QSignalBlocker(self.map_return_base_line)
+            self.map_return_base_line.setText(self.map_return_base_keyword)
+            del blocker
+        self._update_map_return_roi_summary()
+        self._update_map_return_controls()
+        self._map_return_geometry_cache.clear()
+        self._update_map_return_timer_state()
+
         perf_settings = data.get('perf', {})
         if isinstance(perf_settings, dict):
             self._perf_logging_enabled = bool(perf_settings.get('logging_enabled', False))
@@ -13028,6 +14270,28 @@ class HuntTab(QWidget):
                     'include_jump': bool(self.ladder_escape_include_jump_checkbox.isChecked()) if hasattr(self, 'ladder_escape_include_jump_checkbox') else True,
                     'include_ladder': bool(self.ladder_escape_include_ladder_checkbox.isChecked()) if hasattr(self, 'ladder_escape_include_ladder_checkbox') else True,
                     'include_fall': bool(self.ladder_escape_include_fall_checkbox.isChecked()) if hasattr(self, 'ladder_escape_include_fall_checkbox') else True,
+                },
+            },
+            'map_return': {
+                'enabled': bool(self.map_return_enabled),
+                'interval_sec': float(self.map_return_interval_sec),
+                'conf_threshold': float(self.map_return_conf_threshold),
+                'min_height': int(self.map_return_min_height),
+                'max_height': int(self.map_return_max_height),
+                'min_width': int(self.map_return_min_width),
+                'max_width': int(self.map_return_max_width),
+                'base_keyword': self.map_return_base_keyword,
+                'roi': copy.deepcopy(self.map_return_roi) if isinstance(self.map_return_roi, dict) else None,
+                'telegram_limit': int(self.map_return_telegram_limit),
+                'maps': {
+                    str(name): {
+                        'profile': str(cfg.get('profile', '') or ''),
+                        'waypoint_id': str(cfg.get('waypoint_id', '') or ''),
+                        'waypoint_name': str(cfg.get('waypoint_name', '') or ''),
+                        'command_profile': str(cfg.get('command_profile', '') or ''),
+                    }
+                    for name, cfg in self.map_return_registered_maps.items()
+                    if isinstance(name, str) and name
                 },
             },
             'teleport': {
