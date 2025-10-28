@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Optional
+from typing import Optional, Callable, Any
 import os
 import json
 from collections import deque
@@ -11,9 +11,9 @@ import cv2
 import numpy as np
 import mss
 import pygetwindow as gw
-from PyQt6.QtCore import Qt, QTimer, QThread, QRectF, pyqtSlot, pyqtSignal, QSettings, QSize
+from PyQt6.QtCore import Qt, QTimer, QThread, QRectF, pyqtSlot, pyqtSignal, QSettings, QSize, QAbstractNativeEventFilter
 from datetime import datetime
-from PyQt6.QtGui import QImage, QPixmap, QColor, QKeySequence, QPainter, QPen, QBrush
+from PyQt6.QtGui import QImage, QPixmap, QColor, QKeySequence, QPainter, QPen, QBrush, QShortcut
 from PyQt6.QtWidgets import (
     QApplication,
     QWidget,
@@ -51,6 +51,53 @@ except Exception:
     # 실행 환경에 따라 모듈이 없을 수 있으므로 안전 폴백
     def is_maple_window_foreground() -> bool:  # type: ignore
         return True
+
+if os.name == 'nt':
+    import ctypes
+    from ctypes import wintypes
+
+    WM_HOTKEY = 0x0312
+    VK_F7 = 0x76
+
+    class _CaptureHotkeyEventFilter(QAbstractNativeEventFilter):
+        def __init__(self, hotkey_id: int, callback: Callable[[], None]):
+            super().__init__()
+            self._hotkey_id = hotkey_id
+            self._callback = callback
+
+        def nativeEventFilter(self, event_type, message):
+            if event_type == "windows_generic_MSG":
+                msg = wintypes.MSG.from_address(int(message))
+                if msg.message == WM_HOTKEY and msg.wParam == self._hotkey_id:
+                    self._callback()
+            return False, 0
+
+    class _CaptureHotkeyManager:
+        _NEXT_ID = 2000
+
+        def __init__(self) -> None:
+            self.user32 = ctypes.windll.user32
+            self._hotkey_id: int | None = None
+
+        def register_hotkey(self) -> int:
+            if self._hotkey_id is not None:
+                self.unregister_hotkey()
+            hotkey_id = _CaptureHotkeyManager._NEXT_ID
+            _CaptureHotkeyManager._NEXT_ID += 1
+            if not self.user32.RegisterHotKey(None, hotkey_id, 0, VK_F7):
+                raise RuntimeError("RegisterHotKey failed for F7")
+            self._hotkey_id = hotkey_id
+            return hotkey_id
+
+        def unregister_hotkey(self) -> None:
+            if self._hotkey_id is not None:
+                try:
+                    self.user32.UnregisterHotKey(None, self._hotkey_id)
+                finally:
+                    self._hotkey_id = None
+else:
+    _CaptureHotkeyEventFilter = None  # type: ignore
+    _CaptureHotkeyManager = None  # type: ignore
 
 
 class LogListWidget(QListWidget):
@@ -209,6 +256,88 @@ class InfoListWidget(QListWidget):
             self.item(i).setSelected(i in selected_rows)
 
 
+class CaptureWorker(QThread):
+    """Mapleland 창 캡처를 UI 스레드와 분리해서 수행하는 작업 스레드."""
+
+    capture_finished = pyqtSignal(list)
+    capture_failed = pyqtSignal(str, str)
+    notice_emitted = pyqtSignal(str, str)
+
+    def __init__(
+        self,
+        *,
+        count: int,
+        interval_seconds: float,
+        delay_seconds: float,
+        window_title: str = "Mapleland",
+        prep_delay_ms: int = 150,
+        parent: QWidget | None = None,
+    ) -> None:
+        super().__init__(parent)
+        self._count = max(1, int(count))
+        self._interval_ms = max(0, int(interval_seconds * 1000))
+        self._delay_ms = max(0, int(delay_seconds * 1000))
+        self._window_title = window_title
+        self._prep_delay_ms = max(0, int(prep_delay_ms))
+
+    def run(self) -> None:
+        try:
+            target_windows = gw.getWindowsWithTitle(self._window_title)
+        except Exception as exc:
+            self.capture_failed.emit(f"게임 창 검색 실패: {exc}", "warning")
+            return
+
+        if not target_windows:
+            self.capture_failed.emit("메이플스토리 게임 창을 찾을 수 없습니다.", "warning")
+            return
+
+        target_window = target_windows[0]
+        try:
+            if target_window.isMinimized:
+                target_window.restore()
+                self.msleep(500)
+        except Exception:
+            pass
+
+        capture_region = {
+            "top": target_window.top,
+            "left": target_window.left,
+            "width": target_window.width,
+            "height": target_window.height,
+        }
+
+        if capture_region["width"] <= 0 or capture_region["height"] <= 0:
+            self.capture_failed.emit("게임 창의 크기가 유효하지 않습니다.", "warning")
+            return
+
+        if self._prep_delay_ms:
+            self.msleep(self._prep_delay_ms)
+
+        if self._delay_ms:
+            seconds = self._delay_ms / 1000.0
+            self.notice_emitted.emit(f"캡처 시작 전 {seconds:.1f}초 대기합니다.", "#90caf9")
+            self.msleep(self._delay_ms)
+
+        frames: list[np.ndarray] = []
+        try:
+            with mss.mss() as sct:
+                for idx in range(self._count):
+                    sct_img = sct.grab(capture_region)
+                    frame_rgb = cv2.cvtColor(np.array(sct_img), cv2.COLOR_BGRA2RGB)
+                    frames.append(frame_rgb)
+                    if self._count > 1 and self._interval_ms > 0 and idx < self._count - 1:
+                        self.msleep(self._interval_ms)
+        except Exception as exc:
+            self.capture_failed.emit(f"캡처 중 오류가 발생했습니다.\n{exc}", "critical")
+            return
+
+        if not frames:
+            self.capture_failed.emit("저장할 수 있는 캡처 이미지가 없습니다.", "warning")
+            return
+
+        self.capture_finished.emit(frames)
+
+
 class MonitoringTab(QWidget):
     """좌측: 맵 미니맵 미리보기, 우측: 사냥 미리보기, 하단: 로그 3분할."""
 
@@ -285,6 +414,11 @@ class MonitoringTab(QWidget):
         self._special_value_style_success = "color: #FFFFFF; background: #1e7f2f; border: 1px solid #2e9d45; padding: 2px 6px;"
         self._special_value_style_failure = "color: #FFFFFF; background: #aa2e25; border: 1px solid #d32f2f; padding: 2px 6px;"
         self._ocr_next_run_ts: Optional[float] = None
+        self._capture_worker: CaptureWorker | None = None
+        self._pending_capture_options: dict[str, float | int] | None = None
+        self._pending_capture_class: str | None = None
+        self._capture_hotkey_manager: Optional[Any] = None
+        self._capture_hotkey_filter: Optional[Any] = None
 
         self._init_ui()
         # AutoControl 실시간 로그와 동일한 Δ 및 구분선 처리를 위해 마지막 키로그 시각 저장
@@ -292,6 +426,7 @@ class MonitoringTab(QWidget):
         # 모니터링 미니맵: 캐릭터 중심 해제(고정 카메라)
         self._fixed_camera_center: tuple[float, float] | None = None
         self._fixed_camera_initialized: bool = False
+        self._setup_capture_hotkey()
 
     def _init_ui(self) -> None:
         root = QVBoxLayout(self)
@@ -767,6 +902,13 @@ class MonitoringTab(QWidget):
         self._info_timer.setInterval(500)
         self._info_timer.timeout.connect(self._tick_info_update)
         self._info_timer.start()
+
+        try:
+            self._capture_shortcut = QShortcut(QKeySequence(Qt.Key.Key_F7), self)
+            self._capture_shortcut.setContext(Qt.ShortcutContext.ApplicationShortcut)
+            self._capture_shortcut.activated.connect(self._on_click_capture_to_pending)
+        except Exception:
+            self._capture_shortcut = None
 
     # --- 탭 간 연결 ---
     def attach_tabs(self, map_tab, hunt_tab, auto_control_tab, learning_tab=None) -> None:
@@ -1269,6 +1411,10 @@ class MonitoringTab(QWidget):
             pass
 
     def _on_click_capture_to_pending(self) -> None:
+        if self._capture_worker and self._capture_worker.isRunning():
+            self._append_monitor_notice("이미 캡처 작업이 진행 중입니다. 잠시 후 다시 시도하세요.", "#ffb74d")
+            return
+
         if not self._learning_tab or not hasattr(self._learning_tab, 'save_captures_to_pending'):
             QMessageBox.warning(self, "캡처 저장", "학습 탭을 찾을 수 없어 저장할 수 없습니다.")
             return
@@ -1292,70 +1438,92 @@ class MonitoringTab(QWidget):
             delay_seconds = 0.0
         initial_class = prefs.get('initial_class') if isinstance(prefs, dict) else None
 
-        try:
-            QApplication.processEvents()
-            QThread.msleep(150)
-        except Exception:
-            pass
-
-        try:
-            target_windows = gw.getWindowsWithTitle('Mapleland')
-        except Exception as exc:
-            QMessageBox.warning(self, "캡처 저장", f"게임 창 검색 실패: {exc}")
-            return
-
-        if not target_windows:
-            QMessageBox.warning(self, "캡처 저장", "메이플스토리 게임 창을 찾을 수 없습니다.")
-            return
-
-        target_window = target_windows[0]
-        try:
-            if target_window.isMinimized:
-                target_window.restore()
-                QThread.msleep(500)
-        except Exception:
-            pass
-
-        capture_region = {
-            'top': target_window.top,
-            'left': target_window.left,
-            'width': target_window.width,
-            'height': target_window.height,
+        self._pending_capture_options = {
+            'delay_seconds': float(delay_seconds),
+            'count': int(count),
+            'interval_seconds': float(interval),
         }
+        self._pending_capture_class = initial_class if isinstance(initial_class, str) else None
 
-        if capture_region['width'] <= 0 or capture_region['height'] <= 0:
-            QMessageBox.warning(self, "캡처 저장", "게임 창의 크기가 유효하지 않습니다.")
-            return
+        if hasattr(self, 'capture_to_pending_btn'):
+            try:
+                self.capture_to_pending_btn.setEnabled(False)
+            except Exception:
+                pass
 
-        if delay_seconds > 0:
-            self._append_monitor_notice(f"캡처 시작 전 {delay_seconds:.1f}초 대기합니다.", "#90caf9")
-            QThread.msleep(int(delay_seconds * 1000))
+        worker = CaptureWorker(
+            count=count,
+            interval_seconds=interval,
+            delay_seconds=delay_seconds,
+            prep_delay_ms=150,
+            parent=self,
+        )
+        worker.notice_emitted.connect(self._on_capture_worker_notice)
+        worker.capture_failed.connect(self._on_capture_worker_failed)
+        worker.capture_finished.connect(self._on_capture_worker_finished)
+        worker.finished.connect(self._on_capture_thread_finished)
+        worker.finished.connect(worker.deleteLater)
+        self._capture_worker = worker
+        worker.start()
+
+    # --- 캡처 작업 비동기 처리 ---
+    def _restore_capture_controls(self) -> None:
+        try:
+            if hasattr(self, 'capture_to_pending_btn'):
+                busy = self._capture_worker is not None and self._capture_worker.isRunning()
+                self.capture_to_pending_btn.setEnabled(self._learning_tab is not None and not busy)
+        except Exception:
+            pass
+
+    def _on_capture_worker_notice(self, message: str, color: str) -> None:
+        self._append_monitor_notice(message, color)
+
+    def _on_capture_worker_failed(self, message: str, level: str) -> None:
+        if level == "critical":
+            QMessageBox.critical(self, "캡처 저장", message)
+        else:
+            QMessageBox.warning(self, "캡처 저장", message)
+        self._pending_capture_options = None
+        self._pending_capture_class = None
+        self._restore_capture_controls()
+
+    def _on_capture_worker_finished(self, frames: list) -> None:
+        options = dict(self._pending_capture_options or {})
+        initial_class = self._pending_capture_class if isinstance(self._pending_capture_class, str) else None
 
         pixmaps: list[QPixmap] = []
-        try:
-            with mss.mss() as sct:
-                for idx in range(count):
-                    sct_img = sct.grab(capture_region)
-                    frame_rgb = cv2.cvtColor(np.array(sct_img), cv2.COLOR_BGRA2RGB)
-                    h, w, ch = frame_rgb.shape
-                    bytes_per_line = ch * w
-                    q_image = QImage(frame_rgb.data, w, h, bytes_per_line, QImage.Format.Format_RGB888)
-                    pixmaps.append(QPixmap.fromImage(q_image))
-                    if count > 1 and interval > 0 and idx < count - 1:
-                        QThread.msleep(int(interval * 1000))
-        except Exception as exc:
-            QMessageBox.critical(self, "캡처 저장", f"캡처 중 오류가 발생했습니다.\n{exc}")
-            return
+        for frame in frames:
+            if not isinstance(frame, np.ndarray):
+                continue
+            if frame.ndim != 3 or frame.shape[2] != 3:
+                continue
+            arr = np.ascontiguousarray(frame)
+            h, w, ch = arr.shape
+            if h <= 0 or w <= 0:
+                continue
+            bytes_per_line = ch * w
+            q_image = QImage(arr.data, w, h, bytes_per_line, QImage.Format.Format_RGB888).copy()
+            pixmaps.append(QPixmap.fromImage(q_image))
 
         if not pixmaps:
             QMessageBox.warning(self, "캡처 저장", "저장할 수 있는 캡처 이미지가 없습니다.")
+            self._pending_capture_options = None
+            self._pending_capture_class = None
+            self._restore_capture_controls()
             return
 
         capture_options = {
-            'delay_seconds': delay_seconds,
-            'count': count,
-            'interval_seconds': interval,
+            'delay_seconds': float(options.get('delay_seconds', 0.0)),
+            'count': int(options.get('count', len(pixmaps))),
+            'interval_seconds': float(options.get('interval_seconds', 0.0)),
         }
+
+        if not self._learning_tab or not hasattr(self._learning_tab, 'save_captures_to_pending'):
+            QMessageBox.warning(self, "캡처 저장", "학습 탭을 찾을 수 없어 저장할 수 없습니다.")
+            self._pending_capture_options = None
+            self._pending_capture_class = None
+            self._restore_capture_controls()
+            return
 
         try:
             entries = self._learning_tab.save_captures_to_pending(
@@ -1366,12 +1534,65 @@ class MonitoringTab(QWidget):
             )
         except Exception as exc:
             QMessageBox.critical(self, "캡처 저장", f"저장 공간에 추가하지 못했습니다.\n{exc}")
+            self._pending_capture_options = None
+            self._pending_capture_class = None
+            self._restore_capture_controls()
             return
 
         if entries:
             self._append_monitor_notice(f"저장된 캡처 {len(entries)}개를 보관함에 추가했습니다.", "#4caf50")
         else:
             QMessageBox.warning(self, "캡처 저장", "유효한 캡처를 저장하지 못했습니다.")
+
+        self._pending_capture_options = None
+        self._pending_capture_class = None
+        self._restore_capture_controls()
+
+    def _on_capture_thread_finished(self) -> None:
+        worker = self.sender()
+        if worker is self._capture_worker:
+            self._capture_worker = None
+            self._restore_capture_controls()
+
+    def _setup_capture_hotkey(self) -> None:
+        if _CaptureHotkeyManager is None or _CaptureHotkeyEventFilter is None:
+            return
+        if self._capture_hotkey_manager or self._capture_hotkey_filter:
+            return
+        app = QApplication.instance()
+        if app is None:
+            return
+        try:
+            manager = _CaptureHotkeyManager()
+            hotkey_id = manager.register_hotkey()
+            def _trigger() -> None:
+                QTimer.singleShot(0, self._handle_global_capture_trigger)
+            event_filter = _CaptureHotkeyEventFilter(hotkey_id, _trigger)
+            app.installNativeEventFilter(event_filter)
+            self._capture_hotkey_manager = manager
+            self._capture_hotkey_filter = event_filter
+            self._append_monitor_notice("F7 전역 단축키를 등록했습니다.", "#90caf9")
+        except Exception as exc:
+            self._append_monitor_notice(f"경고: F7 전역 단축키 등록에 실패했습니다. ({exc})", "#ffb74d")
+            self._teardown_capture_hotkey()
+
+    def _teardown_capture_hotkey(self) -> None:
+        app = QApplication.instance()
+        if self._capture_hotkey_filter and app:
+            try:
+                app.removeNativeEventFilter(self._capture_hotkey_filter)
+            except Exception:
+                pass
+        if self._capture_hotkey_manager:
+            try:
+                self._capture_hotkey_manager.unregister_hotkey()
+            except Exception:
+                pass
+        self._capture_hotkey_filter = None
+        self._capture_hotkey_manager = None
+
+    def _handle_global_capture_trigger(self) -> None:
+        self._on_click_capture_to_pending()
 
     # --- 상태 모니터 스냅샷 수신 ---
     @pyqtSlot(dict)
@@ -2597,6 +2818,7 @@ class MonitoringTab(QWidget):
                 pass
 
     def cleanup_on_close(self) -> None:
+        self._teardown_capture_hotkey()
         self._stop_map_preview()
         # 스플리터 위치 저장
         try:
