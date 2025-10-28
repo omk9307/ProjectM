@@ -197,6 +197,9 @@ NAMEPLATE_TRACK_BRUSH = QBrush(QColor(255, 32, 32, 40))
 NAMEPLATE_DEADZONE_EDGE = QPen(QColor(20, 20, 20, 230), 3, Qt.PenStyle.SolidLine)
 NAMEPLATE_DEADZONE_SIZE = 100  # 사망 모션 무시 영역 크기(px)
 LOG_LINE_LIMIT = 200
+MAP_RETURN_RECOVERY_INTERVAL_MS = 2000
+MAP_RETURN_RECOVERY_MAX_ATTEMPTS = 5
+MAP_RETURN_RETRY_REQUIRED_STREAK = 2
 
 FORBIDDEN_GLYPH_MARGIN_PX = 80
 FORBIDDEN_GLYPH_VISUAL_HOLD_SEC = 5.0
@@ -4117,7 +4120,7 @@ class HuntTab(QWidget):
             if self.map_return_timer.isActive():
                 self.map_return_timer.stop()
             return
-        if self.map_return_enabled and self.map_return_roi and not self._map_return_recovering:
+        if self._map_return_should_poll():
             interval_ms = max(500, int(self.map_return_interval_sec * 1000))
             if self.map_return_timer.interval() != interval_ms:
                 self.map_return_timer.setInterval(interval_ms)
@@ -4131,9 +4134,55 @@ class HuntTab(QWidget):
         # 후속 단계에서 설정 저장/상태 반영을 확장
         self._save_settings()
 
+    def _map_return_is_map_detection_active(self) -> bool:
+        map_tab = getattr(self, 'map_tab', None)
+        if not map_tab:
+            return False
+        try:
+            running_attr = getattr(map_tab, 'is_detection_running', False)
+            if callable(running_attr):
+                return bool(running_attr())
+            return bool(running_attr)
+        except Exception:
+            return False
+
+    def _map_return_should_poll(self) -> bool:
+        return (
+            bool(self.map_return_enabled)
+            and isinstance(self.map_return_roi, dict)
+            and not self._map_return_recovering
+            and self._map_return_is_map_detection_active()
+        )
+
+    def _map_return_cancel_due_to_map_inactive(self, log_message: Optional[str] = None) -> None:
+        try:
+            if self.map_return_confirm_timer.isActive():
+                self.map_return_confirm_timer.stop()
+        except Exception:
+            pass
+        try:
+            if self.map_return_recovery_timer.isActive():
+                self.map_return_recovery_timer.stop()
+        except Exception:
+            pass
+        if getattr(self, '_map_return_pending', None):
+            self._clear_map_return_pending(restart_timer=False)
+        if self._map_return_recovering:
+            self._map_return_finish_wait_operation(reason='map_detection_stopped', resume_map_detection=False)
+            self._map_return_context = {}
+            self._map_return_active_map = None
+            self._map_return_recovering = False
+            self._map_return_detection_was_active = False
+        self._map_return_last_detected = ""
+        if log_message:
+            self.append_log(log_message, "debug")
+        self._update_map_return_timer_state()
+
     def _handle_map_return_tick(self) -> None:
         """맵 복귀 모드 OCR 주기 콜백 (구현 예정)."""
-        if not self.map_return_enabled or self._map_return_recovering:
+        if not self._map_return_should_poll():
+            if self.map_return_enabled and not self._map_return_is_map_detection_active():
+                self._map_return_cancel_due_to_map_inactive("[맵 복귀] 맵 탐지가 중단되어 감시를 일시 중단합니다.")
             return
         if self._map_return_pending:
             return
@@ -4250,6 +4299,10 @@ class HuntTab(QWidget):
         excluded_hits: Optional[list[str]] = None,
         initial_attempts: int = 0,
     ) -> None:
+        if not self._map_return_is_map_detection_active():
+            self._map_return_cancel_due_to_map_inactive("[맵 복귀] 맵 탐지가 중단되어 확인을 건너뜁니다.")
+            return
+
         try:
             self.map_return_confirm_timer.stop()
         except Exception:
@@ -4272,6 +4325,10 @@ class HuntTab(QWidget):
             self.append_log(f"[맵 복귀] 다른 맵 추정 '{sanitized_text}' → 확인 진행", "debug")
 
     def _handle_map_return_confirm_tick(self) -> None:
+        if not self._map_return_is_map_detection_active():
+            self._map_return_cancel_due_to_map_inactive("[맵 복귀] 맵 탐지가 중단되어 확인을 종료합니다.")
+            return
+
         pending = getattr(self, '_map_return_pending', None)
         if not pending:
             self._update_map_return_timer_state()
@@ -4562,7 +4619,26 @@ class HuntTab(QWidget):
         if not waypoint_name:
             waypoint_name = self._lookup_map_return_waypoint_name(profile, waypoint_id)
 
-        if not bool(getattr(map_tab, 'is_detection_running', False)):
+        map_detection_running = bool(getattr(map_tab, 'is_detection_running', False))
+        if not map_detection_running and base_state.get('map_detection_was_running', False):
+            self.append_log("[맵 복귀] 맵 탐지를 다시 시작합니다.", "debug")
+            try:
+                if hasattr(map_tab, 'suppress_hunt_sync_once'):
+                    map_tab.suppress_hunt_sync_once('map_return_restart')
+            except Exception:
+                pass
+            try:
+                map_tab.toggle_anchor_detection(True)
+            except Exception as exc:
+                message = f"[맵 복귀] 맵 탐지를 재시작하지 못했습니다: {exc}"
+                self.append_log(message, "warn")
+                self._map_return_send_telegram(message, frame_bgr)
+                self._map_return_recovering = False
+                self._update_map_return_timer_state()
+                return
+            map_detection_running = bool(getattr(map_tab, 'is_detection_running', False))
+
+        if not map_detection_running:
             message = "[맵 복귀] 맵 탐지가 중지되어 있어 복구를 실행할 수 없습니다."
             self.append_log(message, "warn")
             self._map_return_send_telegram(message, frame_bgr)
@@ -4604,6 +4680,11 @@ class HuntTab(QWidget):
             previous_sync = bool(getattr(self, '_syncing_with_map', False))
             self._syncing_with_map = True
             try:
+                if hasattr(map_tab, 'suppress_hunt_sync_once'):
+                    try:
+                        map_tab.suppress_hunt_sync_once('map_return_start')
+                    except Exception:
+                        pass
                 self.force_stop_detection(reason='map_return_start', preserve_forbidden=True)
             finally:
                 self._syncing_with_map = previous_sync
@@ -4654,12 +4735,18 @@ class HuntTab(QWidget):
         else:
             self.append_log(f"[맵 복귀] '{context.get('target_map', '')}' 웨이포인트 도착 (명령 미지정)", "info")
         context['check_attempt'] = 0
+        context['other_map_candidate'] = None
+        context['other_map_streak'] = 0
         self._map_return_context = context
         self.map_return_recovery_timer.stop()
-        self.map_return_recovery_timer.setInterval(1000)
+        self.map_return_recovery_timer.setInterval(MAP_RETURN_RECOVERY_INTERVAL_MS)
         self.map_return_recovery_timer.start()
 
     def _handle_map_return_recovery_check(self) -> None:
+        if not self._map_return_is_map_detection_active():
+            self._map_return_cancel_due_to_map_inactive("[맵 복귀] 맵 탐지가 중단되어 복구 절차를 정리합니다.")
+            return
+
         if not self._map_return_recovering:
             self.map_return_recovery_timer.stop()
             return
@@ -4672,7 +4759,7 @@ class HuntTab(QWidget):
         if frame is None:
             detected_text = ""
             words: list = []
-            self.append_log(f"[맵 복귀] OCR 캡처 실패 ({attempt}/3)", "warn")
+            self.append_log(f"[맵 복귀] OCR 캡처 실패 ({attempt}/{MAP_RETURN_RECOVERY_MAX_ATTEMPTS})", "warn")
         else:
             words = self._perform_map_return_ocr(frame)
             detected_text = self._combine_map_return_words(words)
@@ -4695,19 +4782,55 @@ class HuntTab(QWidget):
             )
             self.append_log(success_msg, "info")
             self._map_return_send_telegram(success_msg, frame)
+            context['other_map_candidate'] = None
+            context['other_map_streak'] = 0
+            self._map_return_context = context
             self._finalize_map_return(True, detected_text=sanitized_text, frame_bgr=frame, reason='success')
             return
 
-        if attempt < 3:
-            self.append_log(f"[맵 복귀] 복귀 확인 중 ({attempt}/3) - 감지: '{sanitized_text or '(없음)'}'", "debug")
+        matched_map = self._match_map_return_keyword(normalized)
+        if matched_map:
+            map_name, map_cfg = matched_map
+            prev_candidate = context.get('other_map_candidate')
+            if prev_candidate == map_name:
+                streak = int(context.get('other_map_streak', 0)) + 1
+            else:
+                streak = 1
+            context['other_map_candidate'] = map_name
+            context['other_map_streak'] = streak
+            self._map_return_context = context
+            if streak >= MAP_RETURN_RETRY_REQUIRED_STREAK:
+                self.map_return_recovery_timer.stop()
+                self.append_log(
+                    f"[맵 복귀] '{map_name}' 키워드가 연속 {streak}회 감지되어 복구를 재시도합니다.",
+                    "warn",
+                )
+                self._restart_map_return_flow(
+                    map_name,
+                    map_cfg,
+                    frame,
+                    sanitized_text,
+                    words,
+                    excluded_hits=excluded_hits,
+                )
+                return
+        else:
+            context['other_map_candidate'] = None
+            context['other_map_streak'] = 0
+            self._map_return_context = context
+
+        if attempt < MAP_RETURN_RECOVERY_MAX_ATTEMPTS:
+            self.append_log(
+                f"[맵 복귀] 복귀 확인 중 ({attempt}/{MAP_RETURN_RECOVERY_MAX_ATTEMPTS}) - 감지: '{sanitized_text or '(없음)'}'",
+                "debug",
+            )
             return
 
         self.map_return_recovery_timer.stop()
-        matched = self._match_map_return_keyword(normalized)
-        if matched:
-            retry_msg = f"[맵 복귀] '{matched[0]}' 감지 → 복구 재시도"
+        if matched_map:
+            retry_msg = f"[맵 복귀] '{matched_map[0]}' 감지 → 복구 재시도"
             self.append_log(retry_msg, "warn")
-            self._restart_map_return_flow(matched[0], matched[1], frame, sanitized_text, words, excluded_hits=excluded_hits)
+            self._restart_map_return_flow(matched_map[0], matched_map[1], frame, sanitized_text, words, excluded_hits=excluded_hits)
             return
 
         failure_msg = f"[맵 복귀] 등록되지 않은 맵 감지: {sanitized_text or '(없음)'} → 전체 중지"
@@ -9837,15 +9960,30 @@ class HuntTab(QWidget):
         )
 
     def _handle_map_detection_status_changed(self, running: bool) -> None:
-        if not self.map_link_enabled or self._syncing_with_map:
+        if not self.map_link_enabled:
+            self._map_return_cancel_due_to_map_inactive("[맵 복귀] 맵 링크가 비활성이라 감시를 멈춥니다.")
+            return
+        if self._map_return_recovering:
+            if not running:
+                self._map_return_cancel_due_to_map_inactive("[맵 복귀] 맵 탐지가 중단되어 복구 절차를 정리합니다.")
+            else:
+                self._update_map_return_timer_state()
+            return
+        if self._syncing_with_map:
+            self._update_map_return_timer_state()
             return
         if not hasattr(self, 'detect_btn'):
+            self._update_map_return_timer_state()
             return
         try:
             hunt_running = bool(self.detect_btn.isChecked())
         except Exception:
             hunt_running = False
         if running == hunt_running:
+            if not running:
+                self._map_return_cancel_due_to_map_inactive("[맵 복귀] 맵 탐지가 중단되어 감시를 중지합니다.")
+            else:
+                self._update_map_return_timer_state()
             return
         self._syncing_with_map = True
         try:
@@ -9859,6 +9997,10 @@ class HuntTab(QWidget):
                 self._toggle_detection(False)
         finally:
             self._syncing_with_map = False
+        if not running:
+            self._map_return_cancel_due_to_map_inactive("[맵 복귀] 맵 탐지가 중단되어 감시를 중지합니다.")
+        else:
+            self._update_map_return_timer_state()
 
     def _sync_detection_state_with_map(self) -> None:
         if not self.map_link_enabled or not self.map_tab:
@@ -14414,6 +14556,10 @@ class HuntTab(QWidget):
         if hasattr(self, 'map_return_base_keywords_line'):
             blocker = QSignalBlocker(self.map_return_base_keywords_line)
             self.map_return_base_keywords_line.setText(self.map_return_base_keywords)
+            del blocker
+        if hasattr(self, 'map_return_exclude_line'):
+            blocker = QSignalBlocker(self.map_return_exclude_line)
+            self.map_return_exclude_line.setText(self.map_return_exclude_keywords)
             del blocker
         self._update_map_return_roi_summary()
         self._update_map_return_controls()

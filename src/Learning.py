@@ -31,6 +31,7 @@ import hashlib
 import random
 import requests
 import copy
+import threading
 from datetime import datetime
 from pathlib import Path
 from collections import OrderedDict
@@ -55,6 +56,11 @@ from PyQt6.QtGui import (
     QDropEvent, QGuiApplication, QIntValidator, QDoubleValidator, QFont, QDesktopServices
 )
 from PyQt6.QtCore import Qt, QThread, pyqtSignal, QSize, QRect, QPoint, QPointF, QObject, QMimeData, QTimer, QUrl
+try:
+    from PyQt6.QtMultimedia import QAudioOutput, QMediaPlayer
+except Exception:
+    QAudioOutput = None  # type: ignore[assignment]
+    QMediaPlayer = None  # type: ignore[assignment]
 
 from capture_manager import get_capture_manager
 
@@ -1342,6 +1348,21 @@ class BaseCanvasLabel(QLabel):
         scaled = self._scaled_pixmap_size()
         return scaled if scaled.isValid() else super().minimumSizeHint()
 
+    def _to_image_point(self, pos: QPoint | QPointF) -> QPoint:
+        """현재 확대 배율을 고려해 위젯 좌표를 원본 이미지 좌표로 변환합니다."""
+        factor = self.zoom_factor if self.zoom_factor > 0 else 1.0
+        if isinstance(pos, QPointF):
+            x = pos.x()
+            y = pos.y()
+        else:
+            x = float(pos.x())
+            y = float(pos.y())
+        img_w = max(0, self.pixmap.width() - 1)
+        img_h = max(0, self.pixmap.height() - 1)
+        mapped_x = max(0, min(img_w, int(round(x / factor))))
+        mapped_y = max(0, min(img_h, int(round(y / factor))))
+        return QPoint(mapped_x, mapped_y)
+
     def set_zoom(self, factor, focal_point: QPoint | QPointF | None = None):
         previous_factor = self.zoom_factor
         factor = max(self._min_zoom, min(self._max_zoom, factor))
@@ -1366,6 +1387,12 @@ class BaseCanvasLabel(QLabel):
             self.setFixedSize(self._scaled_pixmap_size())
         self.updateGeometry()
         self.update()
+
+        if hasattr(self, "_on_zoom_changed"):
+            try:
+                self._on_zoom_changed()
+            except Exception:
+                pass
 
         if focal_point is None:
             return
@@ -1470,20 +1497,7 @@ class BaseCanvasLabel(QLabel):
             self.update()
 
     def mouseReleaseEvent(self, event):
-        if self._crop_dragging and event.button() == Qt.MouseButton.LeftButton:
-            self._crop_dragging = False
-            keep_rect = QRect(self._crop_preview_rect)
-            self._crop_active_edges = None
-            if keep_rect.isValid() and keep_rect.width() > 0 and keep_rect.height() > 0:
-                orig_w = self.pixmap.width()
-                orig_h = self.pixmap.height()
-                if keep_rect.width() < orig_w or keep_rect.height() < orig_h:
-                    self.parent_dialog.apply_crop_rect(keep_rect)
-                else:
-                    self.reset_crop_preview()
-            else:
-                self.reset_crop_preview()
-            self._update_cursor_for_edges(self._detect_edges(self._to_image_point(event.pos())))
+        if self._handle_crop_mouse_release(event):
             return
 
         if event.button() == Qt.MouseButton.MiddleButton:
@@ -1507,17 +1521,231 @@ class BaseCanvasLabel(QLabel):
             self.hovered_polygon_idx = -1
             self.update()
 
-class CanvasLabel(BaseCanvasLabel):
+
+class CropMixin:
+    """테두리를 드래그해 실제 픽셀을 잘라내는 공통 로직."""
+
+    EDGE_MARGIN = 8
+    MIN_CROP_DIMENSION = 20
+
+    def __init__(self, *args, **kwargs):
+        self._init_crop_state()
+        super().__init__(*args, **kwargs)
+
+    def _init_crop_state(self):
+        self._crop_active_edges: dict[str, bool] | None = None
+        self._crop_dragging = False
+        self._crop_preview_rect = QRect()
+        self._crop_start_rect = QRect()
+        self._hover_edges: dict[str, bool] | None = None
+
+    def _handle_crop_mouse_press(self, event) -> bool:
+        if event.button() == Qt.MouseButton.LeftButton:
+            image_point = self._to_image_point(event.pos())
+            edges = self._detect_edges(image_point)
+            if edges:
+                self._start_crop_drag(edges, image_point)
+                return True
+        return False
+
+    def _handle_crop_mouse_move(self, event) -> bool:
+        if self._crop_dragging:
+            self._update_crop_preview(self._to_image_point(event.pos()))
+            self.update()
+            return True
+
+        image_point = self._to_image_point(event.pos())
+        self._hover_edges = self._detect_edges(image_point)
+        self._update_cursor_for_edges(self._hover_edges)
+        return False
+
+    def _handle_crop_mouse_release(self, event) -> bool:
+        if event.button() != Qt.MouseButton.LeftButton or not self._crop_dragging:
+            return False
+
+        self._crop_dragging = False
+        keep_rect = QRect(self._crop_preview_rect)
+        self._crop_active_edges = None
+        if keep_rect.isValid() and keep_rect.width() > 0 and keep_rect.height() > 0:
+            orig_w = self.pixmap.width()
+            orig_h = self.pixmap.height()
+            if keep_rect.width() < orig_w or keep_rect.height() < orig_h:
+                self._finalize_crop_rect(keep_rect)
+            else:
+                self.reset_crop_preview()
+        else:
+            self.reset_crop_preview()
+
+        try:
+            image_point = self._to_image_point(event.pos())
+        except Exception:
+            image_point = QPoint()
+        self._update_cursor_for_edges(self._detect_edges(image_point))
+        return True
+
+    def _detect_edges(self, image_point: QPoint) -> dict[str, bool] | None:
+        pixmap = getattr(self, 'pixmap', None)
+        if pixmap is None or pixmap.isNull():
+            return None
+        w = pixmap.width()
+        h = pixmap.height()
+        if w <= 0 or h <= 0:
+            return None
+
+        margin = self.EDGE_MARGIN
+        edges = {
+            'left': image_point.x() <= margin,
+            'right': image_point.x() >= (w - 1 - margin),
+            'top': image_point.y() <= margin,
+            'bottom': image_point.y() >= (h - 1 - margin),
+        }
+        return edges if any(edges.values()) else None
+
+    def _update_cursor_for_edges(self, edges: dict[str, bool] | None) -> None:
+        if getattr(self, 'panning', False) or self._crop_dragging:
+            return
+        if edges:
+            horizontal = edges.get('left') or edges.get('right')
+            vertical = edges.get('top') or edges.get('bottom')
+            if horizontal and vertical:
+                if (edges.get('left') and edges.get('top')) or (edges.get('right') and edges.get('bottom')):
+                    self.setCursor(Qt.CursorShape.SizeFDiagCursor)
+                else:
+                    self.setCursor(Qt.CursorShape.SizeBDiagCursor)
+            elif horizontal:
+                self.setCursor(Qt.CursorShape.SizeHorCursor)
+            elif vertical:
+                self.setCursor(Qt.CursorShape.SizeVerCursor)
+            return
+
+        is_change_mode = getattr(getattr(self, 'parent_dialog', None), 'is_change_mode', False)
+        self.setCursor(Qt.CursorShape.PointingHandCursor if is_change_mode else Qt.CursorShape.CrossCursor)
+
+    def _start_crop_drag(self, edges: dict[str, bool], image_point: QPoint) -> None:
+        self._crop_dragging = True
+        self._crop_active_edges = edges
+        pixmap = getattr(self, 'pixmap', None)
+        if pixmap is None or pixmap.isNull():
+            self._crop_preview_rect = QRect()
+            return
+        self._crop_start_rect = QRect(0, 0, pixmap.width(), pixmap.height())
+        self._crop_preview_rect = QRect(self._crop_start_rect)
+        self._update_cursor_for_edges(edges)
+        self._update_crop_preview(image_point)
+
+    def _update_crop_preview(self, image_point: QPoint) -> None:
+        pixmap = getattr(self, 'pixmap', None)
+        if pixmap is None or pixmap.isNull() or not self._crop_active_edges:
+            return
+
+        w = pixmap.width()
+        h = pixmap.height()
+        if w <= 0 or h <= 0:
+            return
+
+        left, right = 0, w - 1
+        top, bottom = 0, h - 1
+        min_width = max(1, min(w, self.MIN_CROP_DIMENSION))
+        min_height = max(1, min(h, self.MIN_CROP_DIMENSION))
+
+        if self._crop_active_edges.get('left'):
+            new_left = max(left, min(int(image_point.x()), right - (min_width - 1)))
+            left = new_left
+
+        if self._crop_active_edges.get('right'):
+            new_right = min(right, max(int(image_point.x()), left + (min_width - 1)))
+            right = new_right
+
+        if self._crop_active_edges.get('top'):
+            new_top = max(top, min(int(image_point.y()), bottom - (min_height - 1)))
+            top = new_top
+
+        if self._crop_active_edges.get('bottom'):
+            new_bottom = min(bottom, max(int(image_point.y()), top + (min_height - 1)))
+            bottom = new_bottom
+
+        width = max(1, right - left + 1)
+        height = max(1, bottom - top + 1)
+        self._crop_preview_rect = QRect(left, top, width, height)
+
+    def _paint_crop_preview(self, painter: QPainter) -> None:
+        if self._crop_preview_rect.isNull():
+            return
+        pixmap = getattr(self, 'pixmap', None)
+        if pixmap is None or pixmap.isNull():
+            return
+        factor = self.zoom_factor if getattr(self, 'zoom_factor', 0) > 0 else 1.0
+        full_rect = self._rect_to_scaled(QRect(0, 0, pixmap.width(), pixmap.height()), factor)
+        keep_rect = self._rect_to_scaled(self._crop_preview_rect, factor)
+
+        painter.save()
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(QBrush(QColor(0, 0, 0, 100)))
+        if keep_rect.left() > 0:
+            painter.drawRect(0, 0, keep_rect.left(), full_rect.height())
+        right_start = keep_rect.right() + 1
+        if right_start < full_rect.width():
+            painter.drawRect(right_start, 0, full_rect.width() - right_start, full_rect.height())
+        if keep_rect.top() > 0:
+            painter.drawRect(keep_rect.left(), 0, keep_rect.width(), keep_rect.top())
+        bottom_start = keep_rect.bottom() + 1
+        if bottom_start < full_rect.height():
+            painter.drawRect(keep_rect.left(), bottom_start, keep_rect.width(), full_rect.height() - bottom_start)
+        painter.setPen(QPen(QColor(255, 255, 0, 220), 1, Qt.PenStyle.DashLine))
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.drawRect(keep_rect)
+        painter.restore()
+
+    def _rect_to_scaled(self, rect: QRect, factor: float) -> QRect:
+        left = int(round(rect.left() * factor))
+        top = int(round(rect.top() * factor))
+        width = max(1, int(round(rect.width() * factor)))
+        height = max(1, int(round(rect.height() * factor)))
+        return QRect(left, top, width, height)
+
+    def reset_crop_preview(self, *, update_display: bool = True) -> None:
+        self._crop_preview_rect = QRect()
+        self._crop_active_edges = None
+        self._hover_edges = None
+        if update_display:
+            self.update()
+
+    def cancel_crop_drag(self) -> bool:
+        if self._crop_dragging or not self._crop_preview_rect.isNull():
+            self._crop_dragging = False
+            self.reset_crop_preview()
+            self._update_cursor_for_edges(None)
+            return True
+        return False
+
+    def is_crop_drag_active(self) -> bool:
+        return self._crop_dragging
+
+    def leaveEvent(self, event):  # noqa: N802
+        super().leaveEvent(event)
+        if not self._crop_dragging:
+            self._hover_edges = None
+            self._update_cursor_for_edges(None)
+
+    def _on_zoom_changed(self):
+        if not self._crop_dragging:
+            self.reset_crop_preview(update_display=False)
+            self._update_cursor_for_edges(None)
+
+    def _finalize_crop_rect(self, keep_rect: QRect) -> None:
+        parent = getattr(self, 'parent_dialog', None)
+        if parent and hasattr(parent, 'apply_crop_rect'):
+            parent.apply_crop_rect(keep_rect)
+        else:
+            self.reset_crop_preview()
+
+class CanvasLabel(CropMixin, BaseCanvasLabel):
     """수동 다각형 편집기 전용 캔버스.
 
     변경점:
     - 좌클릭 다각형(합집합 후보)과 우클릭 다각형(차집합 후보)을 분리해 동시 표시/편집.
     - AI 편집에서 전달된 임시 마스크(pending_mask) 오버레이 표시.
     """
-
-    EDGE_MARGIN = 8
-    MIN_CROP_DIMENSION = 20
-
     def __init__(self, pixmap, initial_polygons=None, parent_dialog=None):
         super().__init__(pixmap, parent_dialog)
         self.polygons = initial_polygons if initial_polygons else []
@@ -1526,12 +1754,6 @@ class CanvasLabel(BaseCanvasLabel):
         self.current_pos = QPoint()
         self._last_pressed_button = None  # 최근 포인트 추가 버튼 추적
         self.pending_mask = None  # AI 편집에서 넘어온 임시 마스크
-        # 이미지 테두리 크롭 상태
-        self._crop_active_edges: dict[str, bool] | None = None
-        self._crop_dragging = False
-        self._crop_preview_rect = QRect()
-        self._crop_start_rect = QRect()
-        self._hover_edges: dict[str, bool] | None = None
 
     def paintEvent(self, event):
         super().paintEvent(event)
@@ -1589,12 +1811,8 @@ class CanvasLabel(BaseCanvasLabel):
             self._paint_crop_preview(painter)
 
     def mousePressEvent(self, event):
-        if event.button() == Qt.MouseButton.LeftButton:
-            image_point = self._to_image_point(event.pos())
-            edges = self._detect_edges(image_point)
-            if edges:
-                self._start_crop_drag(edges, image_point)
-                return
+        if self._handle_crop_mouse_press(event):
+            return
 
         if self.parent_dialog.is_change_mode and event.button() == Qt.MouseButton.LeftButton:
             if self.change_hovered_polygon_class():
@@ -1624,9 +1842,7 @@ class CanvasLabel(BaseCanvasLabel):
             self.setCursor(Qt.CursorShape.ClosedHandCursor)
 
     def mouseMoveEvent(self, event):
-        if self._crop_dragging:
-            self._update_crop_preview(self._to_image_point(event.pos()))
-            self.update()
+        if self._handle_crop_mouse_move(event):
             return
 
         super().mouseMoveEvent(event)
@@ -1695,21 +1911,6 @@ class CanvasLabel(BaseCanvasLabel):
             self._pending_qimage = None
             self._pending_scaled = None
             self._pending_scaled_dirty = True
-
-    def _to_image_point(self, pos: QPoint | QPointF) -> QPoint:
-        """위젯 좌표를 원본 이미지 좌표로 변환합니다."""
-        factor = self.zoom_factor if self.zoom_factor > 0 else 1.0
-        if isinstance(pos, QPointF):
-            x = pos.x()
-            y = pos.y()
-        else:
-            x = float(pos.x())
-            y = float(pos.y())
-        img_w = max(0, self.pixmap.width() - 1)
-        img_h = max(0, self.pixmap.height() - 1)
-        mapped_x = max(0, min(img_w, int(round(x / factor))))
-        mapped_y = max(0, min(img_h, int(round(y / factor))))
-        return QPoint(mapped_x, mapped_y)
 
     def _detect_edges(self, image_point: QPoint) -> dict[str, bool] | None:
         if self.pixmap.isNull():
@@ -1881,6 +2082,7 @@ class PolygonAnnotationEditor(QDialog):
         self.setWindowTitle('수동 편집기 (변경:C, 지정삭제:D, 완성취소:Z, 초기화:R)')
         self.learning_tab = parent # LearningTab 인스턴스 저장
         self.is_change_mode = False
+        self._current_pixmap = pixmap
         self.canvas = CanvasLabel(pixmap, initial_polygons, self)
         self.canvas.setToolTip("이미지 테두리를 드래그하면 여백을 줄일 수 있습니다.")
         self.pending_ai_mask = None  # [NEW] AI 편집에서 전달된 임시 마스크
@@ -2197,13 +2399,14 @@ class PolygonAnnotationEditor(QDialog):
             return
 
         # 현재 뷰 상태 저장(줌/스크롤)
-        current_zoom = self.canvas.zoom_factor if self.canvas.zoom_factor > 0 else 1.0
+        current_zoom = 1.0
         scroll_area = self.scroll_area
         h_value = scroll_area.horizontalScrollBar().value()
         v_value = scroll_area.verticalScrollBar().value()
 
         new_image = image.copy(target)
         new_pixmap = QPixmap.fromImage(new_image)
+        self._current_pixmap = new_pixmap
 
         dx, dy = target.left(), target.top()
         clamp_x = max(0, target.width() - 1)
@@ -2232,6 +2435,7 @@ class PolygonAnnotationEditor(QDialog):
             self.canvas._update_cursor_for_edges(None)
 
         # 새로운 픽스맵 기준으로 줌/스크롤 상태 복구
+        self.canvas.zoom_factor = 0.0
         self.canvas.set_zoom(current_zoom)
         self.canvas.updateGeometry()
         scroll_area.horizontalScrollBar().setValue(min(scroll_area.horizontalScrollBar().maximum(), h_value))
@@ -2244,6 +2448,28 @@ class PolygonAnnotationEditor(QDialog):
         parent_dialog = self.parent()
         if parent_dialog and hasattr(parent_dialog, "notify_pixmap_updated"):
             parent_dialog.notify_pixmap_updated(new_pixmap)
+
+    def set_pixmap(self, pixmap: QPixmap) -> None:
+        if pixmap.isNull():
+            return
+        self._current_pixmap = pixmap
+        self.canvas.pixmap = pixmap
+        self.canvas._scaled_pixmap = None
+        self.canvas.current_add_points.clear()
+        self.canvas.current_sub_points.clear()
+        self.canvas.current_pos = QPoint()
+        self.canvas.hovered_polygon_idx = -1
+        self.set_pending_ai_mask(None)
+        if hasattr(self.canvas, 'reset_crop_preview'):
+            self.canvas.reset_crop_preview(update_display=False)
+            self.canvas._update_cursor_for_edges(None)
+        self.canvas.zoom_factor = 0.0
+        self.canvas.set_zoom(1.0)
+        self.canvas.updateGeometry()
+        self.canvas.update()
+        self._preferred_size = self._compute_preferred_size(pixmap)
+        self._update_polygon_counts()
+        self.status_label.setText("이미지 준비")
 
     def keyPressEvent(self, event):
         if event.key() in [Qt.Key.Key_Return, Qt.Key.Key_Enter]:
@@ -2484,7 +2710,7 @@ class PolygonAnnotationEditor(QDialog):
         self._update_polygon_counts()
 
 # --- 3.5. 위젯: SAM(AI) 편집기 ---
-class SAMCanvasLabel(BaseCanvasLabel):
+class SAMCanvasLabel(CropMixin, BaseCanvasLabel):
     """AI 어시스트 편집기 전용 캔버스. AI가 예측한 마스크(mask)와 사용자 클릭 포인트를 추가로 그립니다."""
     def __init__(self, pixmap, parent_dialog):
         super().__init__(pixmap, parent_dialog)
@@ -2540,7 +2766,12 @@ class SAMCanvasLabel(BaseCanvasLabel):
             for point in scaled_pts:
                 painter.drawEllipse(point, 4, 4)
 
+        if not self._crop_preview_rect.isNull():
+            self._paint_crop_preview(painter)
+
     def mousePressEvent(self, event):
+        if self._handle_crop_mouse_press(event):
+            return
         if self.parent_dialog.is_change_mode and event.button() == Qt.MouseButton.LeftButton:
             if self.change_hovered_polygon_class():
                 # 클래스 변경 시 카운트 갱신
@@ -2571,10 +2802,17 @@ class SAMCanvasLabel(BaseCanvasLabel):
             self.setCursor(Qt.CursorShape.ClosedHandCursor)
 
     def mouseMoveEvent(self, event):
+        if self._handle_crop_mouse_move(event):
+            return
         super().mouseMoveEvent(event)
         if not self.panning:
             self.current_pos = event.pos()
             self.update()
+
+    def mouseReleaseEvent(self, event):
+        if self._handle_crop_mouse_release(event):
+            return
+        super().mouseReleaseEvent(event)
 
     # 줌 변경 시 마스크 스케일 캐시 무효화
     def set_zoom(self, factor, focal_point: QPoint | QPointF | None = None):
@@ -2929,6 +3167,10 @@ class SAMAnnotationEditor(QDialog):
         self.canvas.update()
 
     def keyPressEvent(self, event):
+        if event.key() == Qt.Key.Key_Escape:
+            if self.canvas.cancel_crop_drag():
+                self.status_label.setText("크롭이 취소되었습니다.")
+                return
         if event.key() in [Qt.Key.Key_Return, Qt.Key.Key_Enter]:
             # 우클릭 수동 차집합 폴리곤이 활성 상태이면 우선 적용
             if getattr(self.canvas, 'current_sub_points', None) and len(self.canvas.current_sub_points) >= 3 and self.canvas.current_mask is None:
@@ -3104,6 +3346,65 @@ class SAMAnnotationEditor(QDialog):
     def result_pixmap(self) -> QPixmap:
         return self.canvas.pixmap
 
+    def apply_crop_rect(self, keep_rect: QRect) -> None:
+        pixmap = self.canvas.pixmap
+        if pixmap.isNull():
+            return
+
+        image = pixmap.toImage()
+        width, height = image.width(), image.height()
+        if width <= 0 or height <= 0:
+            return
+
+        bounds = QRect(0, 0, width, height)
+        target = keep_rect.intersected(bounds).normalized()
+        if not target.isValid() or target.width() <= 0 or target.height() <= 0:
+            return
+        if target == bounds:
+            return
+
+        current_zoom = 1.0
+        scroll_area = self.scroll_area
+        h_value = scroll_area.horizontalScrollBar().value()
+        v_value = scroll_area.verticalScrollBar().value()
+
+        new_pixmap = QPixmap.fromImage(image.copy(target))
+        dx, dy = target.left(), target.top()
+        clamp_x = max(0, target.width() - 1)
+        clamp_y = max(0, target.height() - 1)
+
+        translated_polygons: list[dict] = []
+        for poly in self.canvas.polygons:
+            new_points = []
+            for point in poly.get('points', []):
+                new_x = max(0, min(clamp_x, point.x() - dx))
+                new_y = max(0, min(clamp_y, point.y() - dy))
+                new_points.append(QPoint(new_x, new_y))
+            translated_polygons.append({'class_id': poly.get('class_id'), 'points': new_points})
+
+        self.set_pixmap(new_pixmap)
+        self.set_polygons(translated_polygons)
+        if hasattr(self.canvas, 'reset_crop_preview'):
+            self.canvas.reset_crop_preview()
+            self.canvas._update_cursor_for_edges(None)
+        if hasattr(self.canvas, 'current_sub_points'):
+            self.canvas.current_sub_points.clear()
+        if hasattr(self.canvas, 'current_pos'):
+            self.canvas.current_pos = QPoint()
+
+        self.canvas.zoom_factor = 0.0
+        self.canvas.set_zoom(current_zoom)
+        self.canvas.updateGeometry()
+        scroll_area.horizontalScrollBar().setValue(min(scroll_area.horizontalScrollBar().maximum(), h_value))
+        scroll_area.verticalScrollBar().setValue(min(scroll_area.verticalScrollBar().maximum(), v_value))
+
+        self.status_label.setText("이미지 크롭 완료")
+
+        parent_dialog = self.parent()
+        if parent_dialog and hasattr(parent_dialog, "notify_pixmap_updated"):
+            parent_dialog.notify_pixmap_updated(new_pixmap)
+        self.reset_current_mask()
+
 # --- 4. 위젯: 편집 모드 및 다중 캡처 선택 ---
 class EditModeDialog(QDialog):
     AI_ASSIST, MANUAL, CANCEL = 1, 2, 0
@@ -3230,6 +3531,14 @@ class AnnotationEditorDialog(QDialog):
             return
         self.pixmap = pixmap
         self._result_pixmap = pixmap
+        if hasattr(self.manual_editor, 'result_pixmap'):
+            try:
+                current_manual = self.manual_editor.result_pixmap()
+                same_manual = current_manual.cacheKey() == pixmap.cacheKey()
+            except Exception:
+                same_manual = False
+            if not same_manual and hasattr(self.manual_editor, 'set_pixmap'):
+                self.manual_editor.set_pixmap(pixmap)
         if self.ai_editor is not None:
             current_ai_pixmap = self.ai_editor.result_pixmap()
             try:
@@ -3283,6 +3592,14 @@ class AnnotationEditorDialog(QDialog):
                 self.manual_editor.set_polygons(polygons)
                 if ai_pending_mask is not None:
                     self.manual_editor.set_pending_ai_mask(ai_pending_mask)
+                manual_target_pixmap = self.pixmap
+                if manual_target_pixmap and not manual_target_pixmap.isNull():
+                    try:
+                        same_manual = self.manual_editor.result_pixmap().cacheKey() == manual_target_pixmap.cacheKey()
+                    except Exception:
+                        same_manual = False
+                    if not same_manual and hasattr(self.manual_editor, 'set_pixmap'):
+                        self.manual_editor.set_pixmap(manual_target_pixmap)
             else:
                 polygons = self._clone_polygons(self.manual_editor.get_all_polygons())
                 self.manual_editor.set_polygons(polygons)
@@ -6418,6 +6735,7 @@ class LearningTab(QWidget):
         self._calib_right_pair: Optional[tuple[float, float]] = None
         self._calib_last_profile: Optional[str] = None
         self._calib_last_roi: Optional[dict] = None
+        self._active_qt_sound_players: list = []
         self.initUI()
         self.init_sam()
         self.data_manager.register_status_config_listener(self._handle_status_config_changed)
@@ -6566,15 +6884,15 @@ class LearningTab(QWidget):
         capture_options_layout.addWidget(count_label)
         self.capture_count_spinbox = QSpinBox()
         self.capture_count_spinbox.setRange(1, 50)
-        self.capture_count_spinbox.setValue(1)
+        self.capture_count_spinbox.setValue(5)
         self.capture_count_spinbox.setMaximumWidth(90)
         capture_options_layout.addWidget(self.capture_count_spinbox)
         interval_label = QLabel("간격(초):")
         interval_label.setSizePolicy(QSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Preferred))
         capture_options_layout.addWidget(interval_label)
         self.capture_interval_spinbox = QDoubleSpinBox()
-        self.capture_interval_spinbox.setRange(0.2, 5.0)
-        self.capture_interval_spinbox.setValue(1.0)
+        self.capture_interval_spinbox.setRange(0.1, 5.0)
+        self.capture_interval_spinbox.setValue(0.2)
         self.capture_interval_spinbox.setSingleStep(0.1)
         self.capture_interval_spinbox.setMaximumWidth(100)
         capture_options_layout.addWidget(self.capture_interval_spinbox)
@@ -10933,6 +11251,139 @@ class LearningTab(QWidget):
         if hasattr(self, 'log_viewer'):
             self.log_viewer.append(f"저장된 캡처(ID: {pending_capture_id})를 학습 데이터로 이동했습니다.")
 
+    def _resolve_sound_path(self, name: str) -> str | None:
+        """워크스페이스 기준 사운드 경로를 계산합니다."""
+        if not name:
+            return None
+
+        candidate_path = Path(name)
+        try:
+            if candidate_path.is_absolute() and candidate_path.exists():
+                return str(candidate_path)
+        except Exception:
+            pass
+
+        candidates: list[Path] = []
+        try:
+            workspace_root_path = Path(WORKSPACE_ROOT)
+            candidates.append(workspace_root_path / "sounds" / name)
+        except Exception:
+            pass
+
+        raw_workspace = str(WORKSPACE_ROOT)
+        if ":" in raw_workspace:
+            drive, remainder = raw_workspace.split(":", 1)
+            remainder = remainder.replace("\\", "/").lstrip("/\\")
+            wsl_base = Path("/mnt") / drive.lower()
+            if remainder:
+                wsl_base = wsl_base / Path(remainder)
+            candidates.append(wsl_base / "sounds" / name)
+
+        candidates.append(Path.cwd() / "workspace" / "sounds" / name)
+
+        fallback: str | None = None
+        for candidate in candidates:
+            try:
+                resolved = candidate.resolve()
+            except Exception:
+                resolved = candidate
+            if fallback is None:
+                fallback = str(resolved)
+            if resolved.exists():
+                return str(resolved)
+        return fallback
+
+    def _play_sound_async(self, name: str, *, volume: float = 1.0) -> None:
+        """주어진 사운드 파일을 비동기로 재생합니다."""
+        sound_path = self._resolve_sound_path(name)
+        if not sound_path:
+            try:
+                QApplication.beep()
+            except Exception:
+                pass
+            return
+
+        player = None
+        if QMediaPlayer is not None and QAudioOutput is not None:
+            try:
+                player = QMediaPlayer(self)
+                audio_output = QAudioOutput(player)
+                clamped_volume = max(0.0, min(volume, 1.0))
+                audio_output.setVolume(clamped_volume)
+                player.setAudioOutput(audio_output)
+                player.setSource(QUrl.fromLocalFile(sound_path))
+                self._active_qt_sound_players.append(player)
+
+                def _cleanup() -> None:
+                    try:
+                        player.stop()
+                    except Exception:
+                        pass
+                    try:
+                        self._active_qt_sound_players.remove(player)
+                    except ValueError:
+                        pass
+                    except Exception:
+                        pass
+                    try:
+                        player.deleteLater()
+                    except Exception:
+                        pass
+
+                if hasattr(player, "mediaStatusChanged"):
+                    try:
+                        player.mediaStatusChanged.connect(
+                            lambda status: _cleanup()
+                            if QMediaPlayer is not None
+                            and status == QMediaPlayer.MediaStatus.EndOfMedia
+                            else None
+                        )
+                    except Exception:
+                        pass
+                if hasattr(player, "errorOccurred"):
+                    try:
+                        player.errorOccurred.connect(lambda *_: _cleanup())
+                    except Exception:
+                        pass
+
+                try:
+                    QTimer.singleShot(20000, _cleanup)
+                except Exception:
+                    pass
+
+                player.play()
+                return
+            except Exception:
+                try:
+                    if player is not None:
+                        self._active_qt_sound_players.remove(player)
+                except Exception:
+                    pass
+
+        def _play_sound_fallback() -> None:
+            try:
+                import playsound  # type: ignore
+
+                playsound.playsound(sound_path, block=False)
+                return
+            except Exception:
+                try:
+                    import winsound  # type: ignore
+
+                    winsound.PlaySound(sound_path, winsound.SND_FILENAME | winsound.SND_ASYNC)
+                    return
+                except Exception:
+                    pass
+            try:
+                QApplication.beep()
+            except Exception:
+                pass
+
+        threading.Thread(target=_play_sound_fallback, daemon=True).start()
+
+    def _play_capture_sound(self) -> None:
+        self._play_sound_async("tap.mp3", volume=0.7)
+
     def capture_screen(self):
         count = self.capture_count_spinbox.value()
         interval = self.capture_interval_spinbox.value()
@@ -10976,6 +11427,7 @@ class LearningTab(QWidget):
                     bytes_per_line = ch * w
                     q_image = QImage(frame_rgb.data, w, h, bytes_per_line, QImage.Format.Format_RGB888)
                     captured_pixmaps.append(QPixmap.fromImage(q_image))
+                    self._play_capture_sound()
                     if count > 1: QThread.msleep(int(interval * 1000))
 
             self.update_status_message("캡처 완료")
