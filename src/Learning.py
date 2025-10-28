@@ -1470,6 +1470,22 @@ class BaseCanvasLabel(QLabel):
             self.update()
 
     def mouseReleaseEvent(self, event):
+        if self._crop_dragging and event.button() == Qt.MouseButton.LeftButton:
+            self._crop_dragging = False
+            keep_rect = QRect(self._crop_preview_rect)
+            self._crop_active_edges = None
+            if keep_rect.isValid() and keep_rect.width() > 0 and keep_rect.height() > 0:
+                orig_w = self.pixmap.width()
+                orig_h = self.pixmap.height()
+                if keep_rect.width() < orig_w or keep_rect.height() < orig_h:
+                    self.parent_dialog.apply_crop_rect(keep_rect)
+                else:
+                    self.reset_crop_preview()
+            else:
+                self.reset_crop_preview()
+            self._update_cursor_for_edges(self._detect_edges(self._to_image_point(event.pos())))
+            return
+
         if event.button() == Qt.MouseButton.MiddleButton:
             self.panning = False
             self.setCursor(Qt.CursorShape.CrossCursor)
@@ -1498,6 +1514,10 @@ class CanvasLabel(BaseCanvasLabel):
     - 좌클릭 다각형(합집합 후보)과 우클릭 다각형(차집합 후보)을 분리해 동시 표시/편집.
     - AI 편집에서 전달된 임시 마스크(pending_mask) 오버레이 표시.
     """
+
+    EDGE_MARGIN = 8
+    MIN_CROP_DIMENSION = 20
+
     def __init__(self, pixmap, initial_polygons=None, parent_dialog=None):
         super().__init__(pixmap, parent_dialog)
         self.polygons = initial_polygons if initial_polygons else []
@@ -1506,6 +1526,12 @@ class CanvasLabel(BaseCanvasLabel):
         self.current_pos = QPoint()
         self._last_pressed_button = None  # 최근 포인트 추가 버튼 추적
         self.pending_mask = None  # AI 편집에서 넘어온 임시 마스크
+        # 이미지 테두리 크롭 상태
+        self._crop_active_edges: dict[str, bool] | None = None
+        self._crop_dragging = False
+        self._crop_preview_rect = QRect()
+        self._crop_start_rect = QRect()
+        self._hover_edges: dict[str, bool] | None = None
 
     def paintEvent(self, event):
         super().paintEvent(event)
@@ -1559,7 +1585,17 @@ class CanvasLabel(BaseCanvasLabel):
                 for point in scaled_pts:
                     painter.drawEllipse(point, 4, 4)
 
+        if not self._crop_preview_rect.isNull():
+            self._paint_crop_preview(painter)
+
     def mousePressEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            image_point = self._to_image_point(event.pos())
+            edges = self._detect_edges(image_point)
+            if edges:
+                self._start_crop_drag(edges, image_point)
+                return
+
         if self.parent_dialog.is_change_mode and event.button() == Qt.MouseButton.LeftButton:
             if self.change_hovered_polygon_class():
                 # 클래스 변경 시 카운트 갱신
@@ -1588,9 +1624,18 @@ class CanvasLabel(BaseCanvasLabel):
             self.setCursor(Qt.CursorShape.ClosedHandCursor)
 
     def mouseMoveEvent(self, event):
+        if self._crop_dragging:
+            self._update_crop_preview(self._to_image_point(event.pos()))
+            self.update()
+            return
+
         super().mouseMoveEvent(event)
         if not self.panning:
-            self.current_pos = event.pos(); self.update()
+            image_point = self._to_image_point(event.pos())
+            self.current_pos = event.pos()
+            self._hover_edges = self._detect_edges(image_point)
+            self._update_cursor_for_edges(self._hover_edges)
+            self.update()
 
     # [NEW] 유틸: 마지막 포인트 제거(Backspace)
     def remove_last_point(self):
@@ -1615,6 +1660,10 @@ class CanvasLabel(BaseCanvasLabel):
         super().set_zoom(factor, focal_point)
         if hasattr(self, '_pending_scaled'):
             self._pending_scaled_dirty = True
+        if not self._crop_dragging:
+            self._hover_edges = None
+            self.reset_crop_preview(update_display=False)
+            self._update_cursor_for_edges(None)
 
     # [NEW] pending 마스크 오버레이(QImage) 재구성
     def _rebuild_pending_overlay(self, class_id):
@@ -1647,6 +1696,173 @@ class CanvasLabel(BaseCanvasLabel):
             self._pending_scaled = None
             self._pending_scaled_dirty = True
 
+    def _to_image_point(self, pos: QPoint | QPointF) -> QPoint:
+        """위젯 좌표를 원본 이미지 좌표로 변환합니다."""
+        factor = self.zoom_factor if self.zoom_factor > 0 else 1.0
+        if isinstance(pos, QPointF):
+            x = pos.x()
+            y = pos.y()
+        else:
+            x = float(pos.x())
+            y = float(pos.y())
+        img_w = max(0, self.pixmap.width() - 1)
+        img_h = max(0, self.pixmap.height() - 1)
+        mapped_x = max(0, min(img_w, int(round(x / factor))))
+        mapped_y = max(0, min(img_h, int(round(y / factor))))
+        return QPoint(mapped_x, mapped_y)
+
+    def _detect_edges(self, image_point: QPoint) -> dict[str, bool] | None:
+        if self.pixmap.isNull():
+            return None
+        w = self.pixmap.width()
+        h = self.pixmap.height()
+        if w <= 0 or h <= 0:
+            return None
+
+        margin = self.EDGE_MARGIN
+        edges = {
+            'left': image_point.x() <= margin,
+            'right': image_point.x() >= (w - 1 - margin),
+            'top': image_point.y() <= margin,
+            'bottom': image_point.y() >= (h - 1 - margin),
+        }
+        return edges if any(edges.values()) else None
+
+    def _update_cursor_for_edges(self, edges: dict[str, bool] | None) -> None:
+        if self.panning or self._crop_dragging:
+            return
+        if edges:
+            horizontal = edges.get('left') or edges.get('right')
+            vertical = edges.get('top') or edges.get('bottom')
+            if horizontal and vertical:
+                if (edges.get('left') and edges.get('top')) or (edges.get('right') and edges.get('bottom')):
+                    self.setCursor(Qt.CursorShape.SizeFDiagCursor)
+                else:
+                    self.setCursor(Qt.CursorShape.SizeBDiagCursor)
+            elif horizontal:
+                self.setCursor(Qt.CursorShape.SizeHorCursor)
+            elif vertical:
+                self.setCursor(Qt.CursorShape.SizeVerCursor)
+            return
+
+        if getattr(self.parent_dialog, 'is_change_mode', False):
+            self.setCursor(Qt.CursorShape.PointingHandCursor)
+        else:
+            self.setCursor(Qt.CursorShape.CrossCursor)
+
+    def _start_crop_drag(self, edges: dict[str, bool], image_point: QPoint) -> None:
+        self._crop_dragging = True
+        self._crop_active_edges = edges
+        self._crop_start_rect = QRect(0, 0, self.pixmap.width(), self.pixmap.height())
+        self._crop_preview_rect = QRect(self._crop_start_rect)
+        self._update_cursor_for_edges(edges)
+        self._update_crop_preview(image_point)
+
+    def _update_crop_preview(self, image_point: QPoint) -> None:
+        if not self._crop_dragging or not self._crop_active_edges:
+            return
+
+        w = self.pixmap.width()
+        h = self.pixmap.height()
+        if w <= 0 or h <= 0:
+            return
+
+        left = 0
+        right = w - 1
+        top = 0
+        bottom = h - 1
+
+        min_width = max(1, min(w, self.MIN_CROP_DIMENSION))
+        min_height = max(1, min(h, self.MIN_CROP_DIMENSION))
+
+        if self._crop_active_edges.get('left'):
+            new_left = int(image_point.x())
+            new_left = max(left, new_left)
+            new_left = min(new_left, right - (min_width - 1))
+            left = new_left
+
+        if self._crop_active_edges.get('right'):
+            new_right = int(image_point.x())
+            new_right = min(right, new_right)
+            new_right = max(new_right, left + (min_width - 1))
+            right = new_right
+
+        if self._crop_active_edges.get('top'):
+            new_top = int(image_point.y())
+            new_top = max(top, new_top)
+            new_top = min(new_top, bottom - (min_height - 1))
+            top = new_top
+
+        if self._crop_active_edges.get('bottom'):
+            new_bottom = int(image_point.y())
+            new_bottom = min(bottom, new_bottom)
+            new_bottom = max(new_bottom, top + (min_height - 1))
+            bottom = new_bottom
+
+        width = max(1, right - left + 1)
+        height = max(1, bottom - top + 1)
+        self._crop_preview_rect = QRect(left, top, width, height)
+
+    def _paint_crop_preview(self, painter: QPainter) -> None:
+        if self._crop_preview_rect.isNull():
+            return
+        factor = self.zoom_factor if self.zoom_factor > 0 else 1.0
+        full_rect = self._rect_to_scaled(QRect(0, 0, self.pixmap.width(), self.pixmap.height()), factor)
+        keep_rect = self._rect_to_scaled(self._crop_preview_rect, factor)
+
+        painter.save()
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(QBrush(QColor(0, 0, 0, 100)))
+
+        if keep_rect.left() > 0:
+            painter.drawRect(0, 0, keep_rect.left(), full_rect.height())
+
+        right_start = keep_rect.right() + 1
+        if right_start < full_rect.width():
+            painter.drawRect(right_start, 0, full_rect.width() - right_start, full_rect.height())
+
+        if keep_rect.top() > 0:
+            painter.drawRect(keep_rect.left(), 0, keep_rect.width(), keep_rect.top())
+
+        bottom_start = keep_rect.bottom() + 1
+        if bottom_start < full_rect.height():
+            painter.drawRect(keep_rect.left(), bottom_start, keep_rect.width(), full_rect.height() - bottom_start)
+
+        painter.setPen(QPen(QColor(255, 255, 0, 220), 1, Qt.PenStyle.DashLine))
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.drawRect(keep_rect)
+        painter.restore()
+
+    def _rect_to_scaled(self, rect: QRect, factor: float) -> QRect:
+        left = int(round(rect.left() * factor))
+        top = int(round(rect.top() * factor))
+        width = max(1, int(round(rect.width() * factor)))
+        height = max(1, int(round(rect.height() * factor)))
+        return QRect(left, top, width, height)
+
+    def reset_crop_preview(self, *, update_display: bool = True) -> None:
+        self._crop_preview_rect = QRect()
+        self._crop_active_edges = None
+        if update_display:
+            self.update()
+
+    def cancel_crop_drag(self) -> bool:
+        if self._crop_dragging or not self._crop_preview_rect.isNull():
+            self._crop_dragging = False
+            self.reset_crop_preview()
+            self._update_cursor_for_edges(None)
+            return True
+        return False
+
+    def is_crop_drag_active(self) -> bool:
+        return self._crop_dragging
+
+    def leaveEvent(self, event):
+        super().leaveEvent(event)
+        if not self._crop_dragging:
+            self._hover_edges = None
+            self._update_cursor_for_edges(None)
+
 # --- 3. 위젯: 다각형 편집기 다이얼로그 (공통 로직 추가) ---
 class PolygonAnnotationEditor(QDialog):
     """수동 다각형 편집기 메인 창."""
@@ -1666,6 +1882,7 @@ class PolygonAnnotationEditor(QDialog):
         self.learning_tab = parent # LearningTab 인스턴스 저장
         self.is_change_mode = False
         self.canvas = CanvasLabel(pixmap, initial_polygons, self)
+        self.canvas.setToolTip("이미지 테두리를 드래그하면 여백을 줄일 수 있습니다.")
         self.pending_ai_mask = None  # [NEW] AI 편집에서 전달된 임시 마스크
         self.scroll_area = QScrollArea()
         self.scroll_area.setWidget(self.canvas)
@@ -1961,10 +2178,80 @@ class PolygonAnnotationEditor(QDialog):
                 return None
         return None
 
+    def apply_crop_rect(self, keep_rect: QRect):
+        """지정된 이미지 영역만 남기고 실제 픽셀을 잘라냅니다."""
+        pixmap = self.canvas.pixmap
+        if pixmap.isNull():
+            return
+
+        image = pixmap.toImage()
+        width, height = image.width(), image.height()
+        if width <= 0 or height <= 0:
+            return
+
+        bounds = QRect(0, 0, width, height)
+        target = keep_rect.intersected(bounds).normalized()
+        if not target.isValid() or target.width() <= 0 or target.height() <= 0:
+            return
+        if target == bounds:
+            return
+
+        # 현재 뷰 상태 저장(줌/스크롤)
+        current_zoom = self.canvas.zoom_factor if self.canvas.zoom_factor > 0 else 1.0
+        scroll_area = self.scroll_area
+        h_value = scroll_area.horizontalScrollBar().value()
+        v_value = scroll_area.verticalScrollBar().value()
+
+        new_image = image.copy(target)
+        new_pixmap = QPixmap.fromImage(new_image)
+
+        dx, dy = target.left(), target.top()
+        clamp_x = max(0, target.width() - 1)
+        clamp_y = max(0, target.height() - 1)
+        translated_polygons: list[dict] = []
+        for poly in self.canvas.polygons:
+            new_points = []
+            for point in poly.get('points', []):
+                new_x = point.x() - dx
+                new_y = point.y() - dy
+                new_x = max(0, min(clamp_x, new_x))
+                new_y = max(0, min(clamp_y, new_y))
+                new_points.append(QPoint(new_x, new_y))
+            translated_polygons.append({'class_id': poly.get('class_id'), 'points': new_points})
+
+        self.canvas.pixmap = new_pixmap
+        self.canvas._scaled_pixmap = None
+        self.canvas.polygons = translated_polygons
+        self.canvas.current_add_points.clear()
+        self.canvas.current_sub_points.clear()
+        self.canvas.current_pos = QPoint()
+        self.canvas.hovered_polygon_idx = -1
+        self.set_pending_ai_mask(None)
+        if hasattr(self.canvas, "reset_crop_preview"):
+            self.canvas.reset_crop_preview()
+            self.canvas._update_cursor_for_edges(None)
+
+        # 새로운 픽스맵 기준으로 줌/스크롤 상태 복구
+        self.canvas.set_zoom(current_zoom)
+        self.canvas.updateGeometry()
+        scroll_area.horizontalScrollBar().setValue(min(scroll_area.horizontalScrollBar().maximum(), h_value))
+        scroll_area.verticalScrollBar().setValue(min(scroll_area.verticalScrollBar().maximum(), v_value))
+
+        self.canvas.update()
+        self._update_polygon_counts()
+        self.status_label.setText("이미지 크롭 완료")
+
+        parent_dialog = self.parent()
+        if parent_dialog and hasattr(parent_dialog, "notify_pixmap_updated"):
+            parent_dialog.notify_pixmap_updated(new_pixmap)
+
     def keyPressEvent(self, event):
         if event.key() in [Qt.Key.Key_Return, Qt.Key.Key_Enter]:
             self.commit_current_polygon()
         elif event.key() == Qt.Key.Key_Escape:
+            if self.canvas.cancel_crop_drag():
+                self.status_label.setText("크롭이 취소되었습니다.")
+                return
             # [NEW] 진행 중(좌/우 포인트 또는 pending 마스크)일 때만 취소, 없으면 무시
             if self.canvas.current_add_points or self.canvas.current_sub_points or self.pending_ai_mask is not None:
                 self.canvas.current_add_points.clear()
@@ -2001,7 +2288,11 @@ class PolygonAnnotationEditor(QDialog):
         else:
             self.accept()
 
-    def get_all_polygons(self): return self.canvas.polygons
+    def get_all_polygons(self):
+        return self.canvas.polygons
+
+    def result_pixmap(self) -> QPixmap:
+        return self.canvas.pixmap
 
     def commit_current_polygon(self):
         """현재 그리고 있는 다각형을 확정하거나, 우클릭 차집합을 적용합니다.
@@ -2182,6 +2473,8 @@ class PolygonAnnotationEditor(QDialog):
             self.mode_ai_btn.setToolTip("현재 AI 편집 모드입니다.")
 
     def set_polygons(self, polygons):
+        if hasattr(self.canvas, 'reset_crop_preview'):
+            self.canvas.reset_crop_preview(update_display=False)
         self.canvas.polygons = polygons if polygons else []
         self.create_local_color_map()
         self.canvas.current_add_points.clear()
@@ -2785,6 +3078,32 @@ class SAMAnnotationEditor(QDialog):
         # 외부에서 폴리곤 세트 변경 시 카운트 갱신
         self._update_polygon_counts()
 
+    def set_pixmap(self, pixmap: QPixmap):
+        if pixmap.isNull():
+            return
+        self.pixmap = pixmap
+        q_image = self.pixmap.toImage().convertToFormat(QImage.Format.Format_RGB888)
+        w, h = q_image.width(), q_image.height()
+        ptr = q_image.bits()
+        ptr.setsize(q_image.sizeInBytes())
+        arr = np.array(ptr).reshape(h, q_image.bytesPerLine())[:, :w * 3].reshape(h, w, 3)
+        self.image_np = arr
+        try:
+            self.predictor.set_image(self.image_np)
+        except Exception:
+            pass
+        self.canvas.pixmap = pixmap
+        self.canvas._scaled_pixmap = None
+        self.reset_current_mask()
+        self.canvas.set_zoom(1.0)
+        self.canvas.updateGeometry()
+        self.canvas.update()
+        self._preferred_size = self._compute_preferred_size(pixmap)
+        self._update_polygon_counts()
+
+    def result_pixmap(self) -> QPixmap:
+        return self.canvas.pixmap
+
 # --- 4. 위젯: 편집 모드 및 다중 캡처 선택 ---
 class EditModeDialog(QDialog):
     AI_ASSIST, MANUAL, CANCEL = 1, 2, 0
@@ -2835,6 +3154,7 @@ class AnnotationEditorDialog(QDialog):
         self.sam_predictor = sam_predictor
         self._result_polygons = []
         self._result_class_name = None
+        self._result_pixmap = pixmap
         self._current_mode = None
         # 다중 편집 순번 표시용
         self._seq_index = int(seq_index) if isinstance(seq_index, int) and seq_index > 0 else None
@@ -2905,6 +3225,20 @@ class AnnotationEditorDialog(QDialog):
     def _handle_mode_switch(self, mode):
         self._switch_mode(mode)
 
+    def notify_pixmap_updated(self, pixmap: QPixmap):
+        if pixmap.isNull():
+            return
+        self.pixmap = pixmap
+        self._result_pixmap = pixmap
+        if self.ai_editor is not None:
+            current_ai_pixmap = self.ai_editor.result_pixmap()
+            try:
+                same_cache = current_ai_pixmap.cacheKey() == pixmap.cacheKey()
+            except Exception:
+                same_cache = False
+            if not same_cache:
+                self.ai_editor.set_pixmap(pixmap)
+
     def _switch_mode(self, mode, *, initialize=False):
         sam_ready = self.sam_predictor is not None
 
@@ -2917,6 +3251,15 @@ class AnnotationEditorDialog(QDialog):
                     QMessageBox.warning(self, "오류", "SAM 모델이 준비되지 않아 AI 편집기로 전환할 수 없습니다.")
                 return
             self.manual_editor.commit_current_polygon()
+            manual_pixmap = self.manual_editor.result_pixmap()
+            if manual_pixmap and not manual_pixmap.isNull():
+                current_ai_pixmap = self.ai_editor.result_pixmap() if self.ai_editor else QPixmap()
+                try:
+                    same_cache = current_ai_pixmap.cacheKey() == manual_pixmap.cacheKey()
+                except Exception:
+                    same_cache = False
+                if not same_cache:
+                    self.ai_editor.set_pixmap(manual_pixmap)
             polygons = self._clone_polygons(self.manual_editor.get_all_polygons())
             self.ai_editor.set_polygons(polygons)
             current_class = self.manual_editor.get_current_class_name()
@@ -3012,6 +3355,13 @@ class AnnotationEditorDialog(QDialog):
     def _finalize(self, result_code, editor):
         self._result_polygons = self._clone_polygons(editor.get_all_polygons())
         self._result_class_name = editor.get_current_class_name()
+        try:
+            pixmap = editor.result_pixmap()
+        except AttributeError:
+            pixmap = None
+        if pixmap is not None and not pixmap.isNull():
+            self._result_pixmap = pixmap
+            self.pixmap = pixmap
         self.done(result_code)
 
     def result_polygons(self):
@@ -3019,6 +3369,9 @@ class AnnotationEditorDialog(QDialog):
 
     def result_class_name(self):
         return self._result_class_name
+
+    def result_pixmap(self):
+        return self._result_pixmap
 
     def current_mode(self):
         return self._current_mode
@@ -10728,6 +11081,10 @@ class LearningTab(QWidget):
 
         if editor_result == QDialog.DialogCode.Rejected:
             return
+
+        final_pixmap = editor_dialog.result_pixmap()
+        if final_pixmap is not None and not final_pixmap.isNull():
+            pixmap = final_pixmap
 
         # v1.3: 편집기에서 반환된 결과에 따라 분기 처리
         # 시나리오 1: 일반 저장
