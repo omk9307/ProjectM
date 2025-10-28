@@ -7653,6 +7653,86 @@ class MapTab(QWidget):
         except Exception:
             pass
 
+    def pause_wait_navigation(self, reason: str = '', timeout: float = 3.0) -> bool:
+        """금지 플로우 등 특수 상황에서 대기 이동 보강을 일시 중지한다."""
+        if not self._is_other_player_wait_active():
+            return False
+        context = dict(getattr(self, 'other_player_wait_context', {}) or {})
+        if not context:
+            return False
+        try:
+            timeout_sec = max(0.0, float(timeout))
+        except Exception:
+            timeout_sec = 0.0
+        if not context.get('allow_navigation', True) and context.get('nav_pause_reason') == reason:
+            context['nav_pause_until'] = time.time() + timeout_sec if timeout_sec > 0.0 else 0.0
+            self.other_player_wait_context = context
+            self._stop_wait_nav_reinforce_timer()
+            return True
+        context['allow_navigation'] = False
+        context['nav_pause_reason'] = reason
+        context['nav_pause_until'] = time.time() + timeout_sec if timeout_sec > 0.0 else 0.0
+        self.other_player_wait_context = context
+        self._stop_wait_nav_reinforce_timer()
+        if timeout_sec > 0.0:
+            try:
+                QTimer.singleShot(int(timeout_sec * 1000), lambda: self._handle_wait_nav_pause_timeout(reason))
+            except Exception:
+                pass
+        return True
+
+    def resume_wait_navigation(self, reason: str = '', *, force: bool = False) -> bool:
+        """일시중지된 대기 이동 보강을 재개한다."""
+        if not self._is_other_player_wait_active():
+            return False
+        context = dict(getattr(self, 'other_player_wait_context', {}) or {})
+        if not context:
+            return False
+        if context.get('allow_navigation', True) and not force:
+            return False
+        current_reason = context.get('nav_pause_reason')
+        if not force and current_reason and current_reason != reason:
+            return False
+        context['allow_navigation'] = True
+        context.pop('nav_pause_reason', None)
+        context.pop('nav_pause_until', None)
+        self.other_player_wait_context = context
+        self._start_wait_nav_reinforce_timer()
+        try:
+            if context.get('phase') == 'wait_travel':
+                self._kick_wait_navigation_movement(getattr(self, 'last_player_pos', None))
+        except Exception:
+            pass
+        return True
+
+    def _handle_wait_nav_pause_timeout(self, reason: str) -> None:
+        """pause_wait_navigation에서 예약한 타임아웃을 처리한다."""
+        if not self._is_other_player_wait_active():
+            return
+        context = dict(getattr(self, 'other_player_wait_context', {}) or {})
+        if not context:
+            return
+        if context.get('allow_navigation', True):
+            return
+        current_reason = context.get('nav_pause_reason')
+        if current_reason and current_reason != reason:
+            return
+        deadline = float(context.get('nav_pause_until', 0.0) or 0.0)
+        now_ts = time.time()
+        if deadline > now_ts:
+            try:
+                remaining_ms = int(max(0.0, deadline - now_ts) * 1000)
+                if remaining_ms > 0:
+                    QTimer.singleShot(remaining_ms, lambda: self._handle_wait_nav_pause_timeout(reason))
+            except Exception:
+                pass
+            return
+        if self.resume_wait_navigation(reason, force=True):
+            try:
+                self.update_general_log("[대기 모드] 이동 보강 일시정지 타임아웃 → 자동 재개.", "gray")
+            except Exception:
+                pass
+
     def _kick_wait_navigation_movement(self, final_player_pos: Optional[QPointF]) -> None:
         """대기 모드(wait_travel)에서 즉시 1회 걷기 입력으로 이동을 킥오프한다."""
         if not self._is_other_player_wait_active():
@@ -7660,6 +7740,8 @@ class MapTab(QWidget):
 
         context = getattr(self, 'other_player_wait_context', {})
         if context.get('phase') != 'wait_travel':
+            return
+        if not context.get('allow_navigation', True):
             return
 
         pos = final_player_pos if isinstance(final_player_pos, QPointF) else getattr(self, 'last_player_pos', None)

@@ -42,6 +42,10 @@ try:
 except ImportError:  # pragma: no cover - 실행 환경에 따라 미설치일 수 있음
     pytesseract = None  # type: ignore
 
+if "CUBLAS_WORKSPACE_CONFIG" not in os.environ:
+    # CuBLAS 비결정성 경고를 방지하면서 기존 동작은 그대로 유지
+    os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":4096:8"
+
 from PyQt6.QtWidgets import (
     QApplication, QWidget, QVBoxLayout, QHBoxLayout,
     QPushButton, QListWidget, QLabel, QDialog, QMessageBox, QFileDialog,

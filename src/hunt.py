@@ -1220,9 +1220,12 @@ class HuntTab(QWidget):
         # ----- 리치 귀환 이펙트 복구 상태 -----
         self.lich_return_enabled: bool = False
         self.lich_return_command_profile: str = ""
+        self.lich_return_telegram_enabled: bool = False
         self._lich_return_cooldown_sec: float = 5.0
         self._lich_return_next_ready_ts: float = 0.0
         self._lich_return_recent_ids: dict[int, float] = {}
+        self._lich_return_resume_timer: Optional[QTimer] = None
+        self._lich_return_navigation_paused: bool = False
 
         # ----- 맵 복귀 모드 상태 -----
         self.map_return_enabled: bool = False
@@ -3336,6 +3339,9 @@ class HuntTab(QWidget):
             if isinstance(reason, str) and reason == 'forbidden_monster':
                 self.append_log("금지 프로필 완료 콜백 수신 → 1초 뒤 대기모드 종료 예약", 'info')
                 self._schedule_forbidden_finish()
+            elif isinstance(reason, str) and reason == 'urgent:lich_return_effect':
+                self._cancel_lich_return_resume_timer()
+                self._resume_forbidden_navigation_after_lich(timeout=False)
         except Exception:
             pass
         command = str(command_name) if command_name else ''
@@ -3445,6 +3451,11 @@ class HuntTab(QWidget):
         self.lich_return_checkbox.setChecked(bool(self.lich_return_enabled))
         self.lich_return_checkbox.toggled.connect(self._on_lich_return_toggled)
         header_row.addWidget(self.lich_return_checkbox)
+
+        self.lich_return_telegram_checkbox = QCheckBox("텔레그램")
+        self.lich_return_telegram_checkbox.setChecked(bool(self.lich_return_telegram_enabled))
+        self.lich_return_telegram_checkbox.toggled.connect(self._on_lich_return_telegram_toggled)
+        header_row.addWidget(self.lich_return_telegram_checkbox)
         header_row.addStretch(1)
         layout.addLayout(header_row)
 
@@ -3533,6 +3544,7 @@ class HuntTab(QWidget):
         enabled = bool(self.lich_return_enabled and combo and combo.currentData())
         if combo:
             combo.setEnabled(enabled)
+        self._update_lich_telegram_enabled()
 
     def _on_lich_return_toggled(self, checked: bool) -> None:
         self.lich_return_enabled = bool(checked)
@@ -3555,6 +3567,17 @@ class HuntTab(QWidget):
         self.lich_return_command_profile = str(value)
         self._update_lich_controls_enabled()
         self._save_settings()
+
+    def _on_lich_return_telegram_toggled(self, checked: bool) -> None:
+        self.lich_return_telegram_enabled = bool(checked)
+        self._save_settings()
+
+    def _update_lich_telegram_enabled(self) -> None:
+        checkbox = getattr(self, 'lich_return_telegram_checkbox', None)
+        if not checkbox:
+            return
+        enabled = bool(self.lich_return_enabled)
+        checkbox.setEnabled(enabled)
 
     def _resolve_lich_return_profile(self) -> Optional[str]:
         desired = str(self.lich_return_command_profile or "").strip()
@@ -3616,12 +3639,14 @@ class HuntTab(QWidget):
             return
 
         self._lich_return_next_ready_ts = now + self._lich_return_cooldown_sec
+        self._pause_forbidden_navigation_for_lich()
 
         caption = f"[리치 복구] '{LICH_RETURN_CLASS_NAME}' 감지 → '{profile}' 실행"
         self.append_log(caption, "red")
 
         image_bgr = self._get_latest_detection_bgr()
-        self._send_lich_return_telegram(caption, image_bgr=image_bgr)
+        if bool(self.lich_return_telegram_enabled):
+            self._send_lich_return_telegram(caption, image_bgr=image_bgr)
 
         try:
             if hasattr(auto_tab, 'api_emergency_stop_all'):
@@ -3630,6 +3655,80 @@ class HuntTab(QWidget):
             pass
 
         self.control_command_issued.emit(profile, "urgent:lich_return_effect")
+
+    def _pause_forbidden_navigation_for_lich(self) -> None:
+        self._cancel_lich_return_resume_timer()
+        map_tab = getattr(self, 'map_tab', None)
+        paused = False
+        if map_tab and hasattr(map_tab, 'pause_wait_navigation'):
+            try:
+                paused = bool(map_tab.pause_wait_navigation('lich_return', timeout=3.0))
+            except Exception:
+                paused = False
+        self._lich_return_navigation_paused = bool(paused)
+        if paused:
+            self._schedule_lich_return_resume_timer()
+
+    def _schedule_lich_return_resume_timer(self) -> None:
+        if self._lich_return_resume_timer:
+            try:
+                self._lich_return_resume_timer.stop()
+            except Exception:
+                pass
+            try:
+                self._lich_return_resume_timer.deleteLater()
+            except Exception:
+                pass
+            self._lich_return_resume_timer = None
+        timer = QTimer(self)
+        timer.setSingleShot(True)
+        timer.timeout.connect(self._handle_lich_return_resume_timeout)
+        timer.start(3000)
+        self._lich_return_resume_timer = timer
+
+    def _cancel_lich_return_resume_timer(self) -> None:
+        if self._lich_return_resume_timer:
+            try:
+                self._lich_return_resume_timer.stop()
+            except Exception:
+                pass
+            try:
+                self._lich_return_resume_timer.deleteLater()
+            except Exception:
+                pass
+            self._lich_return_resume_timer = None
+
+    def _handle_lich_return_resume_timeout(self) -> None:
+        timer = self._lich_return_resume_timer
+        self._lich_return_resume_timer = None
+        if timer:
+            try:
+                timer.deleteLater()
+            except Exception:
+                pass
+        self._resume_forbidden_navigation_after_lich(timeout=True)
+
+    def _resume_forbidden_navigation_after_lich(self, timeout: bool) -> None:
+        paused = bool(getattr(self, '_lich_return_navigation_paused', False))
+        map_tab = getattr(self, 'map_tab', None)
+        resumed = False
+        if paused and map_tab and hasattr(map_tab, 'resume_wait_navigation'):
+            try:
+                resumed = bool(map_tab.resume_wait_navigation('lich_return'))
+            except Exception:
+                resumed = False
+        self._lich_return_navigation_paused = False
+        if timeout and paused:
+            if not resumed:
+                try:
+                    self.append_log("리치 복구 완료 신호 미수신 → 대기 이동을 자동 재개합니다.", "warn")
+                except Exception:
+                    pass
+        elif resumed:
+            try:
+                self.append_log("리치 복구 완료 → 대기 이동을 재개했습니다.", "debug")
+            except Exception:
+                pass
 
     def _send_lich_return_telegram(self, text: str, *, image_bgr: Optional[np.ndarray] = None) -> None:
         if not text:
@@ -14135,11 +14234,20 @@ class HuntTab(QWidget):
         except Exception:
             lich_enabled = False
         lich_profile = str(lich_cfg.get('command_profile', '') or '')
+        try:
+            lich_tg = bool(lich_cfg.get('telegram', False))
+        except Exception:
+            lich_tg = False
         self.lich_return_enabled = lich_enabled
         self.lich_return_command_profile = lich_profile
+        self.lich_return_telegram_enabled = lich_tg
         if hasattr(self, 'lich_return_checkbox'):
             blocker = QSignalBlocker(self.lich_return_checkbox)
             self.lich_return_checkbox.setChecked(lich_enabled)
+            del blocker
+        if hasattr(self, 'lich_return_telegram_checkbox'):
+            blocker = QSignalBlocker(self.lich_return_telegram_checkbox)
+            self.lich_return_telegram_checkbox.setChecked(lich_tg)
             del blocker
         try:
             self._refresh_lich_return_profile_options(keep_selection=False)
@@ -15224,6 +15332,7 @@ class HuntTab(QWidget):
             'lich_recovery': {
                 'enabled': bool(self.lich_return_enabled),
                 'command_profile': str(self.lich_return_command_profile or ''),
+                'telegram': bool(self.lich_return_telegram_enabled),
             },
             'map_return': {
                 'enabled': bool(self.map_return_enabled),
