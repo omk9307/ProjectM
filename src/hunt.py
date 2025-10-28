@@ -1430,6 +1430,9 @@ class HuntTab(QWidget):
         # [NEW] 금지 몬스터 플로우 상태/설정
         self.forbidden_monster_enabled: bool = False
         self.forbidden_monster_command_profile: str = ''
+        self.forbidden_monster_wait_waypoint_id: Optional[str] = None
+        self.forbidden_monster_wait_waypoint_name: str = ''
+        self.forbidden_monster_wait_waypoints_by_profile: dict[str, dict[str, str]] = {}
         self._forbidden_active: bool = False
         # [신규] 금지 명령 1회 실행 래치(도착 다중 통지 시 중복 실행 방지)
         self._forbidden_cmd_inflight: bool = False
@@ -2543,7 +2546,7 @@ class HuntTab(QWidget):
             return False, "[금지] 기능이 비활성화되어 있습니다. 사냥탭 설정에서 활성화하세요."
         if not cmd:
             return False, "[금지] 실행할 명령 프로필이 설정되어 있지 않습니다."
-        if not self._has_wait_waypoint_configured():
+        if not (self._has_forbidden_wait_waypoint_configured() or self._has_wait_waypoint_configured()):
             return False, "[금지] 대기 모드를 실행하려면 먼저 웨이포인트를 설정해주세요."
 
         # 이미 금지 플로우가 진행 중이면 중복 시작 방지
@@ -6161,6 +6164,17 @@ class HuntTab(QWidget):
         forbid_layout.addWidget(forbid_tg_chk)
         layout.addRow("금지몬스터 감지", forbid_row)
 
+        forbid_wp_combo = QComboBox(dialog)
+        forbid_wp_combo.addItem("랜덤(대기 웨이포인트 사용)", "")
+        for name, wp_id in waypoint_options:
+            forbid_wp_combo.addItem(name, wp_id)
+        current_forbid_wp = self._get_forbidden_wait_waypoint_for_current_profile()
+        if current_forbid_wp:
+            idx = forbid_wp_combo.findData(current_forbid_wp.get('id'))
+            if idx >= 0:
+                forbid_wp_combo.setCurrentIndex(idx)
+        layout.addRow("금지 웨이포인트", forbid_wp_combo)
+
         button_box = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel, dialog)
         button_box.accepted.connect(dialog.accept)
         button_box.rejected.connect(dialog.reject)
@@ -6222,6 +6236,14 @@ class HuntTab(QWidget):
             self.forbidden_monster_enabled = False
             self.forbidden_monster_command_profile = ''
             self.forbidden_monster_telegram_alert = False
+
+        selected_forbid_wp_id = str(forbid_wp_combo.currentData() or '').strip()
+        if selected_forbid_wp_id:
+            self._set_forbidden_wait_waypoint_for_current_profile(
+                {'id': selected_forbid_wp_id, 'name': forbid_wp_combo.currentText()}
+            )
+        else:
+            self._set_forbidden_wait_waypoint_for_current_profile(None)
 
         self._update_other_player_action_summary()
         self._save_settings()
@@ -6356,6 +6378,79 @@ class HuntTab(QWidget):
             self.shutdown_other_player_wait_waypoints_by_profile[profile] = list(items or [])
         # UI/요약에서 사용할 현재 뷰 동기화
         self.shutdown_other_player_wait_waypoints = list(items or [])
+
+    def _get_forbidden_wait_waypoint_for_current_profile(self) -> Optional[dict]:
+        profile = self._current_map_profile_name()
+        if profile:
+            item = self.forbidden_monster_wait_waypoints_by_profile.get(profile)
+            if isinstance(item, dict):
+                wp_id = str(item.get('id') or '').strip()
+                if wp_id:
+                    name = str(item.get('name') or wp_id)
+                    return {'id': wp_id, 'name': name}
+        if self.forbidden_monster_wait_waypoint_id:
+            wp_id = str(self.forbidden_monster_wait_waypoint_id).strip()
+            if wp_id:
+                name = str(self.forbidden_monster_wait_waypoint_name or wp_id)
+                return {'id': wp_id, 'name': name}
+        return None
+
+    def _set_forbidden_wait_waypoint_for_current_profile(self, item: Optional[dict], *, update_global: bool = True) -> None:
+        cleaned: Optional[dict] = None
+        if isinstance(item, dict):
+            wp_id = str(item.get('id') or '').strip()
+            if wp_id:
+                name = str(item.get('name') or wp_id)
+                cleaned = {'id': wp_id, 'name': name}
+        profile = self._current_map_profile_name()
+        if profile:
+            if cleaned:
+                self.forbidden_monster_wait_waypoints_by_profile[profile] = dict(cleaned)
+            else:
+                self.forbidden_monster_wait_waypoints_by_profile.pop(profile, None)
+        if update_global:
+            if cleaned:
+                self.forbidden_monster_wait_waypoint_id = cleaned['id']
+                self.forbidden_monster_wait_waypoint_name = cleaned['name']
+            else:
+                self.forbidden_monster_wait_waypoint_id = None
+                self.forbidden_monster_wait_waypoint_name = ''
+
+    def _has_forbidden_wait_waypoint_configured(self) -> bool:
+        return bool(self._select_forbidden_wait_waypoint())
+
+    def _select_forbidden_wait_waypoint(self) -> Optional[tuple[str, str]]:
+        profile = self._current_map_profile_name()
+        profile_item = self.forbidden_monster_wait_waypoints_by_profile.get(profile) if profile else None
+        item = self._get_forbidden_wait_waypoint_for_current_profile()
+        if not item:
+            return None
+        wp_id = str(item.get('id') or '').strip()
+        if not wp_id:
+            return None
+        map_tab = getattr(self, 'map_tab', None)
+        geometry = getattr(map_tab, 'geometry_data', None)
+        if not isinstance(geometry, dict):
+            return None
+        valid_map: dict[str, str] = {}
+        for entry in geometry.get('waypoints', []) or []:
+            try:
+                entry_id = str(entry.get('id'))
+            except Exception:
+                continue
+            if not entry_id:
+                continue
+            entry_name = str(entry.get('name') or entry_id)
+            valid_map[entry_id] = entry_name
+        if wp_id not in valid_map:
+            if profile and profile_item:
+                self._set_forbidden_wait_waypoint_for_current_profile(None, update_global=False)
+            elif not profile_item and self.forbidden_monster_wait_waypoint_id == wp_id:
+                self.forbidden_monster_wait_waypoint_id = None
+                self.forbidden_monster_wait_waypoint_name = ''
+            return None
+        name = valid_map.get(wp_id) or str(item.get('name') or wp_id)
+        return wp_id, name
 
     def _filter_waypoints_by_geometry(self, items: list[dict]) -> list[dict]:
         map_tab = getattr(self, 'map_tab', None)
@@ -6885,7 +6980,12 @@ class HuntTab(QWidget):
         self._update_shutdown_labels()
 
     def _start_other_player_wait_mode(self, started_at: float, *, flow: str = 'other_player') -> bool:
-        selected = self._select_random_wait_waypoint()
+        if flow == 'forbidden':
+            selected = self._select_forbidden_wait_waypoint()
+            if not selected:
+                selected = self._select_random_wait_waypoint()
+        else:
+            selected = self._select_random_wait_waypoint()
         if not selected:
             self.append_log("대기 모드를 실행하려면 웨이포인트를 먼저 설정해주세요.", "warn")
             return False
@@ -12244,7 +12344,7 @@ class HuntTab(QWidget):
         cmd = (getattr(self, 'forbidden_monster_command_profile', '') or '').strip()
         if not cmd:
             return
-        if not self._has_wait_waypoint_configured():
+        if not (self._has_forbidden_wait_waypoint_configured() or self._has_wait_waypoint_configured()):
             return
         self._expire_forbidden_visuals(now)
         lock_until = float(getattr(self, '_forbidden_lock_until', 0.0) or 0.0)
@@ -15172,13 +15272,36 @@ class HuntTab(QWidget):
             enabled = bool(cfg.get('enabled', False))
             cmd = str(cfg.get('command_profile', '') or '')
             tg = bool(cfg.get('telegram_alert', False))
+            wait_id = str(cfg.get('wait_waypoint_id', '') or '').strip()
+            wait_name = str(cfg.get('wait_waypoint_name', '') or '')
+            wait_by_profile_raw = cfg.get('wait_waypoints_by_profile', {})
+            cleaned_by_profile: dict[str, dict[str, str]] = {}
+            if isinstance(wait_by_profile_raw, dict):
+                for profile, item in wait_by_profile_raw.items():
+                    if not isinstance(item, dict):
+                        continue
+                    wp_id = str(item.get('id', '') or '').strip()
+                    if not wp_id:
+                        continue
+                    name = str(item.get('name', '') or wp_id)
+                    cleaned_by_profile[str(profile)] = {'id': wp_id, 'name': name}
             self.forbidden_monster_enabled = enabled
             self.forbidden_monster_command_profile = cmd
             self.forbidden_monster_telegram_alert = tg
+            self.forbidden_monster_wait_waypoints_by_profile = cleaned_by_profile
+            if wait_id:
+                self.forbidden_monster_wait_waypoint_id = wait_id
+                self.forbidden_monster_wait_waypoint_name = wait_name or wait_id
+            else:
+                self.forbidden_monster_wait_waypoint_id = None
+                self.forbidden_monster_wait_waypoint_name = ''
         except Exception:
             self.forbidden_monster_enabled = False
             self.forbidden_monster_command_profile = ''
             self.forbidden_monster_telegram_alert = False
+            self.forbidden_monster_wait_waypoints_by_profile = {}
+            self.forbidden_monster_wait_waypoint_id = None
+            self.forbidden_monster_wait_waypoint_name = ''
 
     def _save_settings(self) -> None:
         if getattr(self, '_suppress_settings_save', False):
@@ -15248,6 +15371,23 @@ class HuntTab(QWidget):
             walk_teleport_enabled_save = bool(self.walk_teleport_checkbox.isChecked())
         teleport_prob_save = max(0, min(100, int(teleport_prob_save)))
         walk_teleport_prob_save = max(0.0, min(100.0, float(walk_teleport_prob_save)))
+
+        wait_id = str(getattr(self, 'forbidden_monster_wait_waypoint_id', '') or '').strip()
+        wait_name = str(getattr(self, 'forbidden_monster_wait_waypoint_name', '') or '')
+        wait_by_profile: dict[str, dict[str, str]] = {}
+        try:
+            raw_profiles = getattr(self, 'forbidden_monster_wait_waypoints_by_profile', {})
+            if isinstance(raw_profiles, dict):
+                for profile, item in raw_profiles.items():
+                    if not isinstance(item, dict):
+                        continue
+                    wp_id = str(item.get('id', '') or '').strip()
+                    if not wp_id:
+                        continue
+                    name = str(item.get('name', '') or wp_id)
+                    wait_by_profile[str(profile)] = {'id': wp_id, 'name': name}
+        except Exception:
+            wait_by_profile = {}
 
         settings_data = {
             'ranges': ranges_data,
@@ -15446,6 +15586,9 @@ class HuntTab(QWidget):
                 'command_profile': str(getattr(self, 'forbidden_monster_command_profile', '') or ''),
                 'cooldown_sec': 180,
                 'telegram_alert': bool(getattr(self, 'forbidden_monster_telegram_alert', False)),
+                'wait_waypoint_id': wait_id or None,
+                'wait_waypoint_name': wait_name if wait_id else '',
+                'wait_waypoints_by_profile': wait_by_profile,
             },
         }
 
