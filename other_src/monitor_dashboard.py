@@ -109,6 +109,16 @@ CONFIG_FILE = CONFIG_PATH / "monitor_dashboard.json"
 SOUNDS_DIR = Path(WORKSPACE_ROOT) / "sounds"
 DEFAULT_WHISPER_COLOR = "00F100"
 DEFAULT_FRIEND_COLOR = "FFA500"
+CHAT_INTERVAL_MIN = 0.1
+CHAT_INTERVAL_MAX = 10.0
+CHAT_COLOR_DELTA_H = 5
+CHAT_COLOR_DELTA_S = 30
+CHAT_COLOR_DELTA_V = 30
+CHAT_MIN_PIXEL_RATIO = 0.002  # 최소 면적 비율(0.2%)
+CHAT_MIN_PIXEL_COUNT = 12     # 매우 작은 ROI 대비 절댓값 하한
+EXP_LEVEL_UP_DROP_THRESHOLD = 35.0
+EXP_LEVEL_UP_POST_PERCENT = 30.0
+EXP_REGRESSION_MIN_SAMPLES = 3
 
 _ACTIVE_QT_SOUND_PLAYERS: list = []
 
@@ -396,7 +406,9 @@ class MonitorConfig:
 
         chat_src = data.get("chat")
         if isinstance(chat_src, dict):
-            cfg.chat.interval_sec = clamp_float(float(chat_src.get("interval_sec", 5.0)), 1.0, 30.0)
+            cfg.chat.interval_sec = clamp_float(
+                float(chat_src.get("interval_sec", 5.0)), CHAT_INTERVAL_MIN, CHAT_INTERVAL_MAX
+            )
             roi = chat_src.get("roi")
             cfg.chat.roi = roi if isinstance(roi, dict) and roi else None
             whisper = chat_src.get("whisper")
@@ -564,7 +576,7 @@ class ChatWatcher(QThread):
         color_map: Dict[str, Tuple[str, bool]],
     ) -> None:
         with QMutexLocker(self._mutex):
-            self._interval = clamp_float(interval, 1.0, 30.0)
+            self._interval = clamp_float(interval, CHAT_INTERVAL_MIN, CHAT_INTERVAL_MAX)
             self._roi_payload = roi if isinstance(roi, dict) else None
             self._active_colors = {}
             for key, (hex_color, enabled) in color_map.items():
@@ -573,7 +585,12 @@ class ChatWatcher(QThread):
                 rgb = _hex_to_bgr(hex_color)
                 if rgb is None:
                     continue
-                lower, upper = _build_color_threshold(rgb)
+                lower, upper = _build_color_threshold(
+                    rgb,
+                    delta_h=CHAT_COLOR_DELTA_H,
+                    delta_s=CHAT_COLOR_DELTA_S,
+                    delta_v=CHAT_COLOR_DELTA_V,
+                )
                 self._active_colors[key] = (lower, upper)
             for key in list(self._last_states.keys()):
                 if key not in self._active_colors:
@@ -619,11 +636,17 @@ class ChatWatcher(QThread):
 
                 frame_bgr = np.array(frame)[:, :, :3]
                 frame_hsv = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2HSV)
+                frame_height, frame_width = frame_hsv.shape[:2]
+                min_pixels = max(
+                    CHAT_MIN_PIXEL_COUNT,
+                    int(frame_height * frame_width * CHAT_MIN_PIXEL_RATIO),
+                )
 
                 current_states: Dict[str, bool] = {}
                 for key, (lower, upper) in active_colors.items():
                     mask = cv2.inRange(frame_hsv, lower, upper)
-                    detected = bool(int(np.sum(mask > 0)) > 0)
+                    pixel_count = int(cv2.countNonZero(mask))
+                    detected = pixel_count >= min_pixels
                     current_states[key] = detected
                     if self._last_states.get(key) != detected:
                         self.detected.emit(key, detected)
@@ -665,10 +688,22 @@ def _build_color_threshold(
 
 
 class ExpSnapshot:
-    def __init__(self, *, amount: int, percent: float, timestamp: float):
+    def __init__(
+        self,
+        *,
+        amount: int,
+        percent: float,
+        timestamp: float,
+        total_amount: float = 0.0,
+        total_percent: float = 0.0,
+        level_ups: int = 0,
+    ):
         self.amount = amount
         self.percent = percent
         self.timestamp = timestamp
+        self.total_amount = total_amount
+        self.total_percent = total_percent
+        self.level_ups = level_ups
 
 
 # ---------------------------------------------------------------------------
@@ -704,7 +739,6 @@ class MonitorDashboard(QWidget):
         self.exp_elapsed_timer.timeout.connect(self._handle_exp_elapsed_tick)
 
         self.exp_history: list[ExpSnapshot] = []
-        self.exp_last_minute_mark = 0
         self.exp_minutes_limit: Optional[int] = None
         self.exp_start_ts: Optional[float] = None
         self.exp_active = False
@@ -824,8 +858,8 @@ class MonitorDashboard(QWidget):
         chat_interval_label = QLabel("탐지 주기(초)")
         chat_interval_label.setFixedWidth(80)
         self.chat_interval_spin = QDoubleSpinBox()
-        self.chat_interval_spin.setRange(1.0, 30.0)
-        self.chat_interval_spin.setSingleStep(1.0)
+        self.chat_interval_spin.setRange(CHAT_INTERVAL_MIN, CHAT_INTERVAL_MAX)
+        self.chat_interval_spin.setSingleStep(0.1)
         self.chat_interval_spin.setDecimals(1)
         self.chat_interval_spin.setFixedWidth(60)
         chat_interval_row.addWidget(chat_interval_label)
@@ -1262,9 +1296,8 @@ class MonitorDashboard(QWidget):
 
         amount, percent = snapshot
         now = time.time()
-        self.exp_history = [ExpSnapshot(amount=amount, percent=percent, timestamp=now)]
+        self.exp_history = []
         self.exp_start_ts = now
-        self.exp_last_minute_mark = 0
         self.exp_minutes_limit = minutes_limit
         self.exp_active = True
         self.exp_timer.start(int(self.config.exp.update_interval_sec * 1000))
@@ -1272,6 +1305,7 @@ class MonitorDashboard(QWidget):
         self.exp_start_button.setText("정지")
         self.config.exp.last_minutes_limit = minutes_limit
         self._save_config()
+        self._ingest_exp_snapshot(amount, percent, now, force_reset=True)
         self._update_exp_labels()
 
     def _stop_exp_measurement(self, *, finished: bool = False) -> None:
@@ -1315,17 +1349,8 @@ class MonitorDashboard(QWidget):
 
         amount, percent = snapshot
         now = time.time()
-        last_snapshot = self.exp_history[-1] if self.exp_history else None
-        if last_snapshot and amount == last_snapshot.amount and math.isclose(percent, last_snapshot.percent, abs_tol=0.01):
-            # 변화 없음 → 굳이 추가하지 않음
+        if not self._ingest_exp_snapshot(amount, percent, now):
             return
-
-        if last_snapshot and percent < last_snapshot.percent:
-            # 레벨 업으로 판단 → 히스토리 재기록
-            self.exp_history = [ExpSnapshot(amount=amount, percent=percent, timestamp=now)]
-            self.exp_last_minute_mark = 0
-        else:
-            self.exp_history.append(ExpSnapshot(amount=amount, percent=percent, timestamp=now))
 
         self._update_exp_labels()
 
@@ -1334,14 +1359,88 @@ class MonitorDashboard(QWidget):
             if elapsed_minutes >= self.exp_minutes_limit:
                 self._stop_exp_measurement(finished=True)
 
+    def _ingest_exp_snapshot(self, amount: int, percent: float, timestamp: float, *, force_reset: bool = False) -> bool:
+        if force_reset or not self.exp_history:
+            snapshot = ExpSnapshot(
+                amount=amount,
+                percent=percent,
+                timestamp=timestamp,
+                total_amount=0.0,
+                total_percent=0.0,
+                level_ups=0,
+            )
+            self.exp_history = [snapshot]
+            return True
+
+        last_snapshot = self.exp_history[-1]
+        if amount == last_snapshot.amount and math.isclose(percent, last_snapshot.percent, abs_tol=0.01):
+            return False
+
+        level_up = self._detect_level_up(last_snapshot, amount, percent)
+        if level_up:
+            delta_percent = (100.0 - last_snapshot.percent) + percent
+            level_ups = last_snapshot.level_ups + 1
+        else:
+            delta_percent = max(percent - last_snapshot.percent, 0.0)
+            level_ups = last_snapshot.level_ups
+
+        delta_percent = max(delta_percent, 0.0)
+        delta_amount = max(amount - last_snapshot.amount, 0)
+        total_amount = last_snapshot.total_amount + delta_amount
+        total_percent = last_snapshot.total_percent + delta_percent
+        snapshot = ExpSnapshot(
+            amount=amount,
+            percent=percent,
+            timestamp=timestamp,
+            total_amount=total_amount,
+            total_percent=total_percent,
+            level_ups=level_ups,
+        )
+        self.exp_history.append(snapshot)
+        return True
+
+    def _detect_level_up(self, previous: ExpSnapshot, amount: int, percent: float) -> bool:
+        percent_drop = previous.percent - percent
+        if percent <= EXP_LEVEL_UP_POST_PERCENT and percent_drop >= EXP_LEVEL_UP_DROP_THRESHOLD:
+            return True
+        if percent <= EXP_LEVEL_UP_POST_PERCENT and amount < previous.amount:
+            return True
+        return False
+
+    def _compute_regression_rate(self, attr: str) -> float:
+        if len(self.exp_history) < EXP_REGRESSION_MIN_SAMPLES:
+            return 0.0
+        base_time = self.exp_history[0].timestamp
+        xs = [snap.timestamp - base_time for snap in self.exp_history]
+        ys = [getattr(snap, attr) for snap in self.exp_history]
+        mean_x = sum(xs) / len(xs)
+        mean_y = sum(ys) / len(ys)
+        numerator = sum((x - mean_x) * (y - mean_y) for x, y in zip(xs, ys))
+        denominator = sum((x - mean_x) ** 2 for x in xs)
+        if denominator <= 0:
+            return 0.0
+        slope = numerator / denominator
+        if slope < 0:
+            return 0.0
+        return slope
+
+    def _snapshot_seconds_ago(self, seconds: int) -> Optional[ExpSnapshot]:
+        if not self.exp_history or seconds <= 0:
+            return None
+        target_time = self.exp_history[-1].timestamp - seconds
+        if target_time <= self.exp_history[0].timestamp:
+            return self.exp_history[0]
+        closest = min(self.exp_history, key=lambda snap: abs(snap.timestamp - target_time))
+        return closest
+
     def _update_exp_labels(self) -> None:
         if not self.exp_history:
             return
         first = self.exp_history[0]
         latest = self.exp_history[-1]
         measurement_elapsed = max(latest.timestamp - first.timestamp, 0.0)
-        gained_amount = latest.amount - first.amount
-        gained_percent = latest.percent - first.percent
+        gained_amount = int(latest.total_amount)
+        gained_percent = latest.total_percent
 
         current_time = time.time() if self.exp_active else None
         if self.exp_active and self.exp_start_ts is not None and current_time is not None:
@@ -1350,33 +1449,38 @@ class MonitorDashboard(QWidget):
             elapsed_seconds = max(int(measurement_elapsed), 0)
 
         elapsed_text = _format_duration_hms(elapsed_seconds)
+        level_up_text = f" | 레벨업 {latest.level_ups}회" if latest.level_ups else ""
         self.exp_summary_label.setText(
-            f"누적: +{gained_amount} ( +{gained_percent:.2f}% ) | 경과 {elapsed_text}"
+            f"누적: +{gained_amount} ( +{gained_percent:.2f}% ){level_up_text} | 경과 {elapsed_text}"
         )
 
-        minutes_elapsed = elapsed_seconds // 60
-        if minutes_elapsed > self.exp_last_minute_mark:
-            self.exp_last_minute_mark = minutes_elapsed
-            if len(self.exp_history) >= 2:
-                prev_snapshot = self._snapshot_at_minutes(minutes_elapsed - 1)
-                if prev_snapshot:
-                    delta_amount = latest.amount - prev_snapshot.amount
-                    delta_percent = latest.percent - prev_snapshot.percent
-                    self.exp_gain_label.setText(
-                        f"최근 1분: +{delta_amount} | +{delta_percent:.2f}%"
-                    )
+        recent_snapshot = self._snapshot_seconds_ago(60)
+        if recent_snapshot and latest.timestamp - recent_snapshot.timestamp >= 45:
+            delta_amount = int(latest.total_amount - recent_snapshot.total_amount)
+            delta_percent = latest.total_percent - recent_snapshot.total_percent
+            self.exp_gain_label.setText(f"최근 1분: +{delta_amount} | +{delta_percent:.2f}%")
+        else:
+            self.exp_gain_label.setText("최근 1분: 데이터 부족")
 
         elapsed_for_rate = measurement_elapsed
         if self.exp_active and self.exp_start_ts is not None and current_time is not None:
             elapsed_for_rate = max(current_time - self.exp_start_ts, measurement_elapsed)
 
-        rate_per_sec_amount = gained_amount / elapsed_for_rate if elapsed_for_rate > 0 else 0.0
-        rate_per_sec_percent = gained_percent / elapsed_for_rate if elapsed_for_rate > 0 else 0.0
+        rate_per_sec_amount = self._compute_regression_rate("total_amount")
+        rate_per_sec_percent = self._compute_regression_rate("total_percent")
+
+        if rate_per_sec_amount <= 0 and elapsed_for_rate > 0:
+            rate_per_sec_amount = gained_amount / elapsed_for_rate
+        if rate_per_sec_percent <= 0 and elapsed_for_rate > 0:
+            rate_per_sec_percent = gained_percent / elapsed_for_rate
+
         predictions = []
-        for minutes in (1, 5, 10):
+        for minutes in (1, 5, 10, 60):
             amount_projection = rate_per_sec_amount * (minutes * 60)
             percent_projection = rate_per_sec_percent * (minutes * 60)
-            predictions.append(f"{minutes}분 예상: +{int(amount_projection)} | +{percent_projection:.2f}%")
+            predictions.append(
+                f"{minutes}분 예상: +{int(amount_projection)} | +{percent_projection:.2f}%"
+            )
 
         if rate_per_sec_percent > 0:
             remaining_percent = max(0.0, 100.0 - latest.percent)
@@ -1388,13 +1492,6 @@ class MonitorDashboard(QWidget):
 
         predictions.append(eta_text)
         self.exp_prediction_label.setText("\n".join(predictions))
-
-    def _snapshot_at_minutes(self, minutes_mark: int) -> Optional[ExpSnapshot]:
-        if not self.exp_history or minutes_mark <= 0:
-            return None
-        target_time = self.exp_history[0].timestamp + minutes_mark * 60
-        closest = min(self.exp_history, key=lambda snap: abs(snap.timestamp - target_time))
-        return closest
 
     def _capture_region(self, region: Dict[str, int]) -> Optional[np.ndarray]:
         try:
