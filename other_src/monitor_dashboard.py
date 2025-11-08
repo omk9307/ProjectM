@@ -22,14 +22,14 @@ import threading
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, Optional, Tuple
+from typing import Dict, Optional, Tuple, List
 
 import cv2
 import mss
 import numpy as np
 
 from PyQt6.QtCore import QMutex, QMutexLocker, QObject, QRect, Qt, QThread, QTimer, pyqtSignal
-from PyQt6.QtGui import QCloseEvent
+from PyQt6.QtGui import QCloseEvent, QPixmap
 from PyQt6.QtWidgets import (
     QApplication,
     QDialog,
@@ -147,6 +147,22 @@ def normalize_hex_color(text: str) -> str:
     if not value:
         return ""
     return value.upper()[:6]
+
+
+def normalize_hex_color_list(text: str, *, default: str) -> str:
+    raw = (text or "").strip()
+    if not raw:
+        return default
+    parts = [p.strip() for p in raw.replace("#", "").split(",") if p.strip()]
+    codes: List[str] = []
+    for p in parts:
+        code = p.upper()[:6]
+        if len(code) == 6 and all(ch in "0123456789ABCDEF" for ch in code):
+            if code not in codes:
+                codes.append(code)
+    if not codes:
+        return default
+    return ",".join(codes)
 
 
 def _format_duration_hms(seconds: float) -> str:
@@ -420,13 +436,19 @@ class MonitorConfig:
             whisper = chat_src.get("whisper")
             if isinstance(whisper, dict):
                 cfg.chat.whisper.enabled = bool(whisper.get("enabled", True))
-                cfg.chat.whisper.hex_color = normalize_hex_color(whisper.get("hex_color", DEFAULT_WHISPER_COLOR) or DEFAULT_WHISPER_COLOR)
+                cfg.chat.whisper.hex_color = normalize_hex_color_list(
+                    str(whisper.get("hex_color", DEFAULT_WHISPER_COLOR) or DEFAULT_WHISPER_COLOR),
+                    default=DEFAULT_WHISPER_COLOR,
+                )
             else:
                 cfg.chat.whisper.hex_color = DEFAULT_WHISPER_COLOR
             friend = chat_src.get("friend")
             if isinstance(friend, dict):
                 cfg.chat.friend.enabled = bool(friend.get("enabled", False))
-                cfg.chat.friend.hex_color = normalize_hex_color(friend.get("hex_color", DEFAULT_FRIEND_COLOR) or DEFAULT_FRIEND_COLOR)
+                cfg.chat.friend.hex_color = normalize_hex_color_list(
+                    str(friend.get("hex_color", DEFAULT_FRIEND_COLOR) or DEFAULT_FRIEND_COLOR),
+                    default=DEFAULT_FRIEND_COLOR,
+                )
             else:
                 cfg.chat.friend.hex_color = DEFAULT_FRIEND_COLOR
 
@@ -570,7 +592,7 @@ class ChatWatcher(QThread):
         self._mutex = QMutex()
         self._interval = 5.0
         self._roi_payload: Optional[Dict[str, object]] = None
-        self._active_colors: Dict[str, Tuple[np.ndarray, np.ndarray]] = {}
+        self._active_colors: Dict[str, List[Tuple[np.ndarray, np.ndarray]]] = {}
         self._last_states: Dict[str, bool] = {}
         self._running = True
 
@@ -588,16 +610,23 @@ class ChatWatcher(QThread):
             for key, (hex_color, enabled) in color_map.items():
                 if not enabled:
                     continue
-                rgb = _hex_to_bgr(hex_color)
-                if rgb is None:
-                    continue
-                lower, upper = _build_color_threshold(
-                    rgb,
-                    delta_h=CHAT_COLOR_DELTA_H,
-                    delta_s=CHAT_COLOR_DELTA_S,
-                    delta_v=CHAT_COLOR_DELTA_V,
-                )
-                self._active_colors[key] = (lower, upper)
+                thresholds: List[Tuple[np.ndarray, np.ndarray]] = []
+                for code in (hex_color or "").split(","):
+                    code = normalize_hex_color(code)
+                    if len(code) != 6:
+                        continue
+                    rgb = _hex_to_bgr(code)
+                    if rgb is None:
+                        continue
+                    lower, upper = _build_color_threshold(
+                        rgb,
+                        delta_h=CHAT_COLOR_DELTA_H,
+                        delta_s=CHAT_COLOR_DELTA_S,
+                        delta_v=CHAT_COLOR_DELTA_V,
+                    )
+                    thresholds.append((lower, upper))
+                if thresholds:
+                    self._active_colors[key] = thresholds
             for key in list(self._last_states.keys()):
                 if key not in self._active_colors:
                     if self._last_states[key]:
@@ -649,10 +678,14 @@ class ChatWatcher(QThread):
                 )
 
                 current_states: Dict[str, bool] = {}
-                for key, (lower, upper) in active_colors.items():
-                    mask = cv2.inRange(frame_hsv, lower, upper)
-                    pixel_count = int(cv2.countNonZero(mask))
-                    detected = pixel_count >= min_pixels
+                for key, th_list in active_colors.items():
+                    detected = False
+                    for (lower, upper) in th_list:
+                        mask = cv2.inRange(frame_hsv, lower, upper)
+                        pixel_count = int(cv2.countNonZero(mask))
+                        if pixel_count >= min_pixels:
+                            detected = True
+                            break
                     current_states[key] = detected
                     if self._last_states.get(key) != detected:
                         self.detected.emit(key, detected)
@@ -870,6 +903,10 @@ class MonitorDashboard(QWidget):
         self.chat_interval_spin.setFixedWidth(60)
         chat_interval_row.addWidget(chat_interval_label)
         chat_interval_row.addWidget(self.chat_interval_spin)
+        self.chat_test_button = QPushButton("인식 테스트")
+        self.chat_test_button.setFixedWidth(90)
+        self.chat_test_button.clicked.connect(self._handle_chat_test)
+        chat_interval_row.addWidget(self.chat_test_button)
         chat_interval_row.addStretch(1)
         chat_interval_container = QWidget()
         chat_interval_container.setLayout(chat_interval_row)
@@ -878,8 +915,11 @@ class MonitorDashboard(QWidget):
         self.whisper_toggle_button = QPushButton("시작")
         self.whisper_toggle_button.clicked.connect(self._handle_whisper_toggle)
         self.whisper_color_edit = QLineEdit()
-        self.whisper_color_edit.setMaxLength(6)
-        self.whisper_color_edit.setFixedWidth(70)
+        self.whisper_color_edit.setMaxLength(64)
+        self.whisper_color_edit.setFixedWidth(140)
+        self.whisper_pick_button = QPushButton("스포이드")
+        self.whisper_pick_button.setFixedWidth(60)
+        self.whisper_pick_button.clicked.connect(self._handle_whisper_pick)
         self.whisper_status_label = QLabel("미감지")
         whisper_row = QHBoxLayout()
         whisper_row.setContentsMargins(0, 0, 0, 0)
@@ -889,6 +929,7 @@ class MonitorDashboard(QWidget):
         whisper_label.setFixedWidth(80)
         whisper_row.addWidget(whisper_label)
         whisper_row.addWidget(self.whisper_color_edit)
+        whisper_row.addWidget(self.whisper_pick_button)
         whisper_row.addWidget(self.whisper_status_label)
         whisper_container = QWidget()
         whisper_container.setLayout(whisper_row)
@@ -897,8 +938,11 @@ class MonitorDashboard(QWidget):
         self.friend_toggle_button = QPushButton("시작")
         self.friend_toggle_button.clicked.connect(self._handle_friend_toggle)
         self.friend_color_edit = QLineEdit()
-        self.friend_color_edit.setMaxLength(6)
-        self.friend_color_edit.setFixedWidth(70)
+        self.friend_color_edit.setMaxLength(64)
+        self.friend_color_edit.setFixedWidth(140)
+        self.friend_pick_button = QPushButton("스포이드")
+        self.friend_pick_button.setFixedWidth(60)
+        self.friend_pick_button.clicked.connect(self._handle_friend_pick)
         self.friend_status_label = QLabel("미감지")
         friend_row = QHBoxLayout()
         friend_row.setContentsMargins(0, 0, 0, 0)
@@ -908,6 +952,7 @@ class MonitorDashboard(QWidget):
         friend_label.setFixedWidth(80)
         friend_row.addWidget(friend_label)
         friend_row.addWidget(self.friend_color_edit)
+        friend_row.addWidget(self.friend_pick_button)
         friend_row.addWidget(self.friend_status_label)
         friend_container = QWidget()
         friend_container.setLayout(friend_row)
@@ -1062,12 +1107,12 @@ class MonitorDashboard(QWidget):
             color_map=color_map,
         )
 
-    def _normalize_chat_color_field(self, line_edit: QLineEdit, default: str) -> str:
-        code = normalize_hex_color(line_edit.text()) or default
-        if len(code) != 6:
-            code = default
-        line_edit.setText(code)
-        return code
+    def _normalize_chat_color_list_field(self, line_edit: QLineEdit, default: str) -> str:
+        text = line_edit.text()
+        value = normalize_hex_color_list(text, default=default)
+        if line_edit.text() != value:
+            line_edit.setText(value)
+        return value
 
     def _parse_other_colors_from_ui(self) -> list[str]:
         raw = self.other_color_edit.text()
@@ -1119,8 +1164,8 @@ class MonitorDashboard(QWidget):
         self._save_config()
 
     def _handle_whisper_toggle(self) -> None:
-        color = self._normalize_chat_color_field(self.whisper_color_edit, DEFAULT_WHISPER_COLOR)
-        self.config.chat.whisper.hex_color = color
+        color_list = self._normalize_chat_color_list_field(self.whisper_color_edit, DEFAULT_WHISPER_COLOR)
+        self.config.chat.whisper.hex_color = color_list
         self.config.chat.whisper.enabled = not self.config.chat.whisper.enabled
         self.whisper_toggle_button.setText("중지" if self.config.chat.whisper.enabled else "시작")
         self._update_chat_status_label("whisper", False)
@@ -1128,8 +1173,8 @@ class MonitorDashboard(QWidget):
         self._save_config()
 
     def _handle_friend_toggle(self) -> None:
-        color = self._normalize_chat_color_field(self.friend_color_edit, DEFAULT_FRIEND_COLOR)
-        self.config.chat.friend.hex_color = color
+        color_list = self._normalize_chat_color_list_field(self.friend_color_edit, DEFAULT_FRIEND_COLOR)
+        self.config.chat.friend.hex_color = color_list
         self.config.chat.friend.enabled = not self.config.chat.friend.enabled
         self.friend_toggle_button.setText("중지" if self.config.chat.friend.enabled else "시작")
         self._update_chat_status_label("friend", False)
@@ -1602,6 +1647,149 @@ class MonitorDashboard(QWidget):
             return None
         return np.array(frame)[:, :, :3]
 
+    def _to_qimage(self, image_bgr: np.ndarray) -> Optional['QImage']:
+        try:
+            from PyQt6.QtGui import QImage
+        except Exception:
+            return None
+        if image_bgr is None or image_bgr.size == 0:
+            return None
+        image_rgb = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2RGB)
+        h, w = image_rgb.shape[:2]
+        bytes_per_line = 3 * w
+        return QImage(image_rgb.data, w, h, bytes_per_line, QImage.Format.Format_RGB888).copy()
+
+    # ------------------------------
+    # 채팅 인식 테스트 & 스포이드
+    # ------------------------------
+    def _handle_chat_test(self) -> None:
+        if not self.config.chat.roi:
+            QMessageBox.warning(self, "채팅 인식 테스트", "먼저 채팅창 범위를 설정해주세요.")
+            return
+        window_geometry = get_maple_window_geometry()
+        region = resolve_roi_to_absolute(self.config.chat.roi, window=window_geometry)
+        if not region:
+            QMessageBox.warning(self, "채팅 인식 테스트", "채팅 범위를 절대 좌표로 변환할 수 없습니다.")
+            return
+        frame_bgr = self._capture_region(region)
+        if frame_bgr is None or frame_bgr.size == 0:
+            QMessageBox.warning(self, "채팅 인식 테스트", "화면 캡처에 실패했습니다.")
+            return
+
+        # 활성 색상 파싱 → 임계치 생성
+        color_defs = {
+            "whisper": (self.whisper_color_edit.text().strip(), self.config.chat.whisper.enabled),
+            "friend": (self.friend_color_edit.text().strip(), self.config.chat.friend.enabled),
+        }
+        active_thresholds: Dict[str, List[Tuple[np.ndarray, np.ndarray]]] = {}
+        for key, (hex_text, enabled) in color_defs.items():
+            if not enabled:
+                continue
+            thresholds: List[Tuple[np.ndarray, np.ndarray]] = []
+            for part in (hex_text or "").split(","):
+                code = normalize_hex_color(part)
+                if len(code) != 6:
+                    continue
+                bgr = _hex_to_bgr(code)
+                if bgr is None:
+                    continue
+                lo, hi = _build_color_threshold(
+                    bgr,
+                    delta_h=CHAT_COLOR_DELTA_H,
+                    delta_s=CHAT_COLOR_DELTA_S,
+                    delta_v=CHAT_COLOR_DELTA_V,
+                )
+                thresholds.append((lo, hi))
+            if thresholds:
+                active_thresholds[key] = thresholds
+
+        frame_hsv = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2HSV)
+        h, w = frame_hsv.shape[:2]
+        min_pixels = max(CHAT_MIN_PIXEL_COUNT, int(h * w * CHAT_MIN_PIXEL_RATIO))
+
+        # 오버레이 생성
+        overlay = frame_bgr.copy()
+        summary_lines: List[str] = []
+        channel_colors = {
+            "whisper": (0, 255, 0),  # BGR green
+            "friend": (0, 165, 255),  # BGR orange
+        }
+        for key, ths in active_thresholds.items():
+            total_pixels = 0
+            combined_mask = np.zeros((h, w), dtype=np.uint8)
+            for (lo, hi) in ths:
+                mask = cv2.inRange(frame_hsv, lo, hi)
+                total_pixels += int(cv2.countNonZero(mask))
+                combined_mask = cv2.bitwise_or(combined_mask, mask)
+            color = channel_colors.get(key, (255, 255, 255))
+            color_layer = np.zeros_like(frame_bgr)
+            color_layer[:, :] = color
+            overlay = np.where(combined_mask[:, :, None] > 0, (0.5 * color_layer + 0.5 * overlay).astype(np.uint8), overlay)
+            detected = int(cv2.countNonZero(combined_mask)) >= min_pixels
+            summary_lines.append(f"{key}: 픽셀 {int(cv2.countNonZero(combined_mask))} / 임계 {min_pixels} → {'감지' if detected else '미감지'}")
+
+        # 다이얼로그 구성
+        from PyQt6.QtWidgets import QDialog, QVBoxLayout, QLabel, QHBoxLayout, QPushButton
+        dialog = QDialog(self)
+        dialog.setWindowTitle("채팅 인식 확인")
+        vbox = QVBoxLayout(dialog)
+        info = QLabel("\n".join(summary_lines) if summary_lines else "활성화된 채널이 없습니다.")
+        vbox.addWidget(info)
+        hbox = QHBoxLayout()
+        raw_label = QLabel()
+        ov_label = QLabel()
+        q_raw = self._to_qimage(frame_bgr)
+        q_ov = self._to_qimage(overlay)
+        if q_raw:
+            raw_label.setPixmap(QPixmap.fromImage(q_raw).scaled(320, 200, Qt.AspectRatioMode.KeepAspectRatio))
+        if q_ov:
+            ov_label.setPixmap(QPixmap.fromImage(q_ov).scaled(320, 200, Qt.AspectRatioMode.KeepAspectRatio))
+        hbox.addWidget(raw_label)
+        hbox.addWidget(ov_label)
+        vbox.addLayout(hbox)
+        close_btn = QPushButton("닫기")
+        close_btn.clicked.connect(dialog.accept)
+        vbox.addWidget(close_btn)
+        dialog.exec()
+
+    def _handle_whisper_pick(self) -> None:
+        self._handle_color_pick(self.whisper_color_edit)
+
+    def _handle_friend_pick(self) -> None:
+        self._handle_color_pick(self.friend_color_edit)
+
+    def _handle_color_pick(self, target_edit: QLineEdit) -> None:
+        try:
+            snipper = ScreenSnipper(self)
+        except Exception as exc:
+            QMessageBox.warning(self, "스포이드", f"화면 캡처 도구를 열 수 없습니다: {exc}")
+            return
+        if snipper.exec() != QDialog.DialogCode.Accepted:
+            return
+        rect: QRect = snipper.get_roi()
+        region = {
+            "left": rect.left(),
+            "top": rect.top(),
+            "width": max(1, rect.width()),
+            "height": max(1, rect.height()),
+        }
+        frame = self._capture_region(region)
+        if frame is None or frame.size == 0:
+            QMessageBox.warning(self, "스포이드", "선택 영역 캡처에 실패했습니다.")
+            return
+        # 1px 픽셀 색상(선택 영역의 중심 좌표)
+        h, w = frame.shape[:2]
+        cy, cx = h // 2, w // 2
+        bgr = tuple(int(v) for v in frame[cy, cx])  # type: ignore
+        b, g, r = bgr
+        hex_code = f"{r:02X}{g:02X}{b:02X}"
+        # 추가(중복 제거)
+        existing = [c for c in (target_edit.text() or "").split(",") if c]
+        if hex_code not in existing:
+            existing.append(hex_code)
+        target_edit.setText(",".join([c for c in existing if len(c) == 6]))
+        self._on_chat_settings_changed()
+
     def _prepare_exp_preview(self, image_bgr: np.ndarray) -> dict:
         result: dict = {
             "processed": None,
@@ -1803,6 +1991,7 @@ class MonitorDashboard(QWidget):
         self.whisper_color_edit.editingFinished.connect(self._on_chat_settings_changed)
         self.friend_color_edit.editingFinished.connect(self._on_chat_settings_changed)
         self.chat_interval_spin.valueChanged.connect(self._on_chat_settings_changed)
+        # chat_test_button, pick buttons are connected where created
 
     def _on_other_settings_changed(self) -> None:
         colors = self._parse_other_colors_from_ui()
@@ -1815,8 +2004,8 @@ class MonitorDashboard(QWidget):
 
     def _on_chat_settings_changed(self) -> None:
         self.config.chat.interval_sec = self.chat_interval_spin.value()
-        self.config.chat.whisper.hex_color = self._normalize_chat_color_field(self.whisper_color_edit, DEFAULT_WHISPER_COLOR)
-        self.config.chat.friend.hex_color = self._normalize_chat_color_field(self.friend_color_edit, DEFAULT_FRIEND_COLOR)
+        self.config.chat.whisper.hex_color = self._normalize_chat_color_list_field(self.whisper_color_edit, DEFAULT_WHISPER_COLOR)
+        self.config.chat.friend.hex_color = self._normalize_chat_color_list_field(self.friend_color_edit, DEFAULT_FRIEND_COLOR)
         self._apply_config_to_workers()
         self._save_config()
 
