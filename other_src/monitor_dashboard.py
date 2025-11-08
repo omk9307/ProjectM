@@ -119,6 +119,12 @@ CHAT_MIN_PIXEL_COUNT = 12     # 매우 작은 ROI 대비 절댓값 하한
 EXP_LEVEL_UP_DROP_THRESHOLD = 35.0
 EXP_LEVEL_UP_POST_PERCENT = 30.0
 EXP_REGRESSION_MIN_SAMPLES = 3
+EXP_REGRESSION_WINDOW_SEC = 600  # 최근 10분만 사용
+EXP_REGRESSION_HALF_LIFE_SEC = 360  # 회귀 가중 반감기 6분
+EXP_EWMA_1MIN_WINDOW_SEC = 60  # 최근 60초 구간
+EXP_EWMA_1MIN_HALF_LIFE_SEC = 30  # 1분 예상용 EWMA 반감기
+EXP_IDLE_WINDOW_SEC = 20
+EXP_IDLE_MIN_PERCENT = 0.1
 
 _ACTIVE_QT_SOUND_PLAYERS: list = []
 
@@ -1408,21 +1414,9 @@ class MonitorDashboard(QWidget):
         return False
 
     def _compute_regression_rate(self, attr: str) -> float:
-        if len(self.exp_history) < EXP_REGRESSION_MIN_SAMPLES:
-            return 0.0
-        base_time = self.exp_history[0].timestamp
-        xs = [snap.timestamp - base_time for snap in self.exp_history]
-        ys = [getattr(snap, attr) for snap in self.exp_history]
-        mean_x = sum(xs) / len(xs)
-        mean_y = sum(ys) / len(ys)
-        numerator = sum((x - mean_x) * (y - mean_y) for x, y in zip(xs, ys))
-        denominator = sum((x - mean_x) ** 2 for x in xs)
-        if denominator <= 0:
-            return 0.0
-        slope = numerator / denominator
-        if slope < 0:
-            return 0.0
-        return slope
+        # 기존 전 구간 회귀 → 최근 창 + 가중치 회귀로 대체
+        history = self._recent_history(EXP_REGRESSION_WINDOW_SEC)
+        return self._compute_weighted_regression_rate(history, attr, half_life_sec=EXP_REGRESSION_HALF_LIFE_SEC)
 
     def _snapshot_seconds_ago(self, seconds: int) -> Optional[ExpSnapshot]:
         if not self.exp_history or seconds <= 0:
@@ -1432,6 +1426,88 @@ class MonitorDashboard(QWidget):
             return self.exp_history[0]
         closest = min(self.exp_history, key=lambda snap: abs(snap.timestamp - target_time))
         return closest
+
+    def _recent_history(self, window_sec: int) -> list[ExpSnapshot]:
+        if not self.exp_history:
+            return []
+        latest_ts = self.exp_history[-1].timestamp
+        cutoff = latest_ts - max(int(window_sec), 1)
+        recent = [snap for snap in self.exp_history if snap.timestamp >= cutoff]
+        if len(recent) < 2 and len(self.exp_history) >= 2:
+            # 최소 2개 확보를 위해 가장 최근 2개라도 반환
+            return self.exp_history[-2:]
+        return recent
+
+    def _compute_weighted_regression_rate(
+        self,
+        history: list[ExpSnapshot],
+        attr: str,
+        *,
+        half_life_sec: float,
+    ) -> float:
+        if len(history) < EXP_REGRESSION_MIN_SAMPLES:
+            return 0.0
+        latest_ts = history[-1].timestamp
+        # 지수가중치: w = 0.5 ** (age / half_life)
+        xs: list[float] = []
+        ys: list[float] = []
+        ws: list[float] = []
+        for snap in history:
+            x = snap.timestamp - history[0].timestamp
+            y = getattr(snap, attr)
+            age = latest_ts - snap.timestamp
+            w = 0.5 ** (age / max(half_life_sec, 1e-6))
+            xs.append(x)
+            ys.append(float(y))
+            ws.append(w)
+        # 가중 평균
+        sum_w = sum(ws)
+        if sum_w <= 0:
+            return 0.0
+        mean_x = sum(w * x for w, x in zip(ws, xs)) / sum_w
+        mean_y = sum(w * y for w, y in zip(ws, ys)) / sum_w
+        cov = sum(w * (x - mean_x) * (y - mean_y) for w, x, y in zip(ws, xs, ys))
+        var = sum(w * (x - mean_x) ** 2 for w, x in zip(ws, xs))
+        if var <= 0:
+            return 0.0
+        slope = cov / var
+        return max(slope, 0.0)
+
+    def _compute_ewma_rate(
+        self,
+        history: list[ExpSnapshot],
+        attr: str,
+        *,
+        window_sec: int,
+        half_life_sec: float,
+    ) -> float:
+        # 연속 구간의 순간 속도(dy/dt)를 dt 가중 EWMA로 결합
+        recent = self._recent_history(window_sec)
+        if len(recent) < 2:
+            return 0.0
+        # 연속 시간 지수감쇠 계수
+        tau = max(half_life_sec / math.log(2), 1e-6)
+        latest_ts = recent[-1].timestamp
+        r_ewma = None
+        total_w = 0.0
+        for prev, curr in zip(recent[:-1], recent[1:]):
+            dt = curr.timestamp - prev.timestamp
+            if dt <= 0:
+                continue
+            dy = float(getattr(curr, attr)) - float(getattr(prev, attr))
+            r = max(dy / dt, 0.0)
+            # 쌍이 끝나는 시점의 연령을 기준으로 가중
+            age = latest_ts - curr.timestamp
+            w = (1.0 - math.exp(-dt / tau)) * (0.5 ** (age / max(half_life_sec, 1e-6)))
+            if r_ewma is None:
+                r_ewma = r * w
+                total_w = w
+            else:
+                r_ewma = r_ewma + w * (r - (r_ewma / max(total_w, 1e-12)))
+                total_w += w
+        if r_ewma is None or total_w <= 0:
+            return 0.0
+        return max(r_ewma / total_w, 0.0)
 
     def _update_exp_labels(self) -> None:
         if not self.exp_history:
@@ -1466,18 +1542,43 @@ class MonitorDashboard(QWidget):
         if self.exp_active and self.exp_start_ts is not None and current_time is not None:
             elapsed_for_rate = max(current_time - self.exp_start_ts, measurement_elapsed)
 
-        rate_per_sec_amount = self._compute_regression_rate("total_amount")
-        rate_per_sec_percent = self._compute_regression_rate("total_percent")
+        # 휴식/정체 판단: 최근 20초 누적 증가가 너무 작으면 예측 0 처리
+        idle_snapshot = self._snapshot_seconds_ago(EXP_IDLE_WINDOW_SEC)
+        idle = False
+        if idle_snapshot:
+            idle_delta_percent = latest.total_percent - idle_snapshot.total_percent
+            idle = idle_delta_percent < EXP_IDLE_MIN_PERCENT
 
-        if rate_per_sec_amount <= 0 and elapsed_for_rate > 0:
-            rate_per_sec_amount = gained_amount / elapsed_for_rate
-        if rate_per_sec_percent <= 0 and elapsed_for_rate > 0:
-            rate_per_sec_percent = gained_percent / elapsed_for_rate
+        # 1분 예상은 최근 60초 EWMA 속도, 그 외는 최근 10분 가중 회귀 속도 사용
+        ewma_rate_amount = self._compute_ewma_rate(
+            self.exp_history, "total_amount", window_sec=EXP_EWMA_1MIN_WINDOW_SEC, half_life_sec=EXP_EWMA_1MIN_HALF_LIFE_SEC
+        )
+        ewma_rate_percent = self._compute_ewma_rate(
+            self.exp_history, "total_percent", window_sec=EXP_EWMA_1MIN_WINDOW_SEC, half_life_sec=EXP_EWMA_1MIN_HALF_LIFE_SEC
+        )
+        reg_rate_amount = self._compute_regression_rate("total_amount")
+        reg_rate_percent = self._compute_regression_rate("total_percent")
+
+        # 폴백: 데이터 부족 시 평균 속도 사용
+        if ewma_rate_amount <= 0 and elapsed_for_rate > 0:
+            ewma_rate_amount = gained_amount / elapsed_for_rate
+        if ewma_rate_percent <= 0 and elapsed_for_rate > 0:
+            ewma_rate_percent = gained_percent / elapsed_for_rate
+        if reg_rate_amount <= 0 and elapsed_for_rate > 0:
+            reg_rate_amount = gained_amount / elapsed_for_rate
+        if reg_rate_percent <= 0 and elapsed_for_rate > 0:
+            reg_rate_percent = gained_percent / elapsed_for_rate
 
         predictions = []
         for minutes in (1, 5, 10, 60):
-            amount_projection = rate_per_sec_amount * (minutes * 60)
-            percent_projection = rate_per_sec_percent * (minutes * 60)
+            if idle:
+                amount_projection = 0.0
+                percent_projection = 0.0
+            else:
+                rate_amt = ewma_rate_amount if minutes == 1 else reg_rate_amount
+                rate_pct = ewma_rate_percent if minutes == 1 else reg_rate_percent
+                amount_projection = rate_amt * (minutes * 60)
+                percent_projection = rate_pct * (minutes * 60)
             predictions.append(
                 f"{minutes}분 예상: +{int(amount_projection)} | +{percent_projection:.2f}%"
             )
