@@ -28,8 +28,8 @@ import cv2
 import mss
 import numpy as np
 
-from PyQt6.QtCore import QMutex, QMutexLocker, QObject, QRect, Qt, QThread, QTimer, pyqtSignal
-from PyQt6.QtGui import QCloseEvent, QPixmap
+from PyQt6.QtCore import QMutex, QMutexLocker, QObject, QRect, Qt, QThread, QTimer, pyqtSignal, QPoint, QSize
+from PyQt6.QtGui import QCloseEvent, QPixmap, QPainter, QPen, QColor, QImage, QFont, QFontDatabase, QFontInfo
 from PyQt6.QtWidgets import (
     QApplication,
     QDialog,
@@ -43,8 +43,10 @@ from PyQt6.QtWidgets import (
     QMessageBox,
     QPushButton,
     QSpinBox,
+    QToolButton,
     QVBoxLayout,
     QWidget,
+    QStyle,
 )
 
 
@@ -147,7 +149,6 @@ def normalize_hex_color(text: str) -> str:
     if not value:
         return ""
     return value.upper()[:6]
-
 
 def normalize_hex_color_list(text: str, *, default: str) -> str:
     raw = (text or "").strip()
@@ -653,9 +654,7 @@ class ChatWatcher(QThread):
                     time.sleep(0.5)
                     continue
 
-                if not is_maple_window_foreground():
-                    time.sleep(interval)
-                    continue
+                # 채팅 감지는 Mapleland 포그라운드 여부와 무관하게 동작
 
                 window_geometry = get_maple_window_geometry()
                 region = resolve_roi_to_absolute(roi_payload, window=window_geometry)
@@ -755,6 +754,7 @@ class MonitorDashboard(QWidget):
         super().__init__()
         self.setWindowTitle("Project Maple - 모니터 대시보드")
         self.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint, True)
+        self.setObjectName("monitorDashboard")
 
         self.config = MonitorConfig.from_dict(self._load_config())
         if not self.config.anchor_name:
@@ -785,6 +785,7 @@ class MonitorDashboard(QWidget):
         self._chat_detection_states: Dict[str, bool] = {"whisper": False, "friend": False}
 
         self._build_ui()
+        self._apply_modern_style()
         self._apply_config_to_ui()
         self._apply_config_to_workers()
         self._connect_signals()
@@ -795,10 +796,120 @@ class MonitorDashboard(QWidget):
             self.move(80, 20)
 
     # ------------------------------------------------------------------
+    # 스타일
+    # ------------------------------------------------------------------
+    def _apply_modern_style(self) -> None:
+        target_font_name = "NanumGothic"
+        font_size = 10
+        base_font = QFont(target_font_name, font_size)
+        if QFontInfo(base_font).family().lower() != target_font_name.lower():
+            font_candidates = [
+                "C:/Windows/Fonts/NanumGothic.ttf",
+                "C:/Windows/Fonts/NanumGothic-Regular.ttf",
+            ]
+            for font_path in font_candidates:
+                font_id = QFontDatabase.addApplicationFont(font_path)
+                if font_id != -1:
+                    families = QFontDatabase.applicationFontFamilies(font_id)
+                    if families:
+                        base_font = QFont(families[0], font_size)
+                        break
+        self.setFont(base_font)
+
+        glass_stylesheet = """
+            QWidget#monitorDashboard {
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:1,
+                    stop:0 #f9fbff, stop:1 #e9f0ff);
+            }
+            QGroupBox {
+                font-weight: 600;
+                color: #2a3550;
+                border: 1px solid rgba(80, 120, 200, 0.25);
+                border-radius: 14px;
+                margin-top: 26px;
+                padding: 5px;
+                background-color: rgba(255, 255, 255, 0.82);
+            }
+            QGroupBox::title {
+                top: 0px;
+                subcontrol-origin: margin;
+                subcontrol-position: top left;
+                padding: 5px;
+                background-color: rgba(249, 251, 255, 0.96);
+                border-radius: 8px;
+                color: #1f2b44;
+                font-size: 12px;
+                font-weight: 700;
+            }
+            QLabel {
+                color: #1f2b44;
+            }
+            QPushButton {
+                background-color: #4a8df5;
+                color: white;
+                border: none;
+                border-radius: 8px;
+                padding: 6px 12px;
+                font-weight: 600;
+            }
+            QPushButton:hover {
+                background-color: #6aa4ff;
+            }
+            QPushButton:pressed {
+                background-color: #2b6fd4;
+            }
+            QPushButton:disabled {
+                background-color: #c5d4f0;
+                color: #f4f6fb;
+            }
+            QToolButton {
+                background-color: rgba(74, 141, 245, 0.15);
+                border: 1px solid rgba(74, 141, 245, 0.4);
+                border-radius: 10px;
+                padding: 2px;
+            }
+            QToolButton:hover {
+                background-color: rgba(74, 141, 245, 0.3);
+            }
+            QToolButton:pressed {
+                background-color: rgba(43, 111, 212, 0.45);
+            }
+            QLineEdit {
+                background-color: rgba(255, 255, 255, 0.9);
+                border: 1px solid rgba(70, 100, 160, 0.35);
+                border-radius: 8px;
+                padding: 4px 6px;
+                color: #1f2b44;
+                selection-background-color: #4a8df5;
+                selection-color: white;
+            }
+            QLineEdit:focus {
+                border: 1px solid #4a8df5;
+                box-shadow: 0 0 8px rgba(74, 141, 245, 0.35);
+            }
+            QLabel#statusLabel {
+                font-weight: 600;
+            }
+            QToolButton#chatTestButton {
+                min-width: 22px;
+                max-width: 22px;
+                min-height: 22px;
+                max-height: 22px;
+                padding: 0;
+                border-radius: 11px;
+                background-color: transparent;
+                border: none;
+            }
+        """
+        self.setStyleSheet(glass_stylesheet)
+
+    # ------------------------------------------------------------------
     # UI 구성
     # ------------------------------------------------------------------
     def _build_ui(self) -> None:
         root_layout = QVBoxLayout(self)
+        root_layout.setContentsMargins(10, 14, 10, 10)
+        root_layout.setSpacing(12)
 
         self.anchor_summary_label = QLabel()
         self.anchor_save_btn = QPushButton("저장")
@@ -808,6 +919,8 @@ class MonitorDashboard(QWidget):
 
         anchor_box = QGroupBox("창 위치 관리")
         anchor_layout = QHBoxLayout()
+        anchor_layout.setContentsMargins(2, 2, 2, 2)
+        anchor_layout.setSpacing(6)
         anchor_layout.addWidget(self.anchor_summary_label, 1)
         anchor_layout.addWidget(self.anchor_save_btn)
         anchor_layout.addWidget(self.anchor_load_btn)
@@ -817,6 +930,7 @@ class MonitorDashboard(QWidget):
         # 다른 유저 감지
         other_group = QGroupBox("다른 유저 감지")
         other_layout = QGridLayout()
+        other_layout.setContentsMargins(2, 2, 2, 2)
         other_layout.setHorizontalSpacing(8)
         other_layout.setVerticalSpacing(6)
 
@@ -828,7 +942,7 @@ class MonitorDashboard(QWidget):
         other_top_row.setSpacing(6)
         other_top_row.addWidget(self.other_toggle_button)
 
-        self.other_roi_button = QPushButton("미니맵 범위 설정")
+        self.other_roi_button = QPushButton("범위설정")
         self.other_roi_button.clicked.connect(self._handle_other_roi_select)
         other_top_row.addWidget(self.other_roi_button)
 
@@ -843,39 +957,32 @@ class MonitorDashboard(QWidget):
         other_top_container.setLayout(other_top_row)
         other_layout.addWidget(other_top_container, 0, 0, 1, 3)
 
-        count_row = QHBoxLayout()
-        count_row.setContentsMargins(0, 0, 0, 0)
-        count_row.setSpacing(6)
-        count_label = QLabel("최소 인원")
-        count_label.setFixedWidth(80)
+        count_interval_row = QHBoxLayout()
+        count_interval_row.setContentsMargins(0, 0, 0, 0)
+        count_interval_row.setSpacing(6)
+
         self.other_min_count_spin = QSpinBox()
         self.other_min_count_spin.setRange(1, 50)
-        self.other_min_count_spin.setFixedWidth(60)
-        count_row.addWidget(count_label)
-        count_row.addWidget(self.other_min_count_spin)
-        count_row.addStretch(1)
-        count_container = QWidget()
-        count_container.setLayout(count_row)
-        other_layout.addWidget(count_container, 1, 0, 1, 3)
+        self.other_min_count_spin.setFixedWidth(40)
+        count_interval_row.addWidget(QLabel("최소 인원"))
+        count_interval_row.addWidget(self.other_min_count_spin)
 
-        interval_row = QHBoxLayout()
-        interval_row.setContentsMargins(0, 0, 0, 0)
-        interval_row.setSpacing(6)
-        interval_label = QLabel("탐지 주기(초)")
-        interval_label.setFixedWidth(80)
         self.other_interval_spin = QDoubleSpinBox()
         self.other_interval_spin.setRange(0.01, 10.0)
         self.other_interval_spin.setSingleStep(0.01)
         self.other_interval_spin.setDecimals(2)
-        self.other_interval_spin.setFixedWidth(60)
-        interval_row.addWidget(interval_label)
-        interval_row.addWidget(self.other_interval_spin)
-        interval_row.addStretch(1)
-        interval_container = QWidget()
-        interval_container.setLayout(interval_row)
-        other_layout.addWidget(interval_container, 2, 0, 1, 3)
+        self.other_interval_spin.setFixedWidth(55)
+        count_interval_row.addSpacing(12)
+        count_interval_row.addWidget(QLabel("탐지 주기"))
+        count_interval_row.addWidget(self.other_interval_spin)
+
+        count_interval_row.addStretch(1)
+        count_interval_container = QWidget()
+        count_interval_container.setLayout(count_interval_row)
+        other_layout.addWidget(count_interval_container, 1, 0, 1, 3)
 
         self.other_status_label = QLabel("감지 대기 중")
+        self.other_status_label.setObjectName("statusLabel")
         other_layout.addWidget(self.other_status_label, 3, 0, 1, 3)
 
         other_group.setLayout(other_layout)
@@ -884,79 +991,77 @@ class MonitorDashboard(QWidget):
         # 채팅 감지
         chat_group = QGroupBox("채팅창 감지")
         chat_layout = QGridLayout()
+        chat_layout.setContentsMargins(2, 2, 2, 2)
         chat_layout.setHorizontalSpacing(8)
         chat_layout.setVerticalSpacing(6)
 
-        self.chat_roi_button = QPushButton("범위 설정")
+        self.chat_roi_button = QPushButton("범위설정")
         self.chat_roi_button.clicked.connect(self._handle_chat_roi_select)
-
-        chat_interval_row = QHBoxLayout()
-        chat_interval_row.setContentsMargins(0, 0, 0, 0)
-        chat_interval_row.setSpacing(6)
-        chat_interval_row.addWidget(self.chat_roi_button)
-        chat_interval_label = QLabel("탐지 주기(초)")
+        chat_interval_label = QLabel("탐지 주기")
         chat_interval_label.setFixedWidth(80)
         self.chat_interval_spin = QDoubleSpinBox()
         self.chat_interval_spin.setRange(CHAT_INTERVAL_MIN, CHAT_INTERVAL_MAX)
         self.chat_interval_spin.setSingleStep(0.1)
         self.chat_interval_spin.setDecimals(1)
         self.chat_interval_spin.setFixedWidth(60)
-        chat_interval_row.addWidget(chat_interval_label)
-        chat_interval_row.addWidget(self.chat_interval_spin)
-        self.chat_test_button = QPushButton("인식 테스트")
-        self.chat_test_button.setFixedWidth(90)
+        self.chat_test_button = QToolButton()
+        self.chat_test_button.setObjectName("chatTestButton")
+        self.chat_test_button.setAutoRaise(True)
+        self.chat_test_button.setIcon(self.style().standardIcon(QStyle.StandardPixmap.SP_MediaPlay))
+        self.chat_test_button.setToolTip("채팅 감지 테스트")
+        self.chat_test_button.setIconSize(QSize(14, 14))
+        self.chat_test_button.setFixedSize(20, 20)
         self.chat_test_button.clicked.connect(self._handle_chat_test)
-        chat_interval_row.addWidget(self.chat_test_button)
-        chat_interval_row.addStretch(1)
-        chat_interval_container = QWidget()
-        chat_interval_container.setLayout(chat_interval_row)
-        chat_layout.addWidget(chat_interval_container, 0, 0, 1, 3)
+        chat_layout.addWidget(self.chat_roi_button, 0, 0)
+        chat_layout.addWidget(chat_interval_label, 0, 1)
+        chat_layout.addWidget(self.chat_interval_spin, 0, 2)
+        chat_layout.addWidget(self.chat_test_button, 0, 3)
 
         self.whisper_toggle_button = QPushButton("시작")
         self.whisper_toggle_button.clicked.connect(self._handle_whisper_toggle)
         self.whisper_color_edit = QLineEdit()
         self.whisper_color_edit.setMaxLength(64)
-        self.whisper_color_edit.setFixedWidth(140)
-        self.whisper_pick_button = QPushButton("스포이드")
-        self.whisper_pick_button.setFixedWidth(60)
+        self.whisper_color_edit.setFixedWidth(80)
+        self.whisper_pick_button = QToolButton()
+        self.whisper_pick_button.setAutoRaise(True)
+        self.whisper_pick_button.setIcon(self.style().standardIcon(QStyle.StandardPixmap.SP_DialogOpenButton))
+        self.whisper_pick_button.setToolTip("화면에서 색상 픽셀 선택")
+        self.whisper_pick_button.setIconSize(QSize(14, 14))
+        self.whisper_pick_button.setFixedSize(20, 20)
         self.whisper_pick_button.clicked.connect(self._handle_whisper_pick)
         self.whisper_status_label = QLabel("미감지")
-        whisper_row = QHBoxLayout()
-        whisper_row.setContentsMargins(0, 0, 0, 0)
-        whisper_row.setSpacing(6)
-        whisper_row.addWidget(self.whisper_toggle_button)
+        self.whisper_status_label.setObjectName("statusLabel")
         whisper_label = QLabel("귓속말 감지")
         whisper_label.setFixedWidth(80)
-        whisper_row.addWidget(whisper_label)
-        whisper_row.addWidget(self.whisper_color_edit)
-        whisper_row.addWidget(self.whisper_pick_button)
-        whisper_row.addWidget(self.whisper_status_label)
-        whisper_container = QWidget()
-        whisper_container.setLayout(whisper_row)
-        chat_layout.addWidget(whisper_container, 1, 0, 1, 3)
+        chat_layout.addWidget(self.whisper_toggle_button, 1, 0)
+        chat_layout.addWidget(whisper_label, 1, 1)
+        chat_layout.addWidget(self.whisper_color_edit, 1, 2)
+        chat_layout.addWidget(self.whisper_pick_button, 1, 3)
+        chat_layout.addWidget(self.whisper_status_label, 1, 4)
 
         self.friend_toggle_button = QPushButton("시작")
         self.friend_toggle_button.clicked.connect(self._handle_friend_toggle)
         self.friend_color_edit = QLineEdit()
         self.friend_color_edit.setMaxLength(64)
-        self.friend_color_edit.setFixedWidth(140)
-        self.friend_pick_button = QPushButton("스포이드")
-        self.friend_pick_button.setFixedWidth(60)
+        self.friend_color_edit.setFixedWidth(80)
+        self.friend_pick_button = QToolButton()
+        self.friend_pick_button.setAutoRaise(True)
+        self.friend_pick_button.setIcon(self.style().standardIcon(QStyle.StandardPixmap.SP_DialogOpenButton))
+        self.friend_pick_button.setToolTip("화면에서 색상 픽셀 선택")
+        self.friend_pick_button.setIconSize(QSize(14, 14))
+        self.friend_pick_button.setFixedSize(20, 20)
         self.friend_pick_button.clicked.connect(self._handle_friend_pick)
         self.friend_status_label = QLabel("미감지")
-        friend_row = QHBoxLayout()
-        friend_row.setContentsMargins(0, 0, 0, 0)
-        friend_row.setSpacing(6)
-        friend_row.addWidget(self.friend_toggle_button)
+        self.friend_status_label.setObjectName("statusLabel")
         friend_label = QLabel("친구채팅 감지")
         friend_label.setFixedWidth(80)
-        friend_row.addWidget(friend_label)
-        friend_row.addWidget(self.friend_color_edit)
-        friend_row.addWidget(self.friend_pick_button)
-        friend_row.addWidget(self.friend_status_label)
-        friend_container = QWidget()
-        friend_container.setLayout(friend_row)
-        chat_layout.addWidget(friend_container, 2, 0, 1, 3)
+        chat_layout.addWidget(self.friend_toggle_button, 2, 0)
+        chat_layout.addWidget(friend_label, 2, 1)
+        chat_layout.addWidget(self.friend_color_edit, 2, 2)
+        chat_layout.addWidget(self.friend_pick_button, 2, 3)
+        chat_layout.addWidget(self.friend_status_label, 2, 4)
+
+        chat_layout.setColumnStretch(4, 1)
 
         chat_group.setLayout(chat_layout)
         root_layout.addWidget(chat_group)
@@ -964,6 +1069,7 @@ class MonitorDashboard(QWidget):
         # 경험치 측정
         exp_group = QGroupBox("경험치 측정")
         exp_layout = QGridLayout()
+        exp_layout.setContentsMargins(2, 2, 2, 2)
 
         self.exp_start_button = QPushButton("시작")
         self.exp_start_button.clicked.connect(self._handle_exp_toggle)
@@ -979,11 +1085,11 @@ class MonitorDashboard(QWidget):
         self.exp_minutes_edit.setFixedWidth(70)
         exp_layout.addWidget(self.exp_minutes_edit, 0, 2)
 
-        self.exp_roi_button = QPushButton("범위 설정")
+        self.exp_roi_button = QPushButton("범위설정")
         self.exp_roi_button.clicked.connect(self._handle_exp_roi_select)
         exp_layout.addWidget(self.exp_roi_button, 1, 0)
 
-        self.exp_test_button = QPushButton("인식 테스트")
+        self.exp_test_button = QPushButton("테스트")
         self.exp_test_button.clicked.connect(self._handle_exp_test)
         exp_layout.addWidget(self.exp_test_button, 1, 1)
 
@@ -1057,6 +1163,7 @@ class MonitorDashboard(QWidget):
             self.anchor_save_btn,
             self.anchor_load_btn,
             self.other_toggle_button,
+            self.chat_roi_button,
             self.whisper_toggle_button,
             self.friend_toggle_button,
             self.exp_start_button,
@@ -1074,7 +1181,6 @@ class MonitorDashboard(QWidget):
 
         long_buttons = [
             self.other_roi_button,
-            self.chat_roi_button,
             self.exp_roi_button,
             self.exp_test_button,
         ]
@@ -1108,8 +1214,7 @@ class MonitorDashboard(QWidget):
         )
 
     def _normalize_chat_color_list_field(self, line_edit: QLineEdit, default: str) -> str:
-        text = line_edit.text()
-        value = normalize_hex_color_list(text, default=default)
+        value = normalize_hex_color_list(line_edit.text(), default=default)
         if line_edit.text() != value:
             line_edit.setText(value)
         return value
@@ -1293,9 +1398,16 @@ class MonitorDashboard(QWidget):
     def _update_chat_status_label(self, channel: str, detected: bool) -> None:
         if channel == "whisper":
             label = self.whisper_status_label
+            enabled = self.config.chat.whisper.enabled
         elif channel == "friend":
             label = self.friend_status_label
+            enabled = self.config.chat.friend.enabled
         else:
+            return
+        if not enabled:
+            label.setText("")
+            label.setStyleSheet("")
+            self._chat_detection_states[channel] = False
             return
         text = "감지" if detected else "미감지"
         color = "#2ecc71" if detected else "#7f8c8d"
@@ -1628,9 +1740,10 @@ class MonitorDashboard(QWidget):
                 f"{minutes}분 예상: +{int(amount_projection)} | +{percent_projection:.2f}%"
             )
 
-        if rate_per_sec_percent > 0:
+        # 100%까지 ETA는 장기 추세(회귀 퍼센트 속도)를 사용
+        if reg_rate_percent > 0:
             remaining_percent = max(0.0, 100.0 - latest.percent)
-            eta_seconds = remaining_percent / rate_per_sec_percent
+            eta_seconds = remaining_percent / reg_rate_percent
             eta_minutes = eta_seconds / 60.0
             eta_text = f"100%까지 예상 {eta_minutes:.1f}분"
         else:
@@ -1647,11 +1760,7 @@ class MonitorDashboard(QWidget):
             return None
         return np.array(frame)[:, :, :3]
 
-    def _to_qimage(self, image_bgr: np.ndarray) -> Optional['QImage']:
-        try:
-            from PyQt6.QtGui import QImage
-        except Exception:
-            return None
+    def _to_qimage(self, image_bgr: np.ndarray) -> Optional[QImage]:
         if image_bgr is None or image_bgr.size == 0:
             return None
         image_rgb = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2RGB)
@@ -1707,46 +1816,39 @@ class MonitorDashboard(QWidget):
         h, w = frame_hsv.shape[:2]
         min_pixels = max(CHAT_MIN_PIXEL_COUNT, int(h * w * CHAT_MIN_PIXEL_RATIO))
 
-        # 오버레이 생성
         overlay = frame_bgr.copy()
         summary_lines: List[str] = []
-        channel_colors = {
-            "whisper": (0, 255, 0),  # BGR green
-            "friend": (0, 165, 255),  # BGR orange
-        }
+        channel_labels = {"whisper": "귓속말", "friend": "친구채팅"}
+        combined_all = np.zeros((h, w), dtype=np.uint8)
         for key, ths in active_thresholds.items():
-            total_pixels = 0
             combined_mask = np.zeros((h, w), dtype=np.uint8)
             for (lo, hi) in ths:
                 mask = cv2.inRange(frame_hsv, lo, hi)
-                total_pixels += int(cv2.countNonZero(mask))
                 combined_mask = cv2.bitwise_or(combined_mask, mask)
-            color = channel_colors.get(key, (255, 255, 255))
-            color_layer = np.zeros_like(frame_bgr)
-            color_layer[:, :] = color
-            overlay = np.where(combined_mask[:, :, None] > 0, (0.5 * color_layer + 0.5 * overlay).astype(np.uint8), overlay)
-            detected = int(cv2.countNonZero(combined_mask)) >= min_pixels
-            summary_lines.append(f"{key}: 픽셀 {int(cv2.countNonZero(combined_mask))} / 임계 {min_pixels} → {'감지' if detected else '미감지'}")
+            pixels = int(cv2.countNonZero(combined_mask))
+            detected = pixels >= min_pixels
+            label = channel_labels.get(key, key)
+            summary_lines.append(f"{label}: {pixels}px → {'감지' if detected else '미감지'}")
+            combined_all = cv2.bitwise_or(combined_all, combined_mask)
+        if int(cv2.countNonZero(combined_all)) > 0:
+            red_layer = np.zeros_like(frame_bgr)
+            red_layer[:, :] = (0, 0, 255)
+            overlay = np.where(combined_all[:, :, None] > 0, (0.5 * red_layer + 0.5 * overlay).astype(np.uint8), overlay)
 
-        # 다이얼로그 구성
-        from PyQt6.QtWidgets import QDialog, QVBoxLayout, QLabel, QHBoxLayout, QPushButton
+        # 다이얼로그 구성(원본 크기 표시)
         dialog = QDialog(self)
         dialog.setWindowTitle("채팅 인식 확인")
         vbox = QVBoxLayout(dialog)
         info = QLabel("\n".join(summary_lines) if summary_lines else "활성화된 채널이 없습니다.")
         vbox.addWidget(info)
-        hbox = QHBoxLayout()
-        raw_label = QLabel()
-        ov_label = QLabel()
-        q_raw = self._to_qimage(frame_bgr)
+        img_label = QLabel()
         q_ov = self._to_qimage(overlay)
-        if q_raw:
-            raw_label.setPixmap(QPixmap.fromImage(q_raw).scaled(320, 200, Qt.AspectRatioMode.KeepAspectRatio))
         if q_ov:
-            ov_label.setPixmap(QPixmap.fromImage(q_ov).scaled(320, 200, Qt.AspectRatioMode.KeepAspectRatio))
-        hbox.addWidget(raw_label)
-        hbox.addWidget(ov_label)
-        vbox.addLayout(hbox)
+            pix = QPixmap.fromImage(q_ov)
+            img_label.setPixmap(pix)
+            img_label.resize(pix.size())
+            dialog.resize(pix.size())
+        vbox.addWidget(img_label)
         close_btn = QPushButton("닫기")
         close_btn.clicked.connect(dialog.accept)
         vbox.addWidget(close_btn)
@@ -1759,31 +1861,12 @@ class MonitorDashboard(QWidget):
         self._handle_color_pick(self.friend_color_edit)
 
     def _handle_color_pick(self, target_edit: QLineEdit) -> None:
-        try:
-            snipper = ScreenSnipper(self)
-        except Exception as exc:
-            QMessageBox.warning(self, "스포이드", f"화면 캡처 도구를 열 수 없습니다: {exc}")
+        picker = _ColorPickerDialog(self)
+        if picker.exec() != QDialog.DialogCode.Accepted:
             return
-        if snipper.exec() != QDialog.DialogCode.Accepted:
+        hex_code = picker.get_hex()
+        if not hex_code:
             return
-        rect: QRect = snipper.get_roi()
-        region = {
-            "left": rect.left(),
-            "top": rect.top(),
-            "width": max(1, rect.width()),
-            "height": max(1, rect.height()),
-        }
-        frame = self._capture_region(region)
-        if frame is None or frame.size == 0:
-            QMessageBox.warning(self, "스포이드", "선택 영역 캡처에 실패했습니다.")
-            return
-        # 1px 픽셀 색상(선택 영역의 중심 좌표)
-        h, w = frame.shape[:2]
-        cy, cx = h // 2, w // 2
-        bgr = tuple(int(v) for v in frame[cy, cx])  # type: ignore
-        b, g, r = bgr
-        hex_code = f"{r:02X}{g:02X}{b:02X}"
-        # 추가(중복 제거)
         existing = [c for c in (target_edit.text() or "").split(",") if c]
         if hex_code not in existing:
             existing.append(hex_code)
@@ -1991,7 +2074,7 @@ class MonitorDashboard(QWidget):
         self.whisper_color_edit.editingFinished.connect(self._on_chat_settings_changed)
         self.friend_color_edit.editingFinished.connect(self._on_chat_settings_changed)
         self.chat_interval_spin.valueChanged.connect(self._on_chat_settings_changed)
-        # chat_test_button, pick buttons are connected where created
+        # chat_test_button, pick buttons는 생성 시점에 연결됨
 
     def _on_other_settings_changed(self) -> None:
         colors = self._parse_other_colors_from_ui()
@@ -2022,6 +2105,109 @@ def main() -> None:
 
     if owns_app:
         sys.exit(app.exec())
+
+
+class _ColorPickerDialog(QDialog):
+    def __init__(self, parent: Optional[QWidget] = None) -> None:
+        super().__init__(parent)
+        self.setWindowFlags(
+            Qt.WindowType.FramelessWindowHint
+            | Qt.WindowType.WindowStaysOnTopHint
+            | Qt.WindowType.Tool
+        )
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        self.setMouseTracking(True)
+        self._screenshot, self._origin = self._capture_virtual_desktop()
+        if self._screenshot.isNull():
+            raise RuntimeError("화면 캡처에 실패했습니다.")
+        self.setGeometry(QRect(self._origin, self._screenshot.size()))
+        self._hover = QPoint(self._screenshot.width() // 2, self._screenshot.height() // 2)
+        self._picked_hex: Optional[str] = None
+
+    def _capture_virtual_desktop(self) -> Tuple[QImage, QPoint]:
+        origin = QPoint(0, 0)
+        try:
+            with mss.mss() as sct:
+                mon = sct.monitors[0]
+                shot = sct.grab(mon)
+            img = QImage(shot.rgb, shot.width, shot.height, QImage.Format.Format_RGB888)
+            origin = QPoint(mon.get("left", 0), mon.get("top", 0))
+            return img.copy(), origin
+        except Exception:
+            pass
+        screens = QApplication.screens()
+        if not screens:
+            return QImage(), origin
+        virtual_rect = screens[0].geometry()
+        for screen in screens[1:]:
+            virtual_rect = virtual_rect.united(screen.geometry())
+        origin = virtual_rect.topLeft()
+        snapshot = QPixmap(virtual_rect.size())
+        snapshot.fill(Qt.GlobalColor.transparent)
+        painter = QPainter(snapshot)
+        for screen in screens:
+            geo = screen.geometry()
+            offset = geo.topLeft() - origin
+            painter.drawPixmap(offset, screen.grabWindow(0))
+        painter.end()
+        return snapshot.toImage(), origin
+
+    def paintEvent(self, event):  # noqa: N802
+        painter = QPainter(self)
+        painter.drawImage(QPoint(0, 0), self._screenshot)
+        painter.setPen(QPen(QColor(255, 0, 0), 1))
+        x, y = self._hover.x(), self._hover.y()
+        painter.drawLine(x - 15, y, x + 15, y)
+        painter.drawLine(x, y - 15, x, y + 15)
+        zoom_size = 15
+        scale = 10
+        x0 = max(0, x - zoom_size // 2)
+        y0 = max(0, y - zoom_size // 2)
+        rect = QRect(
+            x0,
+            y0,
+            min(zoom_size, self._screenshot.width() - x0),
+            min(zoom_size, self._screenshot.height() - y0),
+        )
+        sub = self._screenshot.copy(rect)
+        zoom = QPixmap.fromImage(sub).scaled(
+            rect.width() * scale,
+            rect.height() * scale,
+            Qt.AspectRatioMode.KeepAspectRatio,
+            Qt.TransformationMode.FastTransformation,
+        )
+        zx = min(self.width() - zoom.width() - 10, x + 20)
+        zy = min(self.height() - zoom.height() - 10, y + 20)
+        painter.drawPixmap(zx, zy, zoom)
+        painter.setPen(QPen(QColor(255, 255, 255), 2))
+        painter.drawRect(zx - 1, zy - 1, zoom.width() + 2, zoom.height() + 2)
+        painter.setPen(QPen(QColor(255, 0, 0), 1))
+        zx_center = zx + (self._hover.x() - x0) * scale + scale // 2
+        zy_center = zy + (self._hover.y() - y0) * scale + scale // 2
+        painter.drawLine(zx_center - 10, zy_center, zx_center + 10, zy_center)
+        painter.drawLine(zx_center, zy_center - 10, zx_center, zy_center + 10)
+
+    def mouseMoveEvent(self, event):  # noqa: N802
+        pt = event.position().toPoint()
+        x = max(0, min(self._screenshot.width() - 1, pt.x()))
+        y = max(0, min(self._screenshot.height() - 1, pt.y()))
+        self._hover = QPoint(x, y)
+        self.update()
+
+    def mousePressEvent(self, event):  # noqa: N802
+        if event.button() == Qt.MouseButton.LeftButton:
+            c = self._screenshot.pixelColor(self._hover)
+            self._picked_hex = f"{c.red():02X}{c.green():02X}{c.blue():02X}"
+            self.accept()
+        elif event.button() == Qt.MouseButton.RightButton:
+            self.reject()
+
+    def keyPressEvent(self, event):  # noqa: N802
+        if event.key() == Qt.Key.Key_Escape:
+            self.reject()
+
+    def get_hex(self) -> Optional[str]:
+        return self._picked_hex
 
 
 if __name__ == "__main__":
