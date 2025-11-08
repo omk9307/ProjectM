@@ -744,6 +744,22 @@ class ExpSnapshot:
         self.level_ups = level_ups
 
 
+class ExpPredictionRecord:
+    def __init__(
+        self,
+        *,
+        minutes: int,
+        predicted_percent: float,
+        target_ts: float,
+        snapshot_ts: float,
+    ):
+        self.minutes = minutes
+        self.predicted_percent = predicted_percent
+        self.target_ts = target_ts
+        self.snapshot_ts = snapshot_ts
+        self.evaluated = False
+
+
 # ---------------------------------------------------------------------------
 # 메인 위젯
 # ---------------------------------------------------------------------------
@@ -781,6 +797,9 @@ class MonitorDashboard(QWidget):
         self.exp_minutes_limit: Optional[int] = None
         self.exp_start_ts: Optional[float] = None
         self.exp_active = False
+        self.exp_prediction_records: list[ExpPredictionRecord] = []
+        self.exp_prediction_accuracy: dict[int, float] = {}
+        self._last_prediction_snapshot_ts = 0.0
 
         self._chat_detection_states: Dict[str, bool] = {"whisper": False, "friend": False}
 
@@ -1101,11 +1120,24 @@ class MonitorDashboard(QWidget):
         card_layout = QVBoxLayout(self.exp_card)
         self.exp_summary_label = QLabel("측정을 시작하세요.")
         self.exp_gain_label = QLabel("분당 데이터 없음")
+        prediction_container = QWidget()
+        prediction_layout = QVBoxLayout(prediction_container)
+        prediction_layout.setContentsMargins(0, 0, 0, 0)
+        prediction_layout.setSpacing(4)
+
+        self.exp_prediction_title = QLabel("예측")
         self.exp_prediction_label = QLabel("예측 데이터 없음")
         self.exp_prediction_label.setWordWrap(True)
+        self.exp_accuracy_label = QLabel("정확도 데이터 없음")
+        self.exp_accuracy_label.setWordWrap(True)
+
+        prediction_layout.addWidget(self.exp_prediction_title)
+        prediction_layout.addWidget(self.exp_prediction_label)
+        prediction_layout.addWidget(self.exp_accuracy_label)
+
         card_layout.addWidget(self.exp_summary_label)
         card_layout.addWidget(self.exp_gain_label)
-        card_layout.addWidget(self.exp_prediction_label)
+        card_layout.addWidget(prediction_container)
         exp_layout.addWidget(self.exp_card, 3, 0, 1, 4)
 
         exp_group.setLayout(exp_layout)
@@ -1460,6 +1492,9 @@ class MonitorDashboard(QWidget):
         amount, percent = snapshot
         now = time.time()
         self.exp_history = []
+        self.exp_prediction_records.clear()
+        self.exp_prediction_accuracy.clear()
+        self._last_prediction_snapshot_ts = 0.0
         self.exp_start_ts = now
         self.exp_minutes_limit = minutes_limit
         self.exp_active = True
@@ -1488,6 +1523,10 @@ class MonitorDashboard(QWidget):
         self.exp_summary_label.setText("측정을 시작하세요.")
         self.exp_gain_label.setText("분당 데이터 없음")
         self.exp_prediction_label.setText("예측 데이터 없음")
+        self.exp_accuracy_label.setText("정확도 데이터 없음")
+        self.exp_prediction_records.clear()
+        self.exp_prediction_accuracy.clear()
+        self._last_prediction_snapshot_ts = 0.0
 
     def _handle_exp_elapsed_tick(self) -> None:
         if not self.exp_active:
@@ -1584,6 +1623,15 @@ class MonitorDashboard(QWidget):
         closest = min(self.exp_history, key=lambda snap: abs(snap.timestamp - target_time))
         return closest
 
+    def _snapshot_at_timestamp(self, target_ts: float) -> Optional[ExpSnapshot]:
+        if not self.exp_history:
+            return None
+        closest = min(self.exp_history, key=lambda snap: abs(snap.timestamp - target_ts))
+        tolerance = max(self.config.exp.update_interval_sec * 1.5, 15.0)
+        if abs(closest.timestamp - target_ts) > tolerance:
+            return None
+        return closest
+
     def _recent_history(self, window_sec: int) -> list[ExpSnapshot]:
         if not self.exp_history:
             return []
@@ -1666,6 +1714,51 @@ class MonitorDashboard(QWidget):
             return 0.0
         return max(r_ewma / total_w, 0.0)
 
+    def _store_exp_prediction(self, *, minutes: int, predicted_percent: float, snapshot_ts: float) -> None:
+        target_ts = snapshot_ts + (minutes * 60)
+        record = ExpPredictionRecord(
+            minutes=minutes,
+            predicted_percent=min(max(predicted_percent, 0.0), 100.0),
+            target_ts=target_ts,
+            snapshot_ts=snapshot_ts,
+        )
+        self.exp_prediction_records.append(record)
+        if len(self.exp_prediction_records) > 200:
+            self.exp_prediction_records = self.exp_prediction_records[-200:]
+
+    def _evaluate_prediction_records(self) -> None:
+        if not self.exp_prediction_records or not self.exp_history:
+            return
+        latest_ts = self.exp_history[-1].timestamp
+        remaining_records: list[ExpPredictionRecord] = []
+        for record in self.exp_prediction_records:
+            if record.evaluated:
+                continue
+            if latest_ts < record.target_ts:
+                remaining_records.append(record)
+                continue
+            actual_snapshot = self._snapshot_at_timestamp(record.target_ts)
+            if actual_snapshot is None:
+                remaining_records.append(record)
+                continue
+            actual_percent = actual_snapshot.percent
+            error = abs(actual_percent - record.predicted_percent)
+            accuracy = max(0.0, 100.0 - error)
+            self.exp_prediction_accuracy[record.minutes] = accuracy
+            record.evaluated = True
+        stale_threshold = latest_ts - 3600  # 1시간 이전 예측은 정리
+        self.exp_prediction_records = [
+            record
+            for record in remaining_records
+            if record.target_ts >= stale_threshold
+        ]
+
+    def _format_accuracy_text(self, minutes: int) -> str:
+        accuracy = self.exp_prediction_accuracy.get(minutes)
+        if accuracy is None:
+            return "정확도 데이터 없음"
+        return f"정확도 {accuracy:.1f}%"
+
     def _update_exp_labels(self) -> None:
         if not self.exp_history:
             return
@@ -1674,6 +1767,7 @@ class MonitorDashboard(QWidget):
         measurement_elapsed = max(latest.timestamp - first.timestamp, 0.0)
         gained_amount = int(latest.total_amount)
         gained_percent = latest.total_percent
+        self._evaluate_prediction_records()
 
         current_time = time.time() if self.exp_active else None
         if self.exp_active and self.exp_start_ts is not None and current_time is not None:
@@ -1726,19 +1820,30 @@ class MonitorDashboard(QWidget):
         if reg_rate_percent <= 0 and elapsed_for_rate > 0:
             reg_rate_percent = gained_percent / elapsed_for_rate
 
-        predictions = []
-        for minutes in (1, 5, 10, 60):
+        should_store_prediction = self.exp_active and latest.timestamp > self._last_prediction_snapshot_ts
+        prediction_lines = []
+        accuracy_summary: list[str] = []
+        horizons = (5, 15, 30, 60)
+        for minutes in horizons:
             if idle:
                 amount_projection = 0.0
                 percent_projection = 0.0
             else:
-                rate_amt = ewma_rate_amount if minutes == 1 else reg_rate_amount
-                rate_pct = ewma_rate_percent if minutes == 1 else reg_rate_percent
+                rate_amt = ewma_rate_amount if minutes == 5 else reg_rate_amount
+                rate_pct = ewma_rate_percent if minutes == 5 else reg_rate_percent
                 amount_projection = rate_amt * (minutes * 60)
                 percent_projection = rate_pct * (minutes * 60)
-            predictions.append(
-                f"{minutes}분 예상: +{int(amount_projection)} | +{percent_projection:.2f}%"
+            future_percent = min(100.0, max(0.0, latest.percent + percent_projection))
+            accuracy_text = self._format_accuracy_text(minutes)
+            prediction_lines.append(
+                f"{minutes}분 예상: +{int(amount_projection)} | 현재 {latest.percent:.2f}% → {future_percent:.2f}% (+{percent_projection:.2f}%) | {accuracy_text}"
             )
+            accuracy_summary.append(f"{minutes}분 {accuracy_text}")
+            if should_store_prediction:
+                self._store_exp_prediction(minutes=minutes, predicted_percent=future_percent, snapshot_ts=latest.timestamp)
+
+        if should_store_prediction:
+            self._last_prediction_snapshot_ts = latest.timestamp
 
         # 100%까지 ETA는 장기 추세(회귀 퍼센트 속도)를 사용
         if reg_rate_percent > 0:
@@ -1749,8 +1854,14 @@ class MonitorDashboard(QWidget):
         else:
             eta_text = "100% 예측 불가"
 
-        predictions.append(eta_text)
-        self.exp_prediction_label.setText("\n".join(predictions))
+        prediction_lines.append(eta_text)
+        self.exp_prediction_title.setText("예측 (5/15/30/60분)")
+        self.exp_prediction_label.setText("\n".join(prediction_lines))
+
+        if accuracy_summary:
+            self.exp_accuracy_label.setText("정확도(최근 실측 비교): " + " | ".join(accuracy_summary))
+        else:
+            self.exp_accuracy_label.setText("정확도 데이터 없음")
 
     def _capture_region(self, region: Dict[str, int]) -> Optional[np.ndarray]:
         try:
